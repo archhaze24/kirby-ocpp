@@ -48,6 +48,7 @@ import {
 } from "./station/transaction-rules.js";
 import { readChargingProfile } from "./station/smart-charging.js";
 import { isTransactionMessage, retryDelay } from "./station/transaction-message-retry.js";
+import { localTransactionId, OfflineTransactionSync, pendingStopPayload } from "./station/offline-transaction-sync.js";
 import type {
   AvailabilityType,
   ChargePointErrorCode,
@@ -56,6 +57,8 @@ import type {
   DiagnosticsStatus,
   FirmwareStatus,
   LogEntry,
+  PendingStartTransaction,
+  PendingStopTransaction,
   RegistrationStatus,
   StationConfig,
   StationState,
@@ -103,6 +106,7 @@ export class Station extends EventEmitter {
   private readonly reservationScheduler: ReservationScheduler;
   private readonly maintenance: MaintenanceLifecycle;
   private readonly chargingProfiles = new ChargingProfileRegistry();
+  private readonly offlineTransactions: OfflineTransactionSync;
 
   constructor(readonly config: StationConfig) {
     super();
@@ -150,6 +154,16 @@ export class Station extends EventEmitter {
       diagnosticsStatus: (status) => this.diagnosticsStatusNotification(status),
       firmwareStatus: (status) => this.firmwareStatusNotification(status),
       log: (level, message) => this.log(level, message)
+    });
+    this.offlineTransactions = new OfflineTransactionSync({
+      connectors: this.connectors,
+      chargingProfiles: this.chargingProfiles,
+      send: (action, payload) => this.send(action, payload),
+      readIdTagInfo: (value) => this.readIdTagInfo(value),
+      rememberAuthorization: (idTag, idTagInfo) => this.rememberAuthorization(idTag, idTagInfo),
+      save: () => this.savePersistedState(),
+      log: (level, message) => this.log(level, message),
+      statusNotification: (connectorId, status) => this.statusNotification(connectorId, status)
     });
     this.store = config.persistState ? new StationStore(config.chargePointId, config.stateDirectory) : undefined;
     this.loadPersistedState();
@@ -205,6 +219,8 @@ export class Station extends EventEmitter {
       this.configuration.setValue("HeartbeatInterval", String(interval));
       this.savePersistedState();
       this.startHeartbeatTimer(interval);
+      await this.offlineTransactions.syncPendingTransactions();
+      this.meterValueScheduler.reschedulePeriodic(this.connectors.all().map((connector) => connector.id));
       this.meterValueScheduler.startClockAligned();
       await Promise.all(this.connectors.all().map((connector) => this.statusNotification(connector.id, connector.status, true)));
       return;
@@ -230,6 +246,10 @@ export class Station extends EventEmitter {
     status = this.connectors.get(connectorId).status,
     force = false
   ): Promise<void> {
+    if (!this.client.isConnected) {
+      return;
+    }
+
     if (!force && this.statusScheduler.schedule(connectorId, status)) {
       return;
     }
@@ -329,6 +349,35 @@ export class Station extends EventEmitter {
       }
     }
 
+    if (!this.client.isConnected) {
+      const decision = this.authorizeLocally(idTag, true);
+      if (!decision.accepted) {
+        this.log("warn", `Offline StartTransaction blocked: ${decision.idTagInfo.status} (${idTag}, ${decision.source})`);
+        return undefined;
+      }
+
+      const transactionId = localTransactionId(connectorId);
+      this.reservationScheduler.clear(connectorId);
+      this.connectors.patch(connectorId, {
+        transactionId,
+        transactionStartedAt: readString(payload.timestamp, new Date().toISOString()),
+        reservationId: undefined,
+        reservationIdTag: undefined,
+        reservationParentIdTag: undefined,
+        reservationExpiryDate: undefined,
+        lastIdTag: idTag,
+        stopTransactionAtWh: undefined,
+        pendingStartTransaction: payload as unknown as PendingStartTransaction,
+        pendingStopTransaction: undefined,
+        status: "Charging"
+      });
+      this.savePersistedState();
+      this.meterValueScheduler.startPeriodic(connectorId);
+      this.log("warn", `Started local offline transaction ${transactionId} on connector ${connectorId}; will sync after reconnect`);
+      void this.runSafely(() => this.statusNotification(connectorId, "Charging"));
+      return transactionId;
+    }
+
     const response = await this.send("StartTransaction", payload);
     const idTagInfo = this.readIdTagInfo(response.payload.idTagInfo);
     this.rememberAuthorization(idTag, idTagInfo);
@@ -349,6 +398,8 @@ export class Station extends EventEmitter {
       reservationExpiryDate: undefined,
       lastIdTag: idTag,
       stopTransactionAtWh: undefined,
+      pendingStartTransaction: undefined,
+      pendingStopTransaction: undefined,
       status: "Charging"
     });
     this.savePersistedState();
@@ -369,17 +420,34 @@ export class Station extends EventEmitter {
     this.meterValueScheduler.stopPeriodic(connectorId);
 
     const transactionId = connector.transactionId;
-    const payload: Record<string, unknown> = {
+    const pendingStop: PendingStopTransaction = {
       meterStop: Math.round(connector.meterWh),
       timestamp: new Date().toISOString(),
-      transactionId,
       reason,
       transactionData: this.buildStopTransactionData(connectorId)
     };
 
     if (idTag) {
-      payload.idTag = idTag;
+      pendingStop.idTag = idTag;
     }
+
+    if (!this.client.isConnected || connector.pendingStartTransaction) {
+      const { evConnected, status } = statusAfterStopTransaction(reason, connector.evConnected, connector.availability);
+      this.connectors.patch(connectorId, {
+        pendingStopTransaction: pendingStop,
+        evConnected,
+        status
+      });
+      this.savePersistedState();
+      this.log(
+        "warn",
+        `Queued ${connector.pendingStartTransaction ? "offline" : "disconnected"} StopTransaction for connector ${connectorId}; will sync after reconnect`
+      );
+      void this.runSafely(() => this.statusNotification(connectorId, status));
+      return;
+    }
+
+    const payload: Record<string, unknown> = { ...pendingStopPayload(pendingStop), transactionId };
 
     this.connectors.patch(connectorId, { status: "Finishing" });
     void this.runSafely(() => this.statusNotification(connectorId, "Finishing"));
@@ -402,12 +470,13 @@ export class Station extends EventEmitter {
       transactionId: undefined,
       transactionStartedAt: undefined,
       stopTransactionAtWh: undefined,
+      pendingStartTransaction: undefined,
+      pendingStopTransaction: undefined,
       evConnected,
       status
     });
-    if (this.chargingProfiles.clearForTransaction(transactionId)) {
-      this.savePersistedState();
-    }
+    this.chargingProfiles.clearForTransaction(transactionId);
+    this.savePersistedState();
     void this.runSafely(() => this.statusNotification(connectorId, status));
   }
 
@@ -1071,6 +1140,11 @@ export class Station extends EventEmitter {
     const nextMeter = connector.meterWh + deltaWh;
     this.connectors.patch(connectorId, { meterWh: nextMeter });
     this.savePersistedState();
+
+    if (!this.client.isConnected || connector.pendingStartTransaction) {
+      await this.stopTransactionIfInvalidEnergyLimitReached(connectorId, nextMeter);
+      return;
+    }
 
     const payload: Record<string, unknown> = {
       connectorId,

@@ -1,8 +1,14 @@
-import type { ConnectorState } from "../ocpp/types.js";
-import type { LocalAuthorizationEntry, PersistedReservation, PersistedStationState } from "../station-store.js";
+import type { ConnectorState, StopReason } from "../ocpp/types.js";
+import type {
+  LocalAuthorizationEntry,
+  PersistedConnectorTransaction,
+  PersistedReservation,
+  PersistedStationState
+} from "../station-store.js";
 import type { ConfigurationKey } from "./configuration.js";
 import type { ConfigurationRegistry } from "./configuration-registry.js";
 import type { ConnectorRegistry } from "./connector-registry.js";
+import { DEFAULT_SAMPLED_DATA, type MeteringConfigurationKey } from "./metering.js";
 import {
   readChargingProfileEntry,
   readLegacyChargingProfileEntry,
@@ -27,6 +33,7 @@ export function buildPersistedStationState(options: {
     connectorCount: options.connectors.length,
     connectorMeterValues: serializeConnectorMeterValues(options.connectors),
     connectorReservations: serializeConnectorReservations(options.connectors),
+    connectorTransactions: serializeConnectorTransactions(options.connectors),
     localListVersion: options.localListVersion,
     localAuthorizationList: serializeAuthorizationEntries(options.localAuthorizationList),
     authorizationCache: serializeAuthorizationEntries(options.authorizationCache),
@@ -81,6 +88,24 @@ export function restorePersistedStationState(options: {
     options.scheduleReservation(numericConnectorId);
   }
 
+  for (const [connectorId, transaction] of Object.entries(persisted.connectorTransactions ?? {})) {
+    const numericConnectorId = Number.parseInt(connectorId, 10);
+    if (!Number.isInteger(numericConnectorId) || !options.connectors.has(numericConnectorId)) {
+      continue;
+    }
+
+    options.connectors.patch(numericConnectorId, {
+      transactionId: transaction.transactionId,
+      transactionStartedAt: transaction.transactionStartedAt,
+      lastIdTag: transaction.lastIdTag,
+      evConnected: transaction.evConnected,
+      status: readPersistedConnectorStatus(transaction.status),
+      stopTransactionAtWh: transaction.stopTransactionAtWh,
+      pendingStartTransaction: readPersistedPendingStart(transaction.pendingStartTransaction),
+      pendingStopTransaction: readPersistedPendingStop(transaction.pendingStopTransaction)
+    });
+  }
+
   if (Object.keys(persisted.connectorMeterValues ?? {}).length === 0 && options.connectors.has(options.connectorId)) {
     options.connectors.patch(options.connectorId, { meterWh: persisted.meterWh });
   }
@@ -96,10 +121,25 @@ export function restorePersistedStationState(options: {
   }
 
   for (const [key, value] of Object.entries(persisted.configurationValues)) {
-    options.configuration.setValue(key, value);
+    options.configuration.setValue(key, restoredConfigurationValue(key, value));
   }
 
   return { localListVersion: persisted.localListVersion, chargingProfiles };
+}
+
+function restoredConfigurationValue(key: string, value: string): string {
+  if (isMeteringConfigurationKey(key) && value === "Energy.Active.Import.Register") {
+    return DEFAULT_SAMPLED_DATA.join(",");
+  }
+
+  return value;
+}
+
+function isMeteringConfigurationKey(key: string): key is MeteringConfigurationKey {
+  return key === "MeterValuesAlignedData" ||
+    key === "MeterValuesSampledData" ||
+    key === "StopTxnAlignedData" ||
+    key === "StopTxnSampledData";
 }
 
 function serializeAuthorizationEntries(
@@ -140,6 +180,98 @@ function serializeConnectorReservations(connectors: ConnectorState[]): Record<st
         return [String(connector.id), reservation];
       })
   );
+}
+
+function serializeConnectorTransactions(connectors: ConnectorState[]): Record<string, PersistedConnectorTransaction> {
+  return Object.fromEntries(
+    connectors
+      .filter((connector) => connector.transactionId || connector.pendingStartTransaction || connector.pendingStopTransaction)
+      .map((connector) => [
+        String(connector.id),
+        {
+          transactionId: connector.transactionId ?? 0,
+          transactionStartedAt: connector.transactionStartedAt,
+          lastIdTag: connector.lastIdTag,
+          evConnected: connector.evConnected,
+          status: connector.status,
+          stopTransactionAtWh: connector.stopTransactionAtWh,
+          pendingStartTransaction: connector.pendingStartTransaction as unknown as Record<string, unknown> | undefined,
+          pendingStopTransaction: connector.pendingStopTransaction as unknown as Record<string, unknown> | undefined
+        }
+      ])
+  );
+}
+
+function readPersistedConnectorStatus(value: string): ConnectorState["status"] {
+  return value === "Available" ||
+    value === "Preparing" ||
+    value === "Charging" ||
+    value === "SuspendedEVSE" ||
+    value === "SuspendedEV" ||
+    value === "Finishing" ||
+    value === "Reserved" ||
+    value === "Unavailable" ||
+    value === "Faulted"
+    ? value
+    : "Charging";
+}
+
+function readPersistedPendingStart(value: Record<string, unknown> | undefined): ConnectorState["pendingStartTransaction"] {
+  if (!value) {
+    return undefined;
+  }
+
+  const connectorId = typeof value.connectorId === "number" ? value.connectorId : undefined;
+  const idTag = typeof value.idTag === "string" ? value.idTag : undefined;
+  const meterStart = typeof value.meterStart === "number" ? value.meterStart : undefined;
+  const timestamp = typeof value.timestamp === "string" ? value.timestamp : undefined;
+  if (connectorId === undefined || idTag === undefined || meterStart === undefined || timestamp === undefined) {
+    return undefined;
+  }
+
+  const pendingStart = { connectorId, idTag, meterStart, timestamp };
+  if (typeof value.reservationId === "number") {
+    return { ...pendingStart, reservationId: value.reservationId };
+  }
+  return pendingStart;
+}
+
+function readPersistedPendingStop(value: Record<string, unknown> | undefined): ConnectorState["pendingStopTransaction"] {
+  if (!value) {
+    return undefined;
+  }
+
+  const meterStop = typeof value.meterStop === "number" ? value.meterStop : undefined;
+  const timestamp = typeof value.timestamp === "string" ? value.timestamp : undefined;
+  const reason = typeof value.reason === "string" ? value.reason : undefined;
+  const transactionData = Array.isArray(value.transactionData) ? value.transactionData.filter(isRecord) : [];
+  if (meterStop === undefined || timestamp === undefined || !isStopReason(reason)) {
+    return undefined;
+  }
+
+  const pendingStop = { meterStop, timestamp, reason, transactionData };
+  if (typeof value.idTag === "string") {
+    return { ...pendingStop, idTag: value.idTag };
+  }
+  return pendingStop;
+}
+
+function isStopReason(value: unknown): value is StopReason {
+  return value === "EmergencyStop" ||
+    value === "EVDisconnected" ||
+    value === "HardReset" ||
+    value === "Local" ||
+    value === "Other" ||
+    value === "PowerLoss" ||
+    value === "Reboot" ||
+    value === "Remote" ||
+    value === "SoftReset" ||
+    value === "UnlockCommand" ||
+    value === "DeAuthorized";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function isDefined<T>(value: T | undefined): value is T {

@@ -65,26 +65,25 @@ Environment variables mirror the main flags:
 
 ## TUI controls
 
-- `b` sends `BootNotification`
-- `h` sends `Heartbeat`
-- `s` cycles connector status
-- `a` asks for an `idTag` and sends `Authorize`
-- `t` asks for an `idTag` and starts or stops a transaction on the selected connector
-- `m` sends `MeterValues` for the selected connector
-- `M` sends `MeterValues` with editable comma-separated measurands
-- `d` sends `DataTransfer` from editable JSON
-- `D` sets the diagnostics outcome (`success` or `uploadFailure`)
-- `U` sets the firmware outcome (`success`, `downloadFailure`, or `installationFailure`)
-- `f` injects or clears a connector fault
-- `p` plugs or unplugs an EV on the selected connector
-- `j` / `k` scrolls the OCPP log
-- `G` / `g` jumps the OCPP log to the bottom
+The TUI is organized around action tabs. Use `1`-`7` or `Tab` / `Shift+Tab` to switch tabs, `Up` / `Down` to choose an action, and `Enter` to run it. Press `/` to search and run any command across all tabs.
+
+- `1` Station: boot, heartbeat, connect/disconnect/reconnect, add connector
+- `2` Connector: plug/unplug, status notification, fault injection, connector navigation
+- `3` Transaction: authorize, start/stop transaction, meter values with editable connector/idTag/measurands forms
+- `4` Maintenance: diagnostics and firmware outcomes/status notifications
+- `5` Data: editable `DataTransfer` form and vendor ping
+- `6` Logs: plain log view, copy, clear, jump to bottom
+- `7` Scenarios: charge session, finish session, offline sync, fault recovery
+- `/` opens the command palette; type to filter, use `Up` / `Down`, then `Enter` to run
+- `[` / `]` selects a connector from anywhere
+- `+` adds a connector at runtime
+- `j` / `k` scrolls the OCPP log, `G` jumps to the bottom
+- `F` cycles log filters (`all`, `calls`, `errors`, `station`, `csms`)
 - `l` opens a full-screen plain log view for cleaner text selection
 - `y` copies the current OCPP log buffer to the clipboard
-- `[` / `]` selects a connector
-- `+` adds a connector at runtime
-- `r` reconnects
-- `q` exits
+- `r` reconnects, `q` exits
+
+Text forms submit with `Enter` and cancel with `Esc`.
 
 ## Scope
 
@@ -98,10 +97,11 @@ Implementation coverage is tracked in `docs/OCPP_1.6J_CONFORMANCE.md`.
 Station state is persisted by default per `chargePointId`, including local authorization lists, charging profiles, mutable configuration values, and meter value. Use `--no-persist` for an ephemeral station, or `--state-dir <path>` to choose the storage directory.
 
 Authorization behavior now uses the persisted local authorization list and authorization cache. The emulator supports `LocalAuthorizeOffline`, `LocalPreAuthorize`, `AllowOfflineTxForUnknownId`, `AuthorizationCacheEnabled`, and `AuthorizeRemoteTxRequests` through `ChangeConfiguration`.
+When a locally authorized transaction starts while the station is disconnected, the emulator keeps a local negative transaction id and synchronizes the pending `StartTransaction` after reconnect. If the transaction is also stopped offline, the pending `StopTransaction` is delivered after the start is accepted by the Central System.
 
-Charging profiles are persisted structurally per connector. `SetChargingProfile`, filtered `ClearChargingProfile`, `RemoteStartTransaction` with a `TxProfile`, and `GetCompositeSchedule` are supported for common `ChargePointMaxProfile`, `TxDefaultProfile`, and active `TxProfile` scenarios.
+Charging profiles are persisted structurally per connector. `SetChargingProfile`, filtered `ClearChargingProfile`, `RemoteStartTransaction` with a `TxProfile`, and `GetCompositeSchedule` are supported for common `ChargePointMaxProfile`, `TxDefaultProfile`, and active `TxProfile` scenarios, including multi-period and long recurring schedules.
 
-`MeterValuesSampledData`, `MeterValuesAlignedData`, `StopTxnSampledData`, and `StopTxnAlignedData` are honored when building metering payloads. Invalid measurands sent through `ChangeConfiguration` are rejected. `MeterValueSampleInterval` starts periodic `MeterValues` while a transaction is charging, and `ClockAlignedDataInterval` sends `Sample.Clock` values on wall-clock aligned intervals; `0` disables either timer.
+`MeterValuesSampledData`, `MeterValuesAlignedData`, `StopTxnSampledData`, and `StopTxnAlignedData` are honored when building metering payloads. By default the emulator reports energy, active power, current, voltage, temperature, and SoC with charging-like values. Invalid measurands sent through `ChangeConfiguration` are rejected. `MeterValueSampleInterval` starts periodic `MeterValues` while a transaction is charging, and `ClockAlignedDataInterval` sends `Sample.Clock` values on wall-clock aligned intervals; `0` disables either timer.
 
 Connector lifecycle tracks EV plug state and moves through `Preparing`, `Charging`, `Finishing`, and `Available` for manual start/stop and EV disconnect scenarios.
 `MinimumStatusDuration` delays rapid connector status changes and sends only the latest stable `StatusNotification`.

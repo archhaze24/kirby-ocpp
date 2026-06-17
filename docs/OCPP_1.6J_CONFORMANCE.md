@@ -11,14 +11,14 @@ Legend:
 - `manual`: exposed through the TUI or public `Station` API for interactive testing.
 - `partial`: implemented for common testing scenarios, but not yet exhaustive against the prose specification.
 
-`npm run smoke` also covers representative edge/negative CSMS command responses, including unknown connectors, readonly/unknown configuration keys, unknown charging profiles, stale local auth list versions, local auth differential delete/restore/duplicate handling, SendLocalList `NotSupported`/`Failed` behavior, malformed local auth list schema errors, disabled local auth list/cache behavior, parent/expired/concurrent idTagInfo handling, remote-start authorization rejection, remote-start TxProfile handling, unknown reservations/transactions, unknown vendors, reservation Occupied/Unavailable/Faulted statuses, TriggerMessage connector-specific routing/rejection, schema-level CALLERROR responses for malformed/unknown commands, transaction-message retry for StartTransaction/StopTransaction/MeterValues on CALLERROR and timeout, disconnect during pending StartTransaction without creating a phantom transaction, automatic reconnect/reboot after disconnect, active-transaction reconnect continuity, BootNotification Pending retry, MaxEnergyOnInvalidId delayed stop, and Reset with active transaction/reservation cleanup plus ResetRetries reboot retry.
+`npm run smoke` also covers representative edge/negative CSMS command responses, including unknown connectors, readonly/unknown configuration keys, unknown charging profiles, stale local auth list versions, local auth differential delete/restore/duplicate handling, SendLocalList `NotSupported`/`Failed` behavior, malformed local auth list schema errors, disabled local auth list/cache behavior, parent/expired/concurrent idTagInfo handling, remote-start authorization rejection, remote-start TxProfile handling, unknown reservations/transactions, unknown vendors, reservation Occupied/Unavailable/Faulted statuses, TriggerMessage connector-specific routing/rejection, schema-level CALLERROR responses for malformed/unknown commands, transaction-message retry for StartTransaction/StopTransaction/MeterValues on CALLERROR and timeout, disconnect during pending StartTransaction without creating a phantom transaction, offline StartTransaction/StopTransaction synchronization after reconnect, automatic reconnect/reboot after disconnect, active-transaction reconnect continuity, BootNotification Pending retry, MaxEnergyOnInvalidId delayed stop, and Reset with active transaction/reservation cleanup plus ResetRetries reboot retry.
 `npm test` covers WebSocket protocol validation, pending-call timeout/disconnect rejection, ping/pong watchdog behavior, local `wss://` TLS success/failure behavior, CA/server-name validation, mTLS client certificate options, station reconnect after unexpected WebSocket close, and max reconnect attempt limiting.
 
 ## Charge Point to Central System
 
 | Action | Schema | Handler | Smoke | Manual | Notes |
 | --- | --- | --- | --- | --- | --- |
-| Authorize | yes | yes | yes | yes | Online + local list/cache/offline behavior, cache disable behavior, LocalAuthListEnabled, LocalPreAuthorize blocking, parentIdTag preservation, expired/blocked/concurrent idTagInfo rejection, immediate invalid-id transaction stop, and MaxEnergyOnInvalidId delayed stop. |
+| Authorize | yes | yes | yes | yes | Online + local list/cache/offline behavior, offline transaction start/stop synchronization, cache disable behavior, LocalAuthListEnabled, LocalPreAuthorize blocking, parentIdTag preservation, expired/blocked/concurrent idTagInfo rejection, immediate invalid-id transaction stop, and MaxEnergyOnInvalidId delayed stop. |
 | BootNotification | yes | yes | yes | yes | Accepted handling, Pending retry by response interval, and reset-specific rejected retry coverage. |
 | DataTransfer | yes | yes | yes | yes | Vendor-specific payloads are free-form. |
 | DiagnosticsStatusNotification | yes | yes | yes | yes | Simulates upload lifecycle with success, UploadFailed, and retry attempts. |
@@ -39,7 +39,7 @@ Legend:
 | ClearCache | yes | yes | yes | Clears authorization cache. |
 | ClearChargingProfile | yes | partial | yes | Supports id, connectorId, purpose, and stackLevel filters, including unknown-profile response coverage. |
 | DataTransfer | yes | yes | yes | Accepts emulator vendor, rejects unknown vendor. |
-| GetCompositeSchedule | yes | partial | yes | Applies purpose/stack priority, same-stack latest-profile tie behavior, ChargePointMaxProfile limiting, TxProfile lifecycle, expired/future validity windows including activation inside requested duration, multi-period schedules, daily/weekly recurring schedules, unit-specific profile selection without A/W conversion, `numberPhases`, `minChargingRate`, and relative TxProfile timing for common cases. |
+| GetCompositeSchedule | yes | partial | yes | Applies purpose/stack priority, same-stack latest-profile tie behavior, ChargePointMaxProfile limiting, TxProfile lifecycle, expired/future validity windows including activation inside requested duration, multi-period schedules, daily/weekly and long recurring schedules, unit-specific profile selection without A/W conversion, `numberPhases`, `minChargingRate`, and relative TxProfile timing for common cases. |
 | GetConfiguration | yes | yes | yes | Returns known/unknown keys. |
 | GetDiagnostics | yes | partial | yes | Simulates upload lifecycle, retries, and failure outcome; no real file upload. |
 | GetLocalListVersion | yes | yes | yes | Persistent local list version. |
@@ -55,7 +55,7 @@ Legend:
 
 ## Next gaps
 
-- More station-level resume tests for offline command behavior during reconnect windows.
+- More station-level resume tests for non-transaction command behavior during reconnect windows.
 - More Smart Charging edge cases around ambiguous vendor-specific tie policies and long recurring schedules.
 - Expand edge/negative conformance tests toward full per-command response-status matrices.
 - More WebSocket failure-mode tests around handshake errors mixed with reconnect/backoff.

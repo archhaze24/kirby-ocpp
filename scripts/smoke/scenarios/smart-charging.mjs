@@ -354,6 +354,37 @@ export async function runSmartChargingScenario(context) {
   assertCompositeLimits(weeklyCompositeResponse, [15, 13, 15], "weekly recurring composite schedule");
   
   await expectResponseStatus("ClearChargingProfile", { id: 10 }, "Accepted", "clear weekly recurring charging profile");
+
+  const longDailyStart = new Date(Date.now() - (24 * 60 * 60 - 10) * 1000).toISOString();
+  const longDailyProfileResponse = await sendCentralSystemCall("SetChargingProfile", {
+    connectorId: 1,
+    csChargingProfiles: {
+      chargingProfileId: 12,
+      stackLevel: 3,
+      chargingProfilePurpose: "TxDefaultProfile",
+      chargingProfileKind: "Recurring",
+      recurrencyKind: "Daily",
+      chargingSchedule: {
+        startSchedule: longDailyStart,
+        chargingRateUnit: "A",
+        chargingSchedulePeriod: [
+          { startPeriod: 0, limit: 17 },
+          { startPeriod: 86395, limit: 12 }
+        ]
+      }
+    }
+  });
+  if (longDailyProfileResponse[2]?.status !== "Accepted") {
+    throw new Error(`Long daily recurring TxDefaultProfile was not accepted: ${JSON.stringify(longDailyProfileResponse)}`);
+  }
+
+  const longDailyCompositeResponse = await sendCentralSystemCall("GetCompositeSchedule", {
+    connectorId: 1,
+    duration: 2 * 24 * 60 * 60 + 20
+  });
+  assertCompositeLimits(longDailyCompositeResponse, [17, 12, 17, 12, 17, 12, 17], "long daily recurring composite schedule");
+
+  await expectResponseStatus("ClearChargingProfile", { id: 12 }, "Accepted", "clear long daily recurring charging profile");
   
   const wattProfileResponse = await sendCentralSystemCall("SetChargingProfile", {
     connectorId: 0,

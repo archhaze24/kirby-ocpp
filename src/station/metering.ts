@@ -37,7 +37,14 @@ export interface MeteringConnector {
   meterWh: number;
 }
 
-const DEFAULT_SAMPLED_DATA: Measurand[] = ["Energy.Active.Import.Register"];
+export const DEFAULT_SAMPLED_DATA: Measurand[] = [
+  "Energy.Active.Import.Register",
+  "Power.Active.Import",
+  "Current.Import",
+  "Voltage",
+  "Temperature",
+  "SoC"
+];
 
 export const MEASURANDS = new Set<Measurand>([
   "Energy.Active.Export.Register",
@@ -135,8 +142,12 @@ function sampleForMeasurand(
   measurand: Measurand
 ): { value: string; unit?: string; location?: string; phase?: string } {
   const charging = connector.status === "Charging";
-  const activePowerW = charging ? 7200 : 0;
-  const currentA = charging ? 32 : 0;
+  const cycle = Math.abs(Math.round(connector.meterWh / 120)) % 8;
+  const voltageV = charging ? 228 + (cycle % 6) : 230;
+  const activePowerW = charging ? 6800 + cycle * 90 : 0;
+  const currentA = charging ? activePowerW / voltageV : 0;
+  const temperatureC = charging ? 29 + cycle + Math.min(8, Math.floor(connector.meterWh / 3000)) : 25;
+  const soc = charging ? clampNumber(18 + Math.floor(connector.meterWh / 450), 18, 96) : 0;
 
   switch (measurand) {
     case "Energy.Active.Import.Register":
@@ -165,20 +176,28 @@ function sampleForMeasurand(
     case "Power.Factor":
       return { value: charging ? "1" : "0", location: "Outlet" };
     case "Current.Import":
-      return { value: String(currentA), unit: "A", location: "Outlet", phase: "L1" };
+      return { value: formatDecimal(currentA, 1), unit: "A", location: "Outlet", phase: "L1" };
     case "Current.Export":
       return { value: "0", unit: "A", location: "Outlet", phase: "L1" };
     case "Current.Offered":
       return { value: "32", unit: "A", location: "Outlet", phase: "L1" };
     case "Voltage":
-      return { value: "230", unit: "V", location: "Outlet", phase: "L1-N" };
+      return { value: String(voltageV), unit: "V", location: "Outlet", phase: "L1-N" };
     case "Temperature":
-      return { value: charging ? "34" : "25", unit: "Celsius", location: "Body" };
+      return { value: String(temperatureC), unit: "Celsius", location: "Body" };
     case "SoC":
-      return { value: charging ? "80" : "0", unit: "Percent", location: "EV" };
+      return { value: String(soc), unit: "Percent", location: "EV" };
     case "Frequency":
       return { value: "50", location: "Outlet" };
     case "RPM":
       return { value: "0", location: "Body" };
   }
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
+
+function formatDecimal(value: number, digits: number): string {
+  return value.toFixed(digits).replace(/\.0$/, "");
 }

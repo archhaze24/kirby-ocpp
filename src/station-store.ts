@@ -8,6 +8,7 @@ export interface PersistedStationState {
   connectorCount?: number;
   connectorMeterValues?: Record<string, number>;
   connectorReservations?: Record<string, PersistedReservation>;
+  connectorTransactions?: Record<string, PersistedConnectorTransaction>;
   localListVersion: number;
   localAuthorizationList: LocalAuthorizationEntry[];
   authorizationCache?: LocalAuthorizationEntry[];
@@ -26,6 +27,17 @@ export interface PersistedReservation {
   idTag: string;
   parentIdTag?: string;
   expiryDate: string;
+}
+
+export interface PersistedConnectorTransaction {
+  transactionId: number;
+  transactionStartedAt?: string;
+  lastIdTag?: string;
+  evConnected: boolean;
+  status: string;
+  stopTransactionAtWh?: number;
+  pendingStartTransaction?: Record<string, unknown>;
+  pendingStopTransaction?: Record<string, unknown>;
 }
 
 export class StationStore {
@@ -54,6 +66,7 @@ export class StationStore {
       connectorCount: readInteger(parsed.connectorCount, 1),
       connectorMeterValues: isRecord(parsed.connectorMeterValues) ? readNumberRecord(parsed.connectorMeterValues) : {},
       connectorReservations: isRecord(parsed.connectorReservations) ? readReservationRecord(parsed.connectorReservations) : {},
+      connectorTransactions: isRecord(parsed.connectorTransactions) ? readTransactionRecord(parsed.connectorTransactions) : {},
       localListVersion: readInteger(parsed.localListVersion, 0),
       localAuthorizationList: Array.isArray(parsed.localAuthorizationList) ? parsed.localAuthorizationList : [],
       authorizationCache: Array.isArray(parsed.authorizationCache) ? parsed.authorizationCache : [],
@@ -105,6 +118,39 @@ function readReservationRecord(value: Record<string, unknown>): Record<string, P
     const parsed: PersistedReservation = { reservationId, idTag, expiryDate };
     if (typeof reservation.parentIdTag === "string") {
       parsed.parentIdTag = reservation.parentIdTag;
+    }
+
+    return [[connectorId, parsed] as const];
+  });
+
+  return Object.fromEntries(entries);
+}
+
+function readTransactionRecord(value: Record<string, unknown>): Record<string, PersistedConnectorTransaction> {
+  const entries = Object.entries(value).flatMap(([connectorId, transaction]) => {
+    if (!isRecord(transaction) || typeof transaction.transactionId !== "number") {
+      return [];
+    }
+
+    const parsed: PersistedConnectorTransaction = {
+      transactionId: transaction.transactionId,
+      evConnected: transaction.evConnected === true,
+      status: typeof transaction.status === "string" ? transaction.status : "Charging"
+    };
+    if (typeof transaction.transactionStartedAt === "string") {
+      parsed.transactionStartedAt = transaction.transactionStartedAt;
+    }
+    if (typeof transaction.lastIdTag === "string") {
+      parsed.lastIdTag = transaction.lastIdTag;
+    }
+    if (typeof transaction.stopTransactionAtWh === "number") {
+      parsed.stopTransactionAtWh = transaction.stopTransactionAtWh;
+    }
+    if (isRecord(transaction.pendingStartTransaction)) {
+      parsed.pendingStartTransaction = transaction.pendingStartTransaction;
+    }
+    if (isRecord(transaction.pendingStopTransaction)) {
+      parsed.pendingStopTransaction = transaction.pendingStopTransaction;
     }
 
     return [[connectorId, parsed] as const];

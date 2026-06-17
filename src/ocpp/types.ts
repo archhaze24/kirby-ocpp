@@ -121,7 +121,25 @@ export interface ConnectorState {
   reservationExpiryDate?: string;
   lastIdTag?: string;
   stopTransactionAtWh?: number;
+  pendingStartTransaction?: PendingStartTransaction;
+  pendingStopTransaction?: PendingStopTransaction;
   meterWh: number;
+}
+
+export interface PendingStartTransaction {
+  connectorId: number;
+  idTag: string;
+  meterStart: number;
+  timestamp: string;
+  reservationId?: number;
+}
+
+export interface PendingStopTransaction {
+  meterStop: number;
+  timestamp: string;
+  reason: StopReason;
+  idTag?: string;
+  transactionData: Record<string, unknown>[];
 }
 
 export interface StationState {

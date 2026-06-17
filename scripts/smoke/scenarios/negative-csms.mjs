@@ -1,14 +1,24 @@
 export async function runNegativeCsmsScenario(context) {
   const {
+    smoke,
     station,
     callPayloads,
     futureDate,
+    sendCentralSystemCall,
     expectResponseStatus,
     expectCallError,
     waitForCallAfter
   } = context;
 
   // Negative CSMS command matrix and connector-targeted TriggerMessage coverage.
+  await expectResponseStatus("ClearCache", {}, "Accepted", "clear cache accepted");
+  await expectResponseStatus(
+    "ChangeConfiguration",
+    { key: "LightIntensity", value: "10" },
+    "Accepted",
+    "valid ChangeConfiguration accepted"
+  );
+  await expectResponseStatus("UnlockConnector", { connectorId: 1 }, "Unlocked", "unlock idle connector");
   await expectResponseStatus("CancelReservation", { reservationId: 404 }, "Rejected", "unknown reservation cancellation");
   await expectResponseStatus("ChangeAvailability", { connectorId: 404, type: "Inoperative" }, "Rejected", "unknown connector availability");
   await expectResponseStatus("DataTransfer", { vendorId: "OtherVendor", data: "ping" }, "UnknownVendorId", "unknown vendor DataTransfer");
@@ -115,6 +125,11 @@ export async function runNegativeCsmsScenario(context) {
     "trigger meter values for unknown connector"
   );
   await expectResponseStatus("UnlockConnector", { connectorId: 404 }, "NotSupported", "unlock unknown connector");
+  const localListVersionResponse = await sendCentralSystemCall("GetLocalListVersion", {});
+  if (localListVersionResponse[0] !== 3 || typeof localListVersionResponse[2]?.listVersion !== "number") {
+    throw new Error(`GetLocalListVersion did not return a numeric listVersion: ${JSON.stringify(localListVersionResponse)}`);
+  }
+  smoke.addEdgeCheck();
   await expectResponseStatus(
     "SendLocalList",
     {

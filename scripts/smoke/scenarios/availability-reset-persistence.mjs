@@ -150,6 +150,52 @@ export async function runAvailabilityResetPersistenceScenario(context) {
   await waitForCallAfter("BootNotification", reconnectStartIndex);
   await waitForStationState(() => station.state.connected && station.state.booted, "station reconnected after pending StartTransaction disconnect");
   smoke.addEdgeCheck();
+
+  station.disconnect();
+  await waitForStationState(() => !station.state.connected, "station manually disconnected for offline transaction");
+  await station.plugIn(1);
+  const offlineStartIndex = callPayloads.length;
+  const offlineTransactionId = await station.startTransaction(1, "TAG1");
+  if (!offlineTransactionId || offlineTransactionId >= 0) {
+    throw new Error(`Offline transaction did not get a local negative transaction id: ${offlineTransactionId}`);
+  }
+  await station.meterValues(1, 7);
+  await station.stopTransaction(1, "Local", "TAG1");
+  const offlineStoppedConnector = station.state.connectors.find((connector) => connector.id === 1);
+  if (!offlineStoppedConnector?.pendingStartTransaction || !offlineStoppedConnector.pendingStopTransaction) {
+    throw new Error(`Offline transaction did not retain pending start/stop state: ${JSON.stringify(offlineStoppedConnector)}`);
+  }
+  if (callPayloads.slice(offlineStartIndex).some((entry) => entry.action === "StartTransaction" || entry.action === "StopTransaction")) {
+    throw new Error("Offline transaction sent StartTransaction/StopTransaction before reconnect");
+  }
+  station.connect();
+  await waitForCallAfter("BootNotification", offlineStartIndex);
+  await waitForCallAfter(
+    "StartTransaction",
+    offlineStartIndex,
+    (payload) => payload.connectorId === 1 && payload.idTag === "TAG1" && payload.meterStart === offlineStoppedConnector.pendingStartTransaction.meterStart
+  );
+  await waitForCallAfter(
+    "StopTransaction",
+    offlineStartIndex,
+    (payload) => payload.transactionId === 123 && payload.reason === "Local" && payload.idTag === "TAG1"
+  );
+  await waitForStationState(
+    () => {
+      const connector = station.state.connectors.find((item) => item.id === 1);
+      return Boolean(
+        station.state.connected &&
+          station.state.booted &&
+          connector &&
+          !connector.transactionId &&
+          !connector.pendingStartTransaction &&
+          !connector.pendingStopTransaction
+      );
+    },
+    "offline transaction start/stop synced after reconnect"
+  );
+  await station.unplug(1);
+  smoke.addEdgeCheck();
   smoke.close();
   
   const reloadedStation = new Station(stationConfig);

@@ -242,8 +242,7 @@ export function limitTransitionOffsets(
 
   if (profile.chargingProfileKind === "Recurring") {
     const recurrenceSeconds = profile.recurrencyKind === "Weekly" ? 7 * 24 * 60 * 60 : 24 * 60 * 60;
-    const cycleStart = elapsedSeconds - (elapsedSeconds % recurrenceSeconds);
-    for (const cycle of [cycleStart, cycleStart + recurrenceSeconds]) {
+    for (let cycle = 0; cycle <= elapsedSeconds + duration + recurrenceSeconds; cycle += recurrenceSeconds) {
       addScheduleOffsets(offsets, schedule, duration, elapsedSeconds, cycle);
     }
     return [...offsets].sort((left, right) => left - right);

@@ -1,5 +1,5 @@
 import type { StationConfig } from "../ocpp/types.js";
-import { isValidSampledDataConfiguration, MEASURANDS } from "./metering.js";
+import { DEFAULT_SAMPLED_DATA, isValidSampledDataConfiguration, MEASURANDS } from "./metering.js";
 
 export interface ConfigurationKey {
   readonly: boolean;
@@ -26,6 +26,8 @@ const CONNECTOR_PHASE_ROTATIONS = new Set([
   "TRS",
   "TSR"
 ]);
+
+const DEFAULT_SAMPLED_DATA_CONFIGURATION = DEFAULT_SAMPLED_DATA.join(",");
 
 export function createDefaultConfiguration(config: StationConfig): Map<string, ConfigurationKey> {
   const configuration = new Map<string, ConfigurationKey>();
@@ -56,9 +58,9 @@ export function createDefaultConfiguration(config: StationConfig): Map<string, C
   set("LocalAuthorizeOffline", false, "false", boolean);
   set("LocalPreAuthorize", false, "false", boolean);
   set("MaxEnergyOnInvalidId", false, "0", nonNegativeInteger);
-  set("MeterValuesAlignedData", false, "Energy.Active.Import.Register", sampledData);
+  set("MeterValuesAlignedData", false, DEFAULT_SAMPLED_DATA_CONFIGURATION, sampledData);
   set("MeterValuesAlignedDataMaxLength", true, String(MEASURANDS.size));
-  set("MeterValuesSampledData", false, "Energy.Active.Import.Register", sampledData);
+  set("MeterValuesSampledData", false, DEFAULT_SAMPLED_DATA_CONFIGURATION, sampledData);
   set("MeterValuesSampledDataMaxLength", true, String(MEASURANDS.size));
   set("MeterValueSampleInterval", false, "60", nonNegativeInteger);
   set("MinimumStatusDuration", false, "0", nonNegativeInteger);
@@ -67,9 +69,9 @@ export function createDefaultConfiguration(config: StationConfig): Map<string, C
   set("SendLocalListMaxLength", true, "1000");
   set("StopTransactionOnEVSideDisconnect", false, "true", boolean);
   set("StopTransactionOnInvalidId", false, "false", boolean);
-  set("StopTxnAlignedData", false, "Energy.Active.Import.Register", sampledData);
+  set("StopTxnAlignedData", false, DEFAULT_SAMPLED_DATA_CONFIGURATION, sampledData);
   set("StopTxnAlignedDataMaxLength", true, String(MEASURANDS.size));
-  set("StopTxnSampledData", false, "Energy.Active.Import.Register", sampledData);
+  set("StopTxnSampledData", false, DEFAULT_SAMPLED_DATA_CONFIGURATION, sampledData);
   set("StopTxnSampledDataMaxLength", true, String(MEASURANDS.size));
   set("SupportedFeatureProfiles", true, SUPPORTED_FEATURE_PROFILES.join(","));
   set("SupportedFeatureProfilesMaxLength", true, String(SUPPORTED_FEATURE_PROFILES.length));
