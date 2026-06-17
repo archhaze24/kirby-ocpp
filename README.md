@@ -37,7 +37,8 @@ kirby-ocpp \
   --model TUI-16 \
   --connector 1 \
   --connectors 2 \
-  --heartbeat 30
+  --heartbeat 30 \
+  --ws-ping 30
 ```
 
 Environment variables mirror the main flags:
@@ -46,6 +47,13 @@ Environment variables mirror the main flags:
 - `OCPP_CHARGE_POINT_ID`
 - `OCPP_VENDOR`
 - `OCPP_MODEL`
+- `OCPP_WS_SUBPROTOCOL`
+- `OCPP_WS_PING_INTERVAL`
+- `OCPP_TLS_CA_FILE`
+- `OCPP_TLS_CERT_FILE`
+- `OCPP_TLS_KEY_FILE`
+- `OCPP_TLS_SERVER_NAME`
+- `OCPP_TLS_SKIP_VERIFY=1`
 
 ## TUI controls
 
@@ -57,6 +65,8 @@ Environment variables mirror the main flags:
 - `m` sends `MeterValues` for the selected connector
 - `M` sends `MeterValues` with editable comma-separated measurands
 - `d` sends `DataTransfer` from editable JSON
+- `D` sets the diagnostics outcome (`success` or `uploadFailure`)
+- `U` sets the firmware outcome (`success`, `downloadFailure`, or `installationFailure`)
 - `f` injects or clears a connector fault
 - `p` plugs or unplugs an EV on the selected connector
 - `j` / `k` scrolls the OCPP log
@@ -71,6 +81,7 @@ Environment variables mirror the main flags:
 ## Scope
 
 The implementation targets OCPP 1.6 JSON over WebSocket. Incoming and outgoing action payloads are validated against the official OCPP 1.6J JSON schemas in `src/ocpp/schemas/json`.
+The WebSocket client requests the `ocpp1.6` subprotocol by default, sends periodic ping frames, and supports `wss://` TLS options through `--tls-ca`, `--tls-cert`, `--tls-key`, `--tls-server-name`, and `--tls-skip-verify`.
 
 Implementation coverage is tracked in `docs/OCPP_1.6J_CONFORMANCE.md`.
 

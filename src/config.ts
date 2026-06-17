@@ -15,7 +15,14 @@ const configSchema = z.object({
   heartbeatIntervalSeconds: z.coerce.number().int().positive(),
   idTag: z.string().min(1),
   persistState: z.coerce.boolean(),
-  stateDirectory: z.string().min(1).optional()
+  stateDirectory: z.string().min(1).optional(),
+  webSocketSubprotocol: z.string().min(1),
+  webSocketPingIntervalSeconds: z.coerce.number().int().nonnegative(),
+  tlsRejectUnauthorized: z.coerce.boolean(),
+  tlsCaFile: z.string().min(1).optional(),
+  tlsCertFile: z.string().min(1).optional(),
+  tlsKeyFile: z.string().min(1).optional(),
+  tlsServerName: z.string().min(1).optional()
 });
 
 export function parseConfig(input: Partial<Record<keyof StationConfig, unknown>>): StationConfig {
@@ -29,6 +36,13 @@ export function parseConfig(input: Partial<Record<keyof StationConfig, unknown>>
     heartbeatIntervalSeconds: input.heartbeatIntervalSeconds ?? 30,
     idTag: input.idTag ?? "DEADBEEF",
     persistState: input.persistState ?? process.env.KIRBY_OCPP_NO_PERSIST !== "1",
-    stateDirectory: input.stateDirectory ?? process.env.KIRBY_OCPP_STATE_DIR
+    stateDirectory: input.stateDirectory ?? process.env.KIRBY_OCPP_STATE_DIR,
+    webSocketSubprotocol: input.webSocketSubprotocol ?? process.env.OCPP_WS_SUBPROTOCOL ?? "ocpp1.6",
+    webSocketPingIntervalSeconds: input.webSocketPingIntervalSeconds ?? process.env.OCPP_WS_PING_INTERVAL ?? 30,
+    tlsRejectUnauthorized: input.tlsRejectUnauthorized ?? process.env.OCPP_TLS_SKIP_VERIFY !== "1",
+    tlsCaFile: input.tlsCaFile ?? process.env.OCPP_TLS_CA_FILE,
+    tlsCertFile: input.tlsCertFile ?? process.env.OCPP_TLS_CERT_FILE,
+    tlsKeyFile: input.tlsKeyFile ?? process.env.OCPP_TLS_KEY_FILE,
+    tlsServerName: input.tlsServerName ?? process.env.OCPP_TLS_SERVER_NAME
   });
 }

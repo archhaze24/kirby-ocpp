@@ -11,6 +11,7 @@ const callPayloads = [];
 const responses = new Map();
 const callErrorsRemaining = new Map();
 const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+let negativeChecks = 0;
 
 while (!wss.address()) {
   await sleep(5);
@@ -159,6 +160,46 @@ for (const [action, payload] of commands) {
   }
 }
 
+await waitForCallAfter(
+  "DiagnosticsStatusNotification",
+  0,
+  (payload) => payload.status === "Uploading"
+);
+await waitForCallAfter(
+  "DiagnosticsStatusNotification",
+  0,
+  (payload) => payload.status === "Uploaded"
+);
+for (const status of ["Downloading", "Downloaded", "Installing", "Installed"]) {
+  await waitForCallAfter(
+    "FirmwareStatusNotification",
+    0,
+    (payload) => payload.status === status
+  );
+}
+
+station.setDiagnosticsOutcome("uploadFailure");
+const failedDiagnosticsIndex = callPayloads.length;
+await sendCentralSystemCall("GetDiagnostics", { location: "https://example.invalid/diag-fail" });
+await waitForCallAfter(
+  "DiagnosticsStatusNotification",
+  failedDiagnosticsIndex,
+  (payload) => payload.status === "UploadFailed"
+);
+
+station.setFirmwareOutcome("downloadFailure");
+const failedFirmwareIndex = callPayloads.length;
+await sendCentralSystemCall("UpdateFirmware", {
+  location: "https://example.invalid/fw-fail",
+  retrieveDate: new Date().toISOString()
+});
+await waitForCallAfter(
+  "FirmwareStatusNotification",
+  failedFirmwareIndex,
+  (payload) => payload.status === "DownloadFailed"
+);
+station.setFirmwareOutcome("success");
+
 const fullConfiguration = await sendCentralSystemCall("GetConfiguration", {});
 const configurationKeys = fullConfiguration[2]?.configurationKey ?? [];
 for (const key of ["ClockAlignedDataInterval", "SupportedFeatureProfiles", "StopTransactionOnEVSideDisconnect"]) {
@@ -166,6 +207,23 @@ for (const key of ["ClockAlignedDataInterval", "SupportedFeatureProfiles", "Stop
     throw new Error(`GetConfiguration did not include ${key}`);
   }
 }
+
+const partialConfiguration = await sendCentralSystemCall("GetConfiguration", {
+  key: ["HeartbeatInterval", "TotallyUnknownConfigurationKey"]
+});
+if (!partialConfiguration[2]?.configurationKey?.some((entry) => entry.key === "HeartbeatInterval")) {
+  throw new Error(`GetConfiguration did not return requested known key: ${JSON.stringify(partialConfiguration)}`);
+}
+if (!partialConfiguration[2]?.unknownKey?.includes("TotallyUnknownConfigurationKey")) {
+  throw new Error(`GetConfiguration did not report requested unknown key: ${JSON.stringify(partialConfiguration)}`);
+}
+
+await expectResponseStatus(
+  "ChangeConfiguration",
+  { key: "TotallyUnknownConfigurationKey", value: "1" },
+  "NotSupported",
+  "unknown ChangeConfiguration key"
+);
 
 const readonlyResponse = await sendCentralSystemCall("ChangeConfiguration", {
   key: "NumberOfConnectors",
@@ -189,6 +247,151 @@ const invalidSampledDataResponse = await sendCentralSystemCall("ChangeConfigurat
 });
 if (invalidSampledDataResponse[2]?.status !== "Rejected") {
   throw new Error(`Invalid sampled data ChangeConfiguration was not rejected: ${JSON.stringify(invalidSampledDataResponse)}`);
+}
+
+await expectResponseStatus("CancelReservation", { reservationId: 404 }, "Rejected", "unknown reservation cancellation");
+await expectResponseStatus("ChangeAvailability", { connectorId: 404, type: "Inoperative" }, "Rejected", "unknown connector availability");
+await expectResponseStatus("DataTransfer", { vendorId: "OtherVendor", data: "ping" }, "UnknownVendorId", "unknown vendor DataTransfer");
+await expectResponseStatus("RemoteStartTransaction", { connectorId: 404, idTag: "TAG1" }, "Rejected", "remote start on unknown connector");
+await expectResponseStatus("RemoteStopTransaction", { transactionId: 404 }, "Rejected", "remote stop of unknown transaction");
+await expectResponseStatus(
+  "ReserveNow",
+  { connectorId: 1, expiryDate: new Date(Date.now() - 60_000).toISOString(), idTag: "TAG1", reservationId: 401 },
+  "Rejected",
+  "expired reservation"
+);
+await expectResponseStatus(
+  "ReserveNow",
+  { connectorId: 404, expiryDate: futureDate, idTag: "TAG1", reservationId: 402 },
+  "Unavailable",
+  "reservation on unknown connector"
+);
+await expectCallError(
+  "TriggerMessage",
+  { requestedMessage: "Authorize" },
+  "PropertyConstraintViolation",
+  "unsupported trigger message"
+);
+await expectResponseStatus("UnlockConnector", { connectorId: 404 }, "NotSupported", "unlock unknown connector");
+await expectResponseStatus(
+  "SendLocalList",
+  {
+    listVersion: 1,
+    updateType: "Differential",
+    localAuthorizationList: [{ idTag: "TAG1", idTagInfo: { status: "Accepted" } }]
+  },
+  "VersionMismatch",
+  "stale local auth list differential"
+);
+await expectCallError("Reset", { type: "Warm" }, "PropertyConstraintViolation", "invalid Reset enum");
+await expectCallError("GetDiagnostics", {}, "OccurenceConstraintViolation", "missing diagnostics location");
+await expectCallError(
+  "UpdateFirmware",
+  { location: "https://example.invalid/fw-missing-date" },
+  "OccurenceConstraintViolation",
+  "missing firmware retrieveDate"
+);
+
+const invalidChargingConnectorResponse = await sendCentralSystemCall("SetChargingProfile", {
+  connectorId: 99,
+  csChargingProfiles: {
+    chargingProfileId: 991,
+    stackLevel: 1,
+    chargingProfilePurpose: "TxDefaultProfile",
+    chargingProfileKind: "Absolute",
+    chargingSchedule: {
+      chargingRateUnit: "A",
+      chargingSchedulePeriod: [{ startPeriod: 0, limit: 8 }]
+    }
+  }
+});
+if (invalidChargingConnectorResponse[2]?.status !== "Rejected") {
+  throw new Error(`SetChargingProfile accepted unknown connector: ${JSON.stringify(invalidChargingConnectorResponse)}`);
+}
+
+const txProfileWithoutTransactionResponse = await sendCentralSystemCall("SetChargingProfile", {
+  connectorId: 1,
+  csChargingProfiles: {
+    chargingProfileId: 992,
+    stackLevel: 1,
+    chargingProfilePurpose: "TxProfile",
+    chargingProfileKind: "Absolute",
+    chargingSchedule: {
+      chargingRateUnit: "A",
+      chargingSchedulePeriod: [{ startPeriod: 0, limit: 8 }]
+    }
+  }
+});
+if (txProfileWithoutTransactionResponse[2]?.status !== "Rejected") {
+  throw new Error(`SetChargingProfile accepted TxProfile without transaction: ${JSON.stringify(txProfileWithoutTransactionResponse)}`);
+}
+
+const unknownCompositeResponse = await sendCentralSystemCall("GetCompositeSchedule", { connectorId: 99, duration: 60 });
+if (unknownCompositeResponse[2]?.status !== "Rejected") {
+  throw new Error(`GetCompositeSchedule accepted unknown connector: ${JSON.stringify(unknownCompositeResponse)}`);
+}
+
+const unknownClearProfileResponse = await sendCentralSystemCall("ClearChargingProfile", { id: 424242 });
+if (unknownClearProfileResponse[2]?.status !== "Unknown") {
+  throw new Error(`ClearChargingProfile unknown profile did not return Unknown: ${JSON.stringify(unknownClearProfileResponse)}`);
+}
+
+const cpMaxProfileResponse = await sendCentralSystemCall("SetChargingProfile", {
+  connectorId: 0,
+  csChargingProfiles: {
+    chargingProfileId: 2,
+    stackLevel: 1,
+    chargingProfilePurpose: "ChargePointMaxProfile",
+    chargingProfileKind: "Absolute",
+    chargingSchedule: {
+      chargingRateUnit: "A",
+      chargingSchedulePeriod: [{ startPeriod: 0, limit: 20 }]
+    }
+  }
+});
+if (cpMaxProfileResponse[2]?.status !== "Accepted") {
+  throw new Error(`ChargePointMaxProfile was not accepted: ${JSON.stringify(cpMaxProfileResponse)}`);
+}
+
+const highStackDefaultProfileResponse = await sendCentralSystemCall("SetChargingProfile", {
+  connectorId: 1,
+  csChargingProfiles: {
+    chargingProfileId: 3,
+    stackLevel: 2,
+    chargingProfilePurpose: "TxDefaultProfile",
+    chargingProfileKind: "Absolute",
+    chargingSchedule: {
+      chargingRateUnit: "A",
+      chargingSchedulePeriod: [{ startPeriod: 0, limit: 32 }]
+    }
+  }
+});
+if (highStackDefaultProfileResponse[2]?.status !== "Accepted") {
+  throw new Error(`Higher stack TxDefaultProfile was not accepted: ${JSON.stringify(highStackDefaultProfileResponse)}`);
+}
+
+const expiredProfileResponse = await sendCentralSystemCall("SetChargingProfile", {
+  connectorId: 1,
+  csChargingProfiles: {
+    chargingProfileId: 4,
+    stackLevel: 100,
+    chargingProfilePurpose: "TxDefaultProfile",
+    chargingProfileKind: "Absolute",
+    validTo: new Date(Date.now() - 60_000).toISOString(),
+    chargingSchedule: {
+      chargingRateUnit: "A",
+      chargingSchedulePeriod: [{ startPeriod: 0, limit: 1 }]
+    }
+  }
+});
+if (expiredProfileResponse[2]?.status !== "Accepted") {
+  throw new Error(`Expired TxDefaultProfile was not accepted for pruning test: ${JSON.stringify(expiredProfileResponse)}`);
+}
+
+const priorityCompositeResponse = await sendCentralSystemCall("GetCompositeSchedule", { connectorId: 1, duration: 60 });
+const priorityLimit = priorityCompositeResponse[2]?.chargingSchedule?.chargingSchedulePeriod?.[0]?.limit;
+if (priorityCompositeResponse[2]?.status !== "Accepted" || priorityLimit !== 20) {
+  throw new Error(`Composite schedule did not honor purpose/stack priority: ${JSON.stringify(priorityCompositeResponse)}`);
 }
 
 const addConnectorStartIndex = callPayloads.length;
@@ -268,6 +471,30 @@ if (reservedStartConnector?.status !== "Charging" || reservedStartConnector.rese
   throw new Error(`Reserved start did not consume reservation: ${JSON.stringify(reservedStartConnector)}`);
 }
 
+const activeTxProfileResponse = await sendCentralSystemCall("SetChargingProfile", {
+  connectorId: 1,
+  csChargingProfiles: {
+    chargingProfileId: 5,
+    transactionId: 123,
+    stackLevel: 1,
+    chargingProfilePurpose: "TxProfile",
+    chargingProfileKind: "Absolute",
+    chargingSchedule: {
+      chargingRateUnit: "A",
+      chargingSchedulePeriod: [{ startPeriod: 0, limit: 10 }]
+    }
+  }
+});
+if (activeTxProfileResponse[2]?.status !== "Accepted") {
+  throw new Error(`TxProfile for active transaction was not accepted: ${JSON.stringify(activeTxProfileResponse)}`);
+}
+
+const txProfileCompositeResponse = await sendCentralSystemCall("GetCompositeSchedule", { connectorId: 1, duration: 60 });
+const txProfileLimit = txProfileCompositeResponse[2]?.chargingSchedule?.chargingSchedulePeriod?.[0]?.limit;
+if (txProfileCompositeResponse[2]?.status !== "Accepted" || txProfileLimit !== 10) {
+  throw new Error(`TxProfile did not affect composite schedule: ${JSON.stringify(txProfileCompositeResponse)}`);
+}
+
 const periodicStartIndex = callPayloads.length;
 await waitForCallAfter("MeterValues", periodicStartIndex, (payload) => payload.connectorId === 1 && payload.transactionId === 123);
 await waitForCallAfter(
@@ -297,6 +524,11 @@ if (resumedConnector?.status !== "Charging" || resumedConnector.transactionId !=
 }
 
 await station.stopTransaction(1, "Local", "TAG1");
+const clearedTxProfileCompositeResponse = await sendCentralSystemCall("GetCompositeSchedule", { connectorId: 1, duration: 60 });
+const clearedTxProfileLimit = clearedTxProfileCompositeResponse[2]?.chargingSchedule?.chargingSchedulePeriod?.[0]?.limit;
+if (clearedTxProfileCompositeResponse[2]?.status !== "Accepted" || clearedTxProfileLimit !== 20) {
+  throw new Error(`TxProfile was not cleared after StopTransaction: ${JSON.stringify(clearedTxProfileCompositeResponse)}`);
+}
 await station.unplug(1);
 
 await station.plugIn(1);
@@ -429,7 +661,7 @@ if (!reloadedStation.localAuthorizationList.has("TAG1")) {
   throw new Error("Persisted local authorization list does not contain TAG1");
 }
 
-if (reloadedStation.chargingProfiles.length !== 1) {
+if (reloadedStation.chargingProfiles.length !== 3) {
   throw new Error(`Persisted charging profile count mismatch: ${reloadedStation.chargingProfiles.length}`);
 }
 
@@ -438,7 +670,9 @@ if (!offlineDecision.accepted || offlineDecision.source !== "LocalList") {
   throw new Error(`Offline local authorization failed: ${JSON.stringify(offlineDecision)}`);
 }
 
-console.log(`ok ${commands.length} CSMS commands; charge point calls=${[...new Set(calls)].sort().join(",")}`);
+console.log(
+  `ok ${commands.length} CSMS commands; negative checks=${negativeChecks}; charge point calls=${[...new Set(calls)].sort().join(",")}`
+);
 process.exit(0);
 
 function responseFor(action, payload = {}) {
@@ -487,6 +721,22 @@ function sendCentralSystemCall(action, payload) {
 
     tick();
   });
+}
+
+async function expectResponseStatus(action, payload, expectedStatus, label) {
+  const response = await sendCentralSystemCall(action, payload);
+  if (response[0] !== 3 || response[2]?.status !== expectedStatus) {
+    throw new Error(`${label} expected ${expectedStatus}: ${JSON.stringify(response)}`);
+  }
+  negativeChecks += 1;
+}
+
+async function expectCallError(action, payload, expectedCode, label) {
+  const response = await sendCentralSystemCall(action, payload);
+  if (response[0] !== 4 || response[2] !== expectedCode) {
+    throw new Error(`${label} expected CALLERROR ${expectedCode}: ${JSON.stringify(response)}`);
+  }
+  negativeChecks += 1;
 }
 
 async function waitForCall(action) {

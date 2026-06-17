@@ -21,7 +21,7 @@ export class OcppSchemaValidator {
 
       const schema = JSON.parse(readFileSync(join(schemaDirectory, file), "utf8")) as Record<string, unknown>;
       const name = file.replace(/\.json$/, "");
-      this.schemas.set(name, stripSchemaMetadata(schema) as Record<string, unknown>);
+      this.schemas.set(name, stripSchemaMetadata(schema, true) as Record<string, unknown>);
     }
   }
 
@@ -60,7 +60,7 @@ export class OcppSchemaValidator {
   }
 }
 
-function stripSchemaMetadata(value: unknown): unknown {
+function stripSchemaMetadata(value: unknown, root = false): unknown {
   if (Array.isArray(value)) {
     return value.map((item) => stripSchemaMetadata(item));
   }
@@ -71,7 +71,7 @@ function stripSchemaMetadata(value: unknown): unknown {
 
   const output: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
-    if (key === "$schema" || key === "id" || key === "title") {
+    if (key === "$schema" || key === "title" || (root && key === "id")) {
       continue;
     }
 

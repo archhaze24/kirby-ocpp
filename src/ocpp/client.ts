@@ -1,6 +1,7 @@
 import EventEmitter from "node:events";
+import { readFileSync } from "node:fs";
 import { nanoid } from "nanoid";
-import WebSocket from "ws";
+import WebSocket, { type ClientOptions } from "ws";
 import type {
   CallErrorResponse,
   CallResponse,
@@ -24,12 +25,26 @@ type OcppCallErrorCode =
   | "TypeConstraintViolation"
   | "GenericError";
 
+type WebSocketClientOptions = ClientOptions & {
+  servername?: string;
+};
+
 interface OcppClientEvents {
   connected: [];
   disconnected: [code?: number, reason?: string];
   error: [error: Error];
   log: [direction: "in" | "out", message: OcppMessage];
   call: [messageId: string, action: string, payload: Record<string, unknown>];
+}
+
+export interface OcppClientOptions {
+  subprotocol?: string;
+  pingIntervalSeconds?: number;
+  tlsRejectUnauthorized?: boolean;
+  tlsCaFile?: string;
+  tlsCertFile?: string;
+  tlsKeyFile?: string;
+  tlsServerName?: string;
 }
 
 export declare interface OcppClient {
@@ -39,13 +54,15 @@ export declare interface OcppClient {
 
 export class OcppClient extends EventEmitter {
   private socket?: WebSocket;
+  private pingTimer?: NodeJS.Timeout;
   private readonly pending = new Map<string, PendingCall>();
   private readonly incomingCalls = new Map<string, string>();
   private readonly schemaValidator = new OcppSchemaValidator();
 
   constructor(
     private readonly centralSystemUrl: string,
-    private readonly chargePointId: string
+    private readonly chargePointId: string,
+    private readonly options: OcppClientOptions = {}
   ) {
     super();
   }
@@ -58,11 +75,23 @@ export class OcppClient extends EventEmitter {
     this.close();
 
     const url = this.buildChargePointUrl();
-    this.socket = new WebSocket(url, ["ocpp1.6"]);
+    const subprotocol = this.options.subprotocol ?? "ocpp1.6";
+    this.socket = new WebSocket(url, [subprotocol], this.buildWebSocketOptions());
 
-    this.socket.on("open", () => this.emit("connected"));
+    this.socket.on("open", () => {
+      if (this.socket?.protocol !== subprotocol) {
+        const error = new Error(`Central System did not negotiate required WebSocket subprotocol ${subprotocol}`);
+        this.emit("error", error);
+        this.socket?.close(1002, "OCPP subprotocol required");
+        return;
+      }
+
+      this.startPingTimer();
+      this.emit("connected");
+    });
     this.socket.on("message", (data) => this.handleMessage(data.toString()));
     this.socket.on("close", (code, reason) => {
+      this.stopPingTimer();
       this.rejectPending(new Error(`Connection closed (${code})`));
       this.emit("disconnected", code, reason.toString());
     });
@@ -75,6 +104,7 @@ export class OcppClient extends EventEmitter {
     }
 
     this.rejectPending(new Error("Connection closed"));
+    this.stopPingTimer();
     this.socket.removeAllListeners();
     if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
       this.socket.close();
@@ -322,6 +352,30 @@ export class OcppClient extends EventEmitter {
     return typeof message[1] === "string" ? message[1] : undefined;
   }
 
+  private startPingTimer(): void {
+    this.stopPingTimer();
+    const intervalSeconds = this.options.pingIntervalSeconds ?? 30;
+    if (intervalSeconds <= 0) {
+      return;
+    }
+
+    this.pingTimer = setInterval(() => {
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        this.socket.ping();
+      }
+    }, intervalSeconds * 1000);
+    this.pingTimer.unref();
+  }
+
+  private stopPingTimer(): void {
+    if (!this.pingTimer) {
+      return;
+    }
+
+    clearInterval(this.pingTimer);
+    this.pingTimer = undefined;
+  }
+
   private buildChargePointUrl(): string {
     const base = this.centralSystemUrl.replace(/\/+$/, "");
     const id = encodeURIComponent(this.chargePointId);
@@ -331,5 +385,29 @@ export class OcppClient extends EventEmitter {
     }
 
     return `${base}/${id}`;
+  }
+
+  private buildWebSocketOptions(): ClientOptions {
+    const options: WebSocketClientOptions = {
+      rejectUnauthorized: this.options.tlsRejectUnauthorized ?? true
+    };
+
+    if (this.options.tlsCaFile) {
+      options.ca = readFileSync(this.options.tlsCaFile);
+    }
+
+    if (this.options.tlsCertFile) {
+      options.cert = readFileSync(this.options.tlsCertFile);
+    }
+
+    if (this.options.tlsKeyFile) {
+      options.key = readFileSync(this.options.tlsKeyFile);
+    }
+
+    if (this.options.tlsServerName) {
+      options.servername = this.options.tlsServerName;
+    }
+
+    return options;
   }
 }

@@ -36,6 +36,17 @@ export type AvailabilityType = "Operative" | "Inoperative";
 
 export type RegistrationStatus = "Accepted" | "Pending" | "Rejected";
 
+export type DiagnosticsStatus = "Idle" | "Uploaded" | "UploadFailed" | "Uploading";
+
+export type FirmwareStatus =
+  | "Downloaded"
+  | "DownloadFailed"
+  | "Downloading"
+  | "Idle"
+  | "InstallationFailed"
+  | "Installing"
+  | "Installed";
+
 export type StopReason =
   | "EmergencyStop"
   | "EVDisconnected"
@@ -79,6 +90,13 @@ export interface StationConfig {
   idTag: string;
   persistState: boolean;
   stateDirectory?: string;
+  webSocketSubprotocol: string;
+  webSocketPingIntervalSeconds: number;
+  tlsRejectUnauthorized: boolean;
+  tlsCaFile?: string;
+  tlsCertFile?: string;
+  tlsKeyFile?: string;
+  tlsServerName?: string;
 }
 
 export interface ConnectorState {
@@ -91,6 +109,7 @@ export interface ConnectorState {
   vendorErrorCode?: string;
   evConnected: boolean;
   transactionId?: number;
+  transactionStartedAt?: string;
   reservationId?: number;
   reservationIdTag?: string;
   reservationParentIdTag?: string;
@@ -110,6 +129,8 @@ export interface StationState {
   localListVersion: number;
   meterWh: number;
   connectors: ConnectorState[];
+  diagnosticsStatus?: DiagnosticsStatus;
+  firmwareStatus?: FirmwareStatus;
   lastHeartbeatAt?: Date;
 }
 

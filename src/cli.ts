@@ -20,6 +20,13 @@ program
   .option("--id-tag <idTag>", "default RFID/idTag", "DEADBEEF")
   .option("--no-persist", "do not save station state such as local auth list and charging profiles")
   .option("--state-dir <path>", "directory for persisted station state")
+  .option("--ws-subprotocol <protocol>", "WebSocket subprotocol to request", "ocpp1.6")
+  .option("--ws-ping <seconds>", "WebSocket ping interval in seconds, 0 disables pings", "30")
+  .option("--tls-ca <path>", "CA certificate bundle for wss:// connections")
+  .option("--tls-cert <path>", "client certificate for wss:// mutual TLS")
+  .option("--tls-key <path>", "client private key for wss:// mutual TLS")
+  .option("--tls-server-name <name>", "TLS server name override for wss:// connections")
+  .option("--tls-skip-verify", "disable TLS certificate verification for local/self-signed wss:// testing")
   .parse();
 
 const options = program.opts<{
@@ -33,6 +40,13 @@ const options = program.opts<{
   idTag: string;
   persist: boolean;
   stateDir?: string;
+  wsSubprotocol: string;
+  wsPing: string;
+  tlsCa?: string;
+  tlsCert?: string;
+  tlsKey?: string;
+  tlsServerName?: string;
+  tlsSkipVerify?: boolean;
 }>();
 
 try {
@@ -46,7 +60,14 @@ try {
     heartbeatIntervalSeconds: options.heartbeat,
     idTag: options.idTag,
     persistState: options.persist,
-    stateDirectory: options.stateDir
+    stateDirectory: options.stateDir,
+    webSocketSubprotocol: options.wsSubprotocol,
+    webSocketPingIntervalSeconds: options.wsPing,
+    tlsRejectUnauthorized: !options.tlsSkipVerify,
+    tlsCaFile: options.tlsCa,
+    tlsCertFile: options.tlsCert,
+    tlsKeyFile: options.tlsKey,
+    tlsServerName: options.tlsServerName
   });
 
   const station = new Station(config);

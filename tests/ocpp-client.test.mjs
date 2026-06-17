@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { WebSocketServer } from "ws";
+import { parseConfig } from "../dist/config.js";
 import { OcppClient } from "../dist/ocpp/client.js";
 
 test("responds with OccurenceConstraintViolation for missing required payload fields", { timeout: 5_000 }, async () => {
@@ -53,7 +54,64 @@ test("rejects pending calls when CALLRESULT violates response schema", { timeout
   });
 });
 
-async function withClient(run) {
+test("preserves schema properties named id when stripping metadata", { timeout: 5_000 }, async () => {
+  await withClient(async ({ client, socket, nextClientMessage }) => {
+    const call = new Promise((resolve) => {
+      client.once("call", (messageId, action, payload) => {
+        client.reply(messageId, { status: "Unknown" });
+        resolve({ action, payload });
+      });
+    });
+
+    socket.send(JSON.stringify([2, "csms-clear-profile", "ClearChargingProfile", { id: 424242 }]));
+
+    const received = await call;
+    assert.deepEqual(received, { action: "ClearChargingProfile", payload: { id: 424242 } });
+
+    const message = await nextClientMessage();
+    assert.equal(message[0], 3);
+    assert.equal(message[1], "csms-clear-profile");
+    assert.equal(message[2].status, "Unknown");
+  });
+});
+
+test("negotiates the ocpp1.6 WebSocket subprotocol", { timeout: 5_000 }, async () => {
+  await withClient(async ({ socket }) => {
+    assert.equal(socket.protocol, "ocpp1.6");
+  });
+});
+
+test("sends WebSocket ping frames when configured", { timeout: 5_000 }, async () => {
+  await withClient(
+    async ({ socket }) => {
+      await once(socket, "ping");
+    },
+    { clientOptions: { pingIntervalSeconds: 0.01 } }
+  );
+});
+
+test("parses WebSocket and TLS security config", () => {
+  const config = parseConfig({
+    centralSystemUrl: "wss://central.example/ocpp",
+    tlsRejectUnauthorized: false,
+    tlsCaFile: "/tmp/ca.pem",
+    tlsCertFile: "/tmp/client.pem",
+    tlsKeyFile: "/tmp/client-key.pem",
+    tlsServerName: "central.example",
+    webSocketSubprotocol: "ocpp1.6",
+    webSocketPingIntervalSeconds: 45
+  });
+
+  assert.equal(config.tlsRejectUnauthorized, false);
+  assert.equal(config.tlsCaFile, "/tmp/ca.pem");
+  assert.equal(config.tlsCertFile, "/tmp/client.pem");
+  assert.equal(config.tlsKeyFile, "/tmp/client-key.pem");
+  assert.equal(config.tlsServerName, "central.example");
+  assert.equal(config.webSocketSubprotocol, "ocpp1.6");
+  assert.equal(config.webSocketPingIntervalSeconds, 45);
+});
+
+async function withClient(run, options = {}) {
   const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await waitForServer(wss);
 
@@ -75,7 +133,7 @@ async function withClient(run) {
     });
   });
 
-  const client = new OcppClient(`ws://127.0.0.1:${address.port}/ocpp`, "CP-001");
+  const client = new OcppClient(`ws://127.0.0.1:${address.port}/ocpp`, "CP-001", options.clientOptions);
   client.on("log", (direction, message) => {
     if (direction === "out") {
       clientMessages.push(message);

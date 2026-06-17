@@ -164,6 +164,16 @@ export class Tui {
         this.runStationTask(() => this.station.dataTransfer(payload));
       });
     });
+    this.screen.key("D", () => {
+      this.promptText("Diagnostics outcome", "success", (value) => {
+        this.station.setDiagnosticsOutcome(readDiagnosticsOutcome(value));
+      });
+    });
+    this.screen.key("U", () => {
+      this.promptText("Firmware outcome", "success", (value) => {
+        this.station.setFirmwareOutcome(readFirmwareOutcome(value));
+      });
+    });
     this.screen.key("f", () => {
       const connector = this.selectedConnector();
       if (connector?.status === "Faulted") {
@@ -220,6 +230,8 @@ export class Tui {
     const ev = connector?.evConnected ? "connected" : "-";
     const meterWh = connector?.meterWh ?? 0;
     const lastHeartbeat = state.lastHeartbeatAt ? state.lastHeartbeatAt.toLocaleTimeString() : "-";
+    const diagnostics = state.diagnosticsStatus ?? "-";
+    const firmware = state.firmwareStatus ?? "-";
     const contentWidth = this.leftPanelContentWidth();
     const connectorLines = state.connectors.map((item) => {
       const marker = item.id === this.selectedConnectorId ? ">" : " ";
@@ -239,6 +251,7 @@ export class Tui {
       `Reserve:    ${reservation}  idTag: ${truncateText(reservationTag, 14)}`,
       `Meter:      ${Math.round(meterWh)} Wh`,
       `LocalList:  ${state.localListVersion}`,
+      `Diag/FW:    ${diagnostics}/${firmware}`,
       `Heartbeat:  ${lastHeartbeat}`,
       "",
       `{bold}Connectors (${state.connectors.length}){/bold}`
@@ -270,6 +283,7 @@ export class Tui {
         "{bold}m{/bold} MeterValues +120 Wh",
         "{bold}M{/bold} MeterValues custom",
         "{bold}d{/bold} DataTransfer",
+        "{bold}D/U{/bold} Diag/FW outcome",
         "{bold}f{/bold} Fault/Clear fault",
         "{bold}p{/bold} Plug/Unplug EV",
         "{bold}j/k{/bold} Scroll, {bold}G/g{/bold} bottom",
@@ -282,7 +296,7 @@ export class Tui {
 
   private layout(): void {
     const rows = this.screenRows();
-    const controlsHeight = rows >= 34 ? 16 : 13;
+    const controlsHeight = rows >= 34 ? 17 : 14;
     this.stateBoxHeight = Math.max(16, rows - 3 - controlsHeight);
 
     this.stateBox.top = 3;
@@ -591,6 +605,15 @@ function isStopReason(value: string): value is StopReason {
 function readChargePointErrorCode(value: string): ChargePointErrorCode {
   const normalized = value.trim();
   return isChargePointErrorCode(normalized) && normalized !== "NoError" ? normalized : "OtherError";
+}
+
+function readDiagnosticsOutcome(value: string): "success" | "uploadFailure" {
+  return value.trim() === "uploadFailure" ? "uploadFailure" : "success";
+}
+
+function readFirmwareOutcome(value: string): "success" | "downloadFailure" | "installationFailure" {
+  const normalized = value.trim();
+  return normalized === "downloadFailure" || normalized === "installationFailure" ? normalized : "success";
 }
 
 function isChargePointErrorCode(value: string): value is ChargePointErrorCode {

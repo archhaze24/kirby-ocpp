@@ -1,6 +1,7 @@
 import {
-  applicableChargingProfiles,
   canStoreChargingProfile,
+  effectiveChargingProfiles,
+  isChargingProfileExpired,
   limitAt,
   matchesChargingProfileFilter,
   readChargingProfile,
@@ -47,13 +48,35 @@ export class ChargingProfileRegistry {
   }
 
   clear(payload: Record<string, unknown>): "Accepted" | "Unknown" {
+    this.pruneExpired();
     const before = this.profiles.length;
     const remaining = this.profiles.filter((entry) => !matchesChargingProfileFilter(entry, payload));
     this.profiles.splice(0, this.profiles.length, ...remaining);
     return before - this.profiles.length > 0 ? "Accepted" : "Unknown";
   }
 
-  compositeSchedulePayload(payload: Record<string, unknown>, transactionId: number | undefined): Record<string, unknown> | undefined {
+  clearForTransaction(transactionId: number): boolean {
+    const before = this.profiles.length;
+    const remaining = this.profiles.filter(
+      (entry) => entry.profile.chargingProfilePurpose !== "TxProfile" || entry.profile.transactionId !== transactionId
+    );
+    this.profiles.splice(0, this.profiles.length, ...remaining);
+    return this.profiles.length !== before;
+  }
+
+  pruneExpired(at = new Date()): boolean {
+    const before = this.profiles.length;
+    const remaining = this.profiles.filter((entry) => !isChargingProfileExpired(entry.profile, at));
+    this.profiles.splice(0, this.profiles.length, ...remaining);
+    return this.profiles.length !== before;
+  }
+
+  compositeSchedulePayload(
+    payload: Record<string, unknown>,
+    transactionId: number | undefined,
+    transactionStartedAt?: string
+  ): { payload: Record<string, unknown>; prunedExpired: boolean } | undefined {
+    const prunedExpired = this.pruneExpired();
     const connectorId = readNumber(payload.connectorId, -1);
     const duration = readNumber(payload.duration, 0);
     const requestedUnit = readChargingRateUnit(payload.chargingRateUnit);
@@ -63,11 +86,12 @@ export class ChargingProfileRegistry {
     }
 
     const scheduleStart = new Date();
-    const activeProfiles = applicableChargingProfiles(this.profiles, connectorId, transactionId, scheduleStart);
+    const activeProfiles = effectiveChargingProfiles(this.profiles, connectorId, transactionId, scheduleStart);
     const unit = requestedUnit ?? activeProfiles[0]?.profile.chargingSchedule.chargingRateUnit ?? "A";
+    const relativeStart = transactionStartedAt ? new Date(transactionStartedAt) : undefined;
     const limits = activeProfiles
       .filter((entry) => entry.profile.chargingSchedule.chargingRateUnit === unit)
-      .map((entry) => limitAt(entry.profile, scheduleStart))
+      .map((entry) => limitAt(entry.profile, scheduleStart, relativeStart))
       .filter((limit): limit is number => typeof limit === "number" && Number.isFinite(limit));
 
     if (limits.length === 0) {
@@ -75,14 +99,17 @@ export class ChargingProfileRegistry {
     }
 
     return {
-      status: "Accepted",
-      connectorId,
-      scheduleStart: scheduleStart.toISOString(),
-      chargingSchedule: {
-        duration,
-        startSchedule: scheduleStart.toISOString(),
-        chargingRateUnit: unit,
-        chargingSchedulePeriod: [{ startPeriod: 0, limit: Math.min(...limits) }]
+      prunedExpired,
+      payload: {
+        status: "Accepted",
+        connectorId,
+        scheduleStart: scheduleStart.toISOString(),
+        chargingSchedule: {
+          duration,
+          startSchedule: scheduleStart.toISOString(),
+          chargingRateUnit: unit,
+          chargingSchedulePeriod: [{ startPeriod: 0, limit: Math.min(...limits) }]
+        }
       }
     };
   }

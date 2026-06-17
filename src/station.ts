@@ -32,6 +32,11 @@ import { ReservationScheduler } from "./station/reservation-scheduler.js";
 import { buildPersistedStationState, restorePersistedStationState } from "./station/persistence.js";
 import { readNumber, readObject, readOptionalString, readString } from "./station/payload.js";
 import { applyLocalAuthListUpdate } from "./station/local-auth-list.js";
+import {
+  MaintenanceLifecycle,
+  type DiagnosticsOutcome,
+  type FirmwareOutcome
+} from "./station/maintenance-lifecycle.js";
 import { describeOcppMessage } from "./station/ocpp-message.js";
 import { StatusNotificationScheduler } from "./station/status-scheduler.js";
 import { canTriggerMessage } from "./station/trigger-message.js";
@@ -47,6 +52,8 @@ import type {
   ChargePointErrorCode,
   ConnectorState,
   ConnectorStatus,
+  DiagnosticsStatus,
+  FirmwareStatus,
   LogEntry,
   RegistrationStatus,
   StationConfig,
@@ -74,7 +81,9 @@ export class Station extends EventEmitter {
     availability: "Operative",
     localListVersion: 0,
     meterWh: 0,
-    connectors: []
+    connectors: [],
+    diagnosticsStatus: "Idle",
+    firmwareStatus: "Idle"
   };
 
   private heartbeatTimer?: NodeJS.Timeout;
@@ -86,11 +95,20 @@ export class Station extends EventEmitter {
   private readonly statusScheduler: StatusNotificationScheduler;
   private readonly meterValueScheduler: MeterValueScheduler;
   private readonly reservationScheduler: ReservationScheduler;
+  private readonly maintenance: MaintenanceLifecycle;
   private readonly chargingProfiles = new ChargingProfileRegistry();
 
   constructor(readonly config: StationConfig) {
     super();
-    this.client = new OcppClient(config.centralSystemUrl, config.chargePointId);
+    this.client = new OcppClient(config.centralSystemUrl, config.chargePointId, {
+      subprotocol: config.webSocketSubprotocol,
+      pingIntervalSeconds: config.webSocketPingIntervalSeconds,
+      tlsRejectUnauthorized: config.tlsRejectUnauthorized,
+      tlsCaFile: config.tlsCaFile,
+      tlsCertFile: config.tlsCertFile,
+      tlsKeyFile: config.tlsKeyFile,
+      tlsServerName: config.tlsServerName
+    });
     this.configuration = new ConfigurationRegistry(config);
     this.connectors = new ConnectorRegistry(config.connectorId, config.connectorCount);
     this.connectors.setOnChange(() => this.refreshConnectorSnapshot());
@@ -121,6 +139,12 @@ export class Station extends EventEmitter {
       expiryDate: (connectorId) => this.connectors.find(connectorId)?.reservationExpiryDate,
       expire: (connectorId) => this.expireReservation(connectorId)
     });
+    this.maintenance = new MaintenanceLifecycle({
+      run: (task) => void this.runSafely(task),
+      diagnosticsStatus: (status) => this.diagnosticsStatusNotification(status),
+      firmwareStatus: (status) => this.firmwareStatusNotification(status),
+      log: (level, message) => this.log(level, message)
+    });
     this.store = config.persistState ? new StationStore(config.chargePointId, config.stateDirectory) : undefined;
     this.loadPersistedState();
     this.refreshConnectorSnapshot();
@@ -138,6 +162,7 @@ export class Station extends EventEmitter {
     this.meterValueScheduler.stopClockAligned();
     this.reservationScheduler.clearAll();
     this.statusScheduler.clearAll();
+    this.maintenance.clearAll();
     this.client.close();
     this.patchState({ connected: false });
   }
@@ -296,6 +321,7 @@ export class Station extends EventEmitter {
     this.reservationScheduler.clear(connectorId);
     this.connectors.patch(connectorId, {
       transactionId,
+      transactionStartedAt: new Date().toISOString(),
       reservationId: undefined,
       reservationIdTag: undefined,
       reservationParentIdTag: undefined,
@@ -338,7 +364,10 @@ export class Station extends EventEmitter {
     await this.send("StopTransaction", payload);
 
     const { evConnected, status } = statusAfterStopTransaction(reason, connector.evConnected, connector.availability);
-    this.connectors.patch(connectorId, { transactionId: undefined, evConnected, status });
+    this.connectors.patch(connectorId, { transactionId: undefined, transactionStartedAt: undefined, evConnected, status });
+    if (this.chargingProfiles.clearForTransaction(transactionId)) {
+      this.savePersistedState();
+    }
     void this.runSafely(() => this.statusNotification(connectorId, status));
   }
 
@@ -456,12 +485,24 @@ export class Station extends EventEmitter {
     }
   }
 
-  async firmwareStatusNotification(status = "Installed"): Promise<void> {
+  async firmwareStatusNotification(status: FirmwareStatus = "Installed"): Promise<void> {
+    this.patchState({ firmwareStatus: status });
     await this.send("FirmwareStatusNotification", { status });
   }
 
-  async diagnosticsStatusNotification(status = "Uploaded"): Promise<void> {
+  async diagnosticsStatusNotification(status: DiagnosticsStatus = "Uploaded"): Promise<void> {
+    this.patchState({ diagnosticsStatus: status });
     await this.send("DiagnosticsStatusNotification", { status });
+  }
+
+  setDiagnosticsOutcome(outcome: DiagnosticsOutcome): void {
+    this.maintenance.setDiagnosticsOutcome(outcome);
+    this.log("info", `Diagnostics outcome set to ${outcome}`);
+  }
+
+  setFirmwareOutcome(outcome: FirmwareOutcome): void {
+    this.maintenance.setFirmwareOutcome(outcome);
+    this.log("info", `Firmware outcome set to ${outcome}`);
   }
 
   async cycleStatus(connectorId = this.config.connectorId): Promise<void> {
@@ -551,9 +592,7 @@ export class Station extends EventEmitter {
           break;
 
         case "GetDiagnostics":
-          this.client.reply(messageId, { fileName: "kirby-ocpp-diagnostics.log" });
-          setTimeout(() => void this.runSafely(() => this.diagnosticsStatusNotification("Uploading")), 100);
-          setTimeout(() => void this.runSafely(() => this.diagnosticsStatusNotification("Uploaded")), 500);
+          this.client.reply(messageId, { fileName: this.maintenance.startDiagnostics(payload) });
           break;
 
         case "GetLocalListVersion":
@@ -594,9 +633,7 @@ export class Station extends EventEmitter {
 
         case "UpdateFirmware":
           this.client.reply(messageId, {});
-          setTimeout(() => void this.runSafely(() => this.firmwareStatusNotification("Downloading")), 100);
-          setTimeout(() => void this.runSafely(() => this.firmwareStatusNotification("Downloaded")), 500);
-          setTimeout(() => void this.runSafely(() => this.firmwareStatusNotification("Installed")), 900);
+          this.maintenance.startFirmware(payload);
           break;
 
         default:
@@ -722,20 +759,28 @@ export class Station extends EventEmitter {
 
   private handleGetCompositeSchedule(messageId: string, payload: Record<string, unknown>): void {
     const connectorId = readNumber(payload.connectorId, -1);
-    const connector = this.connectors.find(connectorId);
+    const connector = connectorId === 0 ? undefined : this.connectors.find(connectorId);
 
-    if (!connector) {
+    if (connectorId !== 0 && !connector) {
       this.client.reply(messageId, { status: "Rejected" });
       return;
     }
 
-    const schedule = this.chargingProfiles.compositeSchedulePayload(payload, connector.transactionId);
+    const schedule = this.chargingProfiles.compositeSchedulePayload(
+      payload,
+      connector?.transactionId,
+      connector?.transactionStartedAt
+    );
     if (!schedule) {
       this.client.reply(messageId, { status: "Rejected" });
       return;
     }
 
-    this.client.reply(messageId, schedule);
+    if (schedule.prunedExpired) {
+      this.savePersistedState();
+    }
+
+    this.client.reply(messageId, schedule.payload);
   }
 
   private handleSendLocalList(messageId: string, payload: Record<string, unknown>): void {

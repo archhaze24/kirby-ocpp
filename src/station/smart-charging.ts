@@ -33,6 +33,8 @@ export interface ChargingProfileEntry {
   profile: ChargingProfile;
 }
 
+const PURPOSE_PRIORITY: ChargingProfilePurpose[] = ["TxProfile", "TxDefaultProfile", "ChargePointMaxProfile"];
+
 export function readChargingProfile(value: unknown): ChargingProfile | undefined {
   const payload = readObject(value);
   const chargingSchedule = readChargingSchedule(payload.chargingSchedule);
@@ -168,11 +170,28 @@ export function applicableChargingProfiles(
     .sort((left, right) => right.profile.stackLevel - left.profile.stackLevel);
 }
 
-export function limitAt(profile: ChargingProfile, at: Date): number | undefined {
-  const schedule = profile.chargingSchedule;
-  const elapsedSeconds = scheduleElapsedSeconds(profile, at);
+export function effectiveChargingProfiles(
+  entries: ChargingProfileEntry[],
+  connectorId: number,
+  transactionId: number | undefined,
+  at: Date
+): ChargingProfileEntry[] {
+  const applicable = applicableChargingProfiles(entries, connectorId, transactionId, at);
+  return PURPOSE_PRIORITY.flatMap((purpose) => {
+    const candidates = applicable.filter((entry) => entry.profile.chargingProfilePurpose === purpose);
+    if (candidates.length === 0) {
+      return [];
+    }
 
-  if (schedule.duration !== undefined && elapsedSeconds > schedule.duration) {
+    return candidates.reduce((best, entry) => (entry.profile.stackLevel > best.profile.stackLevel ? entry : best));
+  });
+}
+
+export function limitAt(profile: ChargingProfile, at: Date, relativeStart?: Date): number | undefined {
+  const schedule = profile.chargingSchedule;
+  const elapsedSeconds = scheduleElapsedSeconds(profile, at, relativeStart);
+
+  if (schedule.duration !== undefined && elapsedSeconds >= schedule.duration) {
     return undefined;
   }
 
@@ -184,6 +203,11 @@ export function limitAt(profile: ChargingProfile, at: Date): number | undefined 
   }
 
   return activePeriod?.limit;
+}
+
+export function isChargingProfileExpired(profile: ChargingProfile, at: Date): boolean {
+  const validTo = profile.validTo ? Date.parse(profile.validTo) : undefined;
+  return validTo !== undefined && !Number.isNaN(validTo) && at.getTime() > validTo;
 }
 
 function readChargingSchedule(value: unknown): ChargingSchedule | undefined {
@@ -259,9 +283,9 @@ function isChargingProfileActive(profile: ChargingProfile, at: Date): boolean {
   );
 }
 
-function scheduleElapsedSeconds(profile: ChargingProfile, at: Date): number {
+function scheduleElapsedSeconds(profile: ChargingProfile, at: Date, relativeStart?: Date): number {
   if (profile.chargingProfileKind === "Relative") {
-    return 0;
+    return Math.max(0, Math.floor((at.getTime() - (relativeStart?.getTime() ?? at.getTime())) / 1000));
   }
 
   const start = profile.chargingSchedule.startSchedule
