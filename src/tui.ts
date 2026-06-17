@@ -22,6 +22,7 @@ export class Tui {
   private readonly logs: LogEntry[] = [];
   private plainLogView?: Widgets.BoxElement;
   private selectedConnectorId: number;
+  private stateBoxHeight = 18;
 
   constructor(private readonly station: Station) {
     this.selectedConnectorId = station.config.connectorId;
@@ -45,7 +46,7 @@ export class Tui {
       top: 3,
       left: 0,
       width: "40%",
-      height: 18,
+      height: this.stateBoxHeight,
       tags: true,
       border: "line",
       padding: { left: 1, right: 1 },
@@ -96,6 +97,7 @@ export class Tui {
     this.screen.append(this.controlsBox);
     this.screen.append(this.logBox);
 
+    this.layout();
     this.bindKeys();
     this.bindStation();
     this.renderState(this.station.state);
@@ -193,6 +195,12 @@ export class Tui {
       this.selectedConnectorId = this.station.addConnector();
       this.renderState(this.station.state);
     });
+    this.screen.on("resize", () => {
+      this.layout();
+      this.renderState(this.station.state);
+      this.renderControls();
+      this.screen.render();
+    });
     this.bindLogNavigationKeys(this.logBox);
   }
 
@@ -212,14 +220,30 @@ export class Tui {
     const ev = connector?.evConnected ? "connected" : "-";
     const meterWh = connector?.meterWh ?? 0;
     const lastHeartbeat = state.lastHeartbeatAt ? state.lastHeartbeatAt.toLocaleTimeString() : "-";
+    const contentWidth = this.leftPanelContentWidth();
     const connectorLines = state.connectors.map((item) => {
       const marker = item.id === this.selectedConnectorId ? ">" : " ";
       const tx = item.transactionId ? ` tx:${item.transactionId}` : "";
       const reserve = item.reservationId ? ` res:${item.reservationId}` : "";
       const evConnected = item.evConnected ? " ev" : "";
       const fault = item.status === "Faulted" ? ` ${item.errorCode}` : "";
-      return `${marker} #${item.id} ${item.status}${fault}${evConnected} ${Math.round(item.meterWh)}Wh${tx}${reserve}`;
+      return truncateText(`${marker} #${item.id} ${item.status}${fault}${evConnected} ${Math.round(item.meterWh)}Wh${tx}${reserve}`, contentWidth);
     });
+    const baseLines = [
+      `Connection: ${state.connected ? "{green-fg}connected{/green-fg}" : "{red-fg}offline{/red-fg}"}`,
+      `Boot:       ${state.booted ? "{green-fg}accepted{/green-fg}" : state.registrationStatus}`,
+      `Selected:   #${this.selectedConnectorId} ${connectorStatus}`,
+      `Error:      ${errorCode}`,
+      `Available:  ${availability}`,
+      `EV:         ${ev}  Txn: ${transaction}`,
+      `Reserve:    ${reservation}  idTag: ${truncateText(reservationTag, 14)}`,
+      `Meter:      ${Math.round(meterWh)} Wh`,
+      `LocalList:  ${state.localListVersion}`,
+      `Heartbeat:  ${lastHeartbeat}`,
+      "",
+      `{bold}Connectors (${state.connectors.length}){/bold}`
+    ];
+    const visibleConnectors = this.visibleConnectorLines(connectorLines, baseLines.length);
 
     this.header.setContent(
       ` {bold}kirby-ocpp{/bold}  ${this.station.config.chargePointId} -> ${this.station.config.centralSystemUrl}`
@@ -227,22 +251,8 @@ export class Tui {
 
     this.stateBox.setContent(
       [
-        `Connection: ${state.connected ? "{green-fg}connected{/green-fg}" : "{red-fg}offline{/red-fg}"}`,
-        `Boot:       ${state.booted ? "{green-fg}accepted{/green-fg}" : state.registrationStatus}`,
-        `Selected:   #${this.selectedConnectorId}`,
-        `Connector:  ${connectorStatus}`,
-        `Error:      ${errorCode}`,
-        `EV:         ${ev}`,
-        `Available:  ${availability}`,
-        `Txn:        ${transaction}`,
-        `Reserve:    ${reservation}`,
-        `Res idTag:  ${reservationTag}`,
-        `Meter:      ${Math.round(meterWh)} Wh`,
-        `LocalList:  ${state.localListVersion}`,
-        `Heartbeat:  ${lastHeartbeat}`,
-        "",
-        "{bold}Connectors{/bold}",
-        ...connectorLines.slice(0, 6)
+        ...baseLines,
+        ...visibleConnectors
       ].join("\n")
     );
 
@@ -262,16 +272,48 @@ export class Tui {
         "{bold}d{/bold} DataTransfer",
         "{bold}f{/bold} Fault/Clear fault",
         "{bold}p{/bold} Plug/Unplug EV",
-        "{bold}j/k{/bold} Scroll log",
-        "{bold}G/g{/bold} Log bottom",
-        "{bold}l{/bold} Plain log view",
-        "{bold}y{/bold} Copy log",
-        "{bold}[ ]{/bold} Select connector",
-        "{bold}+{/bold} Add connector",
-        "{bold}r{/bold} Reconnect",
-        "{bold}q{/bold} Quit"
+        "{bold}j/k{/bold} Scroll, {bold}G/g{/bold} bottom",
+        "{bold}l{/bold} Plain log, {bold}y{/bold} copy",
+        "{bold}[ ]{/bold} Select, {bold}+{/bold} add",
+        "{bold}r{/bold} Reconnect, {bold}q{/bold} quit"
       ].join("\n")
     );
+  }
+
+  private layout(): void {
+    const rows = this.screenRows();
+    const controlsHeight = rows >= 34 ? 16 : 13;
+    this.stateBoxHeight = Math.max(16, rows - 3 - controlsHeight);
+
+    this.stateBox.top = 3;
+    this.stateBox.height = this.stateBoxHeight;
+    this.controlsBox.top = 3 + this.stateBoxHeight;
+    this.controlsBox.bottom = 0;
+  }
+
+  private visibleConnectorLines(connectorLines: string[], usedRows: number): string[] {
+    const maxLines = Math.max(1, this.stateContentRows() - usedRows);
+    const selectedIndex = Math.max(
+      0,
+      this.station.state.connectors.findIndex((connector) => connector.id === this.selectedConnectorId)
+    );
+    const maxStart = Math.max(0, connectorLines.length - maxLines);
+    const start = Math.min(Math.max(0, selectedIndex - maxLines + 1), maxStart);
+
+    return connectorLines.slice(start, start + maxLines);
+  }
+
+  private stateContentRows(): number {
+    return Math.max(1, this.stateBoxHeight - 2);
+  }
+
+  private screenRows(): number {
+    return typeof this.screen.height === "number" ? this.screen.height : 40;
+  }
+
+  private leftPanelContentWidth(): number {
+    const columns = typeof this.screen.width === "number" ? this.screen.width : 100;
+    return Math.max(24, Math.floor(columns * 0.4) - 4);
   }
 
   private renderLog(entry: LogEntry): void {
@@ -520,6 +562,14 @@ function parseObjectJson(value: string): Record<string, unknown> | undefined {
   } catch {
     return undefined;
   }
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
 function isStopReason(value: string): value is StopReason {
