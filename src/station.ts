@@ -281,7 +281,12 @@ export class Station extends EventEmitter {
     this.statusScheduler.markSent(connectorId, status);
   }
 
-  async authorize(idTag = this.config.idTag): Promise<AuthorizationDecision> {
+  async authorize(idTag?: string): Promise<AuthorizationDecision> {
+    if (!idTag) {
+      this.log("warn", "Authorize requires idTag");
+      return { accepted: false, idTagInfo: { status: "Invalid" }, source: "None" };
+    }
+
     if (this.client.isConnected) {
       const response = await this.send("Authorize", { idTag });
       const idTagInfo = this.readIdTagInfo(response.payload.idTagInfo);
@@ -303,7 +308,12 @@ export class Station extends EventEmitter {
     return decision;
   }
 
-  async toggleTransaction(connectorId = this.config.connectorId, idTag = this.config.idTag): Promise<void> {
+  async toggleTransaction(connectorId = this.config.connectorId, idTag?: string): Promise<void> {
+    if (!idTag) {
+      this.log("warn", "StartTransaction requires idTag");
+      return;
+    }
+
     const connector = this.connectors.get(connectorId);
     if (connector.transactionId) {
       await this.stopTransaction(connectorId, "Local", idTag);
@@ -313,7 +323,12 @@ export class Station extends EventEmitter {
     await this.startTransaction(connectorId, idTag);
   }
 
-  async startTransaction(connectorId = this.config.connectorId, idTag = this.config.idTag): Promise<number | undefined> {
+  async startTransaction(connectorId = this.config.connectorId, idTag?: string): Promise<number | undefined> {
+    if (!idTag) {
+      this.log("warn", "StartTransaction requires idTag");
+      return undefined;
+    }
+
     const connector = this.connectors.get(connectorId);
     const rejection = startTransactionRejection(connector, idTag);
     if (rejection) {
@@ -477,7 +492,9 @@ export class Station extends EventEmitter {
     });
     this.chargingProfiles.clearForTransaction(transactionId);
     this.savePersistedState();
-    void this.runSafely(() => this.statusNotification(connectorId, status));
+    if (status !== "Finishing") {
+      void this.runSafely(() => this.statusNotification(connectorId, status));
+    }
   }
 
   async plugIn(connectorId = this.config.connectorId): Promise<void> {
@@ -914,9 +931,9 @@ export class Station extends EventEmitter {
   private async handleRemoteStartTransaction(messageId: string, payload: Record<string, unknown>): Promise<void> {
     const requestedConnector = readNumber(payload.connectorId, 0);
     const connector = requestedConnector > 0 ? this.connectors.find(requestedConnector) : this.connectors.findAvailable();
-    const idTag = readString(payload.idTag, this.config.idTag);
+    const idTag = readString(payload.idTag, "");
 
-    if (!canRemoteStart(connector) || !this.canAcceptRemoteStartChargingProfile(payload)) {
+    if (!idTag || !canRemoteStart(connector) || !this.canAcceptRemoteStartChargingProfile(payload)) {
       this.client.reply(messageId, { status: "Rejected" });
       return;
     }

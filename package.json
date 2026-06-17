@@ -3,18 +3,21 @@
   "version": "0.1.0",
   "description": "A terminal OCPP charge point emulator.",
   "type": "module",
+  "author": "archhaze24",
   "bin": {
-    "kirby-ocpp": "./dist/cli.js"
+    "kirby-ocpp": "dist/cli.js"
   },
   "files": [
     "dist",
     "docs",
     "README.md",
+    "THIRD_PARTY_NOTICES.md",
     "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/copy-schemas.mjs",
     "dev": "tsx src/cli.ts",
+    "pack:check": "node scripts/check-packed-install.mjs",
     "prepack": "npm run build",
     "smoke": "npm run build && node scripts/smoke-ocpp.mjs",
     "start": "node dist/cli.js",
@@ -29,8 +32,15 @@
     "tui",
     "cli"
   ],
-  "author": "",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/archhaze24/kirby-ocpp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/archhaze24/kirby-ocpp/issues"
+  },
+  "homepage": "https://github.com/archhaze24/kirby-ocpp#readme",
   "engines": {
     "node": ">=20"
   },

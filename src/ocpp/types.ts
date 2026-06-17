@@ -87,7 +87,6 @@ export interface StationConfig {
   connectorId: number;
   connectorCount: number;
   heartbeatIntervalSeconds: number;
-  idTag: string;
   persistState: boolean;
   stateDirectory?: string;
   webSocketSubprotocol: string;

@@ -8,6 +8,7 @@ import { parseConfig } from "../dist/config.js";
 import { Station } from "../dist/station.js";
 import {
   assertServerAddress,
+  delay,
   waitForCondition,
   waitForServer
 } from "./support/ocpp-test-utils.mjs";
@@ -93,6 +94,26 @@ test("successful connected StopTransaction clears persisted transaction state", 
     assert.equal(transactionId, 777);
     await station.stopTransaction(1, "Local", "TAG1");
     await waitForCondition(() => messages.some((message) => message.action === "StopTransaction"), "stop transaction");
+    await waitForCondition(
+      () =>
+        messages.filter(
+          (message) =>
+            message.action === "StatusNotification" &&
+            message.payload.connectorId === 1 &&
+            message.payload.status === "Finishing"
+        ).length >= 1,
+      "single finishing status"
+    );
+    await delay(50);
+    assert.equal(
+      messages.filter(
+        (message) =>
+          message.action === "StatusNotification" &&
+          message.payload.connectorId === 1 &&
+          message.payload.status === "Finishing"
+      ).length,
+      1
+    );
 
     const stoppedConnector = station.state.connectors.find((connector) => connector.id === 1);
     assert.equal(stoppedConnector.transactionId, undefined);

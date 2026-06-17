@@ -1,15 +1,19 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { createRequire } from "node:module";
 import { ZodError } from "zod";
 import { parseConfig } from "./config.js";
 import { Station } from "./station.js";
 import { Tui } from "./tui.js";
 
 const program = new Command();
+const require = createRequire(import.meta.url);
+const packageJson = require("../package.json") as { version?: string };
 
 program
   .name("kirby-ocpp")
   .description("Terminal OCPP charge point emulator")
+  .version(packageJson.version ?? "0.1.0")
   .option("-u, --url <url>", "Central System WebSocket URL, e.g. ws://localhost:9000/ocpp")
   .option("-i, --id <id>", "charge point id", process.env.OCPP_CHARGE_POINT_ID ?? "CP-001")
   .option("--vendor <vendor>", "charge point vendor", process.env.OCPP_VENDOR ?? "archhaze24")
@@ -17,7 +21,6 @@ program
   .option("-c, --connector <id>", "initial connector id", "1")
   .option("--connectors <count>", "number of station connectors", "1")
   .option("--heartbeat <seconds>", "fallback heartbeat interval in seconds", "30")
-  .option("--id-tag <idTag>", "default RFID/idTag", "DEADBEEF")
   .option("--no-persist", "do not save station state such as local auth list and charging profiles")
   .option("--state-dir <path>", "directory for persisted station state")
   .option("--ws-subprotocol <protocol>", "WebSocket subprotocol to request", "ocpp1.6")
@@ -42,7 +45,6 @@ const options = program.opts<{
   connector: string;
   connectors: string;
   heartbeat: string;
-  idTag: string;
   persist: boolean;
   stateDir?: string;
   wsSubprotocol: string;
@@ -68,7 +70,6 @@ try {
     connectorId: options.connector,
     connectorCount: Math.max(Number.parseInt(options.connectors, 10), Number.parseInt(options.connector, 10)),
     heartbeatIntervalSeconds: options.heartbeat,
-    idTag: options.idTag,
     persistState: options.persist,
     stateDirectory: options.stateDir,
     webSocketSubprotocol: options.wsSubprotocol,

@@ -234,6 +234,7 @@ export class Tui {
     this.screen.key(["j"], () => this.runWithoutModal(() => this.scrollLog(1)));
     this.screen.key(["k"], () => this.runWithoutModal(() => this.scrollLog(-1)));
     this.screen.key(["g", "G", "S-g", "end"], () => this.runWithoutModal(() => this.scrollLogToEnd()));
+    this.screen.key("?", () => this.runWithoutOverlay(() => this.openHelp()));
     this.screen.key("l", () => this.runWithoutOverlay(() => this.openPlainLogView()));
     this.screen.key("y", () => this.runWithoutModal(() => this.copyLogsToClipboard()));
     this.screen.key(["F", "S-f"], () => this.runWithoutOverlay(() => this.cycleLogFilter()));
@@ -805,6 +806,66 @@ export class Tui {
     this.screen.render();
   }
 
+  private openHelp(): void {
+    const width = Math.min(92, Math.max(58, this.screenColumns() - 8));
+    const height = Math.min(24, Math.max(16, this.screenRows() - 4));
+    const box = blessed.box({
+      top: "center",
+      left: "center",
+      width,
+      height,
+      border: "line",
+      label: " Help ",
+      tags: true,
+      keys: true,
+      scrollable: true,
+      alwaysScroll: false,
+      padding: { left: 2, right: 2 },
+      style: {
+        border: { fg: THEME.panelBorder }
+      },
+      scrollbar: {
+        ch: " ",
+        style: { bg: THEME.panelBorder }
+      }
+    });
+
+    box.setContent(
+      [
+        "{bold}Navigation{/bold}",
+        "  1-7 tabs     Tab/S-Tab tab cycle     Up/Down action     Enter run",
+        "  [/] connector     + add connector     / command search     ? help",
+        "",
+        "{bold}Logs{/bold}",
+        "  j/k scroll     G bottom     F filter     l plain log     y copy",
+        "",
+        "{bold}Forms{/bold}",
+        "  Tab/Up/Down field     Left/Right cursor     Home/End jump",
+        "  Backspace/Delete edit     Ctrl+U clear     Enter submit     Esc cancel",
+        "",
+        "{bold}Station{/bold}",
+        `  id=${this.station.config.chargePointId}`,
+        `  url=${this.station.config.centralSystemUrl}`,
+        "",
+        "{gray-fg}Esc or q closes this help.{/gray-fg}"
+      ].join("\n")
+    );
+
+    const close = () => {
+      box.destroy();
+      this.modal = undefined;
+      this.actionList.focus();
+      this.screen.render();
+    };
+
+    this.modal = box;
+    box.key(["escape", "q", "C-c"], close);
+    this.screen.append(box);
+    box.setFront();
+    box.focus();
+    this.screen.render();
+  }
+
   private paletteEntryLine(entry: PaletteEntry): string {
     const tab = this.tabLabel(entry.tab).padEnd(11);
     const key = entry.action.key.padEnd(2);
@@ -1099,6 +1160,7 @@ export class Tui {
       }
     });
     const values = fields.map((field) => field.initialValue);
+    const cursors = values.map((value) => value.length);
     const inputBoxes = fields.map((field, index) =>
       blessed.box({
         parent: box,
@@ -1122,7 +1184,7 @@ export class Tui {
       right: 2,
       height: 1,
       tags: true,
-      content: "{gray-fg}Tab/Up/Down field  Enter submit  Esc cancel{/gray-fg}"
+      content: "{gray-fg}Tab/Up/Down field  Left/Right cursor  C-u clear  Enter submit  Esc cancel{/gray-fg}"
     });
 
     let focusedIndex = 0;
@@ -1135,9 +1197,8 @@ export class Tui {
 
       const width = inputContentWidth(input);
       const value = values[index] ?? "";
-      const visible = truncateText(value, Math.max(1, width - 1));
-      const caret = focusedIndex === index ? "{inverse} {/inverse}" : "";
-      input.setContent(`${visible}${caret}`);
+      const cursor = clamp(cursors[index] ?? value.length, 0, value.length);
+      input.setContent(renderFieldValue(value, cursor, width, focusedIndex === index));
       input.style.border = { fg: focusedIndex === index ? "yellow" : THEME.panelBorder };
     };
     const renderInputs = () => {
@@ -1187,19 +1248,61 @@ export class Tui {
         return;
       }
       if (key.name === "backspace") {
-        values[index] = (values[index] ?? "").slice(0, -1);
+        const cursor = cursors[index] ?? 0;
+        if (cursor > 0) {
+          values[index] = `${(values[index] ?? "").slice(0, cursor - 1)}${(values[index] ?? "").slice(cursor)}`;
+          cursors[index] = cursor - 1;
+        }
         renderInput(index);
         this.screen.render();
         return;
       }
       if (key.name === "delete") {
+        const value = values[index] ?? "";
+        const cursor = cursors[index] ?? 0;
+        if (cursor < value.length) {
+          values[index] = `${value.slice(0, cursor)}${value.slice(cursor + 1)}`;
+        }
+        renderInput(index);
+        this.screen.render();
+        return;
+      }
+      if (key.ctrl && key.name === "u") {
         values[index] = "";
+        cursors[index] = 0;
+        renderInput(index);
+        this.screen.render();
+        return;
+      }
+      if (key.name === "left") {
+        cursors[index] = clamp((cursors[index] ?? 0) - 1, 0, (values[index] ?? "").length);
+        renderInput(index);
+        this.screen.render();
+        return;
+      }
+      if (key.name === "right") {
+        cursors[index] = clamp((cursors[index] ?? 0) + 1, 0, (values[index] ?? "").length);
+        renderInput(index);
+        this.screen.render();
+        return;
+      }
+      if (key.name === "home") {
+        cursors[index] = 0;
+        renderInput(index);
+        this.screen.render();
+        return;
+      }
+      if (key.name === "end") {
+        cursors[index] = (values[index] ?? "").length;
         renderInput(index);
         this.screen.render();
         return;
       }
       if (ch && !key.ctrl && !key.meta && isPrintableInput(ch)) {
-        values[index] = `${values[index] ?? ""}${ch}`;
+        const value = values[index] ?? "";
+        const cursor = cursors[index] ?? value.length;
+        values[index] = `${value.slice(0, cursor)}${ch}${value.slice(cursor)}`;
+        cursors[index] = cursor + ch.length;
         renderInput(index);
         this.screen.render();
       }
@@ -1210,6 +1313,8 @@ export class Tui {
       input.on("keypress", (ch, key) => handleKey(index, ch, key));
     }
     box.key(["escape", "C-c"], () => close(false));
+    box.key(["tab"], () => focusInput(focusedIndex + 1));
+    box.key(["S-tab"], () => focusInput(focusedIndex - 1));
     box.append(help);
     this.screen.append(box);
     box.setFront();
@@ -1630,6 +1735,23 @@ function truncateTaggedLine(value: string, maxLength: number): string {
 function inputContentWidth(input: Widgets.BoxElement): number {
   const width = typeof input.width === "number" ? input.width : 48;
   return Math.max(1, width - 4);
+}
+
+function renderFieldValue(value: string, cursor: number, width: number, focused: boolean): string {
+  const contentWidth = Math.max(1, width);
+  if (!focused) {
+    return truncateText(value, contentWidth);
+  }
+
+  const safeCursor = clamp(cursor, 0, value.length);
+  const visibleCharacters = Math.max(1, contentWidth - 1);
+  const start = clamp(safeCursor - visibleCharacters, 0, Math.max(0, value.length - visibleCharacters));
+  const before = value.slice(start, safeCursor);
+  const current = value[safeCursor] ?? " ";
+  const after = value.slice(safeCursor + 1, start + visibleCharacters);
+  const prefix = start > 0 ? "<" : "";
+  const suffix = start + visibleCharacters < value.length ? ">" : "";
+  return `${prefix}${before}{inverse}${current}{/inverse}${after}${suffix}`;
 }
 
 function isPrintableInput(value: string): boolean {
