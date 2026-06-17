@@ -55,6 +55,7 @@ export declare interface OcppClient {
 export class OcppClient extends EventEmitter {
   private socket?: WebSocket;
   private pingTimer?: NodeJS.Timeout;
+  private awaitingPong = false;
   private readonly pending = new Map<string, PendingCall>();
   private readonly incomingCalls = new Map<string, string>();
   private readonly schemaValidator = new OcppSchemaValidator();
@@ -90,6 +91,9 @@ export class OcppClient extends EventEmitter {
       this.emit("connected");
     });
     this.socket.on("message", (data) => this.handleMessage(data.toString()));
+    this.socket.on("pong", () => {
+      this.awaitingPong = false;
+    });
     this.socket.on("close", (code, reason) => {
       this.stopPingTimer();
       this.rejectPending(new Error(`Connection closed (${code})`));
@@ -359,8 +363,16 @@ export class OcppClient extends EventEmitter {
       return;
     }
 
+    this.awaitingPong = false;
     this.pingTimer = setInterval(() => {
       if (this.socket?.readyState === WebSocket.OPEN) {
+        if (this.awaitingPong) {
+          this.emit("error", new Error("WebSocket pong timed out"));
+          this.socket.terminate();
+          return;
+        }
+
+        this.awaitingPong = true;
         this.socket.ping();
       }
     }, intervalSeconds * 1000);
@@ -374,6 +386,7 @@ export class OcppClient extends EventEmitter {
 
     clearInterval(this.pingTimer);
     this.pingTimer = undefined;
+    this.awaitingPong = false;
   }
 
   private buildChargePointUrl(): string {

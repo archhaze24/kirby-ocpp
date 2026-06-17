@@ -174,22 +174,38 @@ export function effectiveChargingProfiles(
   entries: ChargingProfileEntry[],
   connectorId: number,
   transactionId: number | undefined,
-  at: Date
+  at: Date,
+  chargingRateUnit?: ChargingRateUnit
 ): ChargingProfileEntry[] {
-  const applicable = applicableChargingProfiles(entries, connectorId, transactionId, at);
+  const applicable = applicableChargingProfiles(entries, connectorId, transactionId, at).filter(
+    (entry) => chargingRateUnit === undefined || entry.profile.chargingSchedule.chargingRateUnit === chargingRateUnit
+  );
   return PURPOSE_PRIORITY.flatMap((purpose) => {
     const candidates = applicable.filter((entry) => entry.profile.chargingProfilePurpose === purpose);
     if (candidates.length === 0) {
       return [];
     }
 
-    return candidates.reduce((best, entry) => (entry.profile.stackLevel > best.profile.stackLevel ? entry : best));
+    return candidates.reduce((best, entry) => (entry.profile.stackLevel >= best.profile.stackLevel ? entry : best));
   });
 }
 
-export function limitAt(profile: ChargingProfile, at: Date, relativeStart?: Date): number | undefined {
+export function limitAt(profile: ChargingProfile, at: Date, relativeStart?: Date, defaultStart?: Date): number | undefined {
+  return periodAt(profile, at, relativeStart, defaultStart)?.limit;
+}
+
+export function periodAt(
+  profile: ChargingProfile,
+  at: Date,
+  relativeStart?: Date,
+  defaultStart?: Date
+): ChargingSchedulePeriod | undefined {
+  if (!isChargingProfileActive(profile, at)) {
+    return undefined;
+  }
+
   const schedule = profile.chargingSchedule;
-  const elapsedSeconds = scheduleElapsedSeconds(profile, at, relativeStart);
+  const elapsedSeconds = scheduleElapsedSeconds(profile, at, relativeStart, defaultStart);
 
   if (schedule.duration !== undefined && elapsedSeconds >= schedule.duration) {
     return undefined;
@@ -202,7 +218,39 @@ export function limitAt(profile: ChargingProfile, at: Date, relativeStart?: Date
     }
   }
 
-  return activePeriod?.limit;
+  return activePeriod;
+}
+
+export function limitTransitionOffsets(
+  profile: ChargingProfile,
+  scheduleStart: Date,
+  duration: number,
+  relativeStart?: Date
+): number[] {
+  const offsets = new Set<number>();
+  const elapsedSeconds = scheduleElapsedSeconds(profile, scheduleStart, relativeStart, scheduleStart);
+  const schedule = profile.chargingSchedule;
+
+  offsets.add(0);
+
+  if (profile.validTo) {
+    addOffset(offsets, Math.ceil((Date.parse(profile.validTo) - scheduleStart.getTime()) / 1000), duration);
+  }
+  if (profile.validFrom) {
+    addOffset(offsets, Math.ceil((Date.parse(profile.validFrom) - scheduleStart.getTime()) / 1000), duration);
+  }
+
+  if (profile.chargingProfileKind === "Recurring") {
+    const recurrenceSeconds = profile.recurrencyKind === "Weekly" ? 7 * 24 * 60 * 60 : 24 * 60 * 60;
+    const cycleStart = elapsedSeconds - (elapsedSeconds % recurrenceSeconds);
+    for (const cycle of [cycleStart, cycleStart + recurrenceSeconds]) {
+      addScheduleOffsets(offsets, schedule, duration, elapsedSeconds, cycle);
+    }
+    return [...offsets].sort((left, right) => left - right);
+  }
+
+  addScheduleOffsets(offsets, schedule, duration, elapsedSeconds, 0);
+  return [...offsets].sort((left, right) => left - right);
 }
 
 export function isChargingProfileExpired(profile: ChargingProfile, at: Date): boolean {
@@ -283,7 +331,29 @@ function isChargingProfileActive(profile: ChargingProfile, at: Date): boolean {
   );
 }
 
-function scheduleElapsedSeconds(profile: ChargingProfile, at: Date, relativeStart?: Date): number {
+function addScheduleOffsets(
+  offsets: Set<number>,
+  schedule: ChargingSchedule,
+  duration: number,
+  elapsedSeconds: number,
+  elapsedBase: number
+): void {
+  for (const period of schedule.chargingSchedulePeriod) {
+    addOffset(offsets, elapsedBase + period.startPeriod - elapsedSeconds, duration);
+  }
+
+  if (schedule.duration !== undefined) {
+    addOffset(offsets, elapsedBase + schedule.duration - elapsedSeconds, duration);
+  }
+}
+
+function addOffset(offsets: Set<number>, offset: number, duration: number): void {
+  if (Number.isInteger(offset) && offset > 0 && offset < duration) {
+    offsets.add(offset);
+  }
+}
+
+function scheduleElapsedSeconds(profile: ChargingProfile, at: Date, relativeStart?: Date, defaultStart?: Date): number {
   if (profile.chargingProfileKind === "Relative") {
     return Math.max(0, Math.floor((at.getTime() - (relativeStart?.getTime() ?? at.getTime())) / 1000));
   }
@@ -292,7 +362,7 @@ function scheduleElapsedSeconds(profile: ChargingProfile, at: Date, relativeStar
     ? Date.parse(profile.chargingSchedule.startSchedule)
     : profile.validFrom
       ? Date.parse(profile.validFrom)
-      : at.getTime();
+      : defaultStart?.getTime() ?? at.getTime();
 
   const rawElapsed = Math.max(0, Math.floor((at.getTime() - (Number.isNaN(start) ? at.getTime() : start)) / 1000));
 

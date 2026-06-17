@@ -27,6 +27,10 @@ export class MeterValueScheduler {
 
     const timer = setInterval(() => {
       this.options.runSafely(async () => {
+        if (!this.options.isConnected()) {
+          return;
+        }
+
         if (!this.options.isPeriodicConnectorActive(connectorId)) {
           this.stopPeriodic(connectorId);
           return;

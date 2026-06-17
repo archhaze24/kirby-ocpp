@@ -46,6 +46,7 @@ import {
   startTransactionRejection,
   statusAfterStopTransaction
 } from "./station/transaction-rules.js";
+import { readChargingProfile } from "./station/smart-charging.js";
 import { isTransactionMessage, retryDelay } from "./station/transaction-message-retry.js";
 import type {
   AvailabilityType,
@@ -87,6 +88,11 @@ export class Station extends EventEmitter {
   };
 
   private heartbeatTimer?: NodeJS.Timeout;
+  private resetTimer?: NodeJS.Timeout;
+  private bootRetryTimer?: NodeJS.Timeout;
+  private reconnectTimer?: NodeJS.Timeout;
+  private reconnectAttempts = 0;
+  private manuallyDisconnected = true;
   private readonly store?: StationStore;
   private readonly configuration: ConfigurationRegistry;
   private readonly localAuthorizationList = new Map<string, Record<string, unknown> | undefined>();
@@ -152,12 +158,18 @@ export class Station extends EventEmitter {
   }
 
   connect(): void {
+    this.manuallyDisconnected = false;
+    this.clearReconnectTimer();
     this.log("info", `Connecting to ${this.config.centralSystemUrl}`);
     this.client.connect();
   }
 
   disconnect(): void {
+    this.manuallyDisconnected = true;
+    this.clearReconnectTimer();
     this.stopHeartbeatTimer();
+    this.clearResetTimer();
+    this.clearBootRetryTimer();
     this.meterValueScheduler.stopAllPeriodic();
     this.meterValueScheduler.stopClockAligned();
     this.reservationScheduler.clearAll();
@@ -172,7 +184,9 @@ export class Station extends EventEmitter {
     this.connect();
   }
 
-  async boot(): Promise<void> {
+  async boot(options: { scheduleRetry?: boolean } = {}): Promise<void> {
+    const scheduleRetry = options.scheduleRetry ?? true;
+    this.clearBootRetryTimer();
     const response = await this.send("BootNotification", {
       chargePointVendor: this.config.vendor,
       chargePointModel: this.config.model
@@ -187,11 +201,18 @@ export class Station extends EventEmitter {
     });
 
     if (status === "Accepted") {
+      this.reconnectAttempts = 0;
       this.configuration.setValue("HeartbeatInterval", String(interval));
       this.savePersistedState();
       this.startHeartbeatTimer(interval);
       this.meterValueScheduler.startClockAligned();
       await Promise.all(this.connectors.all().map((connector) => this.statusNotification(connector.id, connector.status, true)));
+      return;
+    }
+
+    this.stopHeartbeatTimer();
+    if (scheduleRetry) {
+      this.scheduleBootRetry(interval);
     }
   }
 
@@ -272,12 +293,12 @@ export class Station extends EventEmitter {
     await this.startTransaction(connectorId, idTag);
   }
 
-  async startTransaction(connectorId = this.config.connectorId, idTag = this.config.idTag): Promise<void> {
+  async startTransaction(connectorId = this.config.connectorId, idTag = this.config.idTag): Promise<number | undefined> {
     const connector = this.connectors.get(connectorId);
     const rejection = startTransactionRejection(connector, idTag);
     if (rejection) {
       this.log("warn", rejection);
-      return;
+      return undefined;
     }
 
     if (!connector.evConnected && connector.status === "Available") {
@@ -302,9 +323,9 @@ export class Station extends EventEmitter {
     const localPreAuthorize = this.configuration.boolean("LocalPreAuthorize", false);
     if (localPreAuthorize) {
       const decision = this.authorizeLocally(idTag, false);
-      if (!decision.accepted && decision.source !== "None") {
+      if (!decision.accepted) {
         this.log("warn", `StartTransaction blocked by local authorization: ${decision.idTagInfo.status} (${idTag})`);
-        return;
+        return undefined;
       }
     }
 
@@ -314,7 +335,7 @@ export class Station extends EventEmitter {
 
     if (!isAcceptedIdTagInfo(idTagInfo)) {
       this.log("warn", `StartTransaction rejected by Central System: ${idTagInfo.status} (${idTag})`);
-      return;
+      return undefined;
     }
 
     const transactionId = readNumber(response.payload.transactionId, Date.now());
@@ -327,12 +348,14 @@ export class Station extends EventEmitter {
       reservationParentIdTag: undefined,
       reservationExpiryDate: undefined,
       lastIdTag: idTag,
+      stopTransactionAtWh: undefined,
       status: "Charging"
     });
     this.savePersistedState();
     this.meterValueScheduler.startPeriodic(connectorId);
     this.meterValueScheduler.startClockAligned();
     void this.runSafely(() => this.statusNotification(connectorId, "Charging"));
+    return transactionId;
   }
 
   async stopTransaction(connectorId = this.config.connectorId, reason: StopReason = "Local", idTag?: string): Promise<void> {
@@ -361,10 +384,27 @@ export class Station extends EventEmitter {
     this.connectors.patch(connectorId, { status: "Finishing" });
     void this.runSafely(() => this.statusNotification(connectorId, "Finishing"));
 
-    await this.send("StopTransaction", payload);
+    try {
+      await this.send("StopTransaction", payload);
+    } catch (error) {
+      const restoredStatus: ConnectorStatus = connector.evConnected ? "Charging" : "SuspendedEV";
+      this.connectors.patch(connectorId, { status: restoredStatus });
+      if (restoredStatus === "Charging") {
+        this.meterValueScheduler.startPeriodic(connectorId);
+        this.meterValueScheduler.startClockAligned();
+      }
+      void this.runSafely(() => this.statusNotification(connectorId, restoredStatus));
+      throw error;
+    }
 
     const { evConnected, status } = statusAfterStopTransaction(reason, connector.evConnected, connector.availability);
-    this.connectors.patch(connectorId, { transactionId: undefined, transactionStartedAt: undefined, evConnected, status });
+    this.connectors.patch(connectorId, {
+      transactionId: undefined,
+      transactionStartedAt: undefined,
+      stopTransactionAtWh: undefined,
+      evConnected,
+      status
+    });
     if (this.chargingProfiles.clearForTransaction(transactionId)) {
       this.savePersistedState();
     }
@@ -528,6 +568,7 @@ export class Station extends EventEmitter {
 
   private bindClientEvents(): void {
     this.client.on("connected", () => {
+      this.clearReconnectTimer();
       this.patchState({ connected: true });
       this.log("success", "Connected");
       void this.runSafely(() => this.boot());
@@ -535,8 +576,11 @@ export class Station extends EventEmitter {
 
     this.client.on("disconnected", (code, reason) => {
       this.stopHeartbeatTimer();
+      this.clearResetTimer();
+      this.clearBootRetryTimer();
       this.patchState({ connected: false, booted: false });
       this.log("warn", `Disconnected${code ? ` (${code})` : ""}${reason ? `: ${reason}` : ""}`);
+      this.scheduleReconnect();
     });
 
     this.client.on("error", (error) => this.log("error", error.message));
@@ -784,7 +828,10 @@ export class Station extends EventEmitter {
   }
 
   private handleSendLocalList(messageId: string, payload: Record<string, unknown>): void {
-    const result = applyLocalAuthListUpdate(this.localAuthorizationList, this.state.localListVersion, payload);
+    const result = applyLocalAuthListUpdate(this.localAuthorizationList, this.state.localListVersion, payload, {
+      enabled: this.configuration.boolean("LocalAuthListEnabled", true),
+      maxLength: this.configuration.integer("SendLocalListMaxLength", 1000)
+    });
     if (result.status !== "Accepted") {
       this.client.reply(messageId, { status: result.status });
       return;
@@ -800,7 +847,7 @@ export class Station extends EventEmitter {
     const connector = requestedConnector > 0 ? this.connectors.find(requestedConnector) : this.connectors.findAvailable();
     const idTag = readString(payload.idTag, this.config.idTag);
 
-    if (!canRemoteStart(connector)) {
+    if (!canRemoteStart(connector) || !this.canAcceptRemoteStartChargingProfile(payload)) {
       this.client.reply(messageId, { status: "Rejected" });
       return;
     }
@@ -816,7 +863,10 @@ export class Station extends EventEmitter {
     this.client.reply(messageId, { status: "Accepted" });
 
     if (connector) {
-      await this.startTransaction(connector.id, idTag);
+      const transactionId = await this.startTransaction(connector.id, idTag);
+      if (transactionId !== undefined) {
+        this.applyRemoteStartChargingProfile(connector.id, payload.chargingProfile, transactionId);
+      }
     }
   }
 
@@ -860,20 +910,7 @@ export class Station extends EventEmitter {
     const reason: StopReason = resetType === "Hard" ? "HardReset" : "SoftReset";
 
     this.client.reply(messageId, { status: "Accepted" });
-
-    void this.runSafely(async () => {
-      for (const connector of this.connectors.all()) {
-        if (connector.transactionId) {
-          await this.stopTransaction(connector.id, reason);
-        }
-      }
-
-      for (const connector of this.connectors.all()) {
-        this.clearReservation(connector.id);
-      }
-      this.patchState({ booted: false });
-      setTimeout(() => void this.runSafely(() => this.boot()), 500);
-    });
+    void this.runSafely(() => this.performReset(reason, resetType));
   }
 
   private async handleTriggerMessage(messageId: string, payload: Record<string, unknown>): Promise<void> {
@@ -884,8 +921,13 @@ export class Station extends EventEmitter {
       return;
     }
 
+    if (!this.canTriggerMessageForPayload(requestedMessage, payload)) {
+      this.client.reply(messageId, { status: "Rejected" });
+      return;
+    }
+
     this.client.reply(messageId, { status: "Accepted" });
-    await this.triggerMessage(requestedMessage);
+    await this.triggerMessage(requestedMessage, payload);
   }
 
   private async handleUnlockConnector(messageId: string, payload: Record<string, unknown> = {}): Promise<void> {
@@ -906,7 +948,7 @@ export class Station extends EventEmitter {
     this.client.reply(messageId, { status: "Unlocked" });
   }
 
-  private async triggerMessage(requestedMessage: string): Promise<void> {
+  private async triggerMessage(requestedMessage: string, payload: Record<string, unknown> = {}): Promise<void> {
     switch (requestedMessage) {
       case "BootNotification":
         await this.boot();
@@ -921,13 +963,58 @@ export class Station extends EventEmitter {
         await this.heartbeat();
         break;
       case "MeterValues":
-        await this.meterValues(this.config.connectorId, 0);
+        await this.meterValues(this.triggerConnectorId(payload), 0);
         break;
       case "StatusNotification":
-        await this.statusNotification(this.config.connectorId, this.connectors.get(this.config.connectorId).status, true);
+        await this.statusNotification(this.triggerConnectorId(payload), this.connectors.get(this.triggerConnectorId(payload)).status, true);
         break;
       default:
         this.log("warn", `TriggerMessage requested unsupported message: ${requestedMessage}`);
+    }
+  }
+
+  private canTriggerMessageForPayload(requestedMessage: string, payload: Record<string, unknown>): boolean {
+    if (requestedMessage !== "MeterValues" && requestedMessage !== "StatusNotification") {
+      return true;
+    }
+
+    return Boolean(this.connectors.find(this.triggerConnectorId(payload)));
+  }
+
+  private triggerConnectorId(payload: Record<string, unknown>): number {
+    return "connectorId" in payload ? readNumber(payload.connectorId, -1) : this.config.connectorId;
+  }
+
+  private canAcceptRemoteStartChargingProfile(payload: Record<string, unknown>): boolean {
+    if (!("chargingProfile" in payload)) {
+      return true;
+    }
+
+    const profile = readChargingProfile(payload.chargingProfile);
+    return Boolean(
+      profile &&
+        profile.chargingProfilePurpose === "TxProfile" &&
+        profile.transactionId === undefined
+    );
+  }
+
+  private applyRemoteStartChargingProfile(connectorId: number, profilePayload: unknown, transactionId: number): void {
+    const profile = readChargingProfile(profilePayload);
+    if (!profile) {
+      return;
+    }
+
+    const status = this.chargingProfiles.set(
+      connectorId,
+      { ...profile, transactionId },
+      {
+        hasConnector: (id) => Boolean(this.connectors.find(id)),
+        transactionIdForConnector: (id) => this.connectors.find(id)?.transactionId
+      }
+    );
+
+    if (status === "Accepted") {
+      this.savePersistedState();
     }
   }
 
@@ -937,7 +1024,7 @@ export class Station extends EventEmitter {
     }
 
     try {
-      const response = await this.client.call(action, payload);
+      const response = await this.client.call(action, payload, this.config.callTimeoutMs ?? 30_000);
       this.log("success", `${action} accepted`);
       return response;
     } catch (error) {
@@ -954,7 +1041,7 @@ export class Station extends EventEmitter {
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        const response = await this.client.call(action, payload);
+        const response = await this.client.call(action, payload, this.config.callTimeoutMs ?? 30_000);
         this.log("success", `${action} accepted`);
         return response;
       } catch (error) {
@@ -995,6 +1082,7 @@ export class Station extends EventEmitter {
     }
 
     await this.send("MeterValues", payload);
+    await this.stopTransactionIfInvalidEnergyLimitReached(connectorId, nextMeter);
   }
 
   private buildStopTransactionData(connectorId: number): Record<string, unknown>[] {
@@ -1011,6 +1099,7 @@ export class Station extends EventEmitter {
       this.localAuthorizationList,
       this.authorizationCache,
       {
+        localAuthListEnabled: this.configuration.boolean("LocalAuthListEnabled", true),
         localAuthorizeOffline: this.configuration.boolean("LocalAuthorizeOffline", false),
         authorizationCacheEnabled: this.configuration.boolean("AuthorizationCacheEnabled", true),
         allowOfflineTxForUnknownId: this.configuration.boolean("AllowOfflineTxForUnknownId", false)
@@ -1036,12 +1125,31 @@ export class Station extends EventEmitter {
       return;
     }
 
+    const maxEnergyOnInvalidId = this.configuration.integer("MaxEnergyOnInvalidId", 0);
     const connectors = this.connectors.all().filter(
       (connector) => connector.transactionId && connector.lastIdTag === idTag
     );
     for (const connector of connectors) {
-      await this.stopTransaction(connector.id, "DeAuthorized", idTag);
+      if (maxEnergyOnInvalidId <= 0) {
+        await this.stopTransaction(connector.id, "DeAuthorized", idTag);
+        continue;
+      }
+
+      this.connectors.patch(connector.id, { stopTransactionAtWh: connector.meterWh + maxEnergyOnInvalidId });
+      this.log(
+        "warn",
+        `Connector ${connector.id} will stop after ${maxEnergyOnInvalidId}Wh because idTag ${idTag} is no longer authorized`
+      );
     }
+  }
+
+  private async stopTransactionIfInvalidEnergyLimitReached(connectorId: number, meterWh: number): Promise<void> {
+    const connector = this.connectors.get(connectorId);
+    if (!connector.transactionId || connector.stopTransactionAtWh === undefined || meterWh < connector.stopTransactionAtWh) {
+      return;
+    }
+
+    await this.stopTransaction(connectorId, "DeAuthorized", connector.lastIdTag);
   }
 
   private refreshConnectorSnapshot(): void {
@@ -1159,6 +1267,136 @@ export class Station extends EventEmitter {
 
     clearInterval(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
+  }
+
+  private async performReset(reason: StopReason, resetType: string): Promise<void> {
+    this.log("warn", `${resetType} reset accepted; rebooting station`);
+    this.stopHeartbeatTimer();
+    this.clearResetTimer();
+    this.maintenance.clearAll();
+    this.meterValueScheduler.stopClockAligned();
+
+    for (const connector of this.connectors.all()) {
+      if (connector.transactionId) {
+        await this.stopTransaction(connector.id, reason);
+        const resetStatus: ConnectorStatus =
+          this.connectors.get(connector.id).availability === "Inoperative" ? "Unavailable" : "Available";
+        this.connectors.patch(connector.id, { evConnected: false, status: resetStatus });
+        void this.runSafely(() => this.statusNotification(connector.id, resetStatus));
+      }
+    }
+
+    this.meterValueScheduler.stopAllPeriodic();
+    for (const connector of this.connectors.all()) {
+      if (!connector.reservationId) {
+        continue;
+      }
+
+      this.clearReservation(connector.id);
+      void this.runSafely(() => this.statusNotification(connector.id, this.connectors.get(connector.id).status));
+    }
+
+    this.patchState({ booted: false, registrationStatus: "Unknown" });
+    this.resetTimer = setTimeout(() => {
+      this.resetTimer = undefined;
+      if (this.state.connected) {
+        void this.runSafely(() => this.bootAfterReset(this.configuration.integer("ResetRetries", 0)));
+      }
+    }, 500);
+  }
+
+  private async bootAfterReset(remainingRetries: number): Promise<void> {
+    await this.boot({ scheduleRetry: false });
+    if (this.state.registrationStatus === "Accepted" || remainingRetries <= 0 || !this.state.connected) {
+      return;
+    }
+
+    this.log("warn", `Reset reboot BootNotification was ${this.state.registrationStatus}; retrying (${remainingRetries} left)`);
+    this.resetTimer = setTimeout(() => {
+      this.resetTimer = undefined;
+      if (this.state.connected) {
+        void this.runSafely(() => this.bootAfterReset(remainingRetries - 1));
+      }
+    }, 500);
+  }
+
+  private clearResetTimer(): void {
+    if (!this.resetTimer) {
+      return;
+    }
+
+    clearTimeout(this.resetTimer);
+    this.resetTimer = undefined;
+  }
+
+  private scheduleBootRetry(intervalSeconds: number): void {
+    if (this.bootRetryTimer || !this.state.connected) {
+      return;
+    }
+
+    const delayMs = Math.max(1, intervalSeconds) * 1000;
+    this.log("warn", `BootNotification was ${this.state.registrationStatus}; retrying in ${delayMs}ms`);
+    this.bootRetryTimer = setTimeout(() => {
+      this.bootRetryTimer = undefined;
+      if (this.state.connected) {
+        void this.runSafely(() => this.boot());
+      }
+    }, delayMs);
+  }
+
+  private clearBootRetryTimer(): void {
+    if (!this.bootRetryTimer) {
+      return;
+    }
+
+    clearTimeout(this.bootRetryTimer);
+    this.bootRetryTimer = undefined;
+  }
+
+  private scheduleReconnect(): void {
+    if (
+      this.manuallyDisconnected ||
+      !this.config.webSocketReconnectEnabled ||
+      this.reconnectTimer ||
+      this.state.connected
+    ) {
+      return;
+    }
+
+    const maxAttempts = this.config.webSocketReconnectMaxAttempts;
+    if (maxAttempts > 0 && this.reconnectAttempts >= maxAttempts) {
+      this.log("error", `Reconnect stopped after ${this.reconnectAttempts} failed attempt(s)`);
+      return;
+    }
+
+    this.reconnectAttempts += 1;
+    const delayMs = this.reconnectDelayMs(this.reconnectAttempts);
+    this.log("warn", `Reconnect attempt ${this.reconnectAttempts}${maxAttempts > 0 ? `/${maxAttempts}` : ""} in ${delayMs}ms`);
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined;
+      if (this.manuallyDisconnected || this.state.connected) {
+        return;
+      }
+
+      this.log("info", `Reconnecting to ${this.config.centralSystemUrl}`);
+      this.client.connect();
+    }, delayMs);
+  }
+
+  private reconnectDelayMs(attempt: number): number {
+    const initial = Math.max(0, this.config.webSocketReconnectInitialDelayMs);
+    const max = Math.max(initial, this.config.webSocketReconnectMaxDelayMs);
+    return Math.min(initial * 2 ** Math.max(0, attempt - 1), max);
+  }
+
+  private clearReconnectTimer(): void {
+    if (!this.reconnectTimer) {
+      return;
+    }
+
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
   }
 
   private patchState(patch: Partial<StationState>): void {

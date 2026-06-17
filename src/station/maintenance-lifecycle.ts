@@ -36,18 +36,14 @@ export class MaintenanceLifecycle {
     this.clearDiagnostics();
     const location = readString(payload.location, "");
     const fileName = diagnosticsFileName(location);
+    const retries = boundedRetries(readNumber(payload.retries, 0));
     const retryInterval = readNumber(payload.retryInterval, 0);
     const startDelay = retryInterval > 0 ? Math.min(retryInterval * 1000, 1000) : 100;
-    const terminalStatus: DiagnosticsStatus = this.diagnosticsOutcome === "uploadFailure" ? "UploadFailed" : "Uploaded";
+    const stepDelay = retryInterval > 0 ? Math.min(retryInterval * 1000, 1000) : 400;
+    const statuses = diagnosticsStatuses(this.diagnosticsOutcome, retries, startDelay, stepDelay);
 
     this.options.log("info", `Diagnostics upload scheduled to ${location}`);
-    this.diagnosticsTimers = this.schedule(
-      [
-        { status: "Uploading", delayMs: startDelay },
-        { status: terminalStatus, delayMs: startDelay + 400 }
-      ],
-      this.options.diagnosticsStatus
-    );
+    this.diagnosticsTimers = this.schedule(statuses, this.options.diagnosticsStatus);
     return fileName;
   }
 
@@ -55,10 +51,11 @@ export class MaintenanceLifecycle {
     this.clearFirmware();
     const location = readString(payload.location, "");
     const retrieveDate = readString(payload.retrieveDate, "");
+    const retries = boundedRetries(readNumber(payload.retries, 0));
     const retryInterval = readNumber(payload.retryInterval, 0);
     const startDelay = Math.min(Math.max(Date.parse(retrieveDate) - Date.now(), 100), 1000);
     const stepDelay = retryInterval > 0 ? Math.min(retryInterval * 1000, 1000) : 400;
-    const statuses = firmwareStatuses(this.firmwareOutcome, startDelay, stepDelay);
+    const statuses = firmwareStatuses(this.firmwareOutcome, retries, startDelay, stepDelay);
 
     this.options.log("info", `Firmware update scheduled from ${location}`);
     this.firmwareTimers = this.schedule(statuses, this.options.firmwareStatus);
@@ -107,24 +104,37 @@ function diagnosticsFileName(location: string): string {
   }
 }
 
+function diagnosticsStatuses(
+  outcome: DiagnosticsOutcome,
+  retries: number,
+  startDelay: number,
+  stepDelay: number
+): ScheduledStatus<DiagnosticsStatus>[] {
+  if (outcome === "uploadFailure") {
+    return retryingStatuses("Uploading", "UploadFailed", retries, startDelay, stepDelay);
+  }
+
+  return [
+    ...Array.from({ length: retries + 1 }, (_, index) => ({ status: "Uploading" as const, delayMs: startDelay + stepDelay * index })),
+    { status: "Uploaded", delayMs: startDelay + stepDelay * (retries + 1) }
+  ];
+}
+
 function firmwareStatuses(
   outcome: FirmwareOutcome,
+  retries: number,
   startDelay: number,
   stepDelay: number
 ): ScheduledStatus<FirmwareStatus>[] {
   if (outcome === "downloadFailure") {
-    return [
-      { status: "Downloading", delayMs: startDelay },
-      { status: "DownloadFailed", delayMs: startDelay + stepDelay }
-    ];
+    return retryingStatuses("Downloading", "DownloadFailed", retries, startDelay, stepDelay);
   }
 
   if (outcome === "installationFailure") {
     return [
       { status: "Downloading", delayMs: startDelay },
       { status: "Downloaded", delayMs: startDelay + stepDelay },
-      { status: "Installing", delayMs: startDelay + stepDelay * 2 },
-      { status: "InstallationFailed", delayMs: startDelay + stepDelay * 3 }
+      ...retryingStatuses("Installing", "InstallationFailed", retries, startDelay + stepDelay * 2, stepDelay)
     ];
   }
 
@@ -134,4 +144,21 @@ function firmwareStatuses(
     { status: "Installing", delayMs: startDelay + stepDelay * 2 },
     { status: "Installed", delayMs: startDelay + stepDelay * 3 }
   ];
+}
+
+function retryingStatuses<TStatus extends string>(
+  activeStatus: TStatus,
+  failureStatus: TStatus,
+  retries: number,
+  startDelay: number,
+  stepDelay: number
+): ScheduledStatus<TStatus>[] {
+  return [
+    ...Array.from({ length: retries + 1 }, (_, index) => ({ status: activeStatus, delayMs: startDelay + stepDelay * index })),
+    { status: failureStatus, delayMs: startDelay + stepDelay * (retries + 1) }
+  ];
+}
+
+function boundedRetries(value: number): number {
+  return Number.isInteger(value) && value > 0 ? Math.min(value, 5) : 0;
 }

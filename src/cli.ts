@@ -22,6 +22,11 @@ program
   .option("--state-dir <path>", "directory for persisted station state")
   .option("--ws-subprotocol <protocol>", "WebSocket subprotocol to request", "ocpp1.6")
   .option("--ws-ping <seconds>", "WebSocket ping interval in seconds, 0 disables pings", "30")
+  .option("--no-reconnect", "do not automatically reconnect after an unexpected WebSocket disconnect")
+  .option("--reconnect-initial-ms <milliseconds>", "initial automatic reconnect delay in milliseconds", "1000")
+  .option("--reconnect-max-ms <milliseconds>", "maximum automatic reconnect delay in milliseconds", "30000")
+  .option("--reconnect-max-attempts <attempts>", "maximum automatic reconnect attempts, 0 means unlimited", "0")
+  .option("--call-timeout-ms <milliseconds>", "OCPP CALL response timeout in milliseconds", "30000")
   .option("--tls-ca <path>", "CA certificate bundle for wss:// connections")
   .option("--tls-cert <path>", "client certificate for wss:// mutual TLS")
   .option("--tls-key <path>", "client private key for wss:// mutual TLS")
@@ -42,6 +47,11 @@ const options = program.opts<{
   stateDir?: string;
   wsSubprotocol: string;
   wsPing: string;
+  reconnect: boolean;
+  reconnectInitialMs: string;
+  reconnectMaxMs: string;
+  reconnectMaxAttempts: string;
+  callTimeoutMs: string;
   tlsCa?: string;
   tlsCert?: string;
   tlsKey?: string;
@@ -63,6 +73,11 @@ try {
     stateDirectory: options.stateDir,
     webSocketSubprotocol: options.wsSubprotocol,
     webSocketPingIntervalSeconds: options.wsPing,
+    webSocketReconnectEnabled: options.reconnect,
+    webSocketReconnectInitialDelayMs: options.reconnectInitialMs,
+    webSocketReconnectMaxDelayMs: options.reconnectMaxMs,
+    webSocketReconnectMaxAttempts: options.reconnectMaxAttempts,
+    callTimeoutMs: options.callTimeoutMs,
     tlsRejectUnauthorized: !options.tlsSkipVerify,
     tlsCaFile: options.tlsCa,
     tlsCertFile: options.tlsCert,

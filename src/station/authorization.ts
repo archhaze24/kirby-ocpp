@@ -18,6 +18,7 @@ export function authorizeLocally(
   localAuthorizationList: Map<string, Record<string, unknown> | undefined>,
   authorizationCache: Map<string, Record<string, unknown> | undefined>,
   configuration: {
+    localAuthListEnabled: boolean;
     localAuthorizeOffline: boolean;
     authorizationCacheEnabled: boolean;
     allowOfflineTxForUnknownId: boolean;
@@ -32,7 +33,7 @@ export function authorizeLocally(
   }
 
   const localListInfo = localAuthorizationList.get(idTag);
-  if (localAuthorizationList.has(idTag)) {
+  if (configuration.localAuthListEnabled && localAuthorizationList.has(idTag)) {
     const idTagInfo = normalizeIdTagInfo(localListInfo);
     return {
       accepted: isAcceptedIdTagInfo(idTagInfo),

@@ -2,11 +2,13 @@ import {
   canStoreChargingProfile,
   effectiveChargingProfiles,
   isChargingProfileExpired,
-  limitAt,
+  limitTransitionOffsets,
   matchesChargingProfileFilter,
+  periodAt,
   readChargingProfile,
   readChargingRateUnit,
-  type ChargingProfileEntry
+  type ChargingProfileEntry,
+  type ChargingSchedulePeriod
 } from "./smart-charging.js";
 import { readNumber } from "./payload.js";
 
@@ -86,16 +88,23 @@ export class ChargingProfileRegistry {
     }
 
     const scheduleStart = new Date();
-    const activeProfiles = effectiveChargingProfiles(this.profiles, connectorId, transactionId, scheduleStart);
-    const unit = requestedUnit ?? activeProfiles[0]?.profile.chargingSchedule.chargingRateUnit ?? "A";
+    const defaultUnit = requestedUnit ?? effectiveChargingProfiles(this.profiles, connectorId, transactionId, scheduleStart)[0]?.profile.chargingSchedule.chargingRateUnit ?? "A";
+    const unit = defaultUnit;
     const relativeStart = transactionStartedAt ? new Date(transactionStartedAt) : undefined;
-    const limits = activeProfiles
-      .filter((entry) => entry.profile.chargingSchedule.chargingRateUnit === unit)
-      .map((entry) => limitAt(entry.profile, scheduleStart, relativeStart))
-      .filter((limit): limit is number => typeof limit === "number" && Number.isFinite(limit));
+    const composite = compositeSchedule(this.profiles, connectorId, transactionId, unit, scheduleStart, duration, relativeStart);
 
-    if (limits.length === 0) {
+    if (composite.chargingSchedulePeriod.length === 0) {
       return undefined;
+    }
+
+    const chargingSchedule: Record<string, unknown> = {
+      duration,
+      startSchedule: scheduleStart.toISOString(),
+      chargingRateUnit: unit,
+      chargingSchedulePeriod: composite.chargingSchedulePeriod
+    };
+    if (composite.minChargingRate !== undefined) {
+      chargingSchedule.minChargingRate = composite.minChargingRate;
     }
 
     return {
@@ -104,13 +113,70 @@ export class ChargingProfileRegistry {
         status: "Accepted",
         connectorId,
         scheduleStart: scheduleStart.toISOString(),
-        chargingSchedule: {
-          duration,
-          startSchedule: scheduleStart.toISOString(),
-          chargingRateUnit: unit,
-          chargingSchedulePeriod: [{ startPeriod: 0, limit: Math.min(...limits) }]
-        }
+        chargingSchedule
       }
     };
   }
+}
+
+function compositeSchedule(
+  entries: ChargingProfileEntry[],
+  connectorId: number,
+  transactionId: number | undefined,
+  unit: "A" | "W",
+  scheduleStart: Date,
+  duration: number,
+  relativeStart?: Date
+): { chargingSchedulePeriod: { startPeriod: number; limit: number; numberPhases?: number }[]; minChargingRate?: number } {
+  const offsets = new Set<number>([0]);
+  const unitEntries = entries.filter((entry) => entry.profile.chargingSchedule.chargingRateUnit === unit);
+  for (const entry of unitEntries) {
+    for (const offset of limitTransitionOffsets(entry.profile, scheduleStart, duration, relativeStart)) {
+      offsets.add(offset);
+    }
+  }
+
+  let minChargingRate: number | undefined;
+  const chargingSchedulePeriod = [...offsets]
+    .sort((left, right) => left - right)
+    .map((offset) => {
+      const at = new Date(scheduleStart.getTime() + offset * 1000);
+      const activeProfiles = effectiveChargingProfiles(unitEntries, connectorId, transactionId, at, unit);
+      const activePeriods = activeProfiles
+        .map((entry) => ({ entry, period: periodAt(entry.profile, at, relativeStart, scheduleStart) }))
+        .filter((item): item is { entry: ChargingProfileEntry; period: ChargingSchedulePeriod } => item.period !== undefined);
+
+      for (const { entry } of activePeriods) {
+        const profileMin = entry.profile.chargingSchedule.minChargingRate;
+        if (profileMin !== undefined) {
+          minChargingRate = minChargingRate === undefined ? profileMin : Math.max(minChargingRate, profileMin);
+        }
+      }
+
+      if (activePeriods.length === 0) {
+        return undefined;
+      }
+
+      const limit = Math.min(...activePeriods.map(({ period }) => period.limit));
+      const limitingPhases = activePeriods
+        .filter(({ period }) => period.limit === limit)
+        .map(({ period }) => period.numberPhases)
+        .filter((numberPhases): numberPhases is number => typeof numberPhases === "number" && Number.isFinite(numberPhases));
+      const period: { startPeriod: number; limit: number; numberPhases?: number } = { startPeriod: offset, limit };
+      if (limitingPhases.length > 0) {
+        period.numberPhases = Math.min(...limitingPhases);
+      }
+      return period;
+    })
+    .filter((period): period is { startPeriod: number; limit: number; numberPhases?: number } => period !== undefined);
+
+  return {
+    chargingSchedulePeriod: chargingSchedulePeriod.filter(
+      (period, index) =>
+        index === 0 ||
+        period.limit !== chargingSchedulePeriod[index - 1]?.limit ||
+        period.numberPhases !== chargingSchedulePeriod[index - 1]?.numberPhases
+    ),
+    minChargingRate
+  };
 }

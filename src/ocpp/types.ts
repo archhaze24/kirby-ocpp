@@ -92,6 +92,11 @@ export interface StationConfig {
   stateDirectory?: string;
   webSocketSubprotocol: string;
   webSocketPingIntervalSeconds: number;
+  webSocketReconnectEnabled: boolean;
+  webSocketReconnectInitialDelayMs: number;
+  webSocketReconnectMaxDelayMs: number;
+  webSocketReconnectMaxAttempts: number;
+  callTimeoutMs: number;
   tlsRejectUnauthorized: boolean;
   tlsCaFile?: string;
   tlsCertFile?: string;
@@ -115,6 +120,7 @@ export interface ConnectorState {
   reservationParentIdTag?: string;
   reservationExpiryDate?: string;
   lastIdTag?: string;
+  stopTransactionAtWh?: number;
   meterWh: number;
 }
 
