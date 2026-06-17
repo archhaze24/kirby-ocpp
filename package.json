@@ -1,0 +1,51 @@
+{
+  "name": "kirby-ocpp",
+  "version": "0.1.0",
+  "description": "A terminal OCPP charge point emulator.",
+  "type": "module",
+  "bin": {
+    "kirby-ocpp": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && node scripts/copy-schemas.mjs",
+    "dev": "tsx src/cli.ts",
+    "prepack": "npm run build",
+    "smoke": "npm run build && node scripts/smoke-ocpp.mjs",
+    "start": "node dist/cli.js",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "ocpp",
+    "ocpp16",
+    "charge-point",
+    "emulator",
+    "tui",
+    "cli"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "blessed": "^0.1.81",
+    "commander": "^12.1.0",
+    "jsonschema": "^1.5.0",
+    "nanoid": "^5.0.7",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/blessed": "^0.1.25",
+    "@types/node": "^22.10.2",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

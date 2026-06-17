@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.idea/
+.DS_Store
+*.log
+OCPP_1.6_documentation/
