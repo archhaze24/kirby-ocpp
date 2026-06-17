@@ -127,7 +127,7 @@ export class Tui {
     this.screen.key("b", () => this.runStationTask(() => this.station.boot()));
     this.screen.key("h", () => this.runStationTask(() => this.station.heartbeat()));
     this.screen.key("s", () => this.runStationTask(() => this.station.cycleStatus(this.selectedConnectorId)));
-    this.screen.key("a", () => this.promptIdTag("Authorize", (idTag) => this.runStationTask(() => this.station.authorize(idTag))));
+    this.screen.key("a", () => this.promptIdTag("Enter idTag:", (idTag) => this.runStationTask(() => this.station.authorize(idTag))));
     this.screen.key("t", () => {
       const connector = this.selectedConnector();
       if (connector?.transactionId) {
@@ -137,7 +137,7 @@ export class Tui {
         return;
       }
 
-      this.promptIdTag("StartTransaction", (idTag) =>
+      this.promptIdTag("Enter idTag:", (idTag) =>
         this.runStationTask(() => this.station.startTransaction(this.selectedConnectorId, idTag))
       );
     });

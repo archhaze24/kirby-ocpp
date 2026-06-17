@@ -9,6 +9,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const calls = [];
 const callPayloads = [];
 const responses = new Map();
+const callErrorsRemaining = new Map();
 const wss = new WebSocketServer({ host: "127.0.0.1", port: 0 });
 
 while (!wss.address()) {
@@ -33,7 +34,13 @@ wss.on("connection", (socket) => {
       const [, messageId, action, payload] = message;
       calls.push(action);
       callPayloads.push({ action, payload });
-      socket.send(JSON.stringify([3, messageId, responseFor(action)]));
+      const remainingCallErrors = callErrorsRemaining.get(action) ?? 0;
+      if (remainingCallErrors > 0) {
+        callErrorsRemaining.set(action, remainingCallErrors - 1);
+        socket.send(JSON.stringify([4, messageId, "InternalError", `smoke retry ${action}`, {}]));
+        return;
+      }
+      socket.send(JSON.stringify([3, messageId, responseFor(action, payload)]));
       return;
     }
 
@@ -79,6 +86,13 @@ const commands = [
   ["GetConfiguration", {}],
   ["ChangeConfiguration", { key: "HeartbeatInterval", value: "6" }],
   ["ChangeConfiguration", { key: "LocalAuthorizeOffline", value: "true" }],
+  ["ChangeConfiguration", { key: "StopTransactionOnEVSideDisconnect", value: "false" }],
+  ["ChangeConfiguration", { key: "StopTransactionOnInvalidId", value: "true" }],
+  ["ChangeConfiguration", { key: "TransactionMessageAttempts", value: "2" }],
+  ["ChangeConfiguration", { key: "TransactionMessageRetryInterval", value: "1" }],
+  ["ChangeConfiguration", { key: "MeterValueSampleInterval", value: "1" }],
+  ["ChangeConfiguration", { key: "ClockAlignedDataInterval", value: "1" }],
+  ["ChangeConfiguration", { key: "MeterValuesAlignedData", value: "Energy.Active.Import.Register,Power.Active.Import" }],
   [
     "ChangeConfiguration",
     {
@@ -87,6 +101,7 @@ const commands = [
     }
   ],
   ["ChangeConfiguration", { key: "StopTxnSampledData", value: "Energy.Active.Import.Register,Power.Active.Import" }],
+  ["ChangeConfiguration", { key: "StopTxnAlignedData", value: "Voltage,SoC" }],
   ["ClearCache", {}],
   ["GetLocalListVersion", {}],
   [
@@ -144,6 +159,71 @@ for (const [action, payload] of commands) {
   }
 }
 
+const fullConfiguration = await sendCentralSystemCall("GetConfiguration", {});
+const configurationKeys = fullConfiguration[2]?.configurationKey ?? [];
+for (const key of ["ClockAlignedDataInterval", "SupportedFeatureProfiles", "StopTransactionOnEVSideDisconnect"]) {
+  if (!configurationKeys.some((entry) => entry.key === key)) {
+    throw new Error(`GetConfiguration did not include ${key}`);
+  }
+}
+
+const readonlyResponse = await sendCentralSystemCall("ChangeConfiguration", {
+  key: "NumberOfConnectors",
+  value: "7"
+});
+if (readonlyResponse[2]?.status !== "Rejected") {
+  throw new Error(`Readonly ChangeConfiguration was not rejected: ${JSON.stringify(readonlyResponse)}`);
+}
+
+const invalidBooleanResponse = await sendCentralSystemCall("ChangeConfiguration", {
+  key: "StopTransactionOnEVSideDisconnect",
+  value: "maybe"
+});
+if (invalidBooleanResponse[2]?.status !== "Rejected") {
+  throw new Error(`Invalid boolean ChangeConfiguration was not rejected: ${JSON.stringify(invalidBooleanResponse)}`);
+}
+
+const invalidSampledDataResponse = await sendCentralSystemCall("ChangeConfiguration", {
+  key: "MeterValuesSampledData",
+  value: "Energy.Active.Import.Register,Totally.Not.Real"
+});
+if (invalidSampledDataResponse[2]?.status !== "Rejected") {
+  throw new Error(`Invalid sampled data ChangeConfiguration was not rejected: ${JSON.stringify(invalidSampledDataResponse)}`);
+}
+
+const addConnectorStartIndex = callPayloads.length;
+const minimumStatusConnectorId = station.addConnector();
+await waitForCallAfter(
+  "StatusNotification",
+  addConnectorStartIndex,
+  (payload) => payload.connectorId === minimumStatusConnectorId && payload.status === "Available"
+);
+const minimumStatusResponse = await sendCentralSystemCall("ChangeConfiguration", {
+  key: "MinimumStatusDuration",
+  value: "1"
+});
+if (minimumStatusResponse[2]?.status !== "Accepted") {
+  throw new Error(`MinimumStatusDuration was not accepted: ${JSON.stringify(minimumStatusResponse)}`);
+}
+
+const minimumStatusStartIndex = callPayloads.length;
+await station.cycleStatus(minimumStatusConnectorId);
+await station.cycleStatus(minimumStatusConnectorId);
+await sleep(150);
+if (
+  callPayloads
+    .slice(minimumStatusStartIndex)
+    .some((entry) => entry.action === "StatusNotification" && entry.payload.connectorId === minimumStatusConnectorId)
+) {
+  throw new Error("MinimumStatusDuration did not delay rapid StatusNotification changes");
+}
+await waitForCallAfter(
+  "StatusNotification",
+  minimumStatusStartIndex,
+  (payload) => payload.connectorId === minimumStatusConnectorId && payload.status === "Charging"
+);
+await sendCentralSystemCall("ChangeConfiguration", { key: "MinimumStatusDuration", value: "0" });
+
 await station.meterValues(1, 0);
 await waitForCall("MeterValues");
 const triggeredMeterValues = [...callPayloads].reverse().find((entry) => entry.action === "MeterValues");
@@ -174,10 +254,46 @@ if (station.state.connectors.find((connector) => connector.id === 1)?.transactio
   throw new Error("Reserved connector started transaction for wrong idTag");
 }
 
+const retryStartIndex = callPayloads.length;
+callErrorsRemaining.set("StartTransaction", 1);
 await station.startTransaction(1, "TAG1");
+const retriedStartTransactions = callPayloads
+  .slice(retryStartIndex)
+  .filter((entry) => entry.action === "StartTransaction" && entry.payload.connectorId === 1 && entry.payload.idTag === "TAG1");
+if (retriedStartTransactions.length < 2) {
+  throw new Error(`StartTransaction was not retried after CALLERROR: ${JSON.stringify(retriedStartTransactions)}`);
+}
 const reservedStartConnector = station.state.connectors.find((connector) => connector.id === 1);
 if (reservedStartConnector?.status !== "Charging" || reservedStartConnector.reservationId) {
   throw new Error(`Reserved start did not consume reservation: ${JSON.stringify(reservedStartConnector)}`);
+}
+
+const periodicStartIndex = callPayloads.length;
+await waitForCallAfter("MeterValues", periodicStartIndex, (payload) => payload.connectorId === 1 && payload.transactionId === 123);
+await waitForCallAfter(
+  "MeterValues",
+  periodicStartIndex,
+  (payload) =>
+    payload.connectorId === 1 &&
+    payload.transactionId === 123 &&
+    payload.meterValue?.[0]?.sampledValue?.some((sample) => sample.context === "Sample.Clock")
+);
+
+const stopCountBeforeSuspendedEv = callPayloads.filter((entry) => entry.action === "StopTransaction").length;
+await station.unplug(1);
+const suspendedConnector = station.state.connectors.find((connector) => connector.id === 1);
+if (suspendedConnector?.status !== "SuspendedEV" || suspendedConnector.transactionId !== 123 || suspendedConnector.evConnected) {
+  throw new Error(`EV disconnect did not suspend active transaction: ${JSON.stringify(suspendedConnector)}`);
+}
+const stopCountAfterSuspendedEv = callPayloads.filter((entry) => entry.action === "StopTransaction").length;
+if (stopCountAfterSuspendedEv !== stopCountBeforeSuspendedEv) {
+  throw new Error("EV disconnect sent StopTransaction despite StopTransactionOnEVSideDisconnect=false");
+}
+
+await station.plugIn(1);
+const resumedConnector = station.state.connectors.find((connector) => connector.id === 1);
+if (resumedConnector?.status !== "Charging" || resumedConnector.transactionId !== 123 || !resumedConnector.evConnected) {
+  throw new Error(`EV reconnect did not resume charging transaction: ${JSON.stringify(resumedConnector)}`);
 }
 
 await station.stopTransaction(1, "Local", "TAG1");
@@ -199,10 +315,22 @@ if (station.state.connectors.find((connector) => connector.id === 1)?.status !==
 }
 
 const stopTransactionPayload = [...callPayloads].reverse().find((entry) => entry.action === "StopTransaction")?.payload;
-const stopSampledValues = stopTransactionPayload?.transactionData?.[0]?.sampledValue ?? [];
-const stopMeasurands = stopSampledValues.map((sample) => sample.measurand).sort();
+const stopEndValues =
+  stopTransactionPayload?.transactionData
+    ?.find((meterValue) => meterValue.sampledValue?.some((sample) => sample.context === "Transaction.End"))
+    ?.sampledValue ?? [];
+const stopMeasurands = stopEndValues.map((sample) => sample.measurand).sort();
 if (stopMeasurands.join(",") !== "Energy.Active.Import.Register,Power.Active.Import") {
-  throw new Error(`StopTransaction did not include configured sampled data: ${JSON.stringify(stopSampledValues)}`);
+  throw new Error(`StopTransaction did not include configured sampled data: ${JSON.stringify(stopEndValues)}`);
+}
+
+const stopAlignedValues =
+  stopTransactionPayload?.transactionData
+    ?.find((meterValue) => meterValue.sampledValue?.some((sample) => sample.context === "Sample.Clock"))
+    ?.sampledValue ?? [];
+const stopAlignedMeasurands = stopAlignedValues.map((sample) => sample.measurand).sort();
+if (stopAlignedMeasurands.join(",") !== "SoC,Voltage") {
+  throw new Error(`StopTransaction did not include configured aligned data: ${JSON.stringify(stopAlignedValues)}`);
 }
 
 await station.dataTransfer({ vendorId: "Kirby", messageId: "smoke", data: "ping" });
@@ -210,6 +338,71 @@ await station.dataTransfer({ vendorId: "Kirby", messageId: "smoke", data: "ping"
 await station.unplug(1);
 if (station.state.connectors.find((connector) => connector.id === 1)?.status !== "Available") {
   throw new Error("Unplug did not move connector 1 to Available");
+}
+
+const mixedAvailabilityIdleConnectorId = station.addConnector();
+await station.plugIn(1);
+await station.startTransaction(1, "TAG1");
+const scheduledAvailabilityResponse = await sendCentralSystemCall("ChangeAvailability", {
+  connectorId: 0,
+  type: "Inoperative"
+});
+if (scheduledAvailabilityResponse[2]?.status !== "Scheduled") {
+  throw new Error(`ChangeAvailability during transaction was not scheduled: ${JSON.stringify(scheduledAvailabilityResponse)}`);
+}
+const activeScheduledConnector = station.state.connectors.find((connector) => connector.id === 1);
+if (activeScheduledConnector?.status !== "Charging" || activeScheduledConnector.availability !== "Inoperative") {
+  throw new Error(`Scheduled ChangeAvailability did not preserve active connector status: ${JSON.stringify(activeScheduledConnector)}`);
+}
+const idleScheduledConnector = station.state.connectors.find((connector) => connector.id === mixedAvailabilityIdleConnectorId);
+if (idleScheduledConnector?.status !== "Unavailable" || idleScheduledConnector.availability !== "Inoperative") {
+  throw new Error(`Scheduled ChangeAvailability did not immediately apply to idle connector: ${JSON.stringify(idleScheduledConnector)}`);
+}
+
+await station.stopTransaction(1, "EVDisconnected", "TAG1");
+const unavailableAfterScheduledChange = station.state.connectors.find((connector) => connector.id === 1);
+if (unavailableAfterScheduledChange?.status !== "Unavailable" || unavailableAfterScheduledChange.availability !== "Inoperative") {
+  throw new Error(`Scheduled ChangeAvailability did not apply after transaction: ${JSON.stringify(unavailableAfterScheduledChange)}`);
+}
+
+const operativeAfterScheduledResponse = await sendCentralSystemCall("ChangeAvailability", {
+  connectorId: 0,
+  type: "Operative"
+});
+if (operativeAfterScheduledResponse[2]?.status !== "Accepted") {
+  throw new Error(`ChangeAvailability back to Operative failed: ${JSON.stringify(operativeAfterScheduledResponse)}`);
+}
+if (station.state.connectors.find((connector) => connector.id === 1)?.status !== "Available") {
+  throw new Error("ChangeAvailability back to Operative did not restore Available");
+}
+if (station.state.connectors.find((connector) => connector.id === mixedAvailabilityIdleConnectorId)?.status !== "Available") {
+  throw new Error("ChangeAvailability back to Operative did not restore idle connector");
+}
+
+await station.plugIn(1);
+await station.startTransaction(1, "BADTAG");
+if (station.state.connectors.find((connector) => connector.id === 1)?.status !== "Charging") {
+  throw new Error("BADTAG transaction did not start for invalid-id stop test");
+}
+
+const invalidIdStopIndex = callPayloads.length;
+const invalidDecision = await station.authorize("BADTAG");
+if (invalidDecision.accepted) {
+  throw new Error(`BADTAG authorization unexpectedly accepted: ${JSON.stringify(invalidDecision)}`);
+}
+await waitForCallAfter(
+  "StopTransaction",
+  invalidIdStopIndex,
+  (payload) => payload.idTag === "BADTAG" && payload.reason === "DeAuthorized"
+);
+const invalidStoppedConnector = station.state.connectors.find((connector) => connector.id === 1);
+if (invalidStoppedConnector?.transactionId || invalidStoppedConnector?.status !== "Finishing") {
+  throw new Error(`StopTransactionOnInvalidId did not stop BADTAG transaction: ${JSON.stringify(invalidStoppedConnector)}`);
+}
+
+await station.unplug(1);
+if (station.state.connectors.find((connector) => connector.id === 1)?.status !== "Available") {
+  throw new Error("Unplug after invalid-id stop did not move connector 1 to Available");
 }
 
 await station.setFault(1, "GroundFailure", "smoke fault");
@@ -248,13 +441,16 @@ if (!offlineDecision.accepted || offlineDecision.source !== "LocalList") {
 console.log(`ok ${commands.length} CSMS commands; charge point calls=${[...new Set(calls)].sort().join(",")}`);
 process.exit(0);
 
-function responseFor(action) {
+function responseFor(action, payload = {}) {
   switch (action) {
     case "BootNotification":
       return { status: "Accepted", currentTime: new Date().toISOString(), interval: 5 };
     case "Heartbeat":
       return { currentTime: new Date().toISOString() };
     case "Authorize":
+      if (payload.idTag === "BADTAG") {
+        return { idTagInfo: { status: "Blocked" } };
+      }
       return { idTagInfo: { status: "Accepted" } };
     case "StartTransaction":
       return { transactionId: 123, idTagInfo: { status: "Accepted" } };
@@ -304,4 +500,20 @@ async function waitForCall(action) {
   }
 
   throw new Error(`Timed out waiting for charge point ${action}`);
+}
+
+async function waitForCallAfter(action, startIndex, predicate = () => true) {
+  const started = Date.now();
+  while (Date.now() - started <= 3_000) {
+    const match = callPayloads
+      .slice(startIndex)
+      .some((entry) => entry.action === action && predicate(entry.payload));
+    if (match) {
+      return;
+    }
+
+    await sleep(20);
+  }
+
+  throw new Error(`Timed out waiting for charge point ${action} after index ${startIndex}`);
 }
