@@ -84,6 +84,16 @@ test("closes the connection when ocpp1.6 subprotocol is not negotiated", { timeo
   }
 });
 
+test("closing while the WebSocket handshake is still pending does not throw", () => {
+  const client = new OcppClient("ws://10.255.255.1:65535/ocpp", "CP-001", {
+    pingIntervalSeconds: 0
+  });
+
+  client.on("error", () => {});
+  client.connect();
+  assert.doesNotThrow(() => client.close());
+});
+
 test("connects to self-signed wss when TLS verification is disabled", { timeout: 5_000 }, async () => {
   const certificate = createSelfSignedCertificate();
   const httpsServer = createHttpsServer({

@@ -2,7 +2,8 @@ import { spawnSync } from "node:child_process";
 import blessed from "blessed";
 import type { Widgets } from "blessed";
 import { Station } from "./station.js";
-import type { ChargePointErrorCode, ConnectorState, LogEntry, StationState, StopReason } from "./ocpp/types.js";
+import type { ChargePointErrorCode, ConnectorState, ConnectorStatus, LogEntry, StationState, StopReason } from "./ocpp/types.js";
+import { CONNECTOR_STATUS_SEQUENCE } from "./station/connector-status.js";
 
 type TabId = "station" | "connector" | "transaction" | "maintenance" | "data" | "logs" | "scenarios";
 type LogFilter = "all" | "calls" | "errors" | "station" | "csms";
@@ -463,6 +464,7 @@ export class Tui {
           action("s", "Cycle status", "Cycle StatusNotification status on the selected connector.", () =>
             this.runStationTask(() => this.station.cycleStatus(this.selectedConnectorId))
           ),
+          action("S", "Set status", "Choose any StatusNotification status for the selected connector.", () => this.setStatusFlow()),
           action("n", "Send StatusNotification", "Send current selected connector status now.", () =>
             this.runStationTask(() => this.station.statusNotification(this.selectedConnectorId, this.selectedConnector()?.status, true))
           ),
@@ -561,6 +563,8 @@ export class Tui {
         "d",
         "D",
         "S-d",
+        "S",
+        "S-s",
         "e",
         "f",
         "h",
@@ -951,6 +955,12 @@ export class Tui {
   private stopTransactionFlow(): void {
     this.promptChoice("StopTransaction reason", STOP_REASONS, (reason) =>
       this.runStationTask(() => this.station.stopTransaction(this.selectedConnectorId, readStopReason(reason), this.selectedConnector()?.lastIdTag))
+    );
+  }
+
+  private setStatusFlow(): void {
+    this.promptChoice("Connector status", CONNECTOR_STATUS_SEQUENCE, (status) =>
+      this.runStationTask(() => this.station.setStatus(this.selectedConnectorId, readConnectorStatus(status)))
     );
   }
 
@@ -1698,6 +1708,11 @@ function readStopReason(value: string): StopReason {
   return isStopReason(normalized) ? normalized : "Local";
 }
 
+function readConnectorStatus(value: string): ConnectorStatus {
+  const normalized = value.trim();
+  return isConnectorStatus(normalized) ? normalized : "Available";
+}
+
 function parseObjectJson(value: string): Record<string, unknown> | undefined {
   try {
     const parsed = JSON.parse(value);
@@ -1780,6 +1795,9 @@ function normalizeActionKey(keyName: string | undefined): string {
   if (keyName === "S-d") {
     return "D";
   }
+  if (keyName === "S-s") {
+    return "S";
+  }
   if (keyName === "S-u") {
     return "U";
   }
@@ -1793,7 +1811,7 @@ function legacyActionTab(key: string): TabId | undefined {
   if (["b", "h", "x"].includes(key)) {
     return "station";
   }
-  if (["p", "s", "n", "f"].includes(key)) {
+  if (["p", "s", "S", "n", "f"].includes(key)) {
     return "connector";
   }
   if (["a", "t", "e", "m", "M"].includes(key)) {
@@ -1834,6 +1852,10 @@ const STOP_REASONS = [
 
 function isStopReason(value: string): value is StopReason {
   return STOP_REASONS.includes(value as StopReason);
+}
+
+function isConnectorStatus(value: string): value is ConnectorStatus {
+  return CONNECTOR_STATUS_SEQUENCE.includes(value as ConnectorStatus);
 }
 
 const CHARGE_POINT_ERROR_CODES = [

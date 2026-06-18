@@ -88,6 +88,7 @@ Global shortcuts:
 - `q`: quit.
 
 Forms prompt for values such as `idTag`, connector id, measurands, and `DataTransfer` payloads. There is no built-in default RFID/idTag.
+On the Connector tab, `s` cycles the selected connector status and `S` opens a list of all OCPP connector statuses.
 
 ## Persistence
 

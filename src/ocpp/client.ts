@@ -109,9 +109,13 @@ export class OcppClient extends EventEmitter {
 
     this.rejectPending(new Error("Connection closed"));
     this.stopPingTimer();
-    this.socket.removeAllListeners();
-    if (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING) {
-      this.socket.close();
+    const socket = this.socket;
+    socket.removeAllListeners();
+    socket.on("error", () => {});
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.close();
+    } else if (socket.readyState === WebSocket.CONNECTING) {
+      socket.terminate();
     }
     this.socket = undefined;
   }

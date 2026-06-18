@@ -634,14 +634,18 @@ export class Station extends EventEmitter {
   async cycleStatus(connectorId = this.config.connectorId): Promise<void> {
     const connector = this.connectors.get(connectorId);
     const next = nextConnectorStatus(connector.status);
+    await this.setStatus(connectorId, next);
+  }
+
+  async setStatus(connectorId = this.config.connectorId, status: ConnectorStatus): Promise<void> {
     this.connectors.patch(connectorId, {
-      status: next,
-      errorCode: next === "Faulted" ? "OtherError" : "NoError",
-      info: next === "Faulted" ? "Manual fault" : undefined,
-      vendorId: next === "Faulted" ? this.config.vendor : undefined,
+      status,
+      errorCode: status === "Faulted" ? "OtherError" : "NoError",
+      info: status === "Faulted" ? "Manual fault" : undefined,
+      vendorId: status === "Faulted" ? this.config.vendor : undefined,
       vendorErrorCode: undefined
     });
-    await this.statusNotification(connectorId, next);
+    await this.statusNotification(connectorId, status);
   }
 
   addConnector(): number {
