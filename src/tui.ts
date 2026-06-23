@@ -39,7 +39,7 @@ const TABS: { id: TabId; label: string }[] = [
 ];
 
 const LEVEL_STYLE: Record<LogEntry["level"], string> = {
-  info: "{blue-fg}info{/blue-fg}",
+  info: "{white-fg}info{/white-fg}",
   success: "{green-fg}ok{/green-fg}",
   warn: "{yellow-fg}warn{/yellow-fg}",
   error: "{red-fg}err{/red-fg}",
@@ -49,14 +49,30 @@ const LEVEL_STYLE: Record<LogEntry["level"], string> = {
 
 const DEFAULT_MEASURANDS = "Energy.Active.Import.Register,Power.Active.Import,Current.Import,Voltage,Temperature,SoC";
 const THEME = {
+  background: "black",
+  foreground: "white",
   panelBorder: "cyan",
   headerBg: "black",
   headerFg: "white",
   footerBg: "black",
   footerFg: "white",
+  mutedFg: "cyan",
   selectedBg: "white",
-  selectedFg: "black"
+  selectedFg: "black",
+  focusBorder: "yellow"
 } as const;
+
+function fgTag(color: string, content: string): string {
+  return `{${color}-fg}${content}{/${color}-fg}`;
+}
+
+function muted(content: string): string {
+  return fgTag(THEME.mutedFg, content);
+}
+
+function disabledLine(content: string): string {
+  return muted(`${content} (disabled)`);
+}
 
 export class Tui {
   private readonly screen: Widgets.Screen;
@@ -103,6 +119,8 @@ export class Tui {
       border: "line",
       padding: { left: 1, right: 1 },
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         selected: { bg: THEME.selectedBg, fg: THEME.selectedFg },
         border: { fg: THEME.panelBorder }
       }
@@ -118,6 +136,8 @@ export class Tui {
       border: "line",
       padding: { left: 1, right: 1 },
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         border: { fg: THEME.panelBorder }
       }
     });
@@ -134,6 +154,8 @@ export class Tui {
       border: "line",
       padding: { left: 1, right: 1 },
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         selected: { bg: THEME.selectedBg, fg: THEME.selectedFg },
         border: { fg: THEME.panelBorder }
       }
@@ -158,6 +180,8 @@ export class Tui {
         style: { bg: THEME.panelBorder }
       },
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         border: { fg: THEME.panelBorder }
       }
     });
@@ -331,7 +355,7 @@ export class Tui {
     const compact = this.screenColumns() < 110;
     const tabLine = TABS.map((tab, index) => {
       const label = compact ? `${index + 1}:${tab.label.slice(0, 4)}` : `${index + 1}:${tab.label}`;
-      return tab.id === this.activeTab ? `{black-fg}{white-bg}${label}{/white-bg}{/black-fg}` : `{gray-fg}${label}{/gray-fg}`;
+      return tab.id === this.activeTab ? `{black-fg}{white-bg}${label}{/white-bg}{/black-fg}` : muted(label);
     }).join("  ");
 
     this.header.setContent(
@@ -420,9 +444,11 @@ export class Tui {
     this.actions = this.actionsForTab();
     const width = this.centerContentWidth();
     const items = this.actions.map((action) => {
-      const prefix = action.disabled?.() ? "{gray-fg}" : "";
-      const suffix = action.disabled?.() ? "{/gray-fg}" : "";
-      return `${prefix}${action.key.padEnd(2)} ${truncateText(action.label, Math.max(12, width - 6))}${suffix}`;
+      const disabled = action.disabled?.() ?? false;
+      const suffix = disabled ? " (disabled)" : "";
+      const labelWidth = Math.max(12, width - 6 - suffix.length);
+      const line = `${action.key.padEnd(2)} ${truncateText(action.label, labelWidth)}`;
+      return disabled ? disabledLine(line) : line;
     });
 
     this.actionList.setLabel(` ${this.tabLabel(this.activeTab)} actions `);
@@ -662,6 +688,8 @@ export class Tui {
       tags: true,
       keys: true,
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         border: { fg: THEME.panelBorder }
       }
     });
@@ -675,6 +703,8 @@ export class Tui {
       keys: true,
       tags: true,
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         border: { fg: THEME.panelBorder }
       }
     });
@@ -690,6 +720,8 @@ export class Tui {
       vi: false,
       items: [],
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         selected: { bg: THEME.selectedBg, fg: THEME.selectedFg },
         border: { fg: THEME.panelBorder }
       }
@@ -701,7 +733,8 @@ export class Tui {
       right: 2,
       height: 1,
       tags: true,
-      content: "{gray-fg}Type to filter  Up/Down select  Enter run  Esc cancel{/gray-fg}"
+      style: { fg: THEME.foreground, bg: THEME.background },
+      content: muted("Type to filter  Up/Down select  Enter run  Esc cancel")
     });
 
     let entries: PaletteEntry[] = [];
@@ -732,7 +765,7 @@ export class Tui {
       selectedIndex = clamp(selectedIndex, 0, Math.max(0, entries.length - 1));
       box.setLabel(` Commands${trimmedQuery ? `: ${truncateText(trimmedQuery, 28)}` : ""} `);
       if (entries.length === 0) {
-        list.setItems(["{gray-fg}No matching commands{/gray-fg}"]);
+        list.setItems([muted("No matching commands")]);
         list.select(0);
         this.screen.render();
         return;
@@ -826,6 +859,8 @@ export class Tui {
       alwaysScroll: false,
       padding: { left: 2, right: 2 },
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         border: { fg: THEME.panelBorder }
       },
       scrollbar: {
@@ -851,7 +886,7 @@ export class Tui {
         `  id=${this.station.config.chargePointId}`,
         `  url=${this.station.config.centralSystemUrl}`,
         "",
-        "{gray-fg}Esc or q closes this help.{/gray-fg}"
+        muted("Esc or q closes this help.")
       ].join("\n")
     );
 
@@ -873,9 +908,8 @@ export class Tui {
   private paletteEntryLine(entry: PaletteEntry): string {
     const tab = this.tabLabel(entry.tab).padEnd(11);
     const key = entry.action.key.padEnd(2);
-    const state = entry.action.disabled?.() ? "{gray-fg}" : "";
-    const endState = entry.action.disabled?.() ? "{/gray-fg}" : "";
-    return `${state}${tab} ${key} ${entry.action.label}${endState}`;
+    const line = `${tab} ${key} ${entry.action.label}`;
+    return entry.action.disabled?.() ? disabledLine(line) : line;
   }
 
   private paletteEntries(query: string): PaletteEntry[] {
@@ -1166,6 +1200,8 @@ export class Tui {
       tags: true,
       keys: true,
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         border: { fg: THEME.panelBorder }
       }
     });
@@ -1183,6 +1219,8 @@ export class Tui {
         keys: true,
         tags: true,
         style: {
+          fg: THEME.foreground,
+          bg: THEME.background,
           border: { fg: THEME.panelBorder }
         }
       })
@@ -1194,7 +1232,8 @@ export class Tui {
       right: 2,
       height: 1,
       tags: true,
-      content: "{gray-fg}Tab/Up/Down field  Left/Right cursor  C-u clear  Enter submit  Esc cancel{/gray-fg}"
+      style: { fg: THEME.foreground, bg: THEME.background },
+      content: muted("Tab/Up/Down field  Left/Right cursor  C-u clear  Enter submit  Esc cancel")
     });
 
     let focusedIndex = 0;
@@ -1209,7 +1248,7 @@ export class Tui {
       const value = values[index] ?? "";
       const cursor = clamp(cursors[index] ?? value.length, 0, value.length);
       input.setContent(renderFieldValue(value, cursor, width, focusedIndex === index));
-      input.style.border = { fg: focusedIndex === index ? "yellow" : THEME.panelBorder };
+      input.style.border = { fg: focusedIndex === index ? THEME.focusBorder : THEME.panelBorder };
     };
     const renderInputs = () => {
       inputBoxes.forEach((_input, index) => renderInput(index));
@@ -1347,6 +1386,8 @@ export class Tui {
       vi: true,
       items: choices.map((choice) => ` ${choice}`),
       style: {
+        fg: THEME.foreground,
+        bg: THEME.background,
         selected: { bg: THEME.selectedBg, fg: THEME.selectedFg },
         border: { fg: THEME.panelBorder }
       }
@@ -1436,12 +1477,12 @@ export class Tui {
       alwaysScroll: false,
       content: this.plainLogContent(),
       style: {
-        fg: "white",
-        bg: "black"
+        fg: THEME.foreground,
+        bg: THEME.background
       },
       scrollbar: {
         ch: " ",
-        style: { bg: "cyan" }
+        style: { bg: THEME.panelBorder }
       }
     });
     this.bindLogNavigationKeys(this.plainLogView);
@@ -1520,7 +1561,7 @@ export class Tui {
   private appendLogEntry(entry: LogEntry): void {
     this.logBox.log(this.formatLogEntryForTui(entry));
     if (entry.details) {
-      this.logBox.log(`  {gray-fg}${entry.details}{/gray-fg}`);
+      this.logBox.log(`  ${muted(entry.details)}`);
     }
   }
 
