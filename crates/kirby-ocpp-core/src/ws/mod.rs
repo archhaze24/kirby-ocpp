@@ -243,10 +243,33 @@ impl Connection {
         payload: Value,
         timeout: Option<Duration>,
     ) -> Result<Value, CallError> {
+        self.call_checked(action, payload, timeout, true).await
+    }
+
+    /// Like [`Connection::call`] but the request is sent **without** schema validation
+    /// (negative testing of a central system). The response is still validated.
+    pub async fn call_unvalidated(
+        &self,
+        action: &str,
+        payload: Value,
+        timeout: Option<Duration>,
+    ) -> Result<Value, CallError> {
+        self.call_checked(action, payload, timeout, false).await
+    }
+
+    async fn call_checked(
+        &self,
+        action: &str,
+        payload: Value,
+        timeout: Option<Duration>,
+        validate: bool,
+    ) -> Result<Value, CallError> {
         if !self.is_open() {
             return Err(CallError::NotConnected);
         }
-        schemas().validate_request(action, &payload)?;
+        if validate {
+            schemas().validate_request(action, &payload)?;
+        }
 
         let (reply, response) = oneshot::channel();
         let call = task::OutboundCall {

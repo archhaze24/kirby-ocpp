@@ -99,6 +99,10 @@ pub struct StationConfig {
     pub charge_point_id: String,
     pub vendor: String,
     pub model: String,
+    /// `chargePointSerialNumber` of `BootNotification` (<= 25 characters); omitted when `None`.
+    pub serial_number: Option<String>,
+    /// `firmwareVersion` of `BootNotification` (<= 50 characters); omitted when `None`.
+    pub firmware_version: Option<String>,
     /// TS: `connectorId`. The connector UIs select initially (not a special connector in the core).
     pub initial_connector: ConnectorId,
     /// TS: `connectorCount`. Raised to at least `initial_connector` by [`StationConfig::normalize`].
@@ -126,6 +130,8 @@ impl Default for StationConfig {
             charge_point_id: defaults::CHARGE_POINT_ID.to_owned(),
             vendor: defaults::VENDOR.to_owned(),
             model: defaults::MODEL.to_owned(),
+            serial_number: None,
+            firmware_version: None,
             initial_connector: ConnectorId::new(1),
             connector_count: 1,
             heartbeat_interval_secs: defaults::HEARTBEAT_INTERVAL_SECS,

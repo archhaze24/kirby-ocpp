@@ -21,6 +21,11 @@ pub enum CallError {
     /// No open connection when the CALL was submitted.
     #[error("not connected to the central system")]
     NotConnected,
+    /// The registration state forbids this message: only `BootNotification` may be sent
+    /// until the central system accepted it (CSMS-triggered messages are also allowed
+    /// while `Pending`). `state` is the registration status or `unregistered`.
+    #[error("{action} not sent: BootNotification is {state}")]
+    NotRegistered { action: String, state: String },
     /// The connection closed while the CALL was queued or in flight.
     #[error("connection closed (code {})", .code.map_or_else(|| "none".to_owned(), |c| c.to_string()))]
     Closed { code: Option<u16> },

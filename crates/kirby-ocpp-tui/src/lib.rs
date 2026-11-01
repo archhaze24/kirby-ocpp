@@ -56,7 +56,9 @@ mod tests {
 
     #[tokio::test]
     async fn placeholder_reports_which_station_it_was_given() {
-        let config = StationConfig::new("ws://localhost:9000/ocpp").with_charge_point_id("CP-TUI");
+        let config = StationConfig::new("ws://localhost:9000/ocpp")
+            .with_charge_point_id("CP-TUI")
+            .without_persistence();
         let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
         let err = run(handle.clone(), TuiOptions::default())
             .await

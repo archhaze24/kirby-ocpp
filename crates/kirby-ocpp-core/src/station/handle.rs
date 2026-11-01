@@ -56,7 +56,8 @@ impl StationHandle {
         &self.config
     }
 
-    /// Submits `command` and waits until it has completed.
+    /// Submits `command` and waits until it has completed (for CALL commands: until the CSMS
+    /// answered; for state commands: until the state changed, see [`Command`]).
     ///
     /// **Cancellation:** the command is queued before the future first yields, so dropping
     /// the future afterwards does **not** cancel the command; it still runs, its
