@@ -159,6 +159,9 @@ fn clearing_the_log_needs_confirmation() {
     press(&mut a, "c");
     code(&mut a, KeyCode::Esc);
     assert_eq!(a.log.len(), 1);
+    press(&mut a, "c");
+    code(&mut a, KeyCode::Enter);
+    assert_eq!(a.log.len(), 1, "Enter must not confirm a [y/N] prompt");
     press(&mut a, "cy");
     assert_eq!(a.log.len(), 0);
 }

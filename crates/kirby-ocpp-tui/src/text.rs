@@ -15,6 +15,18 @@ pub fn sanitize(s: &str) -> String {
         .collect()
 }
 
+/// Drops the `user:password@` part of a URL so credentials are never displayed or printed.
+pub fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return url.to_owned();
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    match rest[..end].rfind('@') {
+        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
+        None => url.to_owned(),
+    }
+}
+
 /// Cuts `s` to at most `max` cells, ending in `…` when something was dropped.
 pub fn truncate(s: &str, max: usize) -> String {
     if width(s) <= max {
@@ -204,5 +216,18 @@ mod tests {
         assert_eq!(truncate("abc", 3), "abc");
         assert_eq!(truncate("abcdef", 4), "abc…");
         assert_eq!(truncate("abc", 0), "");
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::redact_url;
+
+    #[test]
+    fn credentials_are_removed_from_urls() {
+        assert_eq!(redact_url("ws://u:p%40w@h:1/x?a=b@c"), "ws://h:1/x?a=b@c");
+        assert_eq!(redact_url("wss://tok@h/x"), "wss://h/x");
+        assert_eq!(redact_url("ws://h/x@y"), "ws://h/x@y");
+        assert_eq!(redact_url("garbage"), "garbage");
     }
 }

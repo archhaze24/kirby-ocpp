@@ -319,3 +319,18 @@ fn bundled_notices_match_the_repository_copy() {
         "update crates/kirby-ocpp/THIRD_PARTY_NOTICES.md"
     );
 }
+
+#[test]
+fn print_config_does_not_leak_url_credentials() {
+    let output = run(
+        &["--print-config", "--url", "ws://user:hunter2@h:9000/ocpp"],
+        &[],
+    );
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !text.contains("hunter2") && !text.contains("user:"),
+        "{text}"
+    );
+    assert!(text.contains("ws://h:9000/ocpp"), "{text}");
+}

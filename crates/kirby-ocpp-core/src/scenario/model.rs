@@ -14,6 +14,9 @@ use crate::ws::ConnectionState;
 /// Default timeout of `wait_for` and `expect_call`.
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 
+/// Longest accepted wait or sleep: one day.
+const MAX_WAIT_MS: u64 = 86_400_000;
+
 fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
@@ -309,6 +312,14 @@ impl Scenario {
                 | Action::ExpectCall { timeout_ms: 0, .. } => {
                     return bad("`timeout_ms` must be positive");
                 }
+                Action::WaitFor { timeout_ms: ms, .. }
+                | Action::ExpectCall { timeout_ms: ms, .. }
+                | Action::Sleep { ms }
+                    if *ms > MAX_WAIT_MS =>
+                {
+                    // Beyond this `Instant + Duration` could overflow and panic the runner.
+                    return bad("`timeout_ms` / `ms` must be at most 86400000 (one day)");
+                }
                 Action::SendRaw { call, .. } | Action::ExpectCall { call, .. }
                     if call.is_empty() =>
                 {
@@ -527,6 +538,13 @@ call = "Heartbeat"
             "{HEAD}[[steps]]\naction = \"wait_for\"\ncondition = {{ kind = \"connected\" }}\ntimeout_ms = 0\n"
         ));
         assert!(e.contains("timeout_ms"), "{e}");
+        for step in [
+            "action = \"sleep\"\nms = 9000000000000000000",
+            "action = \"expect_call\"\ncall = \"Heartbeat\"\ntimeout_ms = 9000000000000000000",
+        ] {
+            let e = err(&format!("{HEAD}[[steps]]\n{step}\n"));
+            assert!(e.contains("one day"), "{e}");
+        }
         let e = err(&format!(
             "{HEAD}[[steps]]\naction = \"authorize\"\nid_tag = \"{}\"\n",
             "x".repeat(40)

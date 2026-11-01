@@ -77,7 +77,11 @@ async fn shutdown_signal() {
 pub async fn run(handle: StationHandle, options: TuiOptions) -> Result<(), TuiError> {
     let mut guard = terminal::TerminalGuard::enter()?;
     let config = handle.config();
-    let mut app = App::new(handle.snapshot(), config.url.clone(), config.vendor.clone());
+    let mut app = App::new(
+        handle.snapshot(),
+        text::redact_url(&config.url),
+        config.vendor.clone(),
+    );
     if let Ok(size) = guard.terminal().size() {
         app.size = (size.width, size.height);
     }
@@ -216,13 +220,32 @@ async fn execute(
             let _ = msg_tx.send(Msg::Notice(notice.0, notice.1));
         }
         Effect::WriteFile { path, contents } => {
-            let notice = match tokio::fs::write(&path, contents).await {
+            let notice = match write_private(&path, contents).await {
                 Ok(()) => (NoticeLevel::Success, format!("log exported to {path}")),
                 Err(e) => (NoticeLevel::Error, format!("export to {path} failed: {e}")),
             };
             let _ = msg_tx.send(Msg::Notice(notice.0, notice.1));
         }
     }
+}
+
+/// Writes the export readable by the owner only: logs contain idTags and meter data.
+async fn write_private(path: &str, contents: String) -> std::io::Result<()> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path)?;
+        file.write_all(contents.as_bytes())
+    })
+    .await
+    .map_err(std::io::Error::other)?
 }
 
 fn spawn_scenario(

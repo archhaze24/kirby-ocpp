@@ -266,3 +266,15 @@ fn log_is_virtualised_and_follows_the_tail() {
     a.log.set_filter(crate::logview::LogFilter::Calls);
     assert!(!render(&a, 130, 20).contains("line-499"));
 }
+
+#[test]
+fn connector_status_and_detail_labels_are_not_cut_or_glued() {
+    for w in [110u16, 130] {
+        let mut a = app();
+        a.snapshot.connectors[0].status = kirby_ocpp_core::ocpp::types::ConnectorStatus::Available;
+        keys(&mut a, "3");
+        let t = render(&a, w, 30);
+        assert!(t.contains("Available"), "{w}\n{t}");
+        assert!(!t.contains("availabilityOperative"), "{t}");
+    }
+}
