@@ -22,7 +22,7 @@ use super::calls::{Origin, Reply};
 use super::command::Outcome;
 use super::commands::call_failure;
 use super::event::LogLevel;
-use super::metering::{SimulatedMeter, stop_transaction_data};
+use super::metering::stop_transaction_data;
 use super::offline::{OfflineTx, StopInfo};
 use super::transaction::{
     ActiveTransaction, PendingStart, StoppingTransaction, TransactionState, state_after_stop,
@@ -141,6 +141,7 @@ impl StationActor {
 
     /// `StopTransactionOnInvalidId`: stop (or cap the energy of) running transactions of `id_tag`.
     fn handle_invalid_id(&mut self, id_tag: &IdTag) {
+        self.flush_meters();
         if !self.registry.stop_transaction_on_invalid_id() {
             return;
         }
@@ -187,6 +188,7 @@ impl StationActor {
         reason = "one linear validate-then-act sequence"
     )]
     pub(super) fn start_transaction(&mut self, id: ConnectorId, id_tag: IdTag, done: Done) {
+        self.flush_meters();
         let now = self.clock.now_utc();
         let connector = match self.connector(id) {
             Ok(connector) => connector.clone(),
@@ -455,6 +457,7 @@ impl StationActor {
         id_tag: Option<IdTag>,
         done: Done,
     ) {
+        self.flush_meters();
         let connector = match self.connector(id) {
             Ok(connector) => connector.clone(),
             Err(error) => return done(self, Err(error)),
@@ -484,13 +487,9 @@ impl StationActor {
         let meter_wh = connector.meter_wh;
         let sampled = self.registry.measurands(STOP_TXN_SAMPLED_DATA);
         let aligned = self.registry.measurands(STOP_TXN_ALIGNED_DATA);
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "Wh counters stay far below 2^53"
-        )]
-        let mut meter = SimulatedMeter::with_energy_wh(meter_wh as f64);
+        let reading = self.meter_reading(id, false);
         let data: Vec<MeterValue> =
-            stop_transaction_data(&mut meter, now, connector.status, &sampled, &aligned);
+            stop_transaction_data(&self.power_model(), &reading, now, &sampled, &aligned);
         let stop_tag = id_tag.or_else(|| connector.last_id_tag.clone());
         let info = StopInfo {
             id_tag: stop_tag.clone(),

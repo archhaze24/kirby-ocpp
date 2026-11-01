@@ -91,6 +91,11 @@ pub struct StoredProfile {
     /// Transaction a TxProfile belongs to. Always `None` for the other purposes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_tx: Option<TxId>,
+    /// When the profile was installed (store format version 3). Absolute and recurring
+    /// profiles without `startSchedule` and `validFrom` count their schedule from it.
+    /// `None` for profiles restored from older files, see [`ChargingProfileStore::backfill_installed_at`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installed_at: Option<DateTime<Utc>>,
 }
 
 /// Persistable store of charging profiles.
@@ -150,8 +155,24 @@ impl ChargingProfileStore {
             connector_id: connector,
             profile,
             bound_tx,
+            installed_at: Some(ctx.now),
         });
         ChargingProfileStatus::Accepted
+    }
+
+    /// Gives profiles restored without an install time `now` as their install time
+    /// (files older than store version 3). Returns how many were changed.
+    pub fn backfill_installed_at(&mut self, now: DateTime<Utc>) -> usize {
+        let mut changed = 0;
+        for stored in self
+            .profiles
+            .iter_mut()
+            .filter(|s| s.installed_at.is_none())
+        {
+            stored.installed_at = Some(now);
+            changed += 1;
+        }
+        changed
     }
 
     /// `ClearChargingProfile`. An empty filter clears everything; the criteria are
@@ -353,6 +374,7 @@ pub(crate) mod test_util {
             connector_id: ConnectorId::new(connector),
             profile,
             bound_tx: Some(tx),
+            installed_at: None,
         }
     }
 
@@ -362,6 +384,7 @@ pub(crate) mod test_util {
             connector_id: ConnectorId::new(connector),
             profile,
             bound_tx: None,
+            installed_at: None,
         }
     }
 }
@@ -850,6 +873,59 @@ mod tests {
         );
         assert_eq!(store.prune_expired(at(3600)), 0);
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn set_records_the_install_time_and_it_survives_serde() {
+        let limits = limits();
+        let mut store = ChargingProfileStore::new();
+        store.set(
+            ConnectorId::new(1),
+            tx_default(1, 1, 8.0),
+            &ctx(&limits, None),
+        );
+        assert_eq!(store.profiles()[0].installed_at, Some(t0()));
+        let back: ChargingProfileStore =
+            serde_json::from_str(&serde_json::to_string(&store).unwrap()).unwrap();
+        assert_eq!(back.profiles()[0].installed_at, Some(t0()));
+    }
+
+    #[test]
+    fn profiles_from_older_files_get_the_restore_time() {
+        let limits = limits();
+        let mut store = ChargingProfileStore::new();
+        store.set(
+            ConnectorId::new(1),
+            tx_default(1, 1, 8.0),
+            &ctx(&limits, None),
+        );
+        // A store version 2 file has no `installed_at`.
+        let mut value = serde_json::to_value(&store).unwrap();
+        value["profiles"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("installed_at");
+        let mut old: ChargingProfileStore = serde_json::from_value(value).unwrap();
+        assert_eq!(old.profiles()[0].installed_at, None);
+        assert_eq!(old.backfill_installed_at(at(90)), 1);
+        assert_eq!(old.profiles()[0].installed_at, Some(at(90)));
+        assert_eq!(old.backfill_installed_at(at(120)), 0, "already set");
+    }
+
+    #[test]
+    fn replacing_a_profile_installs_it_anew() {
+        let limits = limits();
+        let mut store = ChargingProfileStore::new();
+        store.set(
+            ConnectorId::new(1),
+            tx_default(1, 1, 8.0),
+            &ctx(&limits, None),
+        );
+        let mut later = ctx(&limits, None);
+        later.now = at(60);
+        store.set(ConnectorId::new(1), tx_default(1, 1, 6.0), &later);
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.profiles()[0].installed_at, Some(at(60)));
     }
 
     #[test]

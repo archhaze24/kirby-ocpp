@@ -38,6 +38,7 @@ mod handle;
 mod handlers;
 mod link;
 mod persistence;
+mod power;
 mod reservations;
 mod sampling;
 mod snapshot;

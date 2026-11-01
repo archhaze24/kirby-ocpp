@@ -27,7 +27,7 @@ use crate::station::actor::StationActor;
 use crate::station::calls::Origin;
 use crate::station::config_registry::METER_VALUES_SAMPLED_DATA;
 use crate::station::event::LogLevel;
-use crate::station::metering::SimulatedMeter;
+use crate::station::metering::meter_value;
 
 pub(super) fn trigger_message(
     actor: &mut StationActor,
@@ -112,24 +112,20 @@ fn start(actor: &mut StationActor, message: MessageTrigger, connector: Option<Co
 
 /// One triggered `MeterValues` sample for `id` (0 = the whole station).
 fn send_meter_values(actor: &mut StationActor, id: ConnectorId) {
-    let (energy_wh, status, active_tx) = if id.is_station() {
-        let total: u64 = actor.state.connectors.iter().map(|c| c.meter_wh).sum();
-        (total, actor.state.charge_point.status, None)
+    let active_tx = if id.is_station() {
+        None
     } else {
         let Some(connector) = actor.find_connector(id) else {
             return;
         };
-        (connector.meter_wh, connector.status, connector.tx_id())
+        connector.tx_id()
     };
     let measurands = actor.registry.measurands(METER_VALUES_SAMPLED_DATA);
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "Wh counters stay far below 2^53"
-    )]
-    let mut meter = SimulatedMeter::with_energy_wh(energy_wh as f64);
-    let sample = meter.sample(
+    let reading = actor.meter_reading(id, false);
+    let sample = meter_value(
+        &actor.power_model(),
+        &reading,
         actor.clock.now_utc(),
-        status,
         &measurands,
         ReadingContext::Trigger,
     );

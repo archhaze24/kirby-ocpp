@@ -15,7 +15,7 @@ Validation: outgoing and incoming CALL and CALLRESULT payloads are validated aga
 | Local Auth List Management | full |
 | Reservation | full |
 | Remote Trigger | full (all six messages) |
-| Smart Charging | partial: profiles are validated, stored and reported; they do not throttle the simulated power |
+| Smart Charging | partial: profiles are validated, stored, reported and applied to the simulated power and energy (see below) |
 
 `SupportedFeatureProfiles` reports `Core,FirmwareManagement,LocalAuthListManagement,Reservation,RemoteTrigger,SmartCharging`.
 
@@ -29,7 +29,7 @@ Validation: outgoing and incoming CALL and CALLRESULT payloads are validated aga
 | DiagnosticsStatusNotification | simulated | Upload lifecycle with selectable outcome and bounded retries. |
 | FirmwareStatusNotification | simulated | Download/install lifecycle with selectable outcome and bounded retries. |
 | Heartbeat | full | |
-| MeterValues | full (simulated meter) | `MeterValuesSampledData`, `MeterValuesAlignedData`, `MeterValueSampleInterval`, `ClockAlignedDataInterval` honoured; values come from a simulated energy meter. |
+| MeterValues | full (simulated meter) | `MeterValuesSampledData`, `MeterValuesAlignedData`, `MeterValueSampleInterval`, `ClockAlignedDataInterval` honoured; values come from a simulated energy meter that follows the power model below. |
 | StartTransaction | full | Reservation consumption, idTagInfo statuses, `StopTransactionOnInvalidId`/`MaxEnergyOnInvalidId`. |
 | StatusNotification | full | Fault metadata, `MinimumStatusDuration`, duplicate suppression. |
 | StopTransaction | full | `StopTxnSampledData`/`StopTxnAlignedData` in `transactionData`, `StopTransactionOnEVSideDisconnect`. |
@@ -46,16 +46,16 @@ Transaction messages are queued and retried (`TransactionMessageAttempts`, `Tran
 | ClearCache | full | |
 | ClearChargingProfile | partial | Filters by id, connector, purpose, stack level. |
 | DataTransfer | full | Own vendor id echoed, other vendors `UnknownVendorId`. |
-| GetCompositeSchedule | partial | Purpose/stack precedence, validity windows, absolute/recurring/relative schedules, `ChargePointMaxProfile` limiting; edge cases with ambiguous tie policies are not exhaustive. |
+| GetCompositeSchedule | partial | Purpose/stack precedence, validity windows, absolute/recurring/relative schedules, `ChargePointMaxProfile` limiting; uncovered stretches show the station's nominal power; edge cases with ambiguous tie policies are not exhaustive. |
 | GetConfiguration | full | More keys than `GetConfigurationMaxKeys` is answered with CALLERROR `OccurenceConstraintViolation`. |
 | GetDiagnostics | simulated | Starts the status lifecycle; no file is uploaded. |
 | GetLocalListVersion | full | |
 | RemoteStartTransaction | full | Optional authorization (`AuthorizeRemoteTxRequests`), reservation rules, `TxProfile` without `transactionId` stored for the new transaction. |
 | RemoteStopTransaction | full | |
-| ReserveNow | full | Occupied/Unavailable/Faulted/Rejected; same reservationId on another connector moves the reservation. |
-| Reset | partial | Replies `Accepted`, stops transactions, releases reservations, re-registers; `ResetRetries`. No real restart; Soft and Hard behave the same apart from the stop reason. |
+| ReserveNow | full | Occupied/Unavailable/Faulted/Rejected; an existing reservationId is replaced, also when it is on another connector (the reservation moves; a refused move keeps the original). |
+| Reset | partial | Replies `Accepted`, stops transactions (reason `SoftReset`/`HardReset`), releases reservations, re-registers; `ResetRetries`. Soft reboots on the same WebSocket; Hard closes it and reconnects (also with auto-reconnect off), then boots. No real restart. |
 | SendLocalList | full | Full and differential updates, version rules, `NotSupported` when disabled, `Failed` over `SendLocalListMaxLength`. |
-| SetChargingProfile | partial | Stored and validated against `ChargeProfileMaxStackLevel`, `ChargingScheduleMaxPeriods`, `MaxChargingProfilesInstalled`, allowed rate unit; not applied to simulated power. |
+| SetChargingProfile | partial | Stored and validated against `ChargeProfileMaxStackLevel`, `ChargingScheduleMaxPeriods`, `MaxChargingProfilesInstalled`, allowed rate unit; limits the simulated power. |
 | TriggerMessage | full | BootNotification, DiagnosticsStatusNotification, FirmwareStatusNotification, Heartbeat, MeterValues, StatusNotification; connector-specific where applicable. |
 | UnlockConnector | partial | Stops a running transaction with `UnlockCommand`; no hardware. |
 | UpdateFirmware | simulated | Download/install lifecycle only. |
@@ -71,8 +71,17 @@ Capability and limit keys (for example `NumberOfConnectors`, the `*MaxLength` ke
 - No Security Whitepaper extensions, no OCPP 2.x, no JSON-over-SOAP; one WebSocket connection, subprotocol `ocpp1.6` by default.
 - Meter, power, SoC and temperature values are simulated.
 - Diagnostics and firmware flows emit the right status sequences but transfer nothing.
-- Smart charging does not influence the simulated power.
+- The simulated meter is deterministic: temperature and SoC are decorative functions of the energy.
 
 ## Intentional differences from the earlier TypeScript version
 
 Strict boolean parsing and CLI > env > default precedence; `GetConfiguration` key limit; `TriggerMessage` reports the real diagnostics/firmware status and honours the registration gate; maintenance timers are cancelled on disconnect; `ChangeAvailability` on connector 0 also changes all connectors; the reply to a CSMS command is sent before follow-up messages; atomic, versioned state files (directory fsynced, long ids get a hashed file name, a `Scheduled` `ChangeAvailability` survives a restart) with `.bak` recovery; `LocalAuthorizeOffline` and `AllowOfflineTxForUnknownId` default to `true` (TS and the spec leave the default to the implementation; TS used `false`, which made the built-in `offline-sync` scenario fail on a stock station). Both stay writable via `ChangeConfiguration`.
+
+### Power model and smart charging (differences from TS, spec behaviour wins)
+
+- **Power and energy.** A `Charging` connector draws `min(nominal power, charging limit)`; energy is the integral of that power over monotonic elapsed time, integrated piecewise across schedule period boundaries and re-evaluated when profiles, status or transactions change. Nominal power, voltage and phases are configurable (`--nominal-power-w` 7200, `--voltage-v` 230, `--phases` 1; single phase 7.2 kW is about 31.3 A). TS added a fixed `2 * interval` Wh per tick and reported unrelated power values.
+- **Readings** come from the same numbers: `Power.Active.Import` is the power, `Current.Import` is power / (voltage x phases), `Voltage` is the configured voltage, `Power.Offered` / `Current.Offered` are the limit in force (also when idle), `Energy.Active.Import.Interval` is the energy since the previous sample. The `MeterValues` command still adds its `wh_delta` to the register.
+- **Limit resolution.** Profiles in `A` are converted to watts (`A x voltage x numberPhases`, `numberPhases` defaulting to and capped by the station's phases) before they are compared, so `A` and `W` profiles combine. Precedence per instant: the bound `TxProfile`, else the highest stack level of `TxDefaultProfile` (connector's own wins a tie with connector 0), then the minimum with `ChargePointMaxProfile`. The `ChargePointMaxProfile` limits the whole station, so it is split equally between the connectors that are charging; `GetCompositeSchedule` still reports it per connector.
+- **Gaps (composite schedule).** A profile limits only the instants it covers. Where no profile covers an instant there is no limit, so the composite schedule always spans the requested window, starts at the requested time, and shows the station's nominal power (in the requested unit) for uncovered stretches. `Rejected` only if no profile of the requested unit covers any instant of the window. The earlier port shifted `scheduleStart` after a leading gap and ended the schedule at a later gap.
+- **Absolute and recurring profiles without `startSchedule` and `validFrom`** count their schedule from the moment they were installed (state file version 3 stores `installed_at`; profiles restored from older files count from the restore time). TS anchored them at the composite request time.
+- **Reset.** A Hard reset waits briefly for in-flight CALLs (the `StopTransaction`s), closes the WebSocket and reconnects at once, then boots again; a Soft reset reboots on the same connection (TS rebooted on the same connection for both).

@@ -208,6 +208,84 @@ async fn reset_stops_transactions_and_boots_again() {
     let c = conn(&rig, C1);
     assert!(c.transaction.is_idle() && !c.ev_connected);
     assert_eq!(c.status, ConnectorStatus::Available);
+    // A soft reset reboots on the same connection.
+    assert_eq!(rig.csms.connections(), 1);
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn hard_reset_delivers_the_stop_then_reconnects_and_boots() {
+    let rig = booted().await;
+    rig.begin(1, "TAG1").await;
+    let mark = rig.csms.mark();
+    rig.csms
+        .expect_status("Reset", json!({"type": "Hard"}), "Accepted")
+        .await
+        .unwrap();
+    rig.csms
+        .wait_for_connection_count(2, STEP * 3)
+        .await
+        .unwrap();
+    // The first connection was closed, and only after the stop had been delivered on it.
+    assert!(!rig.csms.connection_log()[0].open);
+    let stops = rig.calls("StopTransaction", mark);
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(stops[0]["reason"], "HardReset");
+    assert_eq!(rig.calls("BootNotification", mark).len(), 0);
+
+    rig.csms
+        .wait_for_call_after(mark, "BootNotification", |_| true, STEP)
+        .await
+        .unwrap();
+    rig.wait_registration(RegistrationStatus::Accepted).await;
+    assert_eq!(rig.csms.connections(), 2);
+    assert!(conn(&rig, C1).transaction.is_idle());
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn hard_reset_reconnects_even_when_automatic_reconnect_is_off() {
+    let mut rig = Rig::with(kirby_ocpp_testkit::CsmsOptions::default(), |mut config| {
+        config.reconnect.enabled = false;
+        config
+    })
+    .await;
+    rig.connect_booted().await;
+    rig.csms
+        .expect_status("Reset", json!({"type": "Hard"}), "Accepted")
+        .await
+        .unwrap();
+    rig.csms
+        .wait_for_connection_count(2, STEP * 3)
+        .await
+        .unwrap();
+    rig.wait_registration(RegistrationStatus::Accepted).await;
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn hard_reset_keeps_the_boot_retries_across_the_new_connection() {
+    let rig = booted().await;
+    rig.cfg("ResetRetries", "2").await;
+    let boots = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&boots);
+    rig.csms.respond("BootNotification", move |_| {
+        let status = if counter.fetch_add(1, Ordering::SeqCst) < 2 {
+            "Pending"
+        } else {
+            "Accepted"
+        };
+        Reply::Result(
+            json!({"status": status, "currentTime": "2026-03-01T12:00:00Z", "interval": 30}),
+        )
+    });
+    rig.csms
+        .expect_status("Reset", json!({"type": "Hard"}), "Accepted")
+        .await
+        .unwrap();
+    rig.wait_registration(RegistrationStatus::Accepted).await;
+    assert_eq!(boots.load(Ordering::SeqCst), 3);
+    assert_eq!(rig.csms.connections(), 2);
     rig.shutdown().await;
 }
 
@@ -264,6 +342,42 @@ async fn reset_repeats_the_boot_up_to_reset_retries_times() {
     // Pending twice at 500 ms spacing (not the 30 s the CSMS asked for), then Accepted.
     rig.wait_registration(RegistrationStatus::Accepted).await;
     assert_eq!(boots.load(Ordering::SeqCst), 3);
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_absolute_profile_without_a_start_counts_from_its_install_time() {
+    let rig = booted().await;
+    rig.csms
+        .expect_status(
+            "SetChargingProfile",
+            json!({"connectorId": 1, "csChargingProfiles": {
+                "chargingProfileId": 5, "stackLevel": 0,
+                "chargingProfilePurpose": "TxDefaultProfile", "chargingProfileKind": "Absolute",
+                "chargingSchedule": {"chargingRateUnit": "A", "chargingSchedulePeriod": [
+                    {"startPeriod": 0, "limit": 16}, {"startPeriod": 30, "limit": 8}]}
+            }}),
+            "Accepted",
+        )
+        .await
+        .unwrap();
+    // 20 s after the install the schedule is 10 s away from its second period.
+    rig.clock.advance(Delta::seconds(20));
+    let result = rig
+        .csms_call(
+            "GetCompositeSchedule",
+            json!({"connectorId": 1, "duration": 60}),
+        )
+        .await;
+    assert_eq!(result["status"], "Accepted", "{result}");
+    let periods = &result["chargingSchedule"]["chargingSchedulePeriod"];
+    assert_eq!(
+        periods,
+        &json!([
+            {"startPeriod": 0, "limit": 16.0},
+            {"startPeriod": 10, "limit": 8.0}
+        ])
+    );
     rig.shutdown().await;
 }
 
@@ -363,6 +477,37 @@ async fn cancel_and_move_a_reservation() {
         .expect_status("CancelReservation", json!({"reservationId": 7}), "Rejected")
         .await
         .unwrap();
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failed_move_keeps_the_original_reservation() {
+    let rig = booted().await;
+    rig.csms
+        .expect_status(
+            "ReserveNow",
+            reserve(7, 1, "RES", Delta::hours(1)),
+            "Accepted",
+        )
+        .await
+        .unwrap();
+    // Connector 2 is busy: moving reservation 7 there is refused as a whole.
+    rig.send(Command::StartTransaction {
+        connector: C2,
+        id_tag: tag("TAG1"),
+    })
+    .await;
+    rig.csms
+        .expect_status(
+            "ReserveNow",
+            reserve(7, 2, "RES", Delta::hours(1)),
+            "Occupied",
+        )
+        .await
+        .unwrap();
+    assert!(conn(&rig, C1).reservation.is_some());
+    assert_eq!(conn(&rig, C1).status, ConnectorStatus::Reserved);
+    assert!(conn(&rig, C2).reservation.is_none());
     rig.shutdown().await;
 }
 

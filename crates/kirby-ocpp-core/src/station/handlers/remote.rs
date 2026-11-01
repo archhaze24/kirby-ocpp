@@ -9,8 +9,12 @@
 //!
 //! Reset: reply `Accepted` first, then (see `StationActor::perform_reset`) running transactions
 //! are stopped through the guarded stop path (a failure there is logged, it cannot abort the
-//! reset), reservations are released, the registration is dropped and `BootNotification` is
-//! sent again after 500 ms, repeated up to `ResetRetries` times while not `Accepted`.
+//! reset), reservations are released and the registration is dropped. A **soft** reset sends
+//! `BootNotification` again after 500 ms on the same connection. A **hard** reset waits
+//! (briefly) until the CALLs in flight, such as the `StopTransaction`s, have been answered,
+//! then closes the WebSocket and reconnects at once through the normal lifecycle (also with
+//! automatic reconnect disabled); the boot follows on the new connection. Either way the
+//! boot is repeated up to `ResetRetries` times while it is not `Accepted`.
 
 use std::time::Duration;
 
@@ -142,6 +146,13 @@ pub(super) fn reset(actor: &mut StationActor, responder: Responder<Reset>, reque
     actor.perform_reset(request.kind);
 }
 
+/// Pause before a hard reset looks at the CALLs in flight: lets the `Accepted` reply and the
+/// stop messages reach the wire first.
+const HARD_RESET_FIRST_CHECK: Duration = Duration::from_millis(100);
+const HARD_RESET_POLL: Duration = Duration::from_millis(50);
+/// Longest a hard reset waits for answers before it reconnects anyway.
+const HARD_RESET_WAIT: Duration = Duration::from_secs(5);
+
 impl StationActor {
     fn perform_reset(&mut self, kind: ResetType) {
         let reason = match kind {
@@ -198,9 +209,38 @@ impl StationActor {
         self.state.registration = None;
         self.reset_retries = Some(self.registry.reset_retries());
         if self.link.conn.is_some() {
-            self.timers
-                .set(TimerKey::BootRetry, Duration::from_millis(500));
+            match kind {
+                ResetType::Soft => self
+                    .timers
+                    .set(TimerKey::BootRetry, Duration::from_millis(500)),
+                ResetType::Hard => {
+                    self.hard_reset_deadline = Some(tokio::time::Instant::now() + HARD_RESET_WAIT);
+                    self.timers.set(TimerKey::HardReset, HARD_RESET_FIRST_CHECK);
+                }
+            }
         }
         self.flush_now();
+    }
+
+    /// Reconnects once the CALLs in flight are done, or the wait ran out.
+    pub(in crate::station) fn on_hard_reset_timer(&mut self) {
+        let Some(deadline) = self.hard_reset_deadline else {
+            return;
+        };
+        if self.link.conn.is_none() {
+            // The link went away by itself; the normal lifecycle takes over.
+            self.hard_reset_deadline = None;
+            return;
+        }
+        if !self.calls.is_empty() && tokio::time::Instant::now() < deadline {
+            self.timers.set(TimerKey::HardReset, HARD_RESET_POLL);
+            return;
+        }
+        self.hard_reset_deadline = None;
+        self.log(
+            LogLevel::Info,
+            "hard reset: reconnecting to the CSMS".to_owned(),
+        );
+        self.reconnect_for_hard_reset();
     }
 }

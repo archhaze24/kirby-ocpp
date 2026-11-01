@@ -26,6 +26,10 @@ pub mod defaults {
     pub const RECONNECT_INITIAL_MS: u64 = 1_000;
     pub const RECONNECT_MAX_MS: u64 = 30_000;
     pub const CALL_TIMEOUT_MS: u64 = 30_000;
+    /// Nominal charging power of one connector (7.2 kW = 230 V x 31.3 A, single phase).
+    pub const NOMINAL_POWER_W: u32 = 7_200;
+    pub const VOLTAGE_V: u32 = 230;
+    pub const PHASES: u8 = 1;
 }
 
 /// Automatic reconnect policy after an unexpected disconnect.
@@ -121,6 +125,12 @@ pub struct StationConfig {
     pub persist: bool,
     /// TS: `stateDirectory`. `None` = the per-user default, see [`StationConfig::state_dir_or_default`].
     pub state_dir: Option<PathBuf>,
+    /// Nominal charging power of each connector in watts: the simulated power never exceeds it.
+    pub nominal_power_w: u32,
+    /// Supply voltage per phase in volts (used for A <-> W conversion and the `Voltage` reading).
+    pub voltage_v: u32,
+    /// Number of phases the station charges with (1..=3).
+    pub phases: u8,
 }
 
 impl Default for StationConfig {
@@ -142,6 +152,9 @@ impl Default for StationConfig {
             tls: TlsConfig::default(),
             persist: true,
             state_dir: None,
+            nominal_power_w: defaults::NOMINAL_POWER_W,
+            voltage_v: defaults::VOLTAGE_V,
+            phases: defaults::PHASES,
         }
     }
 }
@@ -162,6 +175,8 @@ pub enum ConfigError {
          busy loop; use a delay of at least 1 ms, limit the attempts or disable reconnect"
     )]
     ReconnectBusyLoop,
+    #[error("phases must be 1, 2 or 3")]
+    InvalidPhases,
 }
 
 impl StationConfig {
@@ -264,10 +279,15 @@ impl StationConfig {
                 u64::from(self.heartbeat_interval_secs),
             ),
             ("call_timeout_ms", self.call_timeout_ms),
+            ("nominal_power_w", u64::from(self.nominal_power_w)),
+            ("voltage_v", u64::from(self.voltage_v)),
         ] {
             if value == 0 {
                 return Err(ConfigError::NotPositive { field });
             }
+        }
+        if !(1..=3).contains(&self.phases) {
+            return Err(ConfigError::InvalidPhases);
         }
         if self.tls.cert_file.is_some() != self.tls.key_file.is_some() {
             return Err(ConfigError::TlsCertKeyMismatch);
@@ -385,6 +405,30 @@ mod tests {
         assert_eq!(with(true, 0, 30_000, 5), Ok(()));
         assert_eq!(with(true, 1, 30_000, 0), Ok(()));
         assert_eq!(with(false, 0, 0, 0), Ok(()));
+    }
+
+    #[test]
+    fn power_model_defaults_and_validation() {
+        let c = valid();
+        assert_eq!((c.nominal_power_w, c.voltage_v, c.phases), (7200, 230, 1));
+        let with = |f: fn(&mut StationConfig)| {
+            let mut c = valid();
+            f(&mut c);
+            c.validate()
+        };
+        assert_eq!(with(|c| c.phases = 3), Ok(()));
+        assert_eq!(with(|c| c.phases = 0), Err(ConfigError::InvalidPhases));
+        assert_eq!(with(|c| c.phases = 4), Err(ConfigError::InvalidPhases));
+        assert_eq!(
+            with(|c| c.nominal_power_w = 0),
+            Err(ConfigError::NotPositive {
+                field: "nominal_power_w"
+            })
+        );
+        assert_eq!(
+            with(|c| c.voltage_v = 0),
+            Err(ConfigError::NotPositive { field: "voltage_v" })
+        );
     }
 
     #[test]

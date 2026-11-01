@@ -2,10 +2,10 @@
 //!
 //! TS reference: `meter-value-scheduler.ts`, `sendMeterValues` in `src/station.ts`.
 //!
-//! * `ConnectorSnapshot::meter_wh` is the energy source. A periodic tick adds
-//!   `periodic_meter_delta_wh(interval)` once (TS parity); clock-aligned samples add nothing,
-//!   which removes the TS double count. The sample itself is built by a transient
-//!   `SimulatedMeter` at that energy.
+//! * `ConnectorSnapshot::meter_wh` is the energy register. It follows the power model
+//!   (`power.rs`: energy is the integral of the charging power); sampling only flushes the
+//!   integrated energy and reads the numbers, so periodic and clock-aligned samples cannot
+//!   double count. The `MeterValues` command additionally adds its `wh_delta` to the register.
 //! * Periodic timers run per connector with a `Charging` transaction, **also while offline**:
 //!   the meter keeps advancing, samples are dropped (nothing is queued). A transaction that
 //!   is still local (`PendingStart`) is not sampled either (it has no CSMS id yet).
@@ -24,7 +24,7 @@ use super::calls::{Origin, Reply};
 use super::command::Outcome;
 use super::commands::call_failure;
 use super::event::LogLevel;
-use super::metering::{SimulatedMeter, clock_aligned_delay, periodic_meter_delta_wh};
+use super::metering::{clock_aligned_delay, meter_value};
 use crate::error::StationError;
 use crate::ids::ConnectorId;
 use crate::ocpp::messages::{MeterValues, MeterValuesRequest};
@@ -86,13 +86,7 @@ impl StationActor {
             Duration::from_secs(u64::from(interval)),
         );
         let measurands = self.registry.measurands(METER_VALUES_SAMPLED_DATA);
-        self.sample_meter(
-            id,
-            ReadingContext::SamplePeriodic,
-            periodic_meter_delta_wh(interval),
-            &measurands,
-            None,
-        );
+        self.sample_meter(id, ReadingContext::SamplePeriodic, 0, &measurands, None);
     }
 
     pub(super) fn on_meter_aligned(&mut self) {
@@ -119,7 +113,8 @@ impl StationActor {
         reply: Option<Reply>,
     ) {
         let now = self.clock.now_utc();
-        let (energy_wh, status, tx) = {
+        self.flush_meters();
+        let tx = {
             let Some(connector) = self.find_connector_mut(id) else {
                 if let Some(reply) = reply {
                     let _ = reply.send(Err(StationError::UnknownConnector(id)));
@@ -127,7 +122,7 @@ impl StationActor {
                 return;
             };
             connector.meter_wh = connector.meter_wh.saturating_add(delta_wh);
-            (connector.meter_wh, connector.status, connector.tx_id())
+            connector.tx_id()
         };
         if delta_wh > 0 {
             self.mark_dirty();
@@ -144,12 +139,8 @@ impl StationActor {
             self.check_energy_limit(id);
             return;
         }
-        #[allow(
-            clippy::cast_precision_loss,
-            reason = "Wh counters stay far below 2^53"
-        )]
-        let mut meter = SimulatedMeter::with_energy_wh(energy_wh as f64);
-        let sample = meter.sample(now, status, measurands, context);
+        let reading = self.meter_reading(id, true);
+        let sample = meter_value(&self.power_model(), &reading, now, measurands, context);
         let request = MeterValuesRequest {
             connector_id: id,
             transaction_id: tx.and_then(crate::ids::TxId::wire),

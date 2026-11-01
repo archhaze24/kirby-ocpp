@@ -34,23 +34,30 @@
 //! not override a TxDefaultProfile. The smoke assertions hold under the spec
 //! rule as well; the difference is pinned by a unit test.
 //!
-//! # Gaps
+//! # Gaps and anchors
 //!
-//! An OCPP schedule cannot express "no limit". Therefore:
+//! A profile only limits the instants it covers (inside its validity window, after its
+//! start, inside its `duration`, per recurrence cycle). Where no profile covers an instant
+//! there is no limit: the station is bound only by its own maximum. A schedule period
+//! cannot say "no limit", so the composite schedule always spans the whole requested
+//! window, starts at the requested time, and shows the station's nominal power (converted
+//! to the requested unit) for the uncovered stretches. The request is answered with
+//! `Rejected` only if no profile of the requested unit covers any instant of the window.
 //!
-//! * a leading gap moves the schedule start to the first covered instant and
-//!   shrinks the schedule duration accordingly;
-//! * a gap after the covered run ends the schedule at the gap (`duration`
-//!   stops before it);
-//! * a covered run after a later gap is dropped.
+//! The schedule of an `Absolute` or `Recurring` profile counts from `startSchedule`, else
+//! `validFrom`, else the moment the profile was installed. A `Relative` profile counts from
+//! the start of the transaction (the composite request time if there is none).
 //!
-//! This is a decision of this port (no TS equivalent, TS silently dropped gap
-//! windows and let the previous period extend over them). See the report.
+//! # Power
+//!
+//! [`limit_w_at`] and [`energy_wh`] apply the same precedence to the profiles of both units
+//! after converting amperes to watts ([`PowerModel`]); the simulated meter uses them.
 
 use chrono::{DateTime, TimeDelta, Utc};
 use thiserror::Error;
 
 use super::charging_profiles::StoredProfile;
+use super::metering::PowerModel;
 use crate::ids::{ConnectorId, TxId};
 use crate::ocpp::messages::{ChargingProfile, ChargingSchedule, ChargingSchedulePeriod};
 use crate::ocpp::types::{
@@ -137,21 +144,24 @@ fn recurrence_period_ms(profile: &ChargingProfile) -> Option<i64> {
 
 /// The instant that elapsed time of a profile's schedule is counted from.
 ///
-/// * `Absolute` and `Recurring`: `startSchedule`, else `validFrom`, else `default_start`.
-/// * `Relative`: the transaction start when known, else `default_start`
-///   (the composite schedule start). `startSchedule` is ignored, as in TS.
+/// * `Absolute` and `Recurring`: `startSchedule`, else `validFrom`, else `installed_at`
+///   (the moment the profile was installed), else `fallback_start`.
+/// * `Relative`: the transaction start when known, else `fallback_start`
+///   (`startSchedule` is ignored, as in TS).
 pub fn schedule_base(
     profile: &ChargingProfile,
     relative_start: Option<DateTime<Utc>>,
-    default_start: DateTime<Utc>,
+    installed_at: Option<DateTime<Utc>>,
+    fallback_start: DateTime<Utc>,
 ) -> DateTime<Utc> {
     match profile.charging_profile_kind {
-        ChargingProfileKindType::Relative => relative_start.unwrap_or(default_start),
+        ChargingProfileKindType::Relative => relative_start.unwrap_or(fallback_start),
         ChargingProfileKindType::Absolute | ChargingProfileKindType::Recurring => profile
             .charging_schedule
             .start_schedule
             .or(profile.valid_from)
-            .unwrap_or(default_start),
+            .or(installed_at)
+            .unwrap_or(fallback_start),
     }
 }
 
@@ -261,6 +271,8 @@ pub struct CompositeRequest {
     pub active_tx: Option<TxId>,
     /// Start of `active_tx`: the base of `Relative` profiles.
     pub tx_started_at: Option<DateTime<Utc>>,
+    /// The station's electrical parameters: its nominal power fills stretches no profile covers.
+    pub model: PowerModel,
 }
 
 /// A composite schedule as returned by `GetCompositeSchedule.conf`.
@@ -297,6 +309,8 @@ struct Resolved {
 struct Candidate<'a> {
     entry: &'a StoredProfile,
     period: &'a ChargingSchedulePeriod,
+    /// The period's limit in the comparison unit.
+    limit: f64,
     /// Ranking inside its purpose: stack level, then "connector-specific" as the tie break.
     rank: (i32, bool),
 }
@@ -330,7 +344,7 @@ pub fn composite_schedule(
         .map(|entry| {
             (
                 entry,
-                schedule_base(&entry.profile, req.tx_started_at, start),
+                schedule_base(&entry.profile, req.tx_started_at, entry.installed_at, start),
             )
         })
         .collect();
@@ -357,47 +371,50 @@ pub fn composite_schedule(
         .into_iter()
         .map(|offset| {
             let at = start + TimeDelta::seconds(offset);
-            (offset, resolve_at(&usable, req, at))
+            (
+                offset,
+                resolve_at(&usable, req.connector, req.active_tx, at, &|_, p| p.limit),
+            )
         })
         .collect();
-
-    // The first covered run; leading gaps are skipped, a later gap ends the run.
-    let Some(first) = points.iter().position(|(_, resolved)| resolved.is_some()) else {
+    if points.iter().all(|(_, resolved)| resolved.is_none()) {
         return Err(CompositeError::NoSchedule);
-    };
-    let run_end = points[first..]
-        .iter()
-        .position(|(_, resolved)| resolved.is_none())
-        .map(|index| first + index);
-    let base_offset = points[first].0;
-    let end_offset = run_end.map_or(i64::from(req.duration_s), |index| points[index].0);
+    }
 
+    // Stretches no profile covers are limited by the station only.
+    let station_limit = match unit {
+        ChargingRateUnitType::W => req.model.nominal_w,
+        ChargingRateUnitType::A => round_tenth(req.model.watts_to_amps(req.model.nominal_w)),
+    };
     let mut periods: Vec<ChargingSchedulePeriod> = Vec::new();
     let mut min_charging_rate: Option<f64> = None;
-    for (offset, resolved) in &points[first..run_end.unwrap_or(points.len())] {
-        let Some(resolved) = resolved else { continue };
-        min_charging_rate = max_option(min_charging_rate, resolved.min_charging_rate);
+    for (offset, resolved) in &points {
+        let (limit, number_phases) = match resolved {
+            Some(resolved) => {
+                min_charging_rate = max_option(min_charging_rate, resolved.min_charging_rate);
+                (resolved.limit, resolved.number_phases)
+            }
+            None => (station_limit, None),
+        };
         if let Some(last) = periods.last()
-            && last.limit.to_bits() == resolved.limit.to_bits()
-            && last.number_phases == resolved.number_phases
+            && last.limit.to_bits() == limit.to_bits()
+            && last.number_phases == number_phases
         {
             continue;
         }
         periods.push(ChargingSchedulePeriod {
-            start_period: i32::try_from(*offset - base_offset).unwrap_or(i32::MAX),
-            limit: resolved.limit,
-            number_phases: resolved.number_phases,
+            start_period: i32::try_from(*offset).unwrap_or(i32::MAX),
+            limit,
+            number_phases,
         });
     }
 
-    let schedule_start = start + TimeDelta::seconds(base_offset);
-    let duration = i32::try_from(end_offset - base_offset).unwrap_or(i32::MAX);
     Ok(CompositeSchedule {
         connector_id: req.connector,
-        schedule_start,
+        schedule_start: start,
         charging_schedule: ChargingSchedule {
-            duration: Some(duration),
-            start_schedule: Some(schedule_start),
+            duration: Some(req.duration_s),
+            start_schedule: Some(start),
             charging_rate_unit: unit,
             charging_schedule_period: periods,
             min_charging_rate,
@@ -405,10 +422,19 @@ pub fn composite_schedule(
     })
 }
 
+fn round_tenth(value: f64) -> f64 {
+    (value * 10.0).round() / 10.0
+}
+
+/// The limit of `period` of `entry` in the unit the caller compares in.
+type LimitOf<'a> = dyn Fn(&StoredProfile, &ChargingSchedulePeriod) -> f64 + 'a;
+
 fn resolve_at(
     usable: &[(&StoredProfile, DateTime<Utc>)],
-    req: &CompositeRequest,
+    connector: ConnectorId,
+    active_tx: Option<TxId>,
     at: DateTime<Utc>,
+    limit_of: &LimitOf<'_>,
 ) -> Option<Resolved> {
     let mut tx_best: Option<Candidate<'_>> = None;
     let mut default_best: Option<Candidate<'_>> = None;
@@ -421,15 +447,13 @@ fn resolve_at(
         let candidate = Candidate {
             entry,
             period,
-            rank: (
-                entry.profile.stack_level,
-                entry.connector_id == req.connector,
-            ),
+            limit: limit_of(entry, period),
+            rank: (entry.profile.stack_level, entry.connector_id == connector),
         };
         match entry.profile.charging_profile_purpose {
             ChargingProfilePurposeType::TxProfile => {
-                let bound = req.active_tx.is_some() && entry.bound_tx == req.active_tx;
-                if entry.connector_id == req.connector && bound {
+                let bound = active_tx.is_some() && entry.bound_tx == active_tx;
+                if entry.connector_id == connector && bound {
                     tx_best = Some(keep_higher(tx_best, candidate));
                 }
             }
@@ -457,12 +481,12 @@ fn resolve_at(
 
     let (limit, number_phases) = match (selected, cap_best) {
         (None, None) => return None,
-        (Some(only), None) | (None, Some(only)) => (only.period.limit, only.period.number_phases),
-        (Some(profile), Some(cap)) => match profile.period.limit.partial_cmp(&cap.period.limit) {
-            Some(std::cmp::Ordering::Less) => (profile.period.limit, profile.period.number_phases),
-            Some(std::cmp::Ordering::Greater) => (cap.period.limit, cap.period.number_phases),
+        (Some(only), None) | (None, Some(only)) => (only.limit, only.period.number_phases),
+        (Some(profile), Some(cap)) => match profile.limit.partial_cmp(&cap.limit) {
+            Some(std::cmp::Ordering::Less) => (profile.limit, profile.period.number_phases),
+            Some(std::cmp::Ordering::Greater) => (cap.limit, cap.period.number_phases),
             _ => (
-                profile.period.limit,
+                profile.limit,
                 min_option(profile.period.number_phases, cap.period.number_phases),
             ),
         },
@@ -523,6 +547,102 @@ fn default_unit(
         })
 }
 
+/// What the power of one connector is evaluated for.
+#[derive(Debug, Clone, Copy)]
+pub struct PowerRequest {
+    pub connector: ConnectorId,
+    /// Transaction active on `connector`, if any.
+    pub active_tx: Option<TxId>,
+    /// Start of `active_tx`: the base of `Relative` profiles.
+    pub tx_started_at: Option<DateTime<Utc>>,
+    pub model: PowerModel,
+    /// Connectors drawing power right now (at least 1). A `ChargePointMaxProfile` limits the
+    /// whole station, so each of them gets an equal share of it.
+    pub charging_connectors: u32,
+}
+
+/// Every profile that can affect the connector, with its schedule base.
+fn power_profiles<'a>(
+    entries: &'a [StoredProfile],
+    req: &PowerRequest,
+    fallback_start: DateTime<Utc>,
+) -> Vec<(&'a StoredProfile, DateTime<Utc>)> {
+    entries
+        .iter()
+        .filter(|entry| entry.connector_id == req.connector || entry.connector_id.is_station())
+        .map(|entry| {
+            (
+                entry,
+                schedule_base(
+                    &entry.profile,
+                    req.tx_started_at,
+                    entry.installed_at,
+                    fallback_start,
+                ),
+            )
+        })
+        .collect()
+}
+
+fn limit_w_resolved(
+    usable: &[(&StoredProfile, DateTime<Utc>)],
+    req: &PowerRequest,
+    at: DateTime<Utc>,
+) -> Option<f64> {
+    let share = f64::from(req.charging_connectors.max(1));
+    let limit_of = |entry: &StoredProfile, period: &ChargingSchedulePeriod| {
+        let watts = match entry.profile.charging_schedule.charging_rate_unit {
+            ChargingRateUnitType::W => period.limit,
+            ChargingRateUnitType::A => req.model.amps_to_watts(period.limit, period.number_phases),
+        };
+        if entry.profile.charging_profile_purpose
+            == ChargingProfilePurposeType::ChargePointMaxProfile
+        {
+            watts / share
+        } else {
+            watts
+        }
+    };
+    resolve_at(usable, req.connector, req.active_tx, at, &limit_of).map(|r| r.limit)
+}
+
+/// The charging limit in watts in force at `at`, or `None` when no profile covers `at`
+/// (the station is then limited only by its nominal power). Profiles in amperes are
+/// converted with the station's voltage and phases.
+pub fn limit_w_at(entries: &[StoredProfile], req: &PowerRequest, at: DateTime<Utc>) -> Option<f64> {
+    limit_w_resolved(&power_profiles(entries, req, at), req, at)
+}
+
+/// Energy in Wh a charging connector takes in `[from, to]`: the integral of
+/// `min(nominal power, limit)`, summed piecewise over the stretches where the limit is constant.
+pub fn energy_wh(
+    entries: &[StoredProfile],
+    req: &PowerRequest,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> f64 {
+    if to <= from {
+        return 0.0;
+    }
+    let usable = power_profiles(entries, req, from);
+    let mut cuts = vec![from, to];
+    for &(entry, base) in &usable {
+        cuts.extend(change_instants(&entry.profile, base, from, to));
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2)
+        .map(|pair| {
+            let span = pair[1] - pair[0];
+            let middle = pair[0] + span / 2;
+            let power = req
+                .model
+                .effective_w(limit_w_resolved(&usable, req, middle));
+            power * span.as_seconds_f64() / 3600.0
+        })
+        .sum()
+}
+
 /// Connector `0` is the station; `1..=count` are the physical connectors.
 pub fn is_known_connector(connector: ConnectorId, connector_count: u32) -> bool {
     connector.is_station() || (1..=connector_count).contains(&connector.get())
@@ -575,6 +695,16 @@ mod tests {
             connector_count: CONNECTOR_COUNT,
             active_tx: None,
             tx_started_at: None,
+            model: model(),
+        }
+    }
+
+    /// 7.2 kW, 230 V, single phase (the station defaults).
+    fn model() -> PowerModel {
+        PowerModel {
+            nominal_w: 7200.0,
+            voltage_v: 230.0,
+            phases: 1,
         }
     }
 
@@ -1002,22 +1132,25 @@ mod tests {
         assert_limits(&composite(&mut store, &request(1, 60)), &[12.0]);
     }
 
+    /// The station default (7.2 kW at 230 V, one phase) in amperes, as the composite shows it.
+    const STATION_A: f64 = 31.3;
+
     #[test]
-    fn leading_gap_moves_the_schedule_start_to_the_first_covered_instant() {
+    fn leading_gap_shows_the_station_limit_and_keeps_the_requested_window() {
         let mut store = ChargingProfileStore::new();
         let mut later = tx_default(1, 1, vec![period(0, 8.0)]);
         later.valid_from = Some(at(30));
         accepted(&mut store, 1, later);
 
         let schedule = composite(&mut store, &request(1, 60));
-        assert_eq!(schedule.schedule_start, at(30));
-        assert_eq!(schedule.charging_schedule.duration, Some(30));
-        assert_limits(&schedule, &[8.0]);
-        assert_eq!(starts_of(&schedule), vec![0]);
+        assert_eq!(schedule.schedule_start, at(0));
+        assert_eq!(schedule.charging_schedule.duration, Some(60));
+        assert_limits(&schedule, &[STATION_A, 8.0]);
+        assert_eq!(starts_of(&schedule), vec![0, 30]);
     }
 
     #[test]
-    fn trailing_gap_ends_the_schedule_at_the_gap() {
+    fn trailing_gap_returns_to_the_station_limit() {
         let mut store = ChargingProfileStore::new();
         let mut ends = tx_default(1, 1, vec![period(0, 8.0)]);
         ends.valid_to = Some(at(20));
@@ -1025,12 +1158,13 @@ mod tests {
 
         let schedule = composite(&mut store, &request(1, 60));
         // validTo is inclusive: second 20 is still covered, second 21 is not.
-        assert_eq!(schedule.charging_schedule.duration, Some(21));
-        assert_limits(&schedule, &[8.0]);
+        assert_eq!(schedule.charging_schedule.duration, Some(60));
+        assert_limits(&schedule, &[8.0, STATION_A]);
+        assert_eq!(starts_of(&schedule), vec![0, 21]);
     }
 
     #[test]
-    fn covered_run_after_a_gap_is_dropped() {
+    fn covered_run_after_a_gap_is_kept() {
         let mut store = ChargingProfileStore::new();
         let mut first = tx_default(1, 1, vec![period(0, 8.0)]);
         first.valid_to = Some(at(9));
@@ -1040,8 +1174,36 @@ mod tests {
         accepted(&mut store, 1, second);
 
         let schedule = composite(&mut store, &request(1, 60));
-        assert_eq!(schedule.charging_schedule.duration, Some(10));
-        assert_limits(&schedule, &[8.0]);
+        assert_eq!(schedule.charging_schedule.duration, Some(60));
+        assert_limits(&schedule, &[8.0, STATION_A, 6.0]);
+        assert_eq!(starts_of(&schedule), vec![0, 10, 20]);
+    }
+
+    #[test]
+    fn gap_in_watts_uses_the_nominal_power() {
+        let mut store = ChargingProfileStore::new();
+        let mut later = with_unit(
+            tx_default(1, 1, vec![period(0, 3000.0)]),
+            ChargingRateUnitType::W,
+        );
+        later.valid_from = Some(at(30));
+        accepted(&mut store, 1, later);
+        let mut req = request(1, 60);
+        req.unit = Some(ChargingRateUnitType::W);
+        let schedule = composite(&mut store, &req);
+        assert_limits(&schedule, &[7200.0, 3000.0]);
+    }
+
+    #[test]
+    fn no_covering_profile_at_all_is_still_no_schedule() {
+        let mut store = ChargingProfileStore::new();
+        let mut later = tx_default(1, 1, vec![period(0, 8.0)]);
+        later.valid_from = Some(at(500));
+        accepted(&mut store, 1, later);
+        assert_eq!(
+            store.composite_schedule(&request(1, 60)),
+            Err(CompositeError::NoSchedule)
+        );
     }
 
     #[test]
@@ -1060,8 +1222,163 @@ mod tests {
             ),
         );
         let schedule = composite(&mut store, &request(1, 30));
-        assert_eq!(schedule.schedule_start, at(10));
-        assert_eq!(schedule.charging_schedule.duration, Some(20));
+        assert_eq!(schedule.schedule_start, at(0));
+        assert_eq!(schedule.charging_schedule.duration, Some(30));
+        assert_limits(&schedule, &[STATION_A, 8.0]);
+        assert_eq!(starts_of(&schedule), vec![0, 10]);
+    }
+
+    #[test]
+    fn absolute_profile_without_a_start_counts_from_its_install_time() {
+        // Installed at t0 with periods 0 s: 16 A, 30 s: 8 A and no startSchedule/validFrom.
+        let mut store = ChargingProfileStore::new();
+        accepted(
+            &mut store,
+            1,
+            tx_default(1, 1, vec![period(0, 16.0), period(30, 8.0)]),
+        );
+        // A request 20 s later still sees the schedule from the install time: 10 s of 16 A,
+        // then 8 A (anchoring at the request time would give 16 A for 30 s).
+        let mut req = request(1, 60);
+        req.now = at(20);
+        let schedule = composite(&mut store, &req);
+        assert_eq!(schedule.schedule_start, at(20));
+        assert_limits(&schedule, &[16.0, 8.0]);
+        assert_eq!(starts_of(&schedule), vec![0, 10]);
+    }
+
+    fn power_request(model: PowerModel, charging_connectors: u32) -> PowerRequest {
+        PowerRequest {
+            connector: ConnectorId::new(1),
+            active_tx: None,
+            tx_started_at: None,
+            model,
+            charging_connectors,
+        }
+    }
+
+    fn entry_at(
+        connector: u32,
+        profile: ChargingProfile,
+        installed: DateTime<Utc>,
+    ) -> StoredProfile {
+        let mut stored = entry(connector, profile);
+        stored.installed_at = Some(installed);
+        stored
+    }
+
+    #[test]
+    fn power_without_profiles_is_unlimited_and_energy_is_nominal() {
+        let req = power_request(model(), 1);
+        assert_eq!(limit_w_at(&[], &req, at(0)), None);
+        // 7200 W for 60 s = 120 Wh.
+        assert!((energy_wh(&[], &req, at(0), at(60)) - 120.0).abs() < 1e-9);
+        assert!(energy_wh(&[], &req, at(60), at(0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn amps_are_converted_and_capped_by_the_nominal_power() {
+        let req = power_request(model(), 1);
+        let entries = [entry_at(1, tx_default(1, 1, vec![period(0, 16.0)]), at(0))];
+        // 16 A x 230 V = 3680 W.
+        assert_eq!(limit_w_at(&entries, &req, at(5)), Some(3680.0));
+        assert!((energy_wh(&entries, &req, at(0), at(3600)) - 3680.0).abs() < 1e-6);
+        // A limit above the nominal power does not raise the power.
+        let big = [entry_at(1, tx_default(1, 1, vec![period(0, 63.0)]), at(0))];
+        assert!((energy_wh(&big, &req, at(0), at(3600)) - 7200.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn three_phase_amps_use_all_phases() {
+        let three = PowerModel {
+            phases: 3,
+            nominal_w: 22_000.0,
+            ..model()
+        };
+        let req = power_request(three, 1);
+        let entries = [entry_at(1, tx_default(1, 1, vec![period(0, 16.0)]), at(0))];
+        assert_eq!(limit_w_at(&entries, &req, at(0)), Some(11_040.0));
+    }
+
+    #[test]
+    fn energy_is_integrated_piecewise_over_period_boundaries() {
+        let req = power_request(model(), 1);
+        // 3000 W for the first 30 s, then 1000 W, anchored at t0 (installed).
+        let w = |p: ChargingProfile| with_unit(p, ChargingRateUnitType::W);
+        let entries = [entry_at(
+            1,
+            w(tx_default(
+                1,
+                1,
+                vec![period(0, 3000.0), period(30, 1000.0)],
+            )),
+            at(0),
+        )];
+        // [0, 60]: 3000*30/3600 + 1000*30/3600 = 25 + 8.333.. Wh.
+        let wh = energy_wh(&entries, &req, at(0), at(60));
+        assert!((wh - (25.0 + 1000.0 * 30.0 / 3600.0)).abs() < 1e-9, "{wh}");
+        // A span that starts inside the second period.
+        let wh = energy_wh(&entries, &req, at(45), at(60));
+        assert!((wh - 1000.0 * 15.0 / 3600.0).abs() < 1e-9, "{wh}");
+    }
+
+    #[test]
+    fn a_stretch_without_a_covering_profile_runs_at_nominal_power() {
+        let req = power_request(model(), 1);
+        let mut profile = with_unit(
+            tx_default(1, 1, vec![period(0, 1000.0)]),
+            ChargingRateUnitType::W,
+        );
+        profile.valid_to = Some(at(30));
+        let entries = [entry_at(1, profile, at(0))];
+        // 30 s at 1000 W, then 30 s at 7200 W.
+        let wh = energy_wh(&entries, &req, at(0), at(60));
+        assert!(
+            (wh - (1000.0 * 30.0 + 7200.0 * 30.0) / 3600.0).abs() < 1e-9,
+            "{wh}"
+        );
+    }
+
+    #[test]
+    fn charge_point_max_is_shared_between_charging_connectors() {
+        let entries = [entry_at(
+            0,
+            cp_max(1, ChargingRateUnitType::W, 6000.0),
+            at(0),
+        )];
+        let one = power_request(model(), 1);
+        let two = power_request(model(), 2);
+        assert_eq!(limit_w_at(&entries, &one, at(1)), Some(6000.0));
+        assert_eq!(limit_w_at(&entries, &two, at(1)), Some(3000.0));
+        // The connector's own lower limit still wins.
+        let own = [
+            entries[0].clone(),
+            entry_at(
+                1,
+                with_unit(
+                    tx_default(2, 1, vec![period(0, 2000.0)]),
+                    ChargingRateUnitType::W,
+                ),
+                at(0),
+            ),
+        ];
+        assert_eq!(limit_w_at(&own, &two, at(1)), Some(2000.0));
+    }
+
+    #[test]
+    fn mixed_units_are_compared_in_watts() {
+        let req = power_request(model(), 1);
+        // TxDefault 16 A = 3680 W under a 3000 W cap: the cap wins; under a 5000 W cap, 16 A.
+        let tight = [
+            entry_at(0, cp_max(1, ChargingRateUnitType::W, 3000.0), at(0)),
+            entry_at(1, tx_default(2, 1, vec![period(0, 16.0)]), at(0)),
+        ];
+        assert_eq!(limit_w_at(&tight, &req, at(1)), Some(3000.0));
+        let loose = [
+            entry_at(0, cp_max(1, ChargingRateUnitType::W, 5000.0), at(0)),
+            entry_at(1, tx_default(2, 1, vec![period(0, 16.0)]), at(0)),
+        ];
+        assert_eq!(limit_w_at(&loose, &req, at(1)), Some(3680.0));
     }
 
     #[test]
@@ -1195,6 +1512,7 @@ mod tests {
                         connector_id: connector,
                         profile,
                         bound_tx,
+                        installed_at: None,
                     }
                 },
             )

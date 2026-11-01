@@ -99,6 +99,36 @@ fn defaults_match_the_ts_cli() {
     assert_eq!(c["call_timeout_ms"], 30000);
     assert_eq!(c["persist"], true);
     assert_eq!(c["tls"]["skip_verify"], false);
+    assert_eq!(c["nominal_power_w"], 7200);
+    assert_eq!(c["voltage_v"], 230);
+    assert_eq!(c["phases"], 1);
+}
+
+#[test]
+fn power_model_flags_are_mapped_and_validated() {
+    let c = config(
+        &with_url(&[
+            "--nominal-power-w",
+            "11000",
+            "--voltage-v",
+            "400",
+            "--phases",
+            "3",
+        ]),
+        &[],
+    );
+    assert_eq!(c["nominal_power_w"], 11000);
+    assert_eq!(c["voltage_v"], 400);
+    assert_eq!(c["phases"], 3);
+    for extra in [
+        vec!["--phases", "4"],
+        vec!["--phases", "0"],
+        vec!["--voltage-v", "0"],
+        vec!["--nominal-power-w", "0"],
+    ] {
+        let output = run(&with_url(&extra), &[]);
+        assert!(!output.status.success(), "{extra:?} should fail");
+    }
 }
 
 #[test]

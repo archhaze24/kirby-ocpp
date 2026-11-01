@@ -48,6 +48,9 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `-c, --connector` | | `1` | Initial connector |
 | `--connectors` | | `1` | Number of connectors |
 | `--heartbeat` | | `30` | Fallback heartbeat interval (s) |
+| `--nominal-power-w` | | `7200` | Nominal charging power per connector (W); charging profiles can only lower it |
+| `--voltage-v` | | `230` | Voltage per phase (V), used for A to W conversion and the `Voltage` reading |
+| `--phases` | | `1` | Number of phases (1-3) |
 | `--ws-subprotocol` | `OCPP_WS_SUBPROTOCOL` | `ocpp1.6` | Requested subprotocol |
 | `--ws-ping` | `OCPP_WS_PING_INTERVAL` | `30` | WebSocket ping interval (s), `0` disables |
 | `--reconnect <BOOL>` | `OCPP_RECONNECT` | `true` | Auto-reconnect after unexpected disconnect |

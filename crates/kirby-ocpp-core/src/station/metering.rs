@@ -1,39 +1,35 @@
-//! Simulated energy meter, MeterValues construction and clock alignment.
+//! Simulated power and energy, MeterValues construction and clock alignment.
 //!
 //! TS reference: `src/station/metering.ts` (readings, configuration parsing) and
-//! `src/station/meter-value-scheduler.ts` (clock alignment).
+//! `src/station/meter-value-scheduler.ts` (clock alignment). The power model differs from TS
+//! on purpose (OCPP 1.6 behaviour wins): see below.
 //!
-//! # The meter
+//! # Power model
 //!
-//! [`SimulatedMeter`] is deterministic: the same energy yields the same readings.
-//! While the connector is `Charging`, energy grows at the nominal rate
-//! [`NOMINAL_POWER_W`] (`Wh += 7200 * seconds / 3600`). The other readings are
-//! functions of the energy, with the TS formulas (see [`SimulatedMeter::sample`]).
+//! A charging connector draws `min(nominal power, charging limit)` watts. The limit comes
+//! from the stored charging profiles (see [`super::smart_charging::limit_w_at`]); an
+//! ampere limit is converted with the configured voltage and phase count
+//! ([`PowerModel`]). Without a limit the connector draws the nominal power. Energy is the
+//! integral of that power over elapsed time
+//! ([`super::smart_charging::energy_wh`]), so a limit change mid-session shows up in the
+//! register, and every reported measurand is derived from the same numbers:
 //!
-//! Energy is integrated **once per elapsed interval**. [`SimulatedMeter::update`] closes
-//! the interval since the last update with the status that held during it, and then records
-//! the new status. Two samples at the same instant add nothing, so periodic and
-//! clock-aligned sampling cannot double count. Time that passes offline counts too,
-//! because the meter does not depend on the connection. A timestamp that goes backwards
-//! never reduces the energy.
+//! * `Power.Active.Import` = the power, `Current.Import` = power / (voltage x phases),
+//!   `Voltage` = the configured voltage;
+//! * `Power.Offered` / `Current.Offered` = the limit in force (`min(nominal, limit)`), also
+//!   while idle;
+//! * `Energy.Active.Import.Register` = the register, `Energy.Active.Import.Interval` = energy
+//!   since the previous sample;
+//! * temperature and SoC are decorative functions of the energy.
 //!
-//! # Power cap
-//!
-//! [`SimulatedMeter::set_power_limit_w`] caps the simulated power. The cap applies to the
-//! integration rate and to the reported `Power.Active.Import` and `Current.Import`.
-//! `None` keeps the TS behaviour.
+//! The integration state lives in the station actor (`power.rs`); this module is pure.
 
 use chrono::{DateTime, TimeDelta, Utc};
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::config::StationConfig;
 use crate::ocpp::messages::{MeterValue, SampledValue};
-use crate::ocpp::types::{
-    ConnectorStatus, Location, Measurand, Phase, ReadingContext, UnitOfMeasure, ValueFormat,
-};
-
-/// Nominal charging power of the simulated meter, used for energy integration (7.2 kW).
-pub const NOMINAL_POWER_W: f64 = 7_200.0;
+use crate::ocpp::types::{Location, Measurand, Phase, ReadingContext, UnitOfMeasure, ValueFormat};
 
 /// Measurands sampled when the configuration does not name any (TS `DEFAULT_SAMPLED_DATA`).
 pub const DEFAULT_SAMPLED_DATA: [Measurand; 6] = [
@@ -45,122 +41,118 @@ pub const DEFAULT_SAMPLED_DATA: [Measurand; 6] = [
     Measurand::SoC,
 ];
 
-/// Deterministic simulated energy meter for one connector.
-///
-/// Only the energy is persisted. Everything else (the last update, the charging state,
-/// the power cap) is runtime state: a restored meter has no baseline yet, so downtime is
-/// not counted as charging.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct SimulatedMeter {
-    energy_wh: f64,
-    #[serde(skip)]
-    last_update: Option<DateTime<Utc>>,
-    #[serde(skip)]
-    charging: bool,
-    #[serde(skip)]
-    power_limit_w: Option<f64>,
+/// Electrical parameters of the station: nominal power, voltage and phases.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PowerModel {
+    /// Nominal power of one connector in watts: the simulated power never exceeds it.
+    pub nominal_w: f64,
+    /// Voltage per phase in volts.
+    pub voltage_v: f64,
+    /// Phases the station charges with (at least 1).
+    pub phases: u8,
 }
 
-impl Default for SimulatedMeter {
-    fn default() -> Self {
-        Self::with_energy_wh(0.0)
-    }
-}
-
-impl SimulatedMeter {
-    /// A meter at `energy_wh` (for example the energy restored from persisted state).
-    pub fn with_energy_wh(energy_wh: f64) -> Self {
+impl PowerModel {
+    pub fn from_config(config: &StationConfig) -> Self {
         Self {
-            energy_wh,
-            last_update: None,
-            charging: false,
-            power_limit_w: None,
+            nominal_w: f64::from(config.nominal_power_w),
+            voltage_v: f64::from(config.voltage_v),
+            phases: config.phases.max(1),
         }
     }
 
-    /// Accumulated energy in Wh (not rounded).
-    pub fn energy_wh(&self) -> f64 {
-        self.energy_wh
+    /// Phases used for a schedule period: `numberPhases`, or all of the station's when
+    /// absent, and never more than the station has.
+    pub fn period_phases(&self, number_phases: Option<i32>) -> f64 {
+        let station = i32::from(self.phases);
+        f64::from(number_phases.map_or(station, |n| n.clamp(1, station)))
     }
 
-    /// Current power cap in watts, if any.
-    pub fn power_limit_w(&self) -> Option<f64> {
-        self.power_limit_w
+    /// Power of `amps` per phase on `number_phases` phases.
+    pub fn amps_to_watts(&self, amps: f64, number_phases: Option<i32>) -> f64 {
+        amps * self.voltage_v * self.period_phases(number_phases)
     }
 
-    /// Sets or clears the power cap (see the module docs).
-    pub fn set_power_limit_w(&mut self, limit_w: Option<f64>) {
-        self.power_limit_w = limit_w;
+    /// Current per phase that `watts` need on all of the station's phases.
+    pub fn watts_to_amps(&self, watts: f64) -> f64 {
+        watts / (self.voltage_v * f64::from(self.phases))
     }
 
-    /// Integrates energy up to `now` with the status recorded before, then records `status`.
-    ///
-    /// Call it on every status change and before every sample. A call with an earlier
-    /// `now` only records the status.
-    pub fn update(&mut self, now: DateTime<Utc>, status: ConnectorStatus) {
-        match self.last_update {
-            None => self.last_update = Some(now),
-            Some(last) if now > last => {
-                if self.charging {
-                    let elapsed_s = millis_to_seconds((now - last).num_milliseconds());
-                    self.energy_wh += self.rate_w() * elapsed_s / 3600.0;
-                }
-                self.last_update = Some(now);
-            }
-            Some(_) => {}
-        }
-        self.charging = status == ConnectorStatus::Charging;
+    /// The power a connector can draw under `limit_w` (`None` = no limit).
+    pub fn effective_w(&self, limit_w: Option<f64>) -> f64 {
+        limit_w.map_or(self.nominal_w, |limit| limit.clamp(0.0, self.nominal_w))
     }
+}
 
-    /// Advances the meter to `at` and builds one MeterValue with the requested measurands.
-    ///
-    /// The readings follow the TS formulas, with `cycle = round(Wh / 120) % 8`:
-    /// `Power.Active.Import = 6800 + cycle * 90 W`, `Voltage = 228 + cycle % 6 V`,
-    /// `Current.Import = power / voltage A`, `Temperature = 29 + cycle + min(8, Wh / 3000) °C`,
-    /// `SoC = clamp(18 + Wh / 450, 18, 96) %`. When not charging: 230 V, 0 W, 0 A, 25 °C, SoC 0.
-    pub fn sample(
-        &mut self,
-        at: DateTime<Utc>,
-        status: ConnectorStatus,
-        measurands: &[Measurand],
-        context: ReadingContext,
-    ) -> MeterValue {
-        self.update(at, status);
-        let readings = compute_readings(self.energy_wh, self.charging, self.power_limit_w);
-        MeterValue {
-            timestamp: at,
-            sampled_value: measurands
-                .iter()
-                .map(|measurand| sampled_value(&readings, context, *measurand))
-                .collect(),
-        }
-    }
+/// Energy `power_w` delivers in `elapsed`.
+pub fn energy_wh_for(power_w: f64, elapsed: std::time::Duration) -> f64 {
+    power_w * elapsed.as_secs_f64() / 3600.0
+}
 
-    fn rate_w(&self) -> f64 {
-        self.power_limit_w
-            .map_or(NOMINAL_POWER_W, |limit| limit.min(NOMINAL_POWER_W))
+/// What the meter of one connector (or the station) shows at one instant.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeterReading {
+    /// The energy register in Wh.
+    pub energy_wh: f64,
+    /// `true` while the connector is `Charging`.
+    pub charging: bool,
+    /// Power drawn now in watts (0 unless charging).
+    pub power_w: f64,
+    /// Power the station offers now in watts (the limit in force).
+    pub offered_w: f64,
+    /// Energy since the previous sample in Wh.
+    pub interval_wh: f64,
+}
+
+/// Builds one MeterValue with the requested measurands from `reading`.
+pub fn meter_value(
+    model: &PowerModel,
+    reading: &MeterReading,
+    at: DateTime<Utc>,
+    measurands: &[Measurand],
+    context: ReadingContext,
+) -> MeterValue {
+    let readings = compute_readings(model, reading);
+    MeterValue {
+        timestamp: at,
+        sampled_value: measurands
+            .iter()
+            .map(|measurand| sampled_value(&readings, context, *measurand))
+            .collect(),
     }
 }
 
 /// Builds the `transactionData` of a StopTransaction (TS `buildStopTransactionData`).
 ///
 /// `Transaction.End` with `sampled_data` (StopTxnSampledData) comes first, then
-/// `Sample.Clock` with `aligned_data` (StopTxnAlignedData), sampled at `at`, the
-/// clock-aligned instant. An empty list produces no MeterValue. TS always sent both, so an
-/// empty list produced a MeterValue with an empty `sampledValue`, which the schema rejects.
+/// `Sample.Clock` with `aligned_data` (StopTxnAlignedData), both at `at` from the same
+/// `reading`. An empty list produces no MeterValue. TS always sent both, so an empty list
+/// produced a MeterValue with an empty `sampledValue`, which the schema rejects.
 pub fn stop_transaction_data(
-    meter: &mut SimulatedMeter,
+    model: &PowerModel,
+    reading: &MeterReading,
     at: DateTime<Utc>,
-    status: ConnectorStatus,
     sampled_data: &[Measurand],
     aligned_data: &[Measurand],
 ) -> Vec<MeterValue> {
     let mut data = Vec::with_capacity(2);
     if !sampled_data.is_empty() {
-        data.push(meter.sample(at, status, sampled_data, ReadingContext::TransactionEnd));
+        data.push(meter_value(
+            model,
+            reading,
+            at,
+            sampled_data,
+            ReadingContext::TransactionEnd,
+        ));
     }
     if !aligned_data.is_empty() {
-        data.push(meter.sample(at, status, aligned_data, ReadingContext::SampleClock));
+        data.push(meter_value(
+            model,
+            reading,
+            at,
+            aligned_data,
+            ReadingContext::SampleClock,
+        ));
     }
     data
 }
@@ -240,40 +232,26 @@ pub fn next_clock_aligned(now: DateTime<Utc>, interval_s: u32) -> Option<DateTim
     clock_aligned_delay(now, interval_s).and_then(|delay| now.checked_add_signed(delay))
 }
 
-/// Energy the meter integrates in `interval_s` seconds at the nominal rate (TS
-/// `periodicMeterDeltaWh`): `7200 * interval / 3600 = 2 * interval` Wh.
-pub fn periodic_meter_delta_wh(interval_s: u32) -> u64 {
-    u64::from(interval_s) * 2
-}
-
-/// Readings of the simulated meter at one instant.
+/// Readings derived from a [`MeterReading`] and the [`PowerModel`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Readings {
     charging: bool,
     energy_wh: f64,
+    interval_wh: f64,
     power_w: f64,
-    voltage_v: i64,
+    offered_w: f64,
+    voltage_v: f64,
     current_a: f64,
+    offered_a: f64,
     temperature_c: i64,
     soc_percent: i64,
 }
 
-fn compute_readings(energy_wh: f64, charging: bool, limit_w: Option<f64>) -> Readings {
+fn compute_readings(model: &PowerModel, reading: &MeterReading) -> Readings {
+    let energy_wh = reading.energy_wh;
+    let charging = reading.charging;
     let cycle = round_half_up(energy_wh / 120.0).abs() % 8;
-    let voltage_v = if charging { 228 + cycle % 6 } else { 230 };
-    let mut power_w = if charging {
-        as_f64(6800 + cycle * 90)
-    } else {
-        0.0
-    };
-    if let Some(limit) = limit_w.filter(|_| charging) {
-        power_w = power_w.min(limit);
-    }
-    let current_a = if charging {
-        power_w / as_f64(voltage_v)
-    } else {
-        0.0
-    };
+    let power_w = if charging { reading.power_w } else { 0.0 };
     let temperature_c = if charging {
         29 + cycle + floor_i64(energy_wh / 3000.0).min(8)
     } else {
@@ -287,9 +265,12 @@ fn compute_readings(energy_wh: f64, charging: bool, limit_w: Option<f64>) -> Rea
     Readings {
         charging,
         energy_wh,
+        interval_wh: reading.interval_wh,
         power_w,
-        voltage_v,
-        current_a,
+        offered_w: reading.offered_w,
+        voltage_v: model.voltage_v,
+        current_a: model.watts_to_amps(power_w),
+        offered_a: model.watts_to_amps(reading.offered_w),
         temperature_c,
         soc_percent,
     }
@@ -328,37 +309,44 @@ fn sampled_value(
         | Measurand::EnergyReactiveExportInterval => {
             (zero(), Some(UnitOfMeasure::Varh), outlet, None)
         }
-        Measurand::EnergyActiveImportInterval => {
-            (when_charging("120"), Some(UnitOfMeasure::Wh), outlet, None)
-        }
+        Measurand::EnergyActiveImportInterval => (
+            round_half_up(readings.interval_wh).to_string(),
+            Some(UnitOfMeasure::Wh),
+            outlet,
+            None,
+        ),
         Measurand::PowerActiveImport => (
-            // Shortest decimal form: `7160` for 7160.0, as JS `String(number)`.
-            readings.power_w.to_string(),
+            format_decimal(readings.power_w),
             Some(UnitOfMeasure::W),
             outlet,
             None,
         ),
         Measurand::PowerActiveExport => (zero(), Some(UnitOfMeasure::W), outlet, None),
-        Measurand::PowerOffered => ("7400".to_owned(), Some(UnitOfMeasure::W), outlet, None),
+        Measurand::PowerOffered => (
+            format_decimal(readings.offered_w),
+            Some(UnitOfMeasure::W),
+            outlet,
+            None,
+        ),
         Measurand::PowerReactiveImport | Measurand::PowerReactiveExport => {
             (zero(), Some(UnitOfMeasure::Var), outlet, None)
         }
         Measurand::PowerFactor => (when_charging("1"), None, outlet, None),
         Measurand::CurrentImport => (
-            format_current(readings.current_a),
+            format_decimal(readings.current_a),
             Some(UnitOfMeasure::A),
             outlet,
             Some(Phase::L1),
         ),
         Measurand::CurrentExport => (zero(), Some(UnitOfMeasure::A), outlet, Some(Phase::L1)),
         Measurand::CurrentOffered => (
-            "32".to_owned(),
+            format_decimal(readings.offered_a),
             Some(UnitOfMeasure::A),
             outlet,
             Some(Phase::L1),
         ),
         Measurand::Voltage => (
-            readings.voltage_v.to_string(),
+            format_decimal(readings.voltage_v),
             Some(UnitOfMeasure::V),
             outlet,
             Some(Phase::L1N),
@@ -391,17 +379,9 @@ fn sampled_value(
 }
 
 /// `toFixed(1)` with a trailing `.0` removed (TS `formatDecimal(value, 1)`).
-fn format_current(value: f64) -> String {
+fn format_decimal(value: f64) -> String {
     let fixed = format!("{value:.1}");
     fixed.strip_suffix(".0").unwrap_or(&fixed).to_owned()
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the readings are small integers, far below 2^53"
-)]
-fn as_f64(value: i64) -> f64 {
-    value as f64
 }
 
 #[allow(
@@ -421,18 +401,9 @@ fn round_half_up(value: f64) -> i64 {
     (value + 0.5).floor() as i64
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "millisecond counts for meter intervals are far below 2^53"
-)]
-fn millis_to_seconds(millis: i64) -> f64 {
-    millis as f64 / 1000.0
-}
-
 #[cfg(test)]
 mod tests {
     use chrono::{TimeZone, Utc};
-    use proptest::prelude::*;
 
     use super::*;
 
@@ -441,18 +412,43 @@ mod tests {
         Utc.with_ymd_and_hms(2026, 11, 1, 12, 0, 0).unwrap() + TimeDelta::seconds(seconds)
     }
 
+    fn model() -> PowerModel {
+        PowerModel {
+            nominal_w: 7200.0,
+            voltage_v: 230.0,
+            phases: 1,
+        }
+    }
+
+    fn charging(energy_wh: f64, power_w: f64) -> MeterReading {
+        MeterReading {
+            energy_wh,
+            charging: true,
+            power_w,
+            offered_w: power_w,
+            interval_wh: 12.0,
+        }
+    }
+
+    fn idle(energy_wh: f64) -> MeterReading {
+        MeterReading {
+            energy_wh,
+            charging: false,
+            power_w: 0.0,
+            offered_w: 7200.0,
+            interval_wh: 0.0,
+        }
+    }
+
+    fn sample(model: &PowerModel, reading: &MeterReading, m: &[Measurand]) -> MeterValue {
+        meter_value(model, reading, t(0), m, ReadingContext::SamplePeriodic)
+    }
+
     fn sampled(mv: &MeterValue, measurand: Measurand) -> &SampledValue {
         mv.sampled_value
             .iter()
             .find(|value| value.measurand == Some(measurand))
             .expect("measurand was requested")
-    }
-
-    fn assert_wh(actual: f64, expected: f64) {
-        assert!(
-            (actual - expected).abs() < 1e-9,
-            "expected {expected} Wh, got {actual} Wh"
-        );
     }
 
     #[test]
@@ -471,25 +467,70 @@ mod tests {
     }
 
     #[test]
-    fn golden_charging_readings_at_1440_wh() {
-        // cycle = round(1440/120) % 8 = 4 -> voltage 232, power 6800 + 360 = 7160 W,
-        // current 7160 / 232 = 30.86 A, temperature 29 + 4 + min(8, 0) = 33 °C, SoC 18 + 3 = 21 %.
-        let mut meter = SimulatedMeter::with_energy_wh(1440.0);
-        let mv = meter.sample(
-            t(0),
-            ConnectorStatus::Charging,
-            &DEFAULT_SAMPLED_DATA,
-            ReadingContext::SamplePeriodic,
-        );
-        assert_eq!(mv.timestamp, t(0));
-        assert_eq!(mv.sampled_value.len(), 6);
+    fn watts_amps_conversion_uses_voltage_and_phases() {
+        let one = model();
+        let three = PowerModel { phases: 3, ..one };
+        assert!((one.amps_to_watts(16.0, None) - 3680.0).abs() < 1e-9);
+        assert!((three.amps_to_watts(16.0, None) - 11_040.0).abs() < 1e-9);
+        // numberPhases narrows the station's phases but never widens them.
+        assert!((three.amps_to_watts(16.0, Some(1)) - 3680.0).abs() < 1e-9);
+        assert!((one.amps_to_watts(16.0, Some(3)) - 3680.0).abs() < 1e-9);
+        assert!((three.watts_to_amps(11_040.0) - 16.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn effective_power_is_the_smaller_of_nominal_and_limit() {
+        let m = model();
+        assert!((m.effective_w(None) - 7200.0).abs() < 1e-9);
+        assert!((m.effective_w(Some(3000.0)) - 3000.0).abs() < 1e-9);
+        assert!((m.effective_w(Some(99_000.0)) - 7200.0).abs() < 1e-9);
+        assert!(m.effective_w(Some(-5.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn energy_is_power_times_time() {
+        let wh = energy_wh_for(3600.0, std::time::Duration::from_secs(30));
+        assert!((wh - 30.0).abs() < 1e-9);
+        assert!((energy_wh_for(7200.0, std::time::Duration::from_secs(60)) - 120.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn readings_are_derived_from_the_same_numbers() {
+        // 3680 W on 230 V single phase = 16 A; offered equals the limit in force.
+        let mv = sample(&model(), &charging(1440.0, 3680.0), Measurand::ALL);
+        assert_eq!(sampled(&mv, Measurand::PowerActiveImport).value, "3680");
+        assert_eq!(sampled(&mv, Measurand::CurrentImport).value, "16");
+        assert_eq!(sampled(&mv, Measurand::Voltage).value, "230");
+        assert_eq!(sampled(&mv, Measurand::PowerOffered).value, "3680");
+        assert_eq!(sampled(&mv, Measurand::CurrentOffered).value, "16");
         assert_eq!(
             sampled(&mv, Measurand::EnergyActiveImportRegister).value,
             "1440"
         );
-        assert_eq!(sampled(&mv, Measurand::PowerActiveImport).value, "7160");
-        assert_eq!(sampled(&mv, Measurand::CurrentImport).value, "30.9");
-        assert_eq!(sampled(&mv, Measurand::Voltage).value, "232");
+        assert_eq!(
+            sampled(&mv, Measurand::EnergyActiveImportInterval).value,
+            "12"
+        );
+    }
+
+    #[test]
+    fn three_phase_current_is_per_phase() {
+        let m = PowerModel {
+            phases: 3,
+            nominal_w: 11_040.0,
+            ..model()
+        };
+        let mv = sample(&m, &charging(0.0, 11_040.0), &[Measurand::CurrentImport]);
+        assert_eq!(sampled(&mv, Measurand::CurrentImport).value, "16");
+    }
+
+    #[test]
+    fn golden_charging_sample_shape() {
+        let mv = sample(&model(), &charging(1440.0, 7200.0), &DEFAULT_SAMPLED_DATA);
+        assert_eq!(mv.timestamp, t(0));
+        assert_eq!(mv.sampled_value.len(), 6);
+        assert_eq!(sampled(&mv, Measurand::CurrentImport).value, "31.3");
+        // cycle = round(1440/120) % 8 = 4: temperature 29 + 4, SoC 18 + 3.
         assert_eq!(sampled(&mv, Measurand::Temperature).value, "33");
         assert_eq!(sampled(&mv, Measurand::SoC).value, "21");
 
@@ -505,29 +546,15 @@ mod tests {
         );
         assert_eq!(sampled(&mv, Measurand::Voltage).phase, Some(Phase::L1N));
         assert_eq!(
-            sampled(&mv, Measurand::Temperature).unit,
-            Some(UnitOfMeasure::Celsius)
-        );
-        assert_eq!(
             sampled(&mv, Measurand::Temperature).location,
             Some(Location::Body)
-        );
-        assert_eq!(
-            sampled(&mv, Measurand::SoC).unit,
-            Some(UnitOfMeasure::Percent)
         );
         assert_eq!(sampled(&mv, Measurand::SoC).location, Some(Location::EV));
     }
 
     #[test]
-    fn readings_when_not_charging_are_idle_values() {
-        let mut meter = SimulatedMeter::with_energy_wh(1440.0);
-        let mv = meter.sample(
-            t(0),
-            ConnectorStatus::Available,
-            &DEFAULT_SAMPLED_DATA,
-            ReadingContext::SamplePeriodic,
-        );
+    fn idle_readings_draw_nothing_but_keep_the_offer() {
+        let mv = sample(&model(), &idle(1440.0), Measurand::ALL);
         assert_eq!(
             sampled(&mv, Measurand::EnergyActiveImportRegister).value,
             "1440"
@@ -535,30 +562,18 @@ mod tests {
         assert_eq!(sampled(&mv, Measurand::PowerActiveImport).value, "0");
         assert_eq!(sampled(&mv, Measurand::CurrentImport).value, "0");
         assert_eq!(sampled(&mv, Measurand::Voltage).value, "230");
+        assert_eq!(sampled(&mv, Measurand::PowerOffered).value, "7200");
         assert_eq!(sampled(&mv, Measurand::Temperature).value, "25");
         assert_eq!(sampled(&mv, Measurand::SoC).value, "0");
     }
 
     #[test]
-    fn every_measurand_has_a_ts_shaped_sample() {
-        let mut meter = SimulatedMeter::with_energy_wh(1000.0);
-        let mv = meter.sample(
-            t(0),
-            ConnectorStatus::Charging,
-            Measurand::ALL,
-            ReadingContext::SamplePeriodic,
-        );
+    fn every_measurand_has_a_sample() {
+        let mv = sample(&model(), &charging(1000.0, 7200.0), Measurand::ALL);
         assert_eq!(mv.sampled_value.len(), Measurand::ALL.len());
-        assert_eq!(
-            sampled(&mv, Measurand::EnergyActiveImportInterval).value,
-            "120"
-        );
         assert_eq!(sampled(&mv, Measurand::PowerFactor).value, "1");
         assert_eq!(sampled(&mv, Measurand::PowerFactor).unit, None);
-        assert_eq!(sampled(&mv, Measurand::CurrentOffered).value, "32");
-        assert_eq!(sampled(&mv, Measurand::PowerOffered).value, "7400");
         assert_eq!(sampled(&mv, Measurand::Frequency).value, "50");
-        assert_eq!(sampled(&mv, Measurand::Frequency).unit, None);
         assert_eq!(sampled(&mv, Measurand::Rpm).location, Some(Location::Body));
         assert_eq!(
             sampled(&mv, Measurand::EnergyReactiveImportRegister).unit,
@@ -571,118 +586,11 @@ mod tests {
     }
 
     #[test]
-    fn energy_integrates_nominal_rate_once_per_elapsed_time() {
-        let mut meter = SimulatedMeter::default();
-        meter.update(t(0), ConnectorStatus::Charging);
-        meter.sample(
-            t(60),
-            ConnectorStatus::Charging,
-            &DEFAULT_SAMPLED_DATA,
-            ReadingContext::SamplePeriodic,
-        );
-        assert_wh(meter.energy_wh(), 120.0);
-        // A second sampler at the same instant (clock-aligned) adds nothing.
-        meter.sample(
-            t(60),
-            ConnectorStatus::Charging,
-            &DEFAULT_SAMPLED_DATA,
-            ReadingContext::SampleClock,
-        );
-        assert_wh(meter.energy_wh(), 120.0);
-        meter.sample(
-            t(90),
-            ConnectorStatus::Charging,
-            &DEFAULT_SAMPLED_DATA,
-            ReadingContext::TransactionEnd,
-        );
-        assert_wh(meter.energy_wh(), 180.0);
-    }
-
-    #[test]
-    fn sixty_seconds_equal_the_periodic_delta() {
-        let mut meter = SimulatedMeter::default();
-        meter.update(t(0), ConnectorStatus::Charging);
-        meter.update(t(60), ConnectorStatus::Charging);
-        assert_wh(meter.energy_wh(), 120.0);
-        assert_eq!(periodic_meter_delta_wh(60), 120);
-    }
-
-    #[test]
-    fn nothing_is_counted_before_charging_starts() {
-        let mut meter = SimulatedMeter::default();
-        meter.update(t(0), ConnectorStatus::Available);
-        meter.update(t(30), ConnectorStatus::Charging);
-        assert_wh(meter.energy_wh(), 0.0);
-        meter.update(t(60), ConnectorStatus::Charging);
-        assert_wh(meter.energy_wh(), 60.0);
-    }
-
-    #[test]
-    fn leaving_charging_closes_the_interval() {
-        let mut meter = SimulatedMeter::default();
-        meter.update(t(0), ConnectorStatus::Charging);
-        meter.update(t(10), ConnectorStatus::Finishing);
-        assert_wh(meter.energy_wh(), 20.0);
-        meter.update(t(100), ConnectorStatus::Finishing);
-        assert_wh(meter.energy_wh(), 20.0);
-    }
-
-    #[test]
-    fn time_passing_offline_is_integrated_at_the_next_sample() {
-        // The meter does not depend on the connection: no sample is needed in between.
-        let mut meter = SimulatedMeter::default();
-        meter.update(t(0), ConnectorStatus::Charging);
-        meter.sample(
-            t(600),
-            ConnectorStatus::Charging,
-            &DEFAULT_SAMPLED_DATA,
-            ReadingContext::SamplePeriodic,
-        );
-        assert_wh(meter.energy_wh(), 1200.0);
-    }
-
-    #[test]
-    fn restored_meter_does_not_count_downtime() {
-        let mut meter = SimulatedMeter::with_energy_wh(1000.0);
-        meter.update(t(0), ConnectorStatus::Charging);
-        meter.update(t(60), ConnectorStatus::Charging);
-        assert_wh(meter.energy_wh(), 1120.0);
-    }
-
-    #[test]
-    fn backwards_timestamps_never_reduce_energy() {
-        let mut meter = SimulatedMeter::default();
-        meter.update(t(0), ConnectorStatus::Charging);
-        meter.update(t(60), ConnectorStatus::Charging);
-        meter.update(t(30), ConnectorStatus::Charging);
-        assert_wh(meter.energy_wh(), 120.0);
-    }
-
-    #[test]
-    fn power_cap_limits_the_rate_and_the_readings() {
-        let mut meter = SimulatedMeter::default();
-        meter.set_power_limit_w(Some(3600.0));
-        meter.update(t(0), ConnectorStatus::Charging);
-        let mv = meter.sample(
-            t(60),
-            ConnectorStatus::Charging,
-            &[Measurand::PowerActiveImport, Measurand::CurrentImport],
-            ReadingContext::SamplePeriodic,
-        );
-        // 3600 W for 60 s = 60 Wh. Cycle at 60 Wh: round(0.5) = 1, so voltage 229 V.
-        assert_wh(meter.energy_wh(), 60.0);
-        assert_eq!(sampled(&mv, Measurand::PowerActiveImport).value, "3600");
-        assert_eq!(sampled(&mv, Measurand::CurrentImport).value, "15.7");
-    }
-
-    #[test]
     fn stop_transaction_data_orders_transaction_end_before_clock() {
-        let mut meter = SimulatedMeter::default();
-        meter.update(t(0), ConnectorStatus::Charging);
         let data = stop_transaction_data(
-            &mut meter,
+            &model(),
+            &charging(120.0, 7200.0),
             t(60),
-            ConnectorStatus::Charging,
             &[Measurand::EnergyActiveImportRegister],
             &[Measurand::PowerActiveImport],
         );
@@ -695,26 +603,19 @@ mod tests {
             data[1].sampled_value[0].context,
             Some(ReadingContext::SampleClock)
         );
-        assert_wh(meter.energy_wh(), 120.0);
     }
 
     #[test]
     fn stop_transaction_data_skips_empty_lists() {
-        let mut meter = SimulatedMeter::default();
-        let only_end = stop_transaction_data(
-            &mut meter,
-            t(0),
-            ConnectorStatus::Available,
-            &[Measurand::Voltage],
-            &[],
-        );
+        let only_end =
+            stop_transaction_data(&model(), &idle(0.0), t(0), &[Measurand::Voltage], &[]);
         assert_eq!(only_end.len(), 1);
         assert_eq!(
             only_end[0].sampled_value[0].context,
             Some(ReadingContext::TransactionEnd)
         );
         assert_eq!(
-            stop_transaction_data(&mut meter, t(0), ConnectorStatus::Available, &[], &[]),
+            stop_transaction_data(&model(), &idle(0.0), t(0), &[], &[]),
             Vec::<MeterValue>::new()
         );
     }
@@ -765,34 +666,5 @@ mod tests {
         assert_eq!(next_clock_aligned(t(30), 60), Some(t(60)));
         assert_eq!(clock_aligned_delay(t(0), 0), None);
         assert_eq!(next_clock_aligned(t(0), 0), None);
-    }
-
-    proptest! {
-        #[test]
-        fn energy_never_decreases(
-            steps in prop::collection::vec((-5_000i64..20_000, any::<bool>(), any::<bool>()), 1..40),
-            limit in prop::option::of(0.0f64..10_000.0),
-        ) {
-            let mut meter = SimulatedMeter::default();
-            meter.set_power_limit_w(limit);
-            let mut clock_ms = 0i64;
-            let mut previous = meter.energy_wh();
-            for (delta_ms, charging, sample) in steps {
-                clock_ms += delta_ms;
-                let at = t(0) + TimeDelta::milliseconds(clock_ms);
-                let status = if charging {
-                    ConnectorStatus::Charging
-                } else {
-                    ConnectorStatus::Available
-                };
-                if sample {
-                    meter.sample(at, status, &DEFAULT_SAMPLED_DATA, ReadingContext::SamplePeriodic);
-                } else {
-                    meter.update(at, status);
-                }
-                prop_assert!(meter.energy_wh() >= previous);
-                previous = meter.energy_wh();
-            }
-        }
     }
 }

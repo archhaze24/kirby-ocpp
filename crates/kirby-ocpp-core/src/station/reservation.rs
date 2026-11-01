@@ -22,7 +22,11 @@
 //! 4. `Faulted`;
 //! 5. `Unavailable`: inoperative, or status `Unavailable`;
 //! 6. `Rejected`: expiry not in the future;
-//! 7. `Rejected`: the same reservation id is live on another connector.
+//! 7. `Rejected`: the same reservation id is live on another connector. This pure function
+//!    never moves a reservation; the `ReserveNow` handler first releases the old one on a
+//!    trial copy of the connectors (OCPP 1.6 section 5.13: an existing reservation id is
+//!    replaced) and keeps the change only if this function accepts, so a refused move leaves
+//!    the original reservation alone.
 //!
 //! Replacement: a request with the reservation id that is already on this
 //! connector replaces it (not `Occupied`), which is the TS bug fix.

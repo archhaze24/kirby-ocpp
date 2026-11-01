@@ -68,6 +68,16 @@ pub(crate) enum TimerKey {
     ReservationExpiry(ConnectorId),
     /// Next simulated diagnostics/firmware step.
     Maintenance,
+    /// A hard `Reset` waits for in-flight CALLs, then reconnects.
+    HardReset,
+}
+
+/// What woke the actor loop.
+enum Wake {
+    Command(Option<Envelope>),
+    Link(ConnectionEvent),
+    Internal(Internal),
+    Timer(TimerKey),
 }
 
 /// Messages from spawned tasks to the actor loop.
@@ -132,12 +142,16 @@ pub(crate) struct StationActor {
     pub(super) next_local: u64,
     /// Energy (Wh) after which a transaction with an invalidated idTag is stopped.
     pub(super) invalid_limits: HashMap<ConnectorId, u64>,
+    /// Energy integration state per connector (see `power.rs`).
+    pub(super) meters: HashMap<ConnectorId, super::power::MeterRuntime>,
     /// Offline syncs of queue entries still running.
     pub(super) sync_outstanding: usize,
     /// Queue keys not yet started by the running offline sync (entries run one at a time, in order).
     pub(super) sync_keys: VecDeque<u64>,
     /// Boot attempts left after a `Reset` (`ResetRetries`).
     pub(super) reset_retries: Option<u32>,
+    /// A hard `Reset` reconnects at the latest at this instant (see `handlers/remote.rs`).
+    pub(super) hard_reset_deadline: Option<tokio::time::Instant>,
     /// Simulated diagnostics/firmware steps still to report.
     pub(super) maintenance: VecDeque<(Duration, super::maintenance::Step)>,
     pub(super) timers: TimerWheel<TimerKey>,
@@ -180,6 +194,8 @@ impl StationActor {
             queue: OfflineQueue::default(),
         };
         persistence.restore(&mut state, &mut parts, &mut startup_logs);
+        // Profiles saved before store version 3 have no install time: count it from now.
+        parts.profiles.backfill_installed_at(clock.now_utc());
         state.heartbeat_interval_secs = parts.registry.heartbeat_interval_secs();
         state.local_list_version = parts.local_list.version();
         state.pending_offline_messages = parts.queue.pending_messages();
@@ -201,9 +217,11 @@ impl StationActor {
             // Never reuse a key still present in the restored queue (the wall clock may jump back).
             next_local: u64::try_from(clock_seed).unwrap_or(1).max(queue_high_water),
             invalid_limits: HashMap::new(),
+            meters: HashMap::new(),
             sync_outstanding: 0,
             sync_keys: VecDeque::new(),
             reset_retries: None,
+            hard_reset_deadline: None,
             maintenance: VecDeque::new(),
             timers: TimerWheel::new(),
             internal_tx,
@@ -237,24 +255,34 @@ impl StationActor {
         self.after_restore();
         self.publish();
 
+        self.settle_meters();
         loop {
-            tokio::select! {
-                envelope = self.commands.recv() => match envelope {
-                    Some(Envelope { command: Command::Shutdown, reply }) => {
-                        self.shutdown().await;
-                        // The requester may have gone away; nothing to do about that.
-                        let _ = reply.send(Ok(Outcome::Done));
-                        break;
-                    }
-                    Some(Envelope { command, reply }) => self.execute(command, reply),
-                    None => {
-                        self.shutdown().await;
-                        break;
-                    }
-                },
-                event = next_link_event(&mut self.link.events) => self.on_connection_event(event),
-                Some(internal) = self.internal_rx.recv() => self.on_internal(internal),
-                key = self.timers.next() => self.on_timer(key),
+            let wake = tokio::select! {
+                envelope = self.commands.recv() => Wake::Command(envelope),
+                event = next_link_event(&mut self.link.events) => Wake::Link(event),
+                Some(internal) = self.internal_rx.recv() => Wake::Internal(internal),
+                key = self.timers.next() => Wake::Timer(key),
+            };
+            // Before anything changes the state: energy of the time that just passed.
+            self.settle_meters();
+            match wake {
+                Wake::Command(Some(Envelope {
+                    command: Command::Shutdown,
+                    reply,
+                })) => {
+                    self.shutdown().await;
+                    // The requester may have gone away; nothing to do about that.
+                    let _ = reply.send(Ok(Outcome::Done));
+                    break;
+                }
+                Wake::Command(Some(Envelope { command, reply })) => self.execute(command, reply),
+                Wake::Command(None) => {
+                    self.shutdown().await;
+                    break;
+                }
+                Wake::Link(event) => self.on_connection_event(event),
+                Wake::Internal(internal) => self.on_internal(internal),
+                Wake::Timer(key) => self.on_timer(key),
             }
             self.publish();
         }
@@ -288,6 +316,7 @@ impl StationActor {
             TimerKey::MeterAligned => self.on_meter_aligned(),
             TimerKey::ReservationExpiry(id) => self.on_reservation_timer(id),
             TimerKey::Maintenance => self.on_maintenance_timer(),
+            TimerKey::HardReset => self.on_hard_reset_timer(),
         }
     }
 
@@ -295,6 +324,7 @@ impl StationActor {
     /// handshake), fail what is in flight, write the state file.
     async fn shutdown(&mut self) {
         self.log(LogLevel::Info, "station shutting down".to_owned());
+        self.flush_meters();
         self.link.wanted = false;
         self.timers.cancel_all();
         self.fail_pending_calls(|| CallError::Closed { code: None });

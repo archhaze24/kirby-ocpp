@@ -38,7 +38,8 @@ use crate::station::reservation::Reservation;
 use crate::station::transaction::TransactionState;
 
 /// Current on-disk format version.
-pub const STORE_VERSION: u32 = 2;
+/// Version 3 added the install time of charging profiles (`StoredProfile::installed_at`).
+pub const STORE_VERSION: u32 = 3;
 
 /// Everything that survives a restart.
 ///
@@ -440,7 +441,11 @@ mod tests {
     fn missing_optional_sections_default_when_the_version_is_present() {
         let dir = tempfile::tempdir().unwrap();
         let store = StationStore::new(dir.path(), "CP-1");
-        fs::write(store.path(), br#"{"version":2,"charge_point_id":"CP-1"}"#).unwrap();
+        fs::write(
+            store.path(),
+            format!(r#"{{"version":{STORE_VERSION},"charge_point_id":"CP-1"}}"#).as_bytes(),
+        )
+        .unwrap();
         let state = loaded(store.load().unwrap());
         assert_eq!(state, PersistedStation::new("CP-1"));
     }

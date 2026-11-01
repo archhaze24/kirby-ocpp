@@ -94,6 +94,27 @@ pub struct Cli {
     )]
     pub heartbeat: u32,
 
+    /// Nominal charging power of each connector in watts
+    #[arg(global = true,
+        long, value_name = "WATTS", default_value_t = defaults::NOMINAL_POWER_W,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub nominal_power_w: u32,
+
+    /// Supply voltage per phase in volts
+    #[arg(global = true,
+        long, value_name = "VOLTS", default_value_t = defaults::VOLTAGE_V,
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub voltage_v: u32,
+
+    /// Number of charging phases (1-3)
+    #[arg(global = true,
+        long, value_name = "COUNT", default_value_t = defaults::PHASES,
+        value_parser = clap::value_parser!(u8).range(1..=3)
+    )]
+    pub phases: u8,
+
     /// Do not save station state such as local auth list and charging profiles
     #[arg(global = true,
         long, env = "KIRBY_OCPP_NO_PERSIST", action = ArgAction::SetTrue,
@@ -289,6 +310,9 @@ impl Cli {
             },
             persist: !self.no_persist,
             state_dir: self.state_dir,
+            nominal_power_w: self.nominal_power_w,
+            voltage_v: self.voltage_v,
+            phases: self.phases,
         })
     }
 }

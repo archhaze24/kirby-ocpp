@@ -81,21 +81,25 @@ impl StationActor {
         let connection = self.link.conn.clone();
         let events = self.link.events.take();
         self.link_down(&CallError::Closed { code: None });
-        if let Some(connection) = connection {
-            connection.close();
-            // Let the close handshake finish in the background; the events are not needed.
-            if let Some(mut events) = events {
-                tokio::spawn(async move {
-                    while let Some(event) = events.recv().await {
-                        if matches!(event, ConnectionEvent::Closed { .. }) {
-                            break;
-                        }
-                    }
-                });
-            }
-        }
+        close_in_background(connection, events);
         self.state.connection = ConnectionState::Disconnected;
         self.log(LogLevel::Info, "disconnected".to_owned());
+    }
+
+    /// Hard `Reset`: closes the connection and opens a new one right away (even with
+    /// automatic reconnect disabled); the boot follows through the normal lifecycle.
+    pub(super) fn reconnect_for_hard_reset(&mut self) {
+        let connection = self.link.conn.clone();
+        let events = self.link.events.take();
+        self.link_down(&CallError::Closed { code: None });
+        close_in_background(connection, events);
+        self.link.wanted = true;
+        self.link.attempts = 0;
+        self.timers.cancel(&TimerKey::Reconnect);
+        if let Some(handle) = self.link.connecting.take() {
+            handle.abort();
+        }
+        self.start_connect();
     }
 
     fn start_connect(&mut self) {
@@ -186,6 +190,8 @@ impl StationActor {
         self.timers.cancel(&TimerKey::Heartbeat);
         self.timers.cancel(&TimerKey::BootRetry);
         self.timers.cancel(&TimerKey::Maintenance);
+        self.timers.cancel(&TimerKey::HardReset);
+        self.hard_reset_deadline = None;
         self.maintenance.clear();
         self.sync_outstanding = 0;
         self.sync_keys.clear();
@@ -443,6 +449,27 @@ fn redact_url(url: &str) -> String {
             parsed.to_string()
         }
         Err(_) => "<invalid url>".to_owned(),
+    }
+}
+
+/// Closes `connection` and lets the close handshake finish in the background; its events
+/// are not needed.
+fn close_in_background(
+    connection: Option<Connection>,
+    events: Option<tokio::sync::mpsc::Receiver<ConnectionEvent>>,
+) {
+    let Some(connection) = connection else {
+        return;
+    };
+    connection.close();
+    if let Some(mut events) = events {
+        tokio::spawn(async move {
+            while let Some(event) = events.recv().await {
+                if matches!(event, ConnectionEvent::Closed { .. }) {
+                    break;
+                }
+            }
+        });
     }
 }
 

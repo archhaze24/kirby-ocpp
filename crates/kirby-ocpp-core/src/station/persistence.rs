@@ -284,6 +284,7 @@ impl StationActor {
 
     /// The debounce timer fired, or a flush was requested: start a write if needed.
     pub(super) fn flush_persistence(&mut self) {
+        self.flush_meters();
         let Some(store) = self.persistence.store.clone() else {
             return;
         };

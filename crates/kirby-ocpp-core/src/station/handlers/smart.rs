@@ -1,7 +1,8 @@
 //! `SetChargingProfile`, `ClearChargingProfile`, `GetCompositeSchedule` over the
 //! [`ChargingProfileStore`](crate::station::charging_profiles::ChargingProfileStore) with the
-//! limits from the configuration registry. Profiles are store-and-report only; applying the
-//! composite limit to the simulated power is not done (see QUESTIONS.md).
+//! limits from the configuration registry. The profiles also drive the simulated power and
+//! energy (`station/power.rs`); the meter is settled at the top of every actor iteration, so
+//! a change made here applies from this moment on.
 
 use crate::ids::ConnectorId;
 use crate::ocpp::messages::{
@@ -100,6 +101,7 @@ pub(super) fn composite_schedule(
         connector_count: actor.connector_count(),
         active_tx,
         tx_started_at,
+        model: actor.power_model(),
     };
     let before = actor.profiles.len();
     let result = actor.profiles.composite_schedule(&query);
