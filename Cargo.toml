@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/kirby-ocpp-core", "crates/kirby-ocpp-tui", "crates/kirby-ocpp"]
+default-members = ["crates/kirby-ocpp-core", "crates/kirby-ocpp-tui", "crates/kirby-ocpp"]
+
+[workspace.package]
+version = "0.2.0-dev"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/archhaze24/kirby-ocpp"
+homepage = "https://github.com/archhaze24/kirby-ocpp#readme"
+
+[workspace.dependencies]
+# internal
+kirby-ocpp-core = { path = "crates/kirby-ocpp-core", version = "0.2.0-dev" }
+kirby-ocpp-tui = { path = "crates/kirby-ocpp-tui", version = "0.2.0-dev" }
+
+# external (latest stable at skeleton time; crates used only in later stages are
+# added to this table by the stage that first compiles against them)
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+crossterm = "0.29.0"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "rt", "sync", "time"] }
+tracing = "0.1.44"
+url = "2.5.8"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+todo = "deny"
+dbg_macro = "deny"
+# pragmatic pedantic opt-outs
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow" # OCPP action and key names are CamelCase prose
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"

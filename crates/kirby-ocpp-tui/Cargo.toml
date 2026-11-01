@@ -1,0 +1,23 @@
+[package]
+name = "kirby-ocpp-tui"
+description = "Terminal UI for the kirby-ocpp charge point emulator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "kirby_ocpp_tui"
+
+[dependencies]
+kirby-ocpp-core.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
