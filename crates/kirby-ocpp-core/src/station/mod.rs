@@ -32,6 +32,7 @@ mod handle;
 mod snapshot;
 
 pub mod authorization;
+pub mod charging_profiles;
 pub mod config_registry;
 pub mod connector;
 pub mod local_auth_list;
