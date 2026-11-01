@@ -1,0 +1,21 @@
+name = "finish-session"
+description = "Send MeterValues, StopTransaction and unplug the EV (needs a running transaction on connector 1)."
+
+[[steps]]
+action = "meter"
+connector = 1
+wh_delta = 500
+
+[[steps]]
+action = "stop_tx"
+connector = 1
+reason = "Local"
+
+[[steps]]
+action = "expect_call"
+call = "StopTransaction"
+timeout_ms = 3000
+
+[[steps]]
+action = "unplug"
+connector = 1

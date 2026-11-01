@@ -1,0 +1,46 @@
+name = "offline-sync"
+description = "Go offline, run a whole session, reconnect, wait until the queued transaction messages are delivered and unplug. The station must be allowed to authorize offline (LocalAuthorizeOffline=true plus AllowOfflineTxForUnknownId=true, or the tag in the local list or authorization cache); otherwise the offline start is rejected and the scenario fails."
+
+[[steps]]
+action = "disconnect"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "disconnected" }
+timeout_ms = 3000
+
+[[steps]]
+action = "plug"
+connector = 1
+
+[[steps]]
+action = "start_tx"
+connector = 1
+id_tag = "KIRBY-TAG"
+
+[[steps]]
+action = "stop_tx"
+connector = 1
+reason = "Local"
+
+[[steps]]
+action = "connect"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+timeout_ms = 8000
+
+[[steps]]
+action = "expect_call"
+call = "StartTransaction"
+timeout_ms = 3000
+
+[[steps]]
+action = "expect_call"
+call = "StopTransaction"
+timeout_ms = 3000
+
+[[steps]]
+action = "unplug"
+connector = 1

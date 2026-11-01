@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use clap::builder::BoolishValueParser;
-use clap::{ArgAction, Parser};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults, validate_ws_url};
 use kirby_ocpp_core::ids::ConnectorId;
@@ -24,107 +24,107 @@ use kirby_ocpp_core::ids::ConnectorId;
 )]
 pub struct Cli {
     /// Central System WebSocket URL, e.g. ws://localhost:9000/ocpp
-    #[arg(short, long, env = "OCPP_URL", value_name = "URL", value_parser = parse_url)]
+    #[arg(global = true, short, long, env = "OCPP_URL", value_name = "URL", value_parser = parse_url)]
     pub url: Option<String>,
 
     /// Charge point id
-    #[arg(
+    #[arg(global = true,
         short, long, env = "OCPP_CHARGE_POINT_ID", value_name = "ID",
         default_value = defaults::CHARGE_POINT_ID, value_parser = non_empty
     )]
     pub id: String,
 
     /// Charge point vendor
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_VENDOR", value_name = "VENDOR",
         default_value = defaults::VENDOR, value_parser = non_empty
     )]
     pub vendor: String,
 
     /// Charge point model
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_MODEL", value_name = "MODEL",
         default_value = defaults::MODEL, value_parser = non_empty
     )]
     pub model: String,
 
     /// Charge point serial number reported in BootNotification (at most 25 characters)
-    #[arg(long, env = "OCPP_SERIAL", value_name = "SERIAL", value_parser = non_empty)]
+    #[arg(global = true, long, env = "OCPP_SERIAL", value_name = "SERIAL", value_parser = non_empty)]
     pub serial: Option<String>,
 
     /// Firmware version reported in BootNotification (at most 50 characters)
-    #[arg(
+    #[arg(global = true,
         long = "firmware-version", env = "OCPP_FIRMWARE_VERSION", value_name = "VERSION",
         value_parser = non_empty
     )]
     pub firmware_version: Option<String>,
 
     /// Initial connector id
-    #[arg(
+    #[arg(global = true,
         short, long, value_name = "ID", default_value_t = 1,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub connector: u32,
 
     /// Number of station connectors (raised to --connector if smaller)
-    #[arg(
+    #[arg(global = true,
         long, value_name = "COUNT", default_value_t = 1,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub connectors: u32,
 
     /// Fallback heartbeat interval in seconds
-    #[arg(
+    #[arg(global = true,
         long, value_name = "SECONDS", default_value_t = defaults::HEARTBEAT_INTERVAL_SECS,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub heartbeat: u32,
 
     /// Do not save station state such as local auth list and charging profiles
-    #[arg(
+    #[arg(global = true,
         long, env = "KIRBY_OCPP_NO_PERSIST", action = ArgAction::SetTrue,
         value_parser = BoolishValueParser::new()
     )]
     pub no_persist: bool,
 
     /// Directory for persisted station state
-    #[arg(long, env = "KIRBY_OCPP_STATE_DIR", value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(global = true, long, env = "KIRBY_OCPP_STATE_DIR", value_name = "PATH", value_parser = non_empty_path)]
     pub state_dir: Option<PathBuf>,
 
     /// WebSocket subprotocol to request
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_WS_SUBPROTOCOL", value_name = "PROTOCOL",
         default_value = defaults::WS_SUBPROTOCOL, value_parser = non_empty
     )]
     pub ws_subprotocol: String,
 
     /// WebSocket ping interval in seconds, 0 disables pings
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_WS_PING_INTERVAL", value_name = "SECONDS",
         default_value_t = defaults::WS_PING_INTERVAL_SECS
     )]
     pub ws_ping: u32,
 
     /// Enable or disable automatic reconnect after an unexpected disconnect
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_RECONNECT", value_name = "BOOL", default_value_t = true,
         action = ArgAction::Set, value_parser = BoolishValueParser::new()
     )]
     pub reconnect: bool,
 
     /// Do not automatically reconnect (wins over --reconnect and OCPP_RECONNECT)
-    #[arg(long)]
+    #[arg(global = true, long)]
     pub no_reconnect: bool,
 
     /// Initial automatic reconnect delay in milliseconds
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_RECONNECT_INITIAL_MS", value_name = "MILLISECONDS",
         default_value_t = defaults::RECONNECT_INITIAL_MS
     )]
     pub reconnect_initial_ms: u64,
 
     /// Maximum automatic reconnect delay in milliseconds
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_RECONNECT_MAX_MS", value_name = "MILLISECONDS",
         default_value_t = defaults::RECONNECT_MAX_MS
     )]
@@ -132,6 +132,7 @@ pub struct Cli {
 
     /// Maximum automatic reconnect attempts, 0 means unlimited
     #[arg(
+        global = true,
         long,
         env = "OCPP_RECONNECT_MAX_ATTEMPTS",
         value_name = "ATTEMPTS",
@@ -140,7 +141,7 @@ pub struct Cli {
     pub reconnect_max_attempts: u32,
 
     /// OCPP CALL response timeout in milliseconds
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_CALL_TIMEOUT_MS", value_name = "MILLISECONDS",
         default_value_t = defaults::CALL_TIMEOUT_MS,
         value_parser = clap::value_parser!(u64).range(1..)
@@ -148,31 +149,88 @@ pub struct Cli {
     pub call_timeout_ms: u64,
 
     /// CA certificate bundle for wss:// connections
-    #[arg(long, env = "OCPP_TLS_CA_FILE", value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(global = true, long, env = "OCPP_TLS_CA_FILE", value_name = "PATH", value_parser = non_empty_path)]
     pub tls_ca: Option<PathBuf>,
 
     /// Client certificate for wss:// mutual TLS
-    #[arg(long, env = "OCPP_TLS_CERT_FILE", value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(global = true, long, env = "OCPP_TLS_CERT_FILE", value_name = "PATH", value_parser = non_empty_path)]
     pub tls_cert: Option<PathBuf>,
 
     /// Client private key for wss:// mutual TLS
-    #[arg(long, env = "OCPP_TLS_KEY_FILE", value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(global = true, long, env = "OCPP_TLS_KEY_FILE", value_name = "PATH", value_parser = non_empty_path)]
     pub tls_key: Option<PathBuf>,
 
     /// TLS server name override for wss:// connections
-    #[arg(long, env = "OCPP_TLS_SERVER_NAME", value_name = "NAME", value_parser = non_empty)]
+    #[arg(global = true, long, env = "OCPP_TLS_SERVER_NAME", value_name = "NAME", value_parser = non_empty)]
     pub tls_server_name: Option<String>,
 
     /// Disable TLS certificate verification for local/self-signed wss:// testing
-    #[arg(
+    #[arg(global = true,
         long, env = "OCPP_TLS_SKIP_VERIFY", action = ArgAction::SetTrue,
         value_parser = BoolishValueParser::new()
     )]
     pub tls_skip_verify: bool,
 
     /// Print the effective configuration as JSON and exit
-    #[arg(long)]
+    #[arg(global = true, long)]
     pub print_config: bool,
+
+    /// Never start the terminal UI; log to stdout instead (automatic when stdout is not a terminal)
+    #[arg(global = true, long)]
+    pub no_tui: bool,
+
+    /// Machine-readable output: one JSON object per line (events, and the report of `run`)
+    #[arg(global = true, long)]
+    pub json: bool,
+
+    /// Also append the headless event log to this file
+    #[arg(global = true, long, value_name = "PATH", value_parser = non_empty_path)]
+    pub log_file: Option<PathBuf>,
+
+    #[command(subcommand)]
+    pub command: Option<Cmd>,
+}
+
+/// Subcommands. Without one, the UI (or the headless logger) runs.
+#[derive(Debug, Subcommand)]
+pub enum Cmd {
+    /// Connect, run a scenario, print the report; exit code 1 if any step fails
+    Run(RunArgs),
+    /// Built-in scenarios
+    Scenarios {
+        #[command(subcommand)]
+        action: ScenariosCmd,
+    },
+}
+
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Scenario: a built-in name (see `scenarios list`) or a TOML file
+    #[arg(long, value_name = "FILE|NAME")]
+    pub scenario: String,
+
+    /// Write the report as JSON to this file
+    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    pub report: Option<PathBuf>,
+
+    /// Give up (and fail) after this many seconds, connecting included
+    #[arg(
+        long, value_name = "SECONDS", default_value_t = 60,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    pub timeout: u64,
+
+    /// Replace the idTag of the scenario's authorize / start_tx / stop_tx steps
+    #[arg(long, value_name = "IDTAG", value_parser = non_empty)]
+    pub id_tag: Option<String>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ScenariosCmd {
+    /// List the built-in scenarios
+    List,
+    /// Print a built-in scenario as TOML
+    Show { name: String },
 }
 
 impl Cli {

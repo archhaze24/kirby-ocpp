@@ -1,0 +1,25 @@
+name = "charge-session"
+description = "Plug the EV in, Authorize, StartTransaction and send MeterValues (connector 1)."
+
+[[steps]]
+action = "plug"
+connector = 1
+
+[[steps]]
+action = "authorize"
+id_tag = "KIRBY-TAG"
+
+[[steps]]
+action = "start_tx"
+connector = 1
+id_tag = "KIRBY-TAG"
+
+[[steps]]
+action = "meter"
+connector = 1
+wh_delta = 1000
+
+[[steps]]
+action = "expect_call"
+call = "MeterValues"
+timeout_ms = 3000

@@ -17,7 +17,13 @@ kirby-ocpp-core.workspace = true
 kirby-ocpp-tui.workspace = true
 clap.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+chrono.workspace = true
+
+[dev-dependencies]
+kirby-ocpp-testkit.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

@@ -1,0 +1,21 @@
+name = "fault-recovery"
+description = "Inject a fault on connector 1, then clear it."
+
+[[steps]]
+action = "fault"
+connector = 1
+error_code = "GroundFailure"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connector_status", connector = 1, status = "Faulted" }
+timeout_ms = 3000
+
+[[steps]]
+action = "clear_fault"
+connector = 1
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connector_status", connector = 1, status = "Available" }
+timeout_ms = 3000
