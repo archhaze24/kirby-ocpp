@@ -17,7 +17,7 @@
 //! One file per topic: `config` (Get/ChangeConfiguration), `data_transfer`, `local_list`
 //! (SendLocalList, GetLocalListVersion, ClearCache), `availability`
 //! (ChangeAvailability, UnlockConnector), `trigger` (TriggerMessage), `remote` (RemoteStart/Stop,
-//! Reset), `reservation`, `smart` (charging profiles), `maintenance` (diagnostics, firmware).
+//! Reset), `rules` (response rules applied before the handler), `reservation`, `smart` (charging profiles), `maintenance` (diagnostics, firmware).
 
 #![allow(
     clippy::needless_pass_by_value,
@@ -31,6 +31,7 @@ mod local_list;
 mod maintenance;
 mod remote;
 mod reservation;
+mod rules;
 mod smart;
 mod trigger;
 
@@ -45,6 +46,7 @@ use crate::ocpp::messages::{
 };
 use crate::ocpp::responder::{ReplyHandle, Responder};
 use crate::station::event::LogLevel;
+use crate::station::response_rules::INBOUND_ACTIONS;
 use crate::ws::IncomingCall;
 
 /// A handler for the inbound action `A`.
@@ -60,6 +62,14 @@ impl StationActor {
             ..
         } = call;
         self.log(LogLevel::Info, format!("CSMS requests {action}"));
+        let reply = if INBOUND_ACTIONS.contains(&action.as_str()) {
+            match self.apply_response_rule(&action, reply) {
+                Some(reply) => reply,
+                None => return,
+            }
+        } else {
+            reply
+        };
         match action.as_str() {
             ChangeConfiguration::NAME => {
                 self.invoke::<ChangeConfiguration>(payload, reply, config::change_configuration);

@@ -14,6 +14,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::ids::ConnectorId;
+use crate::station::response_rules::{ResponseRule, canonical_action};
 
 /// Defaults shared with the TS CLI (`src/cli.ts`).
 pub mod defaults {
@@ -131,6 +132,8 @@ pub struct StationConfig {
     pub voltage_v: u32,
     /// Number of phases the station charges with (1..=3).
     pub phases: u8,
+    /// Response rules active from the start (see `station::response_rules`); runtime-only.
+    pub response_rules: Vec<ResponseRule>,
 }
 
 impl Default for StationConfig {
@@ -155,6 +158,7 @@ impl Default for StationConfig {
             nominal_power_w: defaults::NOMINAL_POWER_W,
             voltage_v: defaults::VOLTAGE_V,
             phases: defaults::PHASES,
+            response_rules: Vec::new(),
         }
     }
 }
@@ -177,6 +181,8 @@ pub enum ConfigError {
     ReconnectBusyLoop,
     #[error("phases must be 1, 2 or 3")]
     InvalidPhases,
+    #[error("response rule `{0}`: action is not an inbound CSMS command or count is zero")]
+    InvalidResponseRule(String),
 }
 
 impl StationConfig {
@@ -298,6 +304,13 @@ impl StationConfig {
             && reconnect.initial_delay_ms.min(reconnect.max_delay_ms) == 0
         {
             return Err(ConfigError::ReconnectBusyLoop);
+        }
+        for rule in &self.response_rules {
+            if canonical_action(&rule.action) != Ok(rule.action.as_str())
+                || rule.remaining == Some(0)
+            {
+                return Err(ConfigError::InvalidResponseRule(rule.to_string()));
+            }
         }
         Ok(())
     }

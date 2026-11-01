@@ -376,6 +376,10 @@ fn to_command(action: &Action) -> Option<Command> {
             message_id,
             data,
         },
+        Action::SetRule { rule } => Command::SetResponseRule { rule: rule.clone() },
+        Action::ClearRules { call } => Command::ClearResponseRules {
+            action: call.clone(),
+        },
         Action::Sleep { .. } | Action::WaitFor { .. } | Action::ExpectCall { .. } => return None,
     })
 }

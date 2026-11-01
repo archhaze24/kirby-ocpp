@@ -20,6 +20,7 @@ use super::connector::{
     status_after_fault_clear, status_after_unplug, trim_text,
 };
 use super::event::LogLevel;
+use super::response_rules::{RuleList, canonical_action};
 use super::transactions::{Done, reply_to};
 use crate::error::{CallError, StationError};
 use crate::ids::ConnectorId;
@@ -162,6 +163,32 @@ impl StationActor {
                 self.log(
                     LogLevel::Info,
                     format!("Firmware outcome set to {outcome:?}"),
+                );
+                Ok(Outcome::Done)
+            }
+            Command::SetResponseRule { mut rule } => {
+                let canonical = canonical_action(&rule.action)
+                    .map_err(|error| StationError::InvalidArgument(error.to_string()))?;
+                canonical.clone_into(&mut rule.action);
+                if rule.remaining == Some(0) {
+                    return Err(StationError::InvalidArgument(
+                        "count must be a positive integer".to_owned(),
+                    ));
+                }
+                self.log(LogLevel::Info, format!("response rule set: {rule}"));
+                self.state.response_rules.set_rule(rule);
+                Ok(Outcome::Done)
+            }
+            Command::ClearResponseRules { action } => {
+                let action = action
+                    .as_deref()
+                    .map(canonical_action)
+                    .transpose()
+                    .map_err(|error| StationError::InvalidArgument(error.to_string()))?;
+                let removed = self.state.response_rules.clear_rules(action);
+                self.log(
+                    LogLevel::Info,
+                    format!("{removed} response rule(s) cleared"),
                 );
                 Ok(Outcome::Done)
             }

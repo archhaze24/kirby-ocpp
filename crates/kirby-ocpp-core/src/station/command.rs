@@ -5,6 +5,7 @@ use serde_json::Value;
 
 use super::authorization::AuthorizationDecision;
 use super::maintenance::{DiagnosticsOutcome, FirmwareOutcome};
+use super::response_rules::ResponseRule;
 use crate::ids::{ConnectorId, IdTag, TxId};
 use crate::ocpp::types::{
     AuthorizationStatus, ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus,
@@ -111,6 +112,11 @@ pub enum Command {
         payload: Value,
         validate: bool,
     },
+    /// Make the station misbehave on purpose: add (or replace, per action) a response rule for an
+    /// inbound CSMS command. See [`super::response_rules`].
+    SetResponseRule { rule: ResponseRule },
+    /// Remove the response rules of one action, or all of them for `None`.
+    ClearResponseRules { action: Option<String> },
     /// Stop the station: close the connection gracefully, flush state, end the actor.
     Shutdown,
 }
@@ -142,6 +148,8 @@ impl Command {
             Self::SetDiagnosticsOutcome { .. } => "set_diagnostics_outcome",
             Self::SetFirmwareOutcome { .. } => "set_firmware_outcome",
             Self::SendRaw { .. } => "send_raw",
+            Self::SetResponseRule { .. } => "set_response_rule",
+            Self::ClearResponseRules { .. } => "clear_response_rules",
             Self::Shutdown => "shutdown",
         }
     }

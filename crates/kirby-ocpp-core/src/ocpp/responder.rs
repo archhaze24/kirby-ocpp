@@ -15,6 +15,7 @@
 //!   with an error - is never followed by this fallback.
 
 use std::marker::PhantomData;
+use std::time::Duration;
 
 use serde_json::Value;
 use thiserror::Error;
@@ -82,6 +83,37 @@ impl ReplyHandle {
             details,
         };
         self.send(frame)
+    }
+
+    /// Deliberately leaves the CALL unanswered: **no** reply and **not** the `InternalError`
+    /// drop fallback. Only for response rules that test a CSMS call timeout (`ignore`) or
+    /// that close the connection instead of answering (`drop`).
+    pub fn abandon(mut self) {
+        self.sink = None;
+    }
+
+    /// Returns a handle whose reply reaches the connection `delay` after this call (counted from
+    /// now). Nothing blocks: a small task holds the real sink. Dropping the returned handle
+    /// without replying still produces the `InternalError` fallback, delayed the same way.
+    /// Must be called inside a tokio runtime.
+    #[must_use]
+    pub fn delayed(mut self, delay: Duration) -> Self {
+        let Some(sink) = self.sink.take() else {
+            return self;
+        };
+        let (proxy, mut frames) = mpsc::unbounded_channel();
+        let due = tokio::time::Instant::now() + delay;
+        tokio::spawn(async move {
+            if let Some(frame) = frames.recv().await {
+                tokio::time::sleep_until(due).await;
+                // The connection may have closed meanwhile; nothing more can be done then.
+                let _ = sink.send(frame);
+            }
+        });
+        Self {
+            id: self.id.clone(),
+            sink: Some(proxy),
+        }
     }
 
     fn send(&mut self, frame: Frame) -> Result<(), ReplyError> {
@@ -223,5 +255,50 @@ mod tests {
             .accept_value(json!({}))
             .unwrap_err();
         assert!(matches!(err, ReplyError::Closed));
+    }
+
+    #[test]
+    fn abandoned_handle_sends_nothing_not_even_the_drop_fallback() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        ReplyHandle::new("m7", tx).abandon();
+        assert_eq!(drain(&mut rx).len(), 0);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delayed_reply_arrives_after_the_delay_and_only_once() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let started = tokio::time::Instant::now();
+        ReplyHandle::new("m8", tx)
+            .delayed(Duration::from_millis(80))
+            .accept_value(json!({}))
+            .unwrap();
+        assert!(rx.try_recv().is_err(), "nothing yet");
+        let frame = rx.recv().await.expect("the delayed reply");
+        assert_eq!(frame, Frame::call_result("m8", json!({})));
+        assert!(started.elapsed() >= Duration::from_millis(80));
+        assert!(rx.recv().await.is_none(), "no second frame");
+    }
+
+    #[tokio::test]
+    async fn delayed_handle_dropped_without_reply_sends_the_fallback_late() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        drop(ReplyHandle::new("m9", tx).delayed(Duration::from_millis(30)));
+        let Some(Frame::CallError { code, .. }) = rx.recv().await else {
+            panic!("expected the InternalError fallback");
+        };
+        assert_eq!(code, ErrorCode::InternalError);
+    }
+
+    #[tokio::test]
+    async fn abandoned_delayed_handle_sends_nothing() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        ReplyHandle::new("m10", tx)
+            .delayed(Duration::from_millis(10))
+            .abandon();
+        assert!(rx.recv().await.is_none());
     }
 }

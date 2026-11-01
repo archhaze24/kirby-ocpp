@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::maintenance::{DiagnosticsOutcome, FirmwareOutcome};
 use super::reservation::Reservation;
+use super::response_rules::ResponseRule;
 use super::transaction::TransactionState;
 use crate::config::StationConfig;
 use crate::ids::{ConnectorId, IdTag, TxId};
@@ -85,6 +86,8 @@ pub struct Snapshot {
     pub firmware_outcome: FirmwareOutcome,
     /// Transaction messages waiting for a connection.
     pub pending_offline_messages: u32,
+    /// Active response rules (runtime only; see `response_rules`), in the order they were set.
+    pub response_rules: Vec<ResponseRule>,
     /// Connectors `1..=n`, ordered by id.
     pub connectors: Vec<ConnectorSnapshot>,
 }
@@ -110,6 +113,7 @@ impl Snapshot {
             diagnostics_outcome: DiagnosticsOutcome::default(),
             firmware_outcome: FirmwareOutcome::default(),
             pending_offline_messages: 0,
+            response_rules: config.response_rules.clone(),
             connectors: (1..=count)
                 .map(|id| ConnectorSnapshot::new(ConnectorId::new(id)))
                 .collect(),

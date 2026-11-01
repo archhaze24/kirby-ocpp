@@ -55,6 +55,7 @@ pub mod maintenance;
 pub mod metering;
 pub mod offline;
 pub mod reservation;
+pub mod response_rules;
 pub mod smart_charging;
 pub mod transaction;
 
@@ -69,6 +70,7 @@ pub use self::event::{Direction, Event, FrameRecord, LogLevel, LogRecord};
 pub use self::handle::StationHandle;
 pub use self::maintenance::{DiagnosticsOutcome, FirmwareOutcome};
 pub use self::reservation::Reservation;
+pub use self::response_rules::{Behavior, ResponseRule};
 pub use self::snapshot::{ConnectorSnapshot, Snapshot};
 pub use self::transaction::TransactionState;
 pub use crate::ocpp::responder::Responder;

@@ -8,7 +8,8 @@ use serde_json::Value;
 use super::ScenarioError;
 use crate::ids::{ConnectorId, IdTag};
 use crate::ocpp::types::{ChargePointErrorCode, ConnectorStatus, RegistrationStatus, StopReason};
-use crate::station::{Direction, Snapshot, TransactionState};
+use crate::station::response_rules::canonical_action;
+use crate::station::{Direction, ResponseRule, Snapshot, TransactionState};
 use crate::ws::ConnectionState;
 
 /// Default timeout of `wait_for` and `expect_call`.
@@ -158,6 +159,34 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         data: Option<String>,
     },
+    /// Misbehave on purpose when the CSMS sends a command, e.g. `rule = "Reset=reject*2"`
+    /// (see `station::response_rules` for the syntax). Replaces the rule of the same action.
+    SetRule {
+        #[serde(with = "rule_text")]
+        rule: ResponseRule,
+    },
+    /// Remove the response rules of the command `call`, or all of them when omitted.
+    ClearRules {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call: Option<String>,
+    },
+}
+
+/// A response rule written as its compact text form in TOML.
+mod rule_text {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    use crate::station::ResponseRule;
+
+    pub fn serialize<S: Serializer>(rule: &ResponseRule, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(rule)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ResponseRule, D::Error> {
+        String::deserialize(d)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 /// A condition on the station snapshot, for `wait_for`.
@@ -228,6 +257,8 @@ impl Action {
             Self::ExpectCall { .. } => "expect_call",
             Self::SendRaw { .. } => "send_raw",
             Self::DataTransfer { .. } => "data_transfer",
+            Self::SetRule { .. } => "set_rule",
+            Self::ClearRules { .. } => "clear_rules",
         }
     }
 }
@@ -324,6 +355,11 @@ impl Scenario {
                     if call.is_empty() =>
                 {
                     return bad("`call` must not be empty");
+                }
+                Action::ClearRules { call: Some(call) } => {
+                    if let Err(error) = canonical_action(call) {
+                        return bad(&error.to_string());
+                    }
                 }
                 _ => {}
             }
@@ -550,6 +586,29 @@ call = "Heartbeat"
             "x".repeat(40)
         ));
         assert!(e.contains("step 1"), "{e}");
+    }
+
+    #[test]
+    fn rule_steps_parse_and_roundtrip() {
+        let s = Scenario::from_toml(&format!(
+            "{HEAD}[[steps]]\naction = \"set_rule\"\nrule = \"reset=reject*2\"\n[[steps]]\naction = \"clear_rules\"\ncall = \"Reset\"\n[[steps]]\naction = \"clear_rules\"\n"
+        ))
+        .unwrap();
+        assert!(matches!(
+            &s.steps[0].action,
+            Action::SetRule { rule } if rule.to_string() == "Reset=reject*2"
+        ));
+        let action = &s.steps[0].action;
+        let back: Action = serde_json::from_str(&serde_json::to_string(action).unwrap()).unwrap();
+        assert_eq!(&back, action);
+        for step in [
+            "action = \"set_rule\"\nrule = \"Reset=explode\"",
+            "action = \"set_rule\"\nrule = \"Nope=reject\"",
+            "action = \"clear_rules\"\ncall = \"Heartbeat\"",
+        ] {
+            let e = err(&format!("{HEAD}[[steps]]\n{step}\n"));
+            assert!(e.contains("step 1"), "{e}");
+        }
     }
 
     #[test]

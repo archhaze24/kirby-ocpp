@@ -250,3 +250,36 @@ timeout_ms = 60000
     drop(tx);
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn set_rule_and_clear_rules_steps_drive_response_rules() {
+    let rig = booted_rig().await;
+    let s = scenario(
+        r#"
+[[steps]]
+action = "set_rule"
+rule = "ClearCache=reject*1"
+[[steps]]
+action = "set_rule"
+rule = "Reset=drop"
+[[steps]]
+action = "clear_rules"
+call = "Reset"
+"#,
+    );
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    assert!(report.passed, "{report:#?}");
+    let rules: Vec<String> = rig
+        .station
+        .snapshot()
+        .response_rules
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(rules, ["ClearCache=reject*1"]);
+    rig.csms
+        .expect_status("ClearCache", serde_json::json!({}), "Rejected")
+        .await
+        .unwrap();
+    rig.shutdown().await;
+}
