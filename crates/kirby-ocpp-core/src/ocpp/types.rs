@@ -5,10 +5,6 @@
 //! the CLI can parse flags without a second source of truth. They are used both
 //! by the typed messages in [`crate::ocpp::messages`] and by the station state.
 
-use std::fmt;
-use std::str::FromStr;
-
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 /// A string that is not a valid value of the named enum.
@@ -42,40 +38,42 @@ macro_rules! wire_enum {
             }
         }
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 f.write_str(self.as_str())
             }
         }
 
-        impl FromStr for $name {
-            type Err = ParseEnumError;
+        impl ::std::str::FromStr for $name {
+            type Err = $crate::ocpp::types::ParseEnumError;
 
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
+            fn from_str(s: &str) -> ::std::result::Result<Self, Self::Err> {
                 match s {
-                    $($wire => Ok(Self::$variant),)+
-                    _ => Err(ParseEnumError {
+                    $($wire => ::std::result::Result::Ok(Self::$variant),)+
+                    _ => Err($crate::ocpp::types::ParseEnumError {
                         type_name: stringify!($name),
-                        value: s.to_owned(),
+                        value: ::std::string::ToString::to_string(s),
                     }),
                 }
             }
         }
 
-        impl Serialize for $name {
-            fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        impl ::serde::Serialize for $name {
+            fn serialize<S: ::serde::Serializer>(&self, serializer: S) -> ::std::result::Result<S::Ok, S::Error> {
                 serializer.serialize_str(self.as_str())
             }
         }
 
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let value = String::deserialize(deserializer)?;
-                value.parse().map_err(serde::de::Error::custom)
+        impl<'de> ::serde::Deserialize<'de> for $name {
+            fn deserialize<D: ::serde::Deserializer<'de>>(deserializer: D) -> ::std::result::Result<Self, D::Error> {
+                let value = <::std::string::String as ::serde::Deserialize>::deserialize(deserializer)?;
+                value.parse().map_err(<D::Error as ::serde::de::Error>::custom)
             }
         }
     };
 }
+
+pub(crate) use wire_enum;
 
 wire_enum! {
     /// `ChargePointStatus` (called `ConnectorStatus` here, as in the TS code).
@@ -207,6 +205,151 @@ wire_enum! {
         SoC => "SoC",
         Temperature => "Temperature",
         Voltage => "Voltage",
+    }
+}
+
+wire_enum! {
+    /// `Phase` of a sampled value.
+    Phase {
+        L1 => "L1",
+        L2 => "L2",
+        L3 => "L3",
+        N => "N",
+        L1N => "L1-N",
+        L2N => "L2-N",
+        L3N => "L3-N",
+        L1L2 => "L1-L2",
+        L2L3 => "L2-L3",
+        L3L1 => "L3-L1",
+    }
+}
+
+wire_enum! {
+    /// `Location` of a measurement.
+    Location {
+        Cable => "Cable",
+        EV => "EV",
+        Inlet => "Inlet",
+        Outlet => "Outlet",
+        Body => "Body",
+    }
+}
+
+wire_enum! {
+    /// `UnitOfMeasure` of a sampled value. Both spellings `Celcius` (sic, as in
+    /// the 1.6 schema) and `Celsius` are valid on the wire.
+    UnitOfMeasure {
+        Wh => "Wh",
+        KWh => "kWh",
+        Varh => "varh",
+        Kvarh => "kvarh",
+        W => "W",
+        KW => "kW",
+        VA => "VA",
+        KVA => "kVA",
+        Var => "var",
+        Kvar => "kvar",
+        A => "A",
+        V => "V",
+        K => "K",
+        Celcius => "Celcius",
+        Celsius => "Celsius",
+        Fahrenheit => "Fahrenheit",
+        Percent => "Percent",
+    }
+}
+
+wire_enum! {
+    /// `ReadingContext` of a sampled value.
+    ReadingContext {
+        InterruptionBegin => "Interruption.Begin",
+        InterruptionEnd => "Interruption.End",
+        SampleClock => "Sample.Clock",
+        SamplePeriodic => "Sample.Periodic",
+        TransactionBegin => "Transaction.Begin",
+        TransactionEnd => "Transaction.End",
+        Trigger => "Trigger",
+        Other => "Other",
+    }
+}
+
+wire_enum! {
+    /// `ValueFormat` of a sampled value.
+    ValueFormat {
+        Raw => "Raw",
+        SignedData => "SignedData",
+    }
+}
+
+wire_enum! {
+    /// `ResetType` of `Reset.req`.
+    ResetType {
+        Hard => "Hard",
+        Soft => "Soft",
+    }
+}
+
+wire_enum! {
+    /// `ConfigurationStatus` of `ChangeConfiguration.conf`.
+    ConfigurationStatus {
+        Accepted => "Accepted",
+        Rejected => "Rejected",
+        RebootRequired => "RebootRequired",
+        NotSupported => "NotSupported",
+    }
+}
+
+wire_enum! {
+    /// `ChargingProfilePurposeType`.
+    ChargingProfilePurposeType {
+        ChargePointMaxProfile => "ChargePointMaxProfile",
+        TxDefaultProfile => "TxDefaultProfile",
+        TxProfile => "TxProfile",
+    }
+}
+
+wire_enum! {
+    /// `ChargingProfileKindType`.
+    ChargingProfileKindType {
+        Absolute => "Absolute",
+        Recurring => "Recurring",
+        Relative => "Relative",
+    }
+}
+
+wire_enum! {
+    /// `RecurrencyKindType`.
+    RecurrencyKindType {
+        Daily => "Daily",
+        Weekly => "Weekly",
+    }
+}
+
+wire_enum! {
+    /// `ChargingRateUnitType`.
+    ChargingRateUnitType {
+        A => "A",
+        W => "W",
+    }
+}
+
+wire_enum! {
+    /// `MessageTrigger`: the `requestedMessage` of `TriggerMessage.req`.
+    MessageTrigger {
+        BootNotification => "BootNotification",
+        DiagnosticsStatusNotification => "DiagnosticsStatusNotification",
+        FirmwareStatusNotification => "FirmwareStatusNotification",
+        Heartbeat => "Heartbeat",
+        MeterValues => "MeterValues",
+        StatusNotification => "StatusNotification",
+    }
+}
+
+wire_enum! {
+    /// `UpdateType` of `SendLocalList.req`.
+    UpdateType {
+        Differential => "Differential",
+        Full => "Full",
     }
 }
 

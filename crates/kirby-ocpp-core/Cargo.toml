@@ -12,6 +12,7 @@ name = "kirby_ocpp_core"
 
 [dependencies]
 chrono.workspace = true
+jsonschema.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
