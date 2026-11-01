@@ -69,6 +69,8 @@ Then bump `main` to the next development version (`0.3.0-dev`) when you start th
 
 ## Notes
 
+- Lessons from 0.2.0: npm rejected new unscoped platform names (403 spam detection), so they live under the personal scope `@archhaze24/…` and need `--access public`; browser authentication may be requested for every `npm publish`; `npm unpublish` leaves `0.0.0-stage` placeholder packages behind (harmless). The first release is the exception: later releases reuse the existing scoped packages and need only `node npm/build.mjs vX.Y.Z` + the publish loop.
+
 - `npm/build.mjs --assets <dir>` builds from already-downloaded archives instead of fetching them.
 - The macOS binaries are unsigned/not notarized; a downloaded archive may need `xattr -d com.apple.quarantine kirby-ocpp`. Installing via npm/cargo does not trigger Gatekeeper.
 - Musl (static Linux) builds are not part of the release yet.
