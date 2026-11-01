@@ -54,7 +54,10 @@ async fn main() -> ExitCode {
     }
 
     if print_config {
-        return match serde_json::to_string_pretty(&config) {
+        // The URL may carry `user:password@`; never print credentials.
+        let mut shown = config.clone();
+        shown.url = kirby_ocpp_tui::text::redact_url(&shown.url);
+        return match serde_json::to_string_pretty(&shown) {
             Ok(json) => {
                 println!("{json}");
                 ExitCode::SUCCESS

@@ -36,13 +36,32 @@ fn status_color(s: ConnectorStatus) -> Color {
 
 const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
+/// Table columns in priority order: header, width. Columns that do not fit are dropped
+/// from the right, so the status is never truncated.
+const CONNECTOR_COLS: [(&str, u16); 5] =
+    [("#", 2), ("Status", 13), ("Tx", 10), ("Wh", 9), ("Res", 4)];
+
+fn connector_cols(inner_w: u16) -> usize {
+    let mut used = 0u16;
+    let mut n = 0;
+    for (i, (_, w)) in CONNECTOR_COLS.iter().enumerate() {
+        used += w + u16::from(i > 0);
+        if used > inner_w && n >= 2 {
+            break;
+        }
+        n += 1;
+    }
+    n
+}
+
 pub fn connectors(f: &mut Frame<'_>, app: &App, area: Rect) {
+    let n = connector_cols(area.width.saturating_sub(2));
     let rows: Vec<Row<'_>> = app
         .snapshot
         .connectors
         .iter()
         .map(|c| {
-            Row::new(vec![
+            let cells = vec![
                 Span::raw(c.id.to_string()),
                 Span::styled(
                     c.status.to_string(),
@@ -55,18 +74,16 @@ pub fn connectors(f: &mut Frame<'_>, app: &App, area: Rect) {
                         .as_ref()
                         .map_or_else(|| "-".to_owned(), |r| r.id.to_string()),
                 ),
-            ])
+            ];
+            Row::new(cells.into_iter().take(n))
         })
         .collect();
-    let widths = [
-        Constraint::Length(3),
-        Constraint::Min(8),
-        Constraint::Length(7),
-        Constraint::Length(8),
-        Constraint::Length(5),
-    ];
+    let widths = CONNECTOR_COLS
+        .iter()
+        .take(n)
+        .map(|&(_, w)| Constraint::Length(w));
     let table = Table::new(rows, widths)
-        .header(Row::new(["#", "Status", "Tx", "Wh", "Res"]).style(dim()))
+        .header(Row::new(CONNECTOR_COLS.iter().take(n).map(|c| c.0)).style(dim()))
         .row_highlight_style(SELECTED)
         .block(block(
             "Connectors".to_owned(),
@@ -83,7 +100,7 @@ pub fn connectors(f: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn kv(k: &str, v: impl Into<String>) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{k:<12}"), dim()),
+        Span::styled(format!("{k:<14}"), dim()),
         Span::raw(v.into()),
     ])
 }

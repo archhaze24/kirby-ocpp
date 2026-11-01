@@ -35,7 +35,7 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         }
         Mode::Detail(d) => detail(app, d, key, fx),
         Mode::Confirm(c) => match key.code {
-            KeyCode::Char('y' | 'Y') | KeyCode::Enter => match c.action {
+            KeyCode::Char('y' | 'Y') => match c.action {
                 ConfirmAction::ClearLog => {
                     app.log.clear();
                     app.notify(NoticeLevel::Info, "log cleared");

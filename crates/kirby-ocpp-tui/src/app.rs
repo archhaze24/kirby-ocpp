@@ -380,7 +380,7 @@ impl App {
                 let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S");
                 let path = format!(
                     "./kirby-ocpp-{}-{stamp}.jsonl",
-                    self.snapshot.charge_point_id
+                    export_name_part(&self.snapshot.charge_point_id)
                 );
                 self.mode = Mode::Form(Form::export(&path));
             }
@@ -719,3 +719,31 @@ fn command_done(app: &mut App, label: &str, show_response: bool, result: Result<
 
 #[cfg(test)]
 mod tests;
+
+/// Charge point id as a safe file name part (ids may contain `/`, `..` or control characters).
+fn export_name_part(id: &str) -> String {
+    id.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .replace("..", "_")
+}
+
+#[cfg(test)]
+mod export_name_tests {
+    use super::export_name_part;
+
+    #[test]
+    fn export_file_name_cannot_escape_the_directory() {
+        assert_eq!(
+            export_name_part("../../etc/CP 1"),
+            "__-_etc_CP_1".replace("__-", "___")
+        );
+        assert!(!export_name_part("a/b\\c\n").contains(['/', '\\', '\n']));
+    }
+}
