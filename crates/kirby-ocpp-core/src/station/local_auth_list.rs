@@ -82,6 +82,11 @@ impl LocalAuthList {
         self.entries.get(id_tag)
     }
 
+    /// The entries ordered by idTag.
+    pub fn iter(&self) -> impl Iterator<Item = (&IdTag, &IdTagInfo)> {
+        self.entries.iter()
+    }
+
     /// The `GetLocalListVersion` answer: `-1` when the feature is disabled.
     pub fn reported_version(&self, enabled: bool) -> i32 {
         if enabled { self.version } else { -1 }

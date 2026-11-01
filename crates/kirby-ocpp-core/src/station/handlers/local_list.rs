@@ -19,7 +19,7 @@ pub(super) fn send_local_list(
     let limits = LocalListLimits::from_config(&actor.registry);
     let status = actor.local_list.apply(&request, &limits);
     if status == UpdateStatus::Accepted {
-        actor.state.local_list_version = actor.local_list.version();
+        actor.local_list_dirty = true;
         actor.flush_now();
         actor.log(
             LogLevel::Info,

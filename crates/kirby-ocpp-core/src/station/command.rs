@@ -7,6 +7,7 @@ use super::authorization::AuthorizationDecision;
 use super::maintenance::{DiagnosticsOutcome, FirmwareOutcome};
 use super::response_rules::ResponseRule;
 use crate::ids::{ConnectorId, IdTag, TxId};
+use crate::ocpp::messages::{ChargingProfile, IdTagInfo};
 use crate::ocpp::types::{
     AuthorizationStatus, ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus,
     Measurand, StopReason,
@@ -117,6 +118,24 @@ pub enum Command {
     SetResponseRule { rule: ResponseRule },
     /// Remove the response rules of one action, or all of them for `None`.
     ClearResponseRules { action: Option<String> },
+    /// Change a writable configuration key as `ChangeConfiguration` would (same validation,
+    /// persistence and side effects), without a CSMS round trip. Unknown, read-only or invalid
+    /// values are `StationError::InvalidArgument`.
+    SetConfiguration { key: String, value: String },
+    /// Add or replace a local list entry (a differential update; the list version goes up by one).
+    SetLocalListEntry { id_tag: IdTag, info: IdTagInfo },
+    /// Remove a local list entry (version up by one); an absent idTag is an error.
+    RemoveLocalListEntry { id_tag: IdTag },
+    /// Empty the local list and reset its version to `0` (a full update).
+    ClearLocalList,
+    /// Install a charging profile as `SetChargingProfile` would (same validation); a refusal is
+    /// `StationError::InvalidArgument`.
+    InstallChargingProfile {
+        connector: ConnectorId,
+        profile: ChargingProfile,
+    },
+    /// Remove the charging profile with this id, or all of them for `None`.
+    ClearChargingProfiles { id: Option<i32> },
     /// Stop the station: close the connection gracefully, flush state, end the actor.
     Shutdown,
 }
@@ -150,6 +169,12 @@ impl Command {
             Self::SendRaw { .. } => "send_raw",
             Self::SetResponseRule { .. } => "set_response_rule",
             Self::ClearResponseRules { .. } => "clear_response_rules",
+            Self::SetConfiguration { .. } => "set_configuration",
+            Self::SetLocalListEntry { .. } => "set_local_list_entry",
+            Self::RemoveLocalListEntry { .. } => "remove_local_list_entry",
+            Self::ClearLocalList => "clear_local_list",
+            Self::InstallChargingProfile { .. } => "install_charging_profile",
+            Self::ClearChargingProfiles { .. } => "clear_charging_profiles",
             Self::Shutdown => "shutdown",
         }
     }

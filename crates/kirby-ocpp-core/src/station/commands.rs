@@ -192,6 +192,14 @@ impl StationActor {
                 );
                 Ok(Outcome::Done)
             }
+            Command::SetConfiguration { key, value } => self.set_configuration(&key, &value),
+            Command::SetLocalListEntry { id_tag, info } => self.set_local_list_entry(id_tag, info),
+            Command::RemoveLocalListEntry { id_tag } => self.remove_local_list_entry(id_tag),
+            Command::ClearLocalList => self.clear_local_list(),
+            Command::InstallChargingProfile { connector, profile } => {
+                self.install_charging_profile(connector, profile)
+            }
+            Command::ClearChargingProfiles { id } => self.clear_charging_profiles(id),
             other => Err(StationError::NotImplemented {
                 command: other.name(),
             }),

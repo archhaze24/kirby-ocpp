@@ -24,29 +24,40 @@ pub(super) fn change_configuration(
     responder: Responder<ChangeConfiguration>,
     request: ChangeConfigurationRequest,
 ) {
-    let status = actor.registry.change(&request.key, &request.value);
+    let status = actor.apply_configuration_change(&request.key, &request.value);
     actor.respond(responder, ChangeConfigurationResponse { status });
-    if status != ConfigurationStatus::Accepted {
-        actor.log(
-            LogLevel::Warn,
-            format!("ChangeConfiguration {} -> {status}", request.key),
-        );
-        return;
-    }
-    let key = actor
-        .registry
-        .get(&request.key)
-        .map_or(request.key.as_str(), |entry| entry.key)
-        .to_owned();
-    actor.log(
-        LogLevel::Info,
-        format!("configuration {key} set to {}", request.value),
-    );
-    actor.flush_now();
-    actor.on_configuration_changed(&key);
 }
 
 impl StationActor {
+    /// `ChangeConfiguration` without the CALL: validates and stores the value, logs, persists
+    /// and runs the side effects. Shared by the CSMS command and the local `SetConfiguration`.
+    pub(in crate::station) fn apply_configuration_change(
+        &mut self,
+        key: &str,
+        value: &str,
+    ) -> ConfigurationStatus {
+        let status = self.registry.change(key, value);
+        if status != ConfigurationStatus::Accepted {
+            self.log(
+                LogLevel::Warn,
+                format!("ChangeConfiguration {key} -> {status}"),
+            );
+            return status;
+        }
+        let canonical = self
+            .registry
+            .get(key)
+            .map_or(key, |entry| entry.key)
+            .to_owned();
+        self.log(
+            LogLevel::Info,
+            format!("configuration {canonical} set to {value}"),
+        );
+        self.flush_now();
+        self.on_configuration_changed(&canonical);
+        status
+    }
+
     /// Side effects of an accepted configuration change.
     fn on_configuration_changed(&mut self, key: &str) {
         match key {

@@ -7,6 +7,7 @@ use super::maintenance::{DiagnosticsOutcome, FirmwareOutcome};
 use super::reservation::Reservation;
 use super::response_rules::ResponseRule;
 use super::transaction::TransactionState;
+use super::views::{ConfigItem, LocalListView, ProfileSummary};
 use crate::config::StationConfig;
 use crate::ids::{ConnectorId, IdTag, TxId};
 use crate::ocpp::types::{
@@ -88,6 +89,12 @@ pub struct Snapshot {
     pub pending_offline_messages: u32,
     /// Active response rules (runtime only; see `response_rules`), in the order they were set.
     pub response_rules: Vec<ResponseRule>,
+    /// Every configuration key with its value, in registry order.
+    pub config: Vec<ConfigItem>,
+    /// The local authorization list (capped, see `views::LOCAL_LIST_VIEW_MAX`).
+    pub local_list: LocalListView,
+    /// Installed charging profiles, in installation order.
+    pub charging_profiles: Vec<ProfileSummary>,
     /// Connectors `1..=n`, ordered by id.
     pub connectors: Vec<ConnectorSnapshot>,
 }
@@ -114,6 +121,9 @@ impl Snapshot {
             firmware_outcome: FirmwareOutcome::default(),
             pending_offline_messages: 0,
             response_rules: config.response_rules.clone(),
+            config: Vec::new(),
+            local_list: LocalListView::default(),
+            charging_profiles: Vec::new(),
             connectors: (1..=count)
                 .map(|id| ConnectorSnapshot::new(ConnectorId::new(id)))
                 .collect(),

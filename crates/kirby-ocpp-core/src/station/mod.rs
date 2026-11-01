@@ -37,6 +37,7 @@ mod event;
 mod handle;
 mod handlers;
 mod link;
+mod local_edit;
 mod persistence;
 mod power;
 mod reservations;
@@ -45,6 +46,7 @@ mod snapshot;
 mod status;
 pub mod timers;
 mod transactions;
+mod views;
 
 pub mod authorization;
 pub mod charging_profiles;
@@ -73,6 +75,9 @@ pub use self::reservation::Reservation;
 pub use self::response_rules::{Behavior, ResponseRule};
 pub use self::snapshot::{ConnectorSnapshot, Snapshot};
 pub use self::transaction::TransactionState;
+pub use self::views::{
+    ConfigItem, LOCAL_LIST_VIEW_MAX, LocalListEntry, LocalListView, ProfileSummary,
+};
 pub use crate::ocpp::responder::Responder;
 pub use crate::ws::ConnectionState;
 

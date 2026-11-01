@@ -138,6 +138,8 @@ pub(crate) struct StationActor {
     pub(super) auth_cache: AuthorizationCache,
     pub(super) profiles: ChargingProfileStore,
     pub(super) queue: OfflineQueue,
+    /// The local list changed since `Snapshot::local_list` was built.
+    pub(super) local_list_dirty: bool,
     /// Counter for station-local transaction ids and queue keys.
     pub(super) next_local: u64,
     /// Energy (Wh) after which a transaction with an invalidated idTag is stopped.
@@ -197,8 +199,15 @@ impl StationActor {
         // Profiles saved before store version 3 have no install time: count it from now.
         parts.profiles.backfill_installed_at(clock.now_utc());
         state.heartbeat_interval_secs = parts.registry.heartbeat_interval_secs();
-        state.local_list_version = parts.local_list.version();
         state.pending_offline_messages = parts.queue.pending_messages();
+        let mut local_list_dirty = true;
+        super::views::refresh(
+            &mut state,
+            &parts.registry,
+            &parts.local_list,
+            &parts.profiles,
+            &mut local_list_dirty,
+        );
 
         let queue_high_water = parts.queue.keys().into_iter().max().unwrap_or(0);
         let (snapshot_tx, snapshot_rx) = watch::channel(state.clone());
@@ -214,6 +223,7 @@ impl StationActor {
             auth_cache: parts.auth_cache,
             profiles: parts.profiles,
             queue: parts.queue,
+            local_list_dirty,
             // Never reuse a key still present in the restored queue (the wall clock may jump back).
             next_local: u64::try_from(clock_seed).unwrap_or(1).max(queue_high_water),
             invalid_limits: HashMap::new(),
@@ -362,6 +372,13 @@ impl StationActor {
     /// Publishes the snapshot if it changed since the last publication.
     pub(super) fn publish(&mut self) {
         self.state.pending_offline_messages = self.queue.pending_messages();
+        super::views::refresh(
+            &mut self.state,
+            &self.registry,
+            &self.local_list,
+            &self.profiles,
+            &mut self.local_list_dirty,
+        );
         let state = &self.state;
         let changed = self.snapshot_tx.send_if_modified(|published| {
             if published == state {

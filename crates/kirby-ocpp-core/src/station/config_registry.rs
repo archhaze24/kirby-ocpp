@@ -141,6 +141,18 @@ enum Kind {
 }
 
 impl Kind {
+    /// Short description of the accepted values, for UIs.
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Text => "read-only",
+            Self::Boolean => "true or false",
+            Self::NonNegativeInt => "integer, 0 or more",
+            Self::PositiveInt => "integer, 1 or more",
+            Self::Measurands => "comma-separated measurand names",
+            Self::PhaseRotations => "comma-separated phase rotations (RST, 1.RST, ...)",
+        }
+    }
+
     fn accepts(self, value: &str) -> bool {
         match self {
             Self::Text => true,
@@ -169,6 +181,17 @@ pub struct ConfigEntry {
     kind: Kind,
     /// For list keys: the read-only `*MaxLength` key that bounds the item count.
     max_items_key: Option<&'static str>,
+}
+
+impl ConfigEntry {
+    /// Short description of the accepted values ("read-only" for read-only keys).
+    pub fn hint(&self) -> &'static str {
+        if self.readonly {
+            "read-only"
+        } else {
+            self.kind.hint()
+        }
+    }
 }
 
 /// `GetConfiguration` named more keys than `GetConfigurationMaxKeys` allows.
@@ -234,18 +257,28 @@ impl ConfigRegistry {
     /// `ChangeConfiguration`: unknown keys are `NotSupported`, read-only keys and
     /// invalid values are `Rejected`, anything else is stored and `Accepted`.
     pub fn change(&mut self, name: &str, value: &str) -> ConfigurationStatus {
-        let Some(index) = self.index_of(name) else {
+        let status = self.check(name, value);
+        if status == ConfigurationStatus::Accepted
+            && let Some(index) = self.index_of(name)
+        {
+            value.clone_into(&mut self.entries[index].value);
+        }
+        status
+    }
+
+    /// What [`Self::change`] would answer, without changing anything.
+    pub fn check(&self, name: &str, value: &str) -> ConfigurationStatus {
+        let Some(entry) = self.get(name) else {
             return ConfigurationStatus::NotSupported;
         };
-        let entry = &self.entries[index];
         let fits = entry
             .max_items_key
             .is_none_or(|max_key| list_items(value).count() <= self.count_limit(max_key));
         if entry.readonly || !entry.kind.accepts(value) || !fits {
-            return ConfigurationStatus::Rejected;
+            ConfigurationStatus::Rejected
+        } else {
+            ConfigurationStatus::Accepted
         }
-        value.clone_into(&mut self.entries[index].value);
-        ConfigurationStatus::Accepted
     }
 
     /// `GetConfiguration`. An empty `requested` list asks for every key.
