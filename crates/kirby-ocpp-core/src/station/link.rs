@@ -185,6 +185,9 @@ impl StationActor {
         self.link.boot_in_flight = false;
         self.timers.cancel(&TimerKey::Heartbeat);
         self.timers.cancel(&TimerKey::BootRetry);
+        self.timers.cancel(&TimerKey::Maintenance);
+        self.maintenance.clear();
+        self.sync_outstanding = 0;
         self.reset_status_tracking();
         self.state.registration = None;
         let code = match error {
@@ -298,11 +301,19 @@ impl StationActor {
             RegistrationStatus::Accepted => self.on_boot_accepted(&response),
             RegistrationStatus::Pending | RegistrationStatus::Rejected => {
                 self.timers.cancel(&TimerKey::Heartbeat);
-                let delay = u64::try_from(response.interval)
+                let mut delay = u64::try_from(response.interval)
                     .ok()
                     .filter(|secs| *secs > 0)
                     .map_or_else(|| self.registry_retry_period(), Duration::from_secs)
                     .max(MIN_PERIOD);
+                // After a Reset the boot is repeated quickly, `ResetRetries` times.
+                match self.reset_retries {
+                    Some(left) if left > 0 => {
+                        self.reset_retries = Some(left - 1);
+                        delay = Duration::from_millis(500);
+                    }
+                    _ => self.reset_retries = None,
+                }
                 self.log(
                     LogLevel::Warn,
                     format!(
@@ -353,13 +364,14 @@ impl StationActor {
         self.after_boot_accepted();
     }
 
-    /// Everything that follows an accepted boot, in this order. Stage 2b inserts, in order:
-    /// offline transaction sync (pending starts, then stops), meter scheduling, reservation
-    /// timers; the status re-send stays last (TS order: sync before status).
+    /// Everything that follows an accepted boot, in this order: offline transaction sync
+    /// (starts, then stops), and when it has finished meter scheduling and the status re-send
+    /// (`finish_boot_accepted`).
     fn after_boot_accepted(&mut self) {
-        // stage 2b: self.sync_offline_transactions();
-        // stage 2b: self.reschedule_metering();
-        self.resend_all_statuses();
+        self.reset_retries = None;
+        if self.start_offline_sync() == 0 {
+            self.finish_boot_accepted();
+        }
     }
 
     pub(super) fn on_boot_retry_timer(&mut self) {

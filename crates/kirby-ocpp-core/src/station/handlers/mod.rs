@@ -12,13 +12,12 @@
 //! * handlers never await; work they trigger (a `StatusNotification`, a `Boot`) is started
 //!   *after* the reply was queued and completes through a continuation;
 //! * unknown action names are answered `NotImplemented` (the connection layer normally
-//!   filters them already), actions of stage 2b `NotSupported`.
+//!   filters them already).
 //!
 //! One file per topic: `config` (Get/ChangeConfiguration), `data_transfer`, `local_list`
 //! (SendLocalList, GetLocalListVersion, ClearCache), `availability`
-//! (ChangeAvailability, UnlockConnector), `trigger` (TriggerMessage), `stage2b` (everything
-//! that is still to come, answered `NotSupported`). Stage 2b adds files here and moves
-//! entries from `stage2b` to their module in the table below.
+//! (ChangeAvailability, UnlockConnector), `trigger` (TriggerMessage), `remote` (RemoteStart/Stop,
+//! Reset), `reservation`, `smart` (charging profiles), `maintenance` (diagnostics, firmware).
 
 #![allow(
     clippy::needless_pass_by_value,
@@ -29,7 +28,10 @@ mod availability;
 mod config;
 mod data_transfer;
 mod local_list;
-mod stage2b;
+mod maintenance;
+mod remote;
+mod reservation;
+mod smart;
 mod trigger;
 
 use super::actor::StationActor;
@@ -88,33 +90,36 @@ impl StationActor {
             TriggerMessage::NAME => {
                 self.invoke::<TriggerMessage>(payload, reply, trigger::trigger_message);
             }
-            // stage 2b
-            CancelReservation::NAME => {
-                self.invoke::<CancelReservation>(payload, reply, stage2b::not_supported);
+            CancelReservation::NAME => self.invoke::<CancelReservation>(
+                payload,
+                reply,
+                reservation::cancel_reservation_handler,
+            ),
+            ReserveNow::NAME => {
+                self.invoke::<ReserveNow>(payload, reply, reservation::reserve_now_handler);
             }
             ClearChargingProfile::NAME => {
-                self.invoke::<ClearChargingProfile>(payload, reply, stage2b::not_supported);
+                self.invoke::<ClearChargingProfile>(payload, reply, smart::clear_profile);
             }
             GetCompositeSchedule::NAME => {
-                self.invoke::<GetCompositeSchedule>(payload, reply, stage2b::not_supported);
+                self.invoke::<GetCompositeSchedule>(payload, reply, smart::composite_schedule);
+            }
+            SetChargingProfile::NAME => {
+                self.invoke::<SetChargingProfile>(payload, reply, smart::set_profile);
             }
             GetDiagnostics::NAME => {
-                self.invoke::<GetDiagnostics>(payload, reply, stage2b::not_supported);
-            }
-            RemoteStartTransaction::NAME => {
-                self.invoke::<RemoteStartTransaction>(payload, reply, stage2b::not_supported);
-            }
-            RemoteStopTransaction::NAME => {
-                self.invoke::<RemoteStopTransaction>(payload, reply, stage2b::not_supported);
-            }
-            ReserveNow::NAME => self.invoke::<ReserveNow>(payload, reply, stage2b::not_supported),
-            Reset::NAME => self.invoke::<Reset>(payload, reply, stage2b::not_supported),
-            SetChargingProfile::NAME => {
-                self.invoke::<SetChargingProfile>(payload, reply, stage2b::not_supported);
+                self.invoke::<GetDiagnostics>(payload, reply, maintenance::get_diagnostics);
             }
             UpdateFirmware::NAME => {
-                self.invoke::<UpdateFirmware>(payload, reply, stage2b::not_supported);
+                self.invoke::<UpdateFirmware>(payload, reply, maintenance::update_firmware);
             }
+            RemoteStartTransaction::NAME => {
+                self.invoke::<RemoteStartTransaction>(payload, reply, remote::remote_start);
+            }
+            RemoteStopTransaction::NAME => {
+                self.invoke::<RemoteStopTransaction>(payload, reply, remote::remote_stop);
+            }
+            Reset::NAME => self.invoke::<Reset>(payload, reply, remote::reset),
             other => {
                 self.log(LogLevel::Warn, format!("{other} is not an inbound action"));
                 let _ = reply.reject(

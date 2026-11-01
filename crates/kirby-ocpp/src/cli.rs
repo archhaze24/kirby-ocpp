@@ -48,6 +48,17 @@ pub struct Cli {
     )]
     pub model: String,
 
+    /// Charge point serial number reported in BootNotification (at most 25 characters)
+    #[arg(long, env = "OCPP_SERIAL", value_name = "SERIAL", value_parser = non_empty)]
+    pub serial: Option<String>,
+
+    /// Firmware version reported in BootNotification (at most 50 characters)
+    #[arg(
+        long = "firmware-version", env = "OCPP_FIRMWARE_VERSION", value_name = "VERSION",
+        value_parser = non_empty
+    )]
+    pub firmware_version: Option<String>,
+
     /// Initial connector id
     #[arg(
         short, long, value_name = "ID", default_value_t = 1,
@@ -179,8 +190,8 @@ impl Cli {
             charge_point_id: self.id,
             vendor: self.vendor,
             model: self.model,
-            serial_number: None,
-            firmware_version: None,
+            serial_number: self.serial,
+            firmware_version: self.firmware_version,
             initial_connector: ConnectorId::new(self.connector),
             connector_count: self.connectors,
             heartbeat_interval_secs: self.heartbeat,

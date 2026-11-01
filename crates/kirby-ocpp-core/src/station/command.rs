@@ -18,7 +18,7 @@ use crate::ocpp::types::{
 /// `Result<Outcome, StationError>` returned by [`super::StationHandle::send`].
 /// The future resolves when the command has been **completed**. Commands that *are* a CALL
 /// (`Boot`, `Heartbeat`, `DataTransfer`, `*StatusNotification`, `StatusNotification`,
-/// `SendRaw`, and in stage 2b `Authorize`, `StartTransaction`, ...) complete when the CSMS
+/// `SendRaw`, `Authorize`, `StartTransaction`, ...) complete when the CSMS
 /// answered, up to the call timeout. Commands that change local state (`PlugIn`, `Unplug`,
 /// `SetConnectorStatus`, `Fault`, `AddConnector`, ...) complete as soon as the state changed;
 /// the resulting `StatusNotification` is queued by the station's status discipline and may be

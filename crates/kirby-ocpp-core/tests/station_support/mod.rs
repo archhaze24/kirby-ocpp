@@ -32,8 +32,14 @@ use tokio::time::timeout;
 /// Upper bound for any single wait. Only reached when something is broken.
 pub const STEP: Duration = Duration::from_secs(8);
 
+/// The test clock's start: the real time of the first call (whole seconds), so that the mock
+/// CSMS's real-time expiry dates (`EXPIREDAUTH`, ...) are seen as the CSMS meant them.
 pub fn t0() -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).unwrap()
+    static START: std::sync::OnceLock<DateTime<Utc>> = std::sync::OnceLock::new();
+    *START.get_or_init(|| {
+        let now = Utc::now();
+        Utc.timestamp_opt(now.timestamp(), 0).unwrap()
+    })
 }
 
 /// A station config for tests: short timeouts, no pings, fast reconnect, own state dir.
@@ -247,4 +253,61 @@ pub async fn dead_url() -> String {
     let port = listener.local_addr().unwrap().port();
     drop(listener);
     format!("ws://127.0.0.1:{port}/ocpp")
+}
+
+// ---- helpers shared by the transaction/feature tests -----------------------------
+
+use kirby_ocpp_core::ids::IdTag;
+use kirby_ocpp_core::station::Outcome;
+use kirby_ocpp_testkit::TransactionIds;
+
+pub fn tag(value: &str) -> IdTag {
+    IdTag::new(value).expect("valid idTag")
+}
+
+/// CSMS options with incrementing transaction ids starting at 100.
+pub fn incrementing() -> CsmsOptions {
+    CsmsOptions {
+        transaction_ids: TransactionIds::Incrementing(100),
+        ..CsmsOptions::default()
+    }
+}
+
+impl Rig {
+    /// `ChangeConfiguration` through the CSMS; must be `Accepted`.
+    pub async fn cfg(&self, key: &str, value: &str) {
+        self.csms
+            .expect_status(
+                "ChangeConfiguration",
+                serde_json::json!({"key": key, "value": value}),
+                "Accepted",
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{key}={value}: {e}"));
+    }
+
+    pub async fn begin(&self, connector: u32, id_tag: &str) -> Outcome {
+        self.send(Command::StartTransaction {
+            connector: kirby_ocpp_core::ids::ConnectorId::new(connector),
+            id_tag: tag(id_tag),
+        })
+        .await
+    }
+
+    pub async fn stop(&self, connector: u32, reason: kirby_ocpp_core::ocpp::types::StopReason) {
+        self.send(Command::StopTransaction {
+            connector: kirby_ocpp_core::ids::ConnectorId::new(connector),
+            reason,
+            id_tag: None,
+        })
+        .await;
+    }
+
+    /// The CALLRESULT payload of a CSMS-originated CALL.
+    pub async fn csms_call(&self, action: &str, request: Value) -> Value {
+        match self.csms.send_call(action, request).await.unwrap() {
+            kirby_ocpp_core::ocpp::Frame::CallResult { payload, .. } => payload,
+            other => panic!("{action}: {}", other.to_json_string()),
+        }
+    }
 }

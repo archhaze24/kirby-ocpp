@@ -1,6 +1,6 @@
 //! Retry of transaction messages (`TransactionMessageAttempts` / `...RetryInterval`) and its
 //! cancellation on disconnect. A CSMS-triggered `MeterValues` is the vehicle: it goes through
-//! the same outbound path as the periodic/transaction MeterValues of stage 2b.
+//! the same outbound path as the periodic/transaction MeterValues.
 
 mod station_support;
 

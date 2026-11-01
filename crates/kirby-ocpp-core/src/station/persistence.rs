@@ -5,8 +5,8 @@
 //! * **When:** state changes call `mark_dirty()`; the first one arms a ~200 ms timer and the
 //!   write happens when it fires, so a burst of changes is one write. Rare, important events
 //!   (configuration changes, local list, availability, connector added, boot accepted)
-//!   call `flush_now()` instead. Nothing writes per meter tick (stage 2b marks the meter
-//!   energy dirty; the debounce coalesces it).
+//!   call `flush_now()` instead. Nothing writes per meter tick (the meter energy is only marked dirty;
+//!   the debounce coalesces it).
 //! * **How:** the snapshot of the persisted data is built in the actor (no locks), the write
 //!   runs on `spawn_blocking`, its result returns as `Internal::Saved`. At most one write is
 //!   in flight; changes that arrive meanwhile cause one more write afterwards, so overlapping
@@ -17,10 +17,10 @@
 //!   and the station starts fresh; a file from a *newer* version disables persistence for
 //!   this run (the file is never overwritten).
 //!
-//! What is restored in stage 2a: configuration values, local list and cache, charging
-//! profiles, availability (charge point and connectors, status derived from it), connector
-//! count (only grows) and per-connector `meter_wh` / `last_id_tag`. Transactions and
-//! reservations are written but not restored; connectors come back idle (see QUESTIONS.md).
+//! Restored: configuration values, local list and cache, charging profiles, availability,
+//! connector count (only grows), the offline queue and per connector status, EV, meter,
+//! reservation (expired ones are dropped after start) and transaction (a `Stopping` one becomes
+//! a queued stop).
 
 use std::time::Duration;
 
@@ -153,13 +153,54 @@ impl Persistence {
                 continue;
             };
             connector.availability = saved.availability;
-            if saved.availability == AvailabilityType::Inoperative {
-                connector.status = ConnectorStatus::Unavailable;
-            }
             connector.meter_wh = saved.meter_wh;
             connector.last_id_tag = saved.last_id_tag;
+            connector.ev_connected = saved.ev_connected;
+            connector.reservation = saved.reservation;
+            connector.transaction = saved.transaction;
+            connector.status = saved.status;
+            if saved.status == ConnectorStatus::Faulted {
+                connector.error_code = crate::ocpp::types::ChargePointErrorCode::OtherError;
+            }
+            if saved.availability == AvailabilityType::Inoperative
+                && connector.transaction.is_idle()
+            {
+                connector.status = ConnectorStatus::Unavailable;
+            }
+        }
+        // A stop that was in flight when the station died is queued, not repeated blindly.
+        for connector in &mut state.connectors {
+            if let crate::station::transaction::TransactionState::Stopping(stopping) =
+                connector.transaction.clone()
+            {
+                connector.transaction = crate::station::transaction::TransactionState::Idle;
+                parts.queue.push(crate::station::offline::OfflineTx {
+                    key: match stopping.tx_id {
+                        crate::ids::TxId::Local(n) => n,
+                        crate::ids::TxId::Csms(n) => u64::try_from(n).unwrap_or(0),
+                    },
+                    connector: connector.id,
+                    tx_id: stopping.tx_id,
+                    id_tag: stopping
+                        .id_tag
+                        .clone()
+                        .unwrap_or_else(|| crate::ids::IdTag::new("UNKNOWN").expect("valid tag")),
+                    started_at: chrono::DateTime::UNIX_EPOCH,
+                    meter_start_wh: 0,
+                    reservation_id: None,
+                    start_pending: false,
+                    stop: Some(crate::station::offline::StopInfo {
+                        id_tag: stopping.id_tag,
+                        meter_stop_wh: connector.meter_wh,
+                        timestamp: chrono::DateTime::UNIX_EPOCH,
+                        reason: stopping.reason,
+                        transaction_data: Vec::new(),
+                    }),
+                });
+            }
         }
 
+        parts.queue = persisted.offline_queue;
         parts.local_list = persisted.local_authorization_list;
         parts.auth_cache = persisted.authorization_cache;
         parts.profiles = persisted.charging_profiles;
@@ -191,6 +232,7 @@ impl StationActor {
             local_authorization_list: self.local_list.clone(),
             authorization_cache: self.auth_cache.clone(),
             charging_profiles: self.profiles.clone(),
+            offline_queue: self.queue.clone(),
             configuration: self.registry.snapshot().values,
             ..PersistedStation::default()
         }

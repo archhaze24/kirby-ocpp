@@ -106,9 +106,51 @@ impl TransactionState {
     }
 }
 
+/// Connector state after a transaction stops (TS `statusAfterStopTransaction`): returns
+/// `(ev_connected, status)`. Reason `EVDisconnected` forces the EV to be disconnected;
+/// otherwise a still connected EV gives `Finishing`, a gone one `Available` (`Unavailable`
+/// when the connector is inoperative).
+pub fn state_after_stop(
+    reason: StopReason,
+    ev_connected: bool,
+    availability: crate::ocpp::types::AvailabilityType,
+) -> (bool, crate::ocpp::types::ConnectorStatus) {
+    use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
+    let still_connected = reason != StopReason::EVDisconnected && ev_connected;
+    let status = if still_connected {
+        ConnectorStatus::Finishing
+    } else if availability == AvailabilityType::Inoperative {
+        ConnectorStatus::Unavailable
+    } else {
+        ConnectorStatus::Available
+    };
+    (still_connected, status)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn state_after_stop_follows_the_ts_rules() {
+        use crate::ocpp::types::{AvailabilityType::*, ConnectorStatus::*};
+        assert_eq!(
+            state_after_stop(StopReason::Local, true, Operative),
+            (true, Finishing)
+        );
+        assert_eq!(
+            state_after_stop(StopReason::EVDisconnected, true, Operative),
+            (false, Available)
+        );
+        assert_eq!(
+            state_after_stop(StopReason::Local, false, Operative),
+            (false, Available)
+        );
+        assert_eq!(
+            state_after_stop(StopReason::Remote, false, Inoperative),
+            (false, Unavailable)
+        );
+    }
 
     fn tag() -> IdTag {
         IdTag::new("TAG1").unwrap()

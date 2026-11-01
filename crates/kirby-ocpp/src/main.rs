@@ -42,6 +42,10 @@ async fn main() -> ExitCode {
     }
 
     let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
+    // Like the TS CLI: connect at startup (the station does not do it by itself).
+    if let Err(error) = handle.connect().await {
+        eprintln!("error: {error}");
+    }
     let result = kirby_ocpp_tui::run(handle.clone(), TuiOptions::default()).await;
     // The station may already be gone; either way we are leaving.
     let _ = handle.shutdown().await;

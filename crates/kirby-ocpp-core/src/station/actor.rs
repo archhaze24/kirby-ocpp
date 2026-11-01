@@ -16,7 +16,7 @@
 //! `calls` (outbound CALLs), `status` (StatusNotification discipline), `persistence`,
 //! `commands` (user commands) and `handlers/` (CSMS-originated CALLs).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -40,6 +40,7 @@ use crate::station::authorization::AuthorizationCache;
 use crate::station::charging_profiles::ChargingProfileStore;
 use crate::station::config_registry::ConfigRegistry;
 use crate::station::local_auth_list::LocalAuthList;
+use crate::station::offline::OfflineQueue;
 use crate::store::StoreError;
 use crate::ws::{ConnectError, Connection, ConnectionEvent, ConnectionState};
 
@@ -59,6 +60,14 @@ pub(crate) enum TimerKey {
     StatusDebounce(ConnectorId),
     /// Debounced write of the state file.
     PersistFlush,
+    /// Periodic `MeterValues` of a connector with a running transaction.
+    MeterPeriodic(ConnectorId),
+    /// Clock-aligned `MeterValues`.
+    MeterAligned,
+    /// A reservation may have expired.
+    ReservationExpiry(ConnectorId),
+    /// Next simulated diagnostics/firmware step.
+    Maintenance,
 }
 
 /// Messages from spawned tasks to the actor loop.
@@ -103,6 +112,7 @@ pub(super) struct RestoredParts {
     pub(super) local_list: LocalAuthList,
     pub(super) auth_cache: AuthorizationCache,
     pub(super) profiles: ChargingProfileStore,
+    pub(super) queue: OfflineQueue,
 }
 
 pub(crate) struct StationActor {
@@ -117,6 +127,17 @@ pub(crate) struct StationActor {
     pub(super) local_list: LocalAuthList,
     pub(super) auth_cache: AuthorizationCache,
     pub(super) profiles: ChargingProfileStore,
+    pub(super) queue: OfflineQueue,
+    /// Counter for station-local transaction ids and queue keys.
+    pub(super) next_local: u64,
+    /// Energy (Wh) after which a transaction with an invalidated idTag is stopped.
+    pub(super) invalid_limits: HashMap<ConnectorId, u64>,
+    /// Offline syncs of queue entries still running.
+    pub(super) sync_outstanding: usize,
+    /// Boot attempts left after a `Reset` (`ResetRetries`).
+    pub(super) reset_retries: Option<u32>,
+    /// Simulated diagnostics/firmware steps still to report.
+    pub(super) maintenance: VecDeque<(Duration, super::maintenance::Step)>,
     pub(super) timers: TimerWheel<TimerKey>,
     pub(super) internal_tx: mpsc::UnboundedSender<Internal>,
     internal_rx: mpsc::UnboundedReceiver<Internal>,
@@ -141,6 +162,7 @@ impl StationActor {
         events: broadcast::Sender<Event>,
     ) -> (Self, watch::Receiver<Snapshot>) {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        let clock_seed = clock.now_utc().timestamp_millis().max(1);
         let mut startup_logs = Vec::new();
         let mut state = Snapshot::initial(&config);
         let mut persistence = Persistence::open(&config, &mut startup_logs);
@@ -149,10 +171,12 @@ impl StationActor {
             local_list: LocalAuthList::default(),
             auth_cache: AuthorizationCache::default(),
             profiles: ChargingProfileStore::default(),
+            queue: OfflineQueue::default(),
         };
         persistence.restore(&mut state, &mut parts, &mut startup_logs);
         state.heartbeat_interval_secs = parts.registry.heartbeat_interval_secs();
         state.local_list_version = parts.local_list.version();
+        state.pending_offline_messages = parts.queue.pending_messages();
 
         let (snapshot_tx, snapshot_rx) = watch::channel(state.clone());
         let actor = Self {
@@ -166,6 +190,12 @@ impl StationActor {
             local_list: parts.local_list,
             auth_cache: parts.auth_cache,
             profiles: parts.profiles,
+            queue: parts.queue,
+            next_local: u64::try_from(clock_seed).unwrap_or(1),
+            invalid_limits: HashMap::new(),
+            sync_outstanding: 0,
+            reset_retries: None,
+            maintenance: VecDeque::new(),
             timers: TimerWheel::new(),
             internal_tx,
             internal_rx,
@@ -193,6 +223,7 @@ impl StationActor {
         for (level, text) in startup_logs {
             self.log(level, text);
         }
+        self.after_restore();
         self.publish();
 
         loop {
@@ -242,6 +273,10 @@ impl StationActor {
             TimerKey::BootRetry => self.on_boot_retry_timer(),
             TimerKey::StatusDebounce(id) => self.status_timer_fired(id),
             TimerKey::PersistFlush => self.flush_persistence(),
+            TimerKey::MeterPeriodic(id) => self.on_meter_periodic(id),
+            TimerKey::MeterAligned => self.on_meter_aligned(),
+            TimerKey::ReservationExpiry(id) => self.on_reservation_timer(id),
+            TimerKey::Maintenance => self.on_maintenance_timer(),
         }
     }
 
@@ -285,6 +320,7 @@ impl StationActor {
 
     /// Publishes the snapshot if it changed since the last publication.
     pub(super) fn publish(&mut self) {
+        self.state.pending_offline_messages = self.queue.pending_messages();
         let state = &self.state;
         let changed = self.snapshot_tx.send_if_modified(|published| {
             if published == state {
