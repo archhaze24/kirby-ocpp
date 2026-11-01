@@ -10,13 +10,20 @@ It speaks OCPP 1.6 JSON over WebSocket (`ws://` and `wss://`, including mutual T
 
 ## Install
 
-Build from source (Rust 1.88 or newer):
+With Node.js (no Rust needed; installs the prebuilt binary for your platform):
 
 ```bash
-cargo install --path crates/kirby-ocpp
+npx kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001
+npm install -g kirby-ocpp
 ```
 
-Prebuilt binaries will be attached to GitHub releases once a release has been published; none exist yet. No crates.io or distro packages are published.
+With Cargo (Rust 1.88 or newer):
+
+```bash
+cargo install kirby-ocpp
+```
+
+Or download a prebuilt binary for Linux, macOS or Windows from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). To build from a checkout: `cargo install --path crates/kirby-ocpp`.
 
 ## Quick start
 
