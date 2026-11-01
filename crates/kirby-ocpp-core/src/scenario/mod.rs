@@ -1,8 +1,7 @@
 //! Scenarios: sequences of station actions described as data, plus a runner.
 //!
 //! UI-free: the TUI, the headless CLI and tests all use [`run_scenario`] /
-//! [`ScenarioRunner`]. Scenario files are TOML (see [`builtin`] for examples and
-//! `docs/rewrite/ARCHITECTURE.md` for the format).
+//! [`ScenarioRunner`]. Scenario files are TOML (see [`builtin`] for examples for the format).
 
 pub mod builtin;
 mod model;

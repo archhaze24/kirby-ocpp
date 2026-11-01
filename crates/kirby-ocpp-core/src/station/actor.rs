@@ -1,6 +1,6 @@
 //! The station actor: the single task that owns all station state.
 //!
-//! Rules (see `docs/rewrite/ARCHITECTURE.md`):
+//! Rules:
 //!
 //! * state is mutated **only** here, never behind a lock;
 //! * the loop `select!`s over four sources: the command queue, the current connection's

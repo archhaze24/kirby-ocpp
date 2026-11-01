@@ -3,7 +3,7 @@
 //! The bundled OCPP 1.6J schemas (draft-04, 28 actions x request/response) are
 //! the source of truth for payload validity. Validation applies to **both
 //! directions**: requests we send, requests we receive, responses we receive and
-//! the replies we send ourselves (see `docs/rewrite/core-analysis.md`).
+//! the replies we send ourselves.
 //!
 //! The schemas live in `crates/kirby-ocpp-core/schemas/` and are embedded with
 //! `include_str!` (no runtime file lookup). [`SchemaRegistry::new`] compiles each
