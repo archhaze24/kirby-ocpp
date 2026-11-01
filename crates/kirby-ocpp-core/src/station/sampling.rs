@@ -11,6 +11,10 @@
 //!   is still local (`PendingStart`) is not sampled either (it has no CSMS id yet).
 //! * The clock-aligned timer fires at the next multiple of `ClockAlignedDataInterval` and
 //!   samples every connector, idle ones too (without `transactionId`).
+//! * Timer-driven samples in flight are bounded ([`MAX_PENDING_SAMPLES`]): a silent CSMS and a
+//!   tiny interval must not pile up calls. When the limit is hit the oldest sample is
+//!   abandoned (its task is aborted; a queued CALL is withdrawn from the connection) and one
+//!   warning per burst is logged; the next answered sample re-arms the warning.
 //! * After every meter advance `MaxEnergyOnInvalidId` is checked.
 
 use std::time::Duration;
@@ -26,6 +30,9 @@ use crate::ids::ConnectorId;
 use crate::ocpp::messages::{MeterValues, MeterValuesRequest};
 use crate::ocpp::types::{ConnectorStatus, Measurand, ReadingContext};
 use crate::station::config_registry::{METER_VALUES_ALIGNED_DATA, METER_VALUES_SAMPLED_DATA};
+
+/// Most timer-driven `MeterValues` calls that may await an answer at the same time.
+pub(crate) const MAX_PENDING_SAMPLES: usize = 16;
 
 impl StationActor {
     fn is_sampling(&self, id: ConnectorId) -> bool {
@@ -148,12 +155,48 @@ impl StationActor {
             transaction_id: tx.and_then(crate::ids::TxId::wire),
             meter_value: vec![sample],
         };
+        let timer_driven = reply.is_none();
+        if timer_driven {
+            self.make_room_for_sample();
+        }
+        let token = self.next_call_token;
         self.call::<MeterValues>(Origin::Station, &request, move |actor, result| {
+            if result.is_ok() {
+                actor.sample_overflow_warned = false;
+            }
             if let Some(reply) = reply {
                 let _ = reply.send(result.map(|_| Outcome::Done).map_err(call_failure));
             }
             actor.check_energy_limit(id);
         });
+        if timer_driven && self.calls.contains_key(&token) {
+            self.sample_calls.push_back(token);
+        }
+    }
+
+    /// Abandons the oldest in-flight timer-driven samples until one more fits.
+    fn make_room_for_sample(&mut self) {
+        self.sample_calls.retain(|t| self.calls.contains_key(t));
+        while self.sample_calls.len() >= MAX_PENDING_SAMPLES {
+            let Some(call) = self
+                .sample_calls
+                .pop_front()
+                .and_then(|token| self.calls.remove(&token))
+            else {
+                continue;
+            };
+            call.task.abort();
+            if !self.sample_overflow_warned {
+                self.sample_overflow_warned = true;
+                self.log(
+                    LogLevel::Warn,
+                    format!(
+                        "CSMS is not answering MeterValues; dropping the oldest samples \
+                         (keeping at most {MAX_PENDING_SAMPLES} in flight)"
+                    ),
+                );
+            }
+        }
     }
 
     /// The `MeterValues` command.

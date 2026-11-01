@@ -255,6 +255,46 @@ async fn serialized_calls_wait_for_each_answer_in_order() {
 }
 
 #[tokio::test]
+async fn a_queued_call_whose_caller_gave_up_is_never_sent() {
+    let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+    let (connection, _events) = connect(&server.url("/ocpp"), options()).await;
+    let mut peer = server.next_peer().await;
+
+    let first = {
+        let connection = connection.clone();
+        tokio::spawn(async move { connection.call("Heartbeat", json!({}), None).await })
+    };
+    let first_frame = peer.recv_frame().await;
+    let abandoned = {
+        let connection = connection.clone();
+        tokio::spawn(async move { connection.call("Heartbeat", json!({}), None).await })
+    };
+    // The runtime is single-threaded: one yield runs the task up to its await, so the CALL
+    // is queued behind the first one before it is dropped.
+    tokio::task::yield_now().await;
+    abandoned.abort();
+    assert!(abandoned.await.unwrap_err().is_cancelled());
+    let third = {
+        let connection = connection.clone();
+        tokio::spawn(async move {
+            connection
+                .call("Authorize", json!({"idTag": "TAG1"}), None)
+                .await
+        })
+    };
+
+    peer.reply(&first_frame, heartbeat_result("2026-01-01T00:00:00Z"))
+        .await;
+    first.await.unwrap().unwrap();
+    // Next on the wire is the Authorize, not the abandoned Heartbeat.
+    let next = peer.recv_frame().await;
+    assert_eq!(next[2], "Authorize");
+    peer.reply(&next, json!({"idTagInfo": {"status": "Accepted"}}))
+        .await;
+    third.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn serialization_can_be_disabled_for_negative_tests() {
     let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
     let options = ConnectOptions {
@@ -409,6 +449,42 @@ async fn invalid_reply_from_the_station_is_replaced_by_internal_error() {
     assert_eq!(frame[1], "hb-1");
     assert_eq!(frame[2], "InternalError");
     assert!(next_warning(&mut events).await.contains("InternalError"));
+}
+
+#[tokio::test]
+async fn a_duplicate_call_id_while_pending_is_delivered_once_and_answered_once() {
+    let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+    let (_connection, mut events) = connect(&server.url("/ocpp"), options()).await;
+    let mut peer = server.next_peer().await;
+
+    peer.send_json(&json!([2, "dup-1", "Heartbeat", {}])).await;
+    let first = next_call(&mut events).await;
+    peer.send_json(&json!([2, "dup-1", "Heartbeat", {}])).await;
+    // The retransmission is reported, not delivered.
+    let warning = next_warning(&mut events).await;
+    assert!(warning.contains("duplicate CALL dup-1"), "{warning}");
+
+    first
+        .reply
+        .accept_value(heartbeat_result("2026-01-01T00:00:00Z"))
+        .unwrap();
+    assert_eq!(
+        peer.recv_frame().await,
+        json!([3, "dup-1", {"currentTime": "2026-01-01T00:00:00Z"}])
+    );
+
+    // Once answered, the id is free again: a later CALL with it is a new CALL.
+    peer.send_json(&json!([2, "dup-1", "Heartbeat", {}])).await;
+    let again = next_call(&mut events).await;
+    assert_eq!(again.id, "dup-1");
+    again
+        .reply
+        .accept_value(heartbeat_result("2026-01-02T00:00:00Z"))
+        .unwrap();
+    assert_eq!(
+        peer.recv_frame().await,
+        json!([3, "dup-1", {"currentTime": "2026-01-02T00:00:00Z"}])
+    );
 }
 
 #[tokio::test]

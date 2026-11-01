@@ -172,6 +172,9 @@ impl Task {
     {
         match step {
             Step::Command(Some(Command::Call(call))) => {
+                // Withdraw queued CALLs whose caller gave up, so a silent peer cannot make
+                // abandoned CALLs pile up.
+                self.queue.retain(|queued| !queued.reply.is_closed());
                 self.queue.push_back(call);
                 self.pump(sink).await
             }
@@ -202,6 +205,9 @@ impl Task {
             let Some(call) = self.queue.pop_front() else {
                 break;
             };
+            if call.reply.is_closed() {
+                continue;
+            }
             let OutboundCall {
                 action,
                 payload,
@@ -366,6 +372,15 @@ impl Task {
     where
         W: Sink<Message, Error = WsError> + Unpin,
     {
+        // A CALL id that is still being handled is a retransmission: ignore it, the one reply
+        // for the first copy goes out when the owner answers.
+        if self.incoming.contains_key(&id) {
+            return self
+                .warn(format!(
+                    "ignored duplicate CALL {id} ({action}): the first one is still being handled"
+                ))
+                .await;
+        }
         let rejection = if schemas().knows_action(&action) {
             schemas()
                 .validate_request(&action, &payload)

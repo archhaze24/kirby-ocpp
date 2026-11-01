@@ -235,8 +235,9 @@ impl Connection {
     /// [`ConnectOptions::call_timeout`].
     ///
     /// The request is validated first: a schema violation returns
-    /// [`CallError::Schema`] and nothing is sent. Dropping the returned future does
-    /// not cancel the CALL; it is still sent (and its response discarded).
+    /// [`CallError::Schema`] and nothing is sent. Dropping the returned future
+    /// withdraws the CALL if it is still queued behind an earlier one; once it has been
+    /// written to the socket it is not recalled (its response is discarded).
     pub async fn call(
         &self,
         action: &str,

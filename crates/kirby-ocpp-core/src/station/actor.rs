@@ -146,6 +146,10 @@ pub(crate) struct StationActor {
     pub(super) link: Link,
     pub(super) calls: HashMap<u64, PendingCall>,
     pub(super) next_call_token: u64,
+    /// Tokens of the timer-driven `MeterValues` in flight, oldest first (see `sampling.rs`).
+    pub(super) sample_calls: std::collections::VecDeque<u64>,
+    /// A sample was dropped since the last one that got through (one warning per burst).
+    pub(super) sample_overflow_warned: bool,
     pub(super) trackers: Trackers,
     pub(super) persistence: Persistence,
     /// CSMS time minus our clock at the last accepted `BootNotification`; for logs only.
@@ -207,6 +211,8 @@ impl StationActor {
             link: Link::default(),
             calls: HashMap::new(),
             next_call_token: 0,
+            sample_calls: std::collections::VecDeque::new(),
+            sample_overflow_warned: false,
             trackers: BTreeMap::new(),
             persistence,
             clock_offset: None,
