@@ -4,7 +4,7 @@ members = ["crates/kirby-ocpp-core", "crates/kirby-ocpp-tui", "crates/kirby-ocpp
 default-members = ["crates/kirby-ocpp-core", "crates/kirby-ocpp-tui", "crates/kirby-ocpp"]
 
 [workspace.package]
-version = "0.3.0-dev"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -13,8 +13,8 @@ homepage = "https://github.com/archhaze24/kirby-ocpp#readme"
 
 [workspace.dependencies]
 # internal
-kirby-ocpp-core = { path = "crates/kirby-ocpp-core", version = "0.3.0-dev" }
-kirby-ocpp-tui = { path = "crates/kirby-ocpp-tui", version = "0.3.0-dev" }
+kirby-ocpp-core = { path = "crates/kirby-ocpp-core", version = "0.3.0" }
+kirby-ocpp-tui = { path = "crates/kirby-ocpp-tui", version = "0.3.0" }
 kirby-ocpp-testkit = { path = "crates/kirby-ocpp-testkit" }
 
 # external (latest stable at skeleton time; crates used only in later stages are

@@ -65,7 +65,7 @@ Publish the six platform packages first with `npm publish --access public` (scop
 npx kirby-ocpp@0.2.0 --version
 cargo install kirby-ocpp --version 0.2.0 --force && kirby-ocpp --version
 ```
-Then bump `main` to the next development version (`0.3.0-dev`) when you start the next cycle.
+Then bump `main` to the next development version (e.g. `0.4.0-dev`) when you start the next cycle.
 
 ## Notes
 
