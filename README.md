@@ -23,7 +23,7 @@ With Cargo (Rust 1.88 or newer):
 cargo install kirby-ocpp
 ```
 
-Or download a prebuilt binary for Linux, macOS or Windows from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). To build from a checkout: `cargo install --path crates/kirby-ocpp`.
+Or download a prebuilt binary for Linux (x86_64 glibc, aarch64 glibc, x86_64 static musl for Alpine and minimal containers), macOS or Windows from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). To build from a checkout: `cargo install --path crates/kirby-ocpp`.
 
 ## Quick start
 

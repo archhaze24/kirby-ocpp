@@ -5,7 +5,7 @@
 //
 // Without --assets the archives are downloaded from the GitHub release of that tag.
 // Output (one directory per package, ready for `npm publish`):
-//   <out>/kirby-ocpp-<os>-<arch>/   platform packages @archhaze24/kirby-ocpp-<os>-<arch> (binary in bin/)
+//   <out>/kirby-ocpp-<os>-<arch>[-musl]/   platform packages @archhaze24/kirby-ocpp-<os>-<arch> (binary in bin/)
 //   <out>/kirby-ocpp/               main package (launcher + optionalDependencies)
 // Publish the platform packages first, the main package last (see npm/README.md).
 import { execFileSync } from "node:child_process";
@@ -19,8 +19,9 @@ const NOTICES = path.join(root, "crates", "kirby-ocpp", "THIRD_PARTY_NOTICES.md"
 const REPO = "archhaze24/kirby-ocpp";
 
 const PLATFORMS = [
-  { pkg: "@archhaze24/kirby-ocpp-linux-x64", target: "x86_64-unknown-linux-gnu", os: "linux", cpu: "x64", ext: "tar.gz", exe: "kirby-ocpp" },
-  { pkg: "@archhaze24/kirby-ocpp-linux-arm64", target: "aarch64-unknown-linux-gnu", os: "linux", cpu: "arm64", ext: "tar.gz", exe: "kirby-ocpp" },
+  { pkg: "@archhaze24/kirby-ocpp-linux-x64", target: "x86_64-unknown-linux-gnu", os: "linux", cpu: "x64", libc: "glibc", ext: "tar.gz", exe: "kirby-ocpp" },
+  { pkg: "@archhaze24/kirby-ocpp-linux-x64-musl", target: "x86_64-unknown-linux-musl", os: "linux", cpu: "x64", libc: "musl", ext: "tar.gz", exe: "kirby-ocpp" },
+  { pkg: "@archhaze24/kirby-ocpp-linux-arm64", target: "aarch64-unknown-linux-gnu", os: "linux", cpu: "arm64", libc: "glibc", ext: "tar.gz", exe: "kirby-ocpp" },
   { pkg: "@archhaze24/kirby-ocpp-darwin-x64", target: "x86_64-apple-darwin", os: "darwin", cpu: "x64", ext: "tar.gz", exe: "kirby-ocpp" },
   { pkg: "@archhaze24/kirby-ocpp-darwin-arm64", target: "aarch64-apple-darwin", os: "darwin", cpu: "arm64", ext: "tar.gz", exe: "kirby-ocpp" },
   { pkg: "@archhaze24/kirby-ocpp-win32-x64", target: "x86_64-pc-windows-msvc", os: "win32", cpu: "x64", ext: "zip", exe: "kirby-ocpp.exe" },
@@ -119,17 +120,18 @@ async function main() {
     fs.copyFileSync(NOTICES, path.join(dir, "THIRD_PARTY_NOTICES.md"));
     fs.writeFileSync(
       path.join(dir, "README.md"),
-      `# ${platform.pkg}\n\nPrebuilt \`kirby-ocpp\` binary for ${platform.os}/${platform.cpu}. Install \`kirby-ocpp\` instead of this package: https://github.com/${REPO}\n`,
+      `# ${platform.pkg}\n\nPrebuilt \`kirby-ocpp\` binary for ${platform.os}/${platform.cpu}${platform.libc ? ` (${platform.libc})` : ""}. Install \`kirby-ocpp\` instead of this package: https://github.com/${REPO}\n`,
     );
     writeJson(path.join(dir, "package.json"), {
       name: platform.pkg,
       version,
-      description: `kirby-ocpp binary for ${platform.os}-${platform.cpu}`,
+      description: `kirby-ocpp binary for ${platform.os}-${platform.cpu}${platform.libc ? ` (${platform.libc})` : ""}`,
       license: template.license,
       author: template.author,
       repository: template.repository,
       os: [platform.os],
       cpu: [platform.cpu],
+      ...(platform.libc ? { libc: [platform.libc] } : {}),
       files: ["bin", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
     });
     optionalDependencies[platform.pkg] = version;
