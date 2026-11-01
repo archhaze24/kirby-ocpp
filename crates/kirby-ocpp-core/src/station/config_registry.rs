@@ -591,7 +591,7 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
         .join(",");
 
     vec![
-        writable(ALLOW_OFFLINE_TX_FOR_UNKNOWN_ID, Kind::Boolean, "false"),
+        writable(ALLOW_OFFLINE_TX_FOR_UNKNOWN_ID, Kind::Boolean, "true"),
         writable(AUTHORIZATION_CACHE_ENABLED, Kind::Boolean, "true"),
         writable(AUTHORIZE_REMOTE_TX_REQUESTS, Kind::Boolean, "false"),
         writable(BLINK_REPEAT, Kind::NonNegativeInt, "0"),
@@ -639,7 +639,7 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
         writable(LIGHT_INTENSITY, Kind::NonNegativeInt, "0"),
         writable(LOCAL_AUTH_LIST_ENABLED, Kind::Boolean, "true"),
         read_only(LOCAL_AUTH_LIST_MAX_LENGTH, LOCAL_LIST_LIMIT.to_string()),
-        writable(LOCAL_AUTHORIZE_OFFLINE, Kind::Boolean, "false"),
+        writable(LOCAL_AUTHORIZE_OFFLINE, Kind::Boolean, "true"),
         writable(LOCAL_PRE_AUTHORIZE, Kind::Boolean, "false"),
     ]
 }
@@ -723,6 +723,16 @@ mod tests {
 
     fn keys_of(report: &ConfigurationReport<'_>) -> Vec<&'static str> {
         report.configuration_key.iter().map(|e| e.key).collect()
+    }
+
+    #[test]
+    fn offline_authorization_is_allowed_by_default() {
+        let registry = registry();
+        assert_eq!(registry.value(LOCAL_AUTHORIZE_OFFLINE), Some("true"));
+        assert_eq!(
+            registry.value(ALLOW_OFFLINE_TX_FOR_UNKNOWN_ID),
+            Some("true")
+        );
     }
 
     #[test]
@@ -969,10 +979,10 @@ mod tests {
         assert!(registry.local_auth_list_enabled());
         assert_eq!(registry.local_auth_list_max_length(), 1000);
         assert_eq!(registry.send_local_list_max_length(), 1000);
-        assert!(!registry.local_authorize_offline());
+        assert!(registry.local_authorize_offline());
         assert!(!registry.local_pre_authorize());
         assert!(registry.authorization_cache_enabled());
-        assert!(!registry.allow_offline_tx_for_unknown_id());
+        assert!(registry.allow_offline_tx_for_unknown_id());
         assert!(!registry.authorize_remote_tx_requests());
         assert!(registry.stop_transaction_on_ev_side_disconnect());
         assert!(!registry.stop_transaction_on_invalid_id());

@@ -1,5 +1,5 @@
 name = "offline-sync"
-description = "Go offline, run a whole session, reconnect, wait until the queued transaction messages are delivered and unplug. The station must be allowed to authorize offline (LocalAuthorizeOffline=true plus AllowOfflineTxForUnknownId=true, or the tag in the local list or authorization cache); otherwise the offline start is rejected and the scenario fails."
+description = "Go offline, run a whole session, reconnect, wait until the queued transaction messages are delivered and unplug. Needs offline authorization: LocalAuthorizeOffline and AllowOfflineTxForUnknownId (both true by default), or the tag in the local list or authorization cache; if they are switched off the offline start is rejected and the scenario fails."
 
 [[steps]]
 action = "disconnect"

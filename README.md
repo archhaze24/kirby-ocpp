@@ -114,7 +114,7 @@ Without a TTY (or with `--no-tui`) the tool connects and prints events until SIG
 
 ## Scenarios
 
-`kirby-ocpp scenarios list` lists the built-in scenarios (`charge-session`, `fault-recovery`, `finish-session`, `offline-sync`); `kirby-ocpp scenarios show <name>` prints one as TOML. Built-ins target connector 1 unless `--connector` is given.
+`kirby-ocpp scenarios list` lists the built-in scenarios (`charge-session`, `fault-recovery`, `finish-session`, `offline-sync`); `kirby-ocpp scenarios show <name>` prints one as TOML. Built-ins target connector 1 unless `--connector` is given. `offline-sync` works on a stock station: `LocalAuthorizeOffline` and `AllowOfflineTxForUnknownId` default to `true` (switch them off with `ChangeConfiguration` to test the CSMS-side rejection path).
 
 ```toml
 name = "my-session"

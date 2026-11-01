@@ -24,9 +24,7 @@ fn statuses(report: &kirby_ocpp_core::scenario::ScenarioReport) -> Vec<&StepStat
 #[tokio::test]
 async fn all_builtins_pass_in_sequence() {
     let rig = booted_rig().await;
-    // Offline starts of a tag the CSMS has not seen need this (see the offline-sync scenario).
-    rig.cfg("LocalAuthorizeOffline", "true").await;
-    rig.cfg("AllowOfflineTxForUnknownId", "true").await;
+    // Stock station: no offline-authorization keys overridden (offline-sync relies on the defaults).
     let cancel = CancelToken::new();
     for scenario in builtin::all() {
         let report = run_scenario(&rig.station, &scenario, &cancel, None).await;

@@ -479,9 +479,11 @@ async fn offline_transactions_survive_a_station_restart() {
 async fn offline_authorization_gates_offline_starts() {
     let mut rig = Rig::start().await;
     rig.connect_booted().await;
+    // With the offline switches off nothing allows an unknown tag offline.
+    rig.cfg("LocalAuthorizeOffline", "false").await;
+    rig.cfg("AllowOfflineTxForUnknownId", "false").await;
     rig.station.disconnect().await.unwrap();
     rig.csms.wait_for_disconnect(STEP).await.unwrap();
-    // Nothing allows an unknown tag offline.
     let outcome = rig.begin(1, "STRANGER").await;
     assert!(
         matches!(outcome, Outcome::TransactionRejected { .. }),
@@ -489,6 +491,20 @@ async fn offline_authorization_gates_offline_starts() {
     );
     assert!(conn1(&rig).transaction.is_idle());
     assert_eq!(rig.station.snapshot().pending_offline_messages, 0);
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn stock_station_starts_an_unknown_tag_offline() {
+    let mut rig = Rig::start().await;
+    rig.connect_booted().await;
+    rig.station.disconnect().await.unwrap();
+    rig.csms.wait_for_disconnect(STEP).await.unwrap();
+    let outcome = rig.begin(1, "STRANGER").await;
+    assert!(
+        matches!(outcome, Outcome::TransactionStarted { .. }),
+        "{outcome:?}"
+    );
     rig.shutdown().await;
 }
 

@@ -335,8 +335,16 @@ mod tests {
         IdTagInfo::with_status(status)
     }
 
+    /// Strict baseline: both offline switches off (the station defaults are `true`),
+    /// so each test opts in to exactly what it exercises.
     fn config() -> ConfigRegistry {
-        ConfigRegistry::new(&StationConfig::new("ws://h/p"))
+        with(
+            ConfigRegistry::new(&StationConfig::new("ws://h/p")),
+            &[
+                ("LocalAuthorizeOffline", "false"),
+                ("AllowOfflineTxForUnknownId", "false"),
+            ],
+        )
     }
 
     fn with(mut config: ConfigRegistry, changes: &[(&str, &str)]) -> ConfigRegistry {
