@@ -4,3 +4,4 @@ dist/
 .DS_Store
 *.log
 OCPP_1.6_documentation/
+target/
