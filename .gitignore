@@ -4,3 +4,4 @@ target/
 .DS_Store
 *.log
 docs/rewrite/
+AGENTS.md
