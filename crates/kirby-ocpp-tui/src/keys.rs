@@ -1,0 +1,255 @@
+//! Key handling. Each [`Mode`] owns its keys; nothing falls through to another mode.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use kirby_ocpp_core::ocpp::types::{
+    ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus, StopReason,
+};
+use kirby_ocpp_core::station::{Command, DiagnosticsOutcome, FirmwareOutcome};
+
+use crate::actions::{ActionId, Tab};
+use crate::app::{App, ConfirmAction, Detail, Effect, Focus, Mode, NoticeLevel};
+use crate::forms::{Choice, ChoiceKind, FormEvent};
+use crate::palette::Palette;
+
+pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
+    if key.kind == KeyEventKind::Release {
+        return;
+    }
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl && key.code == KeyCode::Char('c') {
+        app.quit = true;
+        return;
+    }
+    match std::mem::replace(&mut app.mode, Mode::Normal) {
+        Mode::Normal => normal(app, key, fx),
+        Mode::Palette(p) => palette(app, p, key, fx),
+        Mode::Form(f) => form(app, f, key, fx),
+        Mode::Choice(c) => choice(app, c, key, fx),
+        Mode::Help => {
+            if !matches!(
+                key.code,
+                KeyCode::Esc | KeyCode::Char('?' | 'q') | KeyCode::Enter
+            ) {
+                app.mode = Mode::Help;
+            }
+        }
+        Mode::Detail(d) => detail(app, d, key, fx),
+        Mode::Confirm(c) => match key.code {
+            KeyCode::Char('y' | 'Y') | KeyCode::Enter => match c.action {
+                ConfirmAction::ClearLog => {
+                    app.log.clear();
+                    app.notify(NoticeLevel::Info, "log cleared");
+                }
+            },
+            _ => app.notify(NoticeLevel::Info, "cancelled"),
+        },
+    }
+}
+
+fn open_palette(app: &mut App) {
+    app.mode = Mode::Palette(Palette::new(&app.catalog));
+}
+
+fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    match key.code {
+        KeyCode::Char('p') if ctrl => open_palette(app),
+        _ if ctrl || alt => {}
+        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char(':') => open_palette(app),
+        KeyCode::Char('/') => {
+            if app.tab == Tab::Logs && app.focus == Focus::Log {
+                app.run_action(ActionId::LogSearch, fx);
+            } else {
+                open_palette(app);
+            }
+        }
+        KeyCode::Char(d @ '1'..='7') => {
+            app.set_tab(Tab::from_index(usize::from(d as u8 - b'1')));
+        }
+        KeyCode::Tab => app.set_tab(app.tab.next()),
+        KeyCode::BackTab => app.set_tab(app.tab.prev()),
+        KeyCode::Char('[') => app.move_connector(-1),
+        KeyCode::Char(']') => app.move_connector(1),
+        KeyCode::Left => app.focus = shift_focus(app.focus, -1),
+        KeyCode::Right => app.focus = shift_focus(app.focus, 1),
+        KeyCode::Up | KeyCode::Char('k') => step(app, -1),
+        KeyCode::Down | KeyCode::Char('j') => step(app, 1),
+        KeyCode::PageUp => step(app, -10),
+        KeyCode::PageDown => step(app, 10),
+        KeyCode::Home if app.focus == Focus::Log => app.log.select_first(),
+        KeyCode::End if app.focus == Focus::Log => app.log.follow_tail(),
+        KeyCode::Esc => {
+            if !app.log.search.is_empty() {
+                app.log.search.clear();
+                app.notify(NoticeLevel::Info, "search cleared");
+            }
+        }
+        KeyCode::Enter => match app.focus {
+            Focus::Actions => {
+                if let Some(id) = app.selected_action().map(|a| a.id) {
+                    app.run_action(id, fx);
+                }
+            }
+            Focus::Log => app.open_detail(),
+            Focus::Connectors => {}
+        },
+        KeyCode::Char(c) => {
+            // Accelerators exist only for the active tab's own actions.
+            let id = app
+                .catalog
+                .iter()
+                .find(|a| a.tab == app.tab && a.key == Some(c))
+                .map(|a| a.id);
+            if let Some(id) = id {
+                app.run_action(id, fx);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn shift_focus(f: Focus, d: isize) -> Focus {
+    const ORDER: [Focus; 3] = [Focus::Connectors, Focus::Actions, Focus::Log];
+    let i = ORDER.iter().position(|x| *x == f).unwrap_or(1);
+    ORDER[i.saturating_add_signed(d).min(2)]
+}
+
+fn step(app: &mut App, d: isize) {
+    match app.focus {
+        Focus::Connectors => app.move_connector(d),
+        Focus::Actions => app.move_action(d.signum()),
+        Focus::Log => app.log.move_selection(d),
+    }
+}
+
+fn palette(app: &mut App, mut p: Palette, key: KeyEvent, fx: &mut Vec<Effect>) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => return,
+        KeyCode::Enter => {
+            if let Some(id) = p.chosen().map(|i| app.catalog[i].id) {
+                app.run_action(id, fx);
+            }
+            return;
+        }
+        KeyCode::Up => p.move_by(-1),
+        KeyCode::Down => p.move_by(1),
+        KeyCode::Char('p') if ctrl => p.move_by(-1),
+        KeyCode::Char('n') if ctrl => p.move_by(1),
+        KeyCode::Char('u') if ctrl => {
+            p.query = crate::text::TextInput::default();
+            p.refresh(&app.catalog);
+        }
+        KeyCode::Left => p.query.left(),
+        KeyCode::Right => p.query.right(),
+        KeyCode::Home => p.query.home(),
+        KeyCode::End => p.query.end(),
+        KeyCode::Delete => {
+            p.query.delete();
+            p.refresh(&app.catalog);
+        }
+        KeyCode::Backspace => {
+            p.query.backspace();
+            p.refresh(&app.catalog);
+        }
+        KeyCode::Char(c) if !ctrl => {
+            p.query.insert_char(c);
+            p.refresh(&app.catalog);
+        }
+        _ => {}
+    }
+    app.mode = Mode::Palette(p);
+}
+
+fn form(app: &mut App, mut f: crate::forms::Form, key: KeyEvent, fx: &mut Vec<Effect>) {
+    match f.handle_key(key) {
+        FormEvent::Cancel => {}
+        FormEvent::Submit => match f.submit() {
+            Some(done) => app.apply_form(done, fx),
+            None => app.mode = Mode::Form(f),
+        },
+        FormEvent::None => app.mode = Mode::Form(f),
+    }
+}
+
+fn choice(app: &mut App, mut c: Choice, key: KeyEvent, fx: &mut Vec<Effect>) {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => return,
+        KeyCode::Up | KeyCode::Char('k') => c.move_by(-1),
+        KeyCode::Down | KeyCode::Char('j') => c.move_by(1),
+        KeyCode::Home => c.selected = 0,
+        KeyCode::End => c.selected = c.items.len().saturating_sub(1),
+        KeyCode::Enter => {
+            if let Some(command) = choice_command(&c) {
+                let label = format!("{}: {}", command.name(), c.items[c.selected]);
+                fx.push(Effect::Send {
+                    label,
+                    command,
+                    show_response: false,
+                });
+            }
+            return;
+        }
+        _ => {}
+    }
+    app.mode = Mode::Choice(c);
+}
+
+fn choice_command(c: &Choice) -> Option<Command> {
+    let i = c.selected;
+    let connector = c.connector;
+    Some(match c.kind {
+        ChoiceKind::SetStatus => Command::SetConnectorStatus {
+            connector,
+            status: *ConnectorStatus::ALL.get(i)?,
+        },
+        ChoiceKind::Fault => Command::Fault {
+            connector,
+            error_code: *ChargePointErrorCode::ALL
+                .iter()
+                .filter(|e| **e != ChargePointErrorCode::NoError)
+                .nth(i)?,
+            info: None,
+            vendor_error_code: None,
+        },
+        ChoiceKind::StopReason => Command::StopTransaction {
+            connector,
+            reason: *StopReason::ALL.get(i)?,
+            id_tag: None,
+        },
+        ChoiceKind::DiagOutcome => Command::SetDiagnosticsOutcome {
+            outcome: *DiagnosticsOutcome::ALL.get(i)?,
+        },
+        ChoiceKind::FwOutcome => Command::SetFirmwareOutcome {
+            outcome: *FirmwareOutcome::ALL.get(i)?,
+        },
+        ChoiceKind::DiagStatus => Command::DiagnosticsStatusNotification {
+            status: *DiagnosticsStatus::ALL.get(i)?,
+        },
+        ChoiceKind::FwStatus => Command::FirmwareStatusNotification {
+            status: *FirmwareStatus::ALL.get(i)?,
+        },
+    })
+}
+
+fn detail(app: &mut App, mut d: Detail, key: KeyEvent, fx: &mut Vec<Effect>) {
+    let max = d.lines.len().saturating_sub(1);
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => return,
+        KeyCode::Up | KeyCode::Char('k') => d.scroll = d.scroll.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => d.scroll = (d.scroll + 1).min(max),
+        KeyCode::PageUp => d.scroll = d.scroll.saturating_sub(10),
+        KeyCode::PageDown => d.scroll = (d.scroll + 10).min(max),
+        KeyCode::Home | KeyCode::Char('g') => d.scroll = 0,
+        KeyCode::End | KeyCode::Char('G') => d.scroll = max,
+        KeyCode::Char('c' | 'y') => fx.push(Effect::Copy {
+            text: d.copy.clone(),
+            what: "detail".to_owned(),
+        }),
+        _ => {}
+    }
+    app.mode = Mode::Detail(d);
+}
