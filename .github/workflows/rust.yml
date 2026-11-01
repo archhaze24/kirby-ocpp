@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - rust-rewrite
+      - "ci-check/**"
   pull_request:
   workflow_dispatch:
 
@@ -30,7 +30,7 @@ jobs:
         run: git config --global core.autocrlf false
 
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable

@@ -35,7 +35,7 @@ jobs:
       - name: Keep line endings as committed
         run: git config --global core.autocrlf false
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -54,7 +54,7 @@ jobs:
         run: |
           name="kirby-ocpp-${{ github.ref_name }}-${{ matrix.target }}"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/kirby-ocpp" LICENSE THIRD_PARTY_NOTICES.md README.md "$name/"
+          cp "target/${{ matrix.target }}/release/kirby-ocpp" LICENSE crates/kirby-ocpp/THIRD_PARTY_NOTICES.md README.md "$name/"
           tar -czf "$name.tar.gz" "$name"
           if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"; else shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"; fi
           echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
@@ -65,13 +65,13 @@ jobs:
         run: |
           $name = "kirby-ocpp-${{ github.ref_name }}-${{ matrix.target }}"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/kirby-ocpp.exe", LICENSE, THIRD_PARTY_NOTICES.md, README.md $name
+          Copy-Item "target/${{ matrix.target }}/release/kirby-ocpp.exe", LICENSE, crates/kirby-ocpp/THIRD_PARTY_NOTICES.md, README.md $name
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
           "ASSET=$name.zip" | Out-File -Append -Encoding ascii $env:GITHUB_ENV
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -89,7 +89,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
