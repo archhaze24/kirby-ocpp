@@ -158,6 +158,7 @@ impl Persistence {
                 continue;
             };
             connector.availability = saved.availability;
+            connector.pending_availability = saved.pending_availability;
             connector.meter_wh = saved.meter_wh;
             connector.last_id_tag = saved.last_id_tag;
             connector.ev_connected = saved.ev_connected;
@@ -248,6 +249,7 @@ impl StationActor {
                     id: c.id,
                     status: c.status,
                     availability: c.availability,
+                    pending_availability: c.pending_availability,
                     ev_connected: c.ev_connected,
                     meter_wh: c.meter_wh,
                     last_id_tag: c.last_id_tag.clone(),

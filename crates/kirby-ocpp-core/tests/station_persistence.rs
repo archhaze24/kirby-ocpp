@@ -8,11 +8,11 @@ use std::sync::Arc;
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::ocpp::types::{AvailabilityType, ConnectorStatus};
 use kirby_ocpp_core::station::Command;
-use kirby_ocpp_core::store::StationStore;
+use kirby_ocpp_core::store::{LoadOutcome, StationStore};
 use kirby_ocpp_core::{ManualClock, Station};
 use kirby_ocpp_testkit::{CsmsOptions, MockCsms};
 use serde_json::{Value, json};
-use station_support::{Observed, STEP, t0, test_config};
+use station_support::{Observed, Rig, STEP, incrementing, t0, test_config};
 
 async fn payload(csms: &MockCsms, action: &str, request: Value) -> Value {
     match csms.send_call(action, request).await.unwrap() {
@@ -204,16 +204,26 @@ async fn changes_are_written_soon_without_waiting_for_shutdown() {
     let store = StationStore::new(dir.path(), &config.charge_point_id);
     let (station, join) = Station::spawn(config, Arc::new(ManualClock::new(t0())));
     station.send(Command::AddConnector).await.unwrap();
-    // AddConnector is an "important" change: the file appears without a shutdown.
-    // Generous: the write is debounced and fsynced, and a full fsync on a shared macOS CI
-    // runner can take seconds. The point is that no shutdown is needed, not how fast it is.
-    let started = std::time::Instant::now();
-    while !store.path().exists() {
+    let expected = u32::try_from(station.snapshot().connectors.len()).unwrap();
+    // AddConnector is an "important" change: the file shows it without a shutdown.
+    // The write is debounced and fsynced (twice, with the directory), and a full fsync on a
+    // shared macOS CI runner can take seconds. The point is that no shutdown is needed, not how
+    // fast it is, so poll until the content is there under a deadline that only guards hangs.
+    // `load` may briefly see nothing or an older file; the rename is atomic, never a torn one.
+    let deadline = std::time::Instant::now() + STEP * 4;
+    loop {
+        let seen = match store.load() {
+            Ok(LoadOutcome::Loaded(state)) => Some(state.connector_count),
+            _ => None,
+        };
+        if seen == Some(expected) {
+            break;
+        }
         assert!(
-            started.elapsed() < STEP * 4,
-            "state file was not written without a shutdown"
+            std::time::Instant::now() < deadline,
+            "state file did not show {expected} connectors without a shutdown (last seen: {seen:?})"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     station.shutdown().await.unwrap();
     join.await.unwrap();
@@ -235,6 +245,7 @@ async fn a_stop_in_flight_at_a_crash_is_restored_as_a_queued_stop() {
         id: ConnectorId::new(1),
         status: ConnectorStatus::Finishing,
         availability: AvailabilityType::Operative,
+        pending_availability: None,
         ev_connected: true,
         meter_wh: 42,
         last_id_tag: None,
@@ -250,6 +261,7 @@ async fn a_stop_in_flight_at_a_crash_is_restored_as_a_queued_stop() {
         id: ConnectorId::new(2),
         status: ConnectorStatus::Preparing,
         availability: AvailabilityType::Operative,
+        pending_availability: None,
         ev_connected: true,
         meter_wh: 0,
         last_id_tag: None,
@@ -281,4 +293,66 @@ async fn a_stop_in_flight_at_a_crash_is_restored_as_a_queued_stop() {
     );
     station.shutdown().await.unwrap();
     join.await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_availability_survives_a_restart_and_is_applied_when_the_transaction_ends() {
+    use kirby_ocpp_core::ocpp::types::StopReason;
+
+    let mut rig = Rig::with(incrementing(), |config| config).await;
+    rig.connect_booted().await;
+    rig.begin(1, "TAG1").await;
+    rig.csms
+        .expect_status(
+            "ChangeAvailability",
+            json!({"connectorId": 1, "type": "Inoperative"}),
+            "Scheduled",
+        )
+        .await
+        .unwrap();
+    let one = ConnectorId::new(1);
+    assert_eq!(
+        rig.station
+            .snapshot()
+            .connector(one)
+            .unwrap()
+            .pending_availability,
+        Some(AvailabilityType::Inoperative)
+    );
+
+    // Restart on the same state directory (shutdown writes the final state).
+    rig.station.shutdown().await.unwrap();
+    rig.join.take().unwrap().await.unwrap();
+    let config = test_config(rig.csms.url(), &rig.dir);
+    let (station, join) = Station::spawn(config, Arc::new(ManualClock::new(t0())));
+    let restored = station.snapshot();
+    let connector = restored.connector(one).unwrap();
+    assert_eq!(
+        connector.pending_availability,
+        Some(AvailabilityType::Inoperative)
+    );
+    assert_eq!(connector.availability, AvailabilityType::Operative);
+    assert!(!connector.transaction.is_idle());
+
+    // The transaction ends: the restored pending change is applied.
+    station
+        .send(Command::StopTransaction {
+            connector: one,
+            reason: StopReason::Local,
+            id_tag: None,
+        })
+        .await
+        .unwrap();
+    let snapshot = station_support::wait_state(&station, "availability applied", |s| {
+        s.connector(one)
+            .is_some_and(|c| c.availability == AvailabilityType::Inoperative)
+    })
+    .await;
+    let connector = snapshot.connector(one).unwrap();
+    assert_eq!(connector.pending_availability, None);
+    assert_eq!(connector.status, ConnectorStatus::Unavailable);
+
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    rig.csms.shutdown().await;
 }

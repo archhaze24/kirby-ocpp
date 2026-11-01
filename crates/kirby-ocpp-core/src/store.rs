@@ -5,7 +5,8 @@
 //! `<base64url(id)>.json` and its files are neither read nor overwritten.
 //!
 //! * **Atomic:** the file is written to a temp file in the same directory,
-//!   fsynced, then renamed over the target (`tempfile::NamedTempFile::persist`).
+//!   fsynced, then renamed over the target (`tempfile::NamedTempFile::persist`) and the
+//!   directory is fsynced (Unix) so the rename itself survives a power loss.
 //!   A crash leaves either the old or the new file, never a torn one.
 //! * **Private:** temp files are created `0600` on Unix, and `persist` keeps that.
 //! * **Versioned:** [`PersistedStation::version`] is checked before the rest is
@@ -37,7 +38,7 @@ use crate::station::reservation::Reservation;
 use crate::station::transaction::TransactionState;
 
 /// Current on-disk format version.
-pub const STORE_VERSION: u32 = 1;
+pub const STORE_VERSION: u32 = 2;
 
 /// Everything that survives a restart.
 ///
@@ -98,6 +99,10 @@ pub struct PersistedConnector {
     pub status: ConnectorStatus,
     /// Persisted (the TS code lost it across restarts).
     pub availability: AvailabilityType,
+    /// A `ChangeAvailability` answered `Scheduled`, waiting for the transaction to end
+    /// (added in format version 2).
+    #[serde(default)]
+    pub pending_availability: Option<AvailabilityType>,
     pub ev_connected: bool,
     pub meter_wh: u64,
     pub last_id_tag: Option<IdTag>,
@@ -205,7 +210,10 @@ impl StationStore {
         temp.as_file().sync_all().map_err(|e| self.io_error(e))?;
         temp.persist(&self.path)
             .map_err(|e| self.io_error(e.error))?;
-        Ok(())
+        sync_dir(dir).map_err(|e| StoreError::Io {
+            path: dir.to_owned(),
+            source: e,
+        })
     }
 
     fn quarantine(&self, reason: String) -> Result<LoadOutcome, StoreError> {
@@ -235,24 +243,70 @@ impl StationStore {
     }
 }
 
+/// Makes the rename durable. Directories cannot be opened and synced on Windows (and NTFS
+/// journals the rename), so it is a no-op there.
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> io::Result<()> {
+    fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "same signature as the unix version"
+)]
+fn sync_dir(_dir: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Longest escaped id kept verbatim. With `.station.json` (13 bytes), the `.bak` suffix and the
+/// `~<16 hex>` hash tail the name stays well below the 255-byte file name limit.
+const MAX_ESCAPED_LEN: usize = 200;
+
 /// File name for a charge point id: `[A-Za-z0-9_-]` and non-leading `.` are kept, every
 /// other byte becomes `%XX`, so any id maps to a distinct, filesystem-safe name.
+///
+/// An escaped id longer than [`MAX_ESCAPED_LEN`] is cut at an escape boundary and followed by
+/// `~` plus the FNV-1a hash of the whole id. `~` is always escaped in plain names, so a
+/// shortened name cannot collide with an unshortened one.
 fn file_name(charge_point_id: &str) -> String {
-    let mut name = String::with_capacity(charge_point_id.len() + 13);
+    let mut name = String::with_capacity(charge_point_id.len().min(MAX_ESCAPED_LEN) + 32);
+    let mut kept = 0;
+    let mut truncated = false;
     for (index, byte) in charge_point_id.bytes().enumerate() {
+        let mut piece = String::with_capacity(3);
         match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => name.push(char::from(byte)),
-            b'.' if index > 0 => name.push('.'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-' => piece.push(char::from(byte)),
+            b'.' if index > 0 => piece.push('.'),
             _ => {
-                let _ = write!(name, "%{byte:02X}");
+                let _ = write!(piece, "%{byte:02X}");
             }
         }
+        if truncated || name.len() + piece.len() > MAX_ESCAPED_LEN {
+            if !truncated {
+                kept = name.len();
+                truncated = true;
+            }
+            continue;
+        }
+        name.push_str(&piece);
+    }
+    if truncated {
+        name.truncate(kept);
+        let _ = write!(name, "~{:016x}", fnv1a_64(charge_point_id.as_bytes()));
     }
     if name.is_empty() {
         name.push_str("%00empty");
     }
     name.push_str(".station.json");
     name
+}
+
+/// FNV-1a, 64 bit: a stable hash (unlike `DefaultHasher`) that needs no dependency.
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, &byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 #[cfg(test)]
@@ -274,6 +328,7 @@ mod tests {
             id: ConnectorId::new(1),
             status: ConnectorStatus::Charging,
             availability: AvailabilityType::Inoperative,
+            pending_availability: Some(AvailabilityType::Operative),
             ev_connected: true,
             meter_wh: 1234,
             last_id_tag: Some(IdTag::new("TAG").unwrap()),
@@ -385,9 +440,24 @@ mod tests {
     fn missing_optional_sections_default_when_the_version_is_present() {
         let dir = tempfile::tempdir().unwrap();
         let store = StationStore::new(dir.path(), "CP-1");
-        fs::write(store.path(), br#"{"version":1,"charge_point_id":"CP-1"}"#).unwrap();
+        fs::write(store.path(), br#"{"version":2,"charge_point_id":"CP-1"}"#).unwrap();
         let state = loaded(store.load().unwrap());
         assert_eq!(state, PersistedStation::new("CP-1"));
+    }
+
+    #[test]
+    fn version_1_file_without_pending_availability_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        let mut value = serde_json::to_value(sample()).unwrap();
+        value["version"] = 1.into();
+        value["connectors"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_availability");
+        fs::write(store.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let state = loaded(store.load().unwrap());
+        assert_eq!(state.connectors[0].pending_availability, None);
     }
 
     #[test]
@@ -401,6 +471,38 @@ mod tests {
         assert_eq!(file_name("é"), "%C3%A9.station.json");
         assert_ne!(file_name("a/b"), file_name("a%2Fb"));
         assert!(file_name("").starts_with("%00empty"));
+    }
+
+    #[test]
+    fn long_ids_get_a_short_unique_file_name_and_round_trip() {
+        let long_a = format!("{}A", "x".repeat(300));
+        let long_b = format!("{}B", "x".repeat(300));
+        let special = "é/ ".repeat(100);
+        let dir = tempfile::tempdir().unwrap();
+        for id in [&long_a, &long_b, &special] {
+            let name = file_name(id);
+            assert!(name.len() + ".bak".len() <= 255, "{} bytes", name.len());
+            assert!(!name.contains('/') && !name.contains(' '));
+            let store = StationStore::new(dir.path(), id);
+            store.save(&PersistedStation::new(id.as_str())).unwrap();
+            let state = loaded(store.load().unwrap());
+            assert_eq!(&state.charge_point_id, id);
+        }
+        assert_ne!(file_name(&long_a), file_name(&long_b));
+        assert_eq!(file_name(&long_a), file_name(&long_a));
+        // Cut at an escape boundary: no dangling `%` or `%X`.
+        let name = file_name(&special);
+        let stem = name.split('~').next().unwrap();
+        assert!(!stem.ends_with('%'));
+        assert!(stem.len() <= MAX_ESCAPED_LEN);
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn short_ids_keep_their_plain_file_names() {
+        let id = "a".repeat(MAX_ESCAPED_LEN);
+        assert_eq!(file_name(&id), format!("{id}.station.json"));
+        assert!(file_name(&format!("{id}a")).contains('~'));
     }
 
     #[cfg(unix)]
