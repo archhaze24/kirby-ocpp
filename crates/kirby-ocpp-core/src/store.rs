@@ -261,8 +261,9 @@ fn sync_dir(_dir: &Path) -> io::Result<()> {
 }
 
 /// Longest escaped id kept verbatim. With `.station.json` (13 bytes), the `.bak` suffix and the
-/// `~<16 hex>` hash tail the name stays well below the 255-byte file name limit.
-const MAX_ESCAPED_LEN: usize = 200;
+/// `~<16 hex>` hash tail the name stays well below the 255-byte file name limit, and short enough
+/// for the 260-character path limit of Windows with a typical state directory.
+const MAX_ESCAPED_LEN: usize = 100;
 
 /// File name for a charge point id: `[A-Za-z0-9_-]` and non-leading `.` are kept, every
 /// other byte becomes `%XX`, so any id maps to a distinct, filesystem-safe name.

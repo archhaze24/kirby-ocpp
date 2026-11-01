@@ -81,7 +81,7 @@ Options are global and may be placed before or after a subcommand.
 
 ## State persistence
 
-Per charge point id, one JSON file `<state dir>/<id>.station.json` holds the local authorization list and its version, authorization cache, charging profiles, writable configuration values, availability (including a `Scheduled` change waiting for a transaction to end), connector count and per-connector state (status, meter, reservation, transaction) and the offline transaction queue. Ids whose escaped name would exceed 200 bytes are shortened and get a hash suffix (`...~<16 hex>.station.json`) so the name always fits the filesystem limit. Files are versioned and written atomically (temp file plus rename, then the directory is fsynced); a corrupt file or one belonging to another charge point is moved to `<file>.bak` and the station starts clean. `--no-persist` disables both loading and saving.
+Per charge point id, one JSON file `<state dir>/<id>.station.json` holds the local authorization list and its version, authorization cache, charging profiles, writable configuration values, availability (including a `Scheduled` change waiting for a transaction to end), connector count and per-connector state (status, meter, reservation, transaction) and the offline transaction queue. Ids whose escaped name would exceed 100 bytes are shortened and get a hash suffix (`...~<16 hex>.station.json`) so the name always fits the filesystem limit. Files are versioned and written atomically (temp file plus rename, then the directory is fsynced); a corrupt file or one belonging to another charge point is moved to `<file>.bak` and the station starts clean. `--no-persist` disables both loading and saving.
 
 ## Terminal UI
 
