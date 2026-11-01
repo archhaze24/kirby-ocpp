@@ -65,6 +65,10 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Skip certificate verification (testing only) |
 | `--no-persist` | `KIRBY_OCPP_NO_PERSIST` | off | Do not load or save station state |
 | `--state-dir` | `KIRBY_OCPP_STATE_DIR` | `~/.kirby-ocpp/stations` | State directory (`%USERPROFILE%` on Windows) |
+| `--count` | `OCPP_COUNT` | `1` | Number of stations (fleet mode, 1-1000), see [Fleet mode](#fleet-mode) |
+| `--id-template` | `OCPP_ID_TEMPLATE` | the `--id` value | Charge point id template with `{n}` / `{n:03}` |
+| `--first-index` | `OCPP_FIRST_INDEX` | `1` | Index of the first station |
+| `--stagger-ms` | `OCPP_STAGGER_MS` | `0` | Delay between starting two stations (ms) |
 | `--rule ACTION=BEHAVIOR[*N]` | `KIRBY_OCPP_RULES` (`;`-separated) | none | Response rule for a CSMS command, repeatable; see [Response rules](#response-rules) |
 | `--print-config` | | | Print the effective configuration as JSON and exit |
 | `--no-tui` | | | Never start the TUI; log to stdout |
@@ -126,6 +130,22 @@ Without a TTY (or with `--no-tui`) the tool connects and prints events until SIG
 | 1 | Scenario failed or timed out, or a runtime error |
 | 2 | Usage or configuration error |
 | 130 | `run` interrupted by SIGINT (Ctrl-C); SIGTERM still ends it with 1 |
+
+## Fleet mode
+
+`--count N` runs N independent stations in one process against the same CSMS, for load and multi-station tests (headless only for now: the terminal UI refuses `--count > 1` with exit 2, pass `--no-tui`).
+
+```
+kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n:03}' --count 50 --stagger-ms 100 --no-tui
+kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 run --scenario charge-session
+```
+
+- The id comes from `--id-template`, or from `--id` when no template is given. `{n}` is the station index, `{n:03}` the index zero-padded to 3 digits; `{{` and `}}` are literal braces. With `--count` above 1 the template needs a placeholder (otherwise exit 2). `--first-index` (default 1) is the index of the first station, so `--count 3 --first-index 10` gives `CP-10`, `CP-11`, `CP-12`. `--count 1` without `--id-template` uses `--id` as is; with an explicit template it is expanded too.
+- Every station is a normal station (own connection, transactions, state file named after its id, so state files never collide). `--stagger-ms` waits that long between starting two stations.
+- Output is tagged with the station id: `[CP-001] ...` in front of every human line, a `"station"` field in every JSON line, stdout and `--log-file` alike. With `--count 1` nothing is tagged.
+- `run --scenario` runs the scenario on every station at the same time and prints one report per station (tagged), then one aggregate line: `fleet: 3/3 stations PASSED`, or `fleet: 2/3 stations passed, FAILED: CP-2`. With `--json` the aggregate is `{"type":"fleet_report","passed":bool,"total":n,"passed_count":n,"failed":[ids],"stations":[...]}`. `--timeout` covers the whole fleet, stagger included. `--report out.json` writes one file per station: `out.CP-001.json` (characters of the id other than letters, digits, `-` and `_` become `_`).
+- Exit codes: 0 only if every station passes, 1 if any fails or times out, 2 usage error, 130 SIGINT.
+- `--print-config` with `--count > 1` prints `{"fleet": {...}, "config": {...}}` where `config` is the first station.
 
 ## Scenarios
 

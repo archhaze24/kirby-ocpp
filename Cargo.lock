@@ -1160,6 +1160,7 @@ version = "0.3.0-dev"
 dependencies = [
  "chrono",
  "clap",
+ "futures-util",
  "kirby-ocpp-core",
  "kirby-ocpp-testkit",
  "kirby-ocpp-tui",

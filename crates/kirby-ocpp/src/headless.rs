@@ -5,6 +5,7 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 
 use kirby_ocpp_core::StationHandle;
+use kirby_ocpp_core::fleet::{FleetEvents, FleetItem};
 use kirby_ocpp_core::station::{Direction, Event};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
@@ -51,11 +52,26 @@ pub fn event_human(event: &Event) -> Option<String> {
     }
 }
 
-fn format_event(event: &Event, json: bool) -> Option<String> {
+/// One line for `event`; with `station` (fleet mode) the line says which station it is from:
+/// `[id] ` in front of the human form, a `"station"` field in the JSON form.
+fn format_event(event: &Event, json: bool, station: Option<&str>) -> Option<String> {
     if json {
-        Some(event_json(event).to_string())
+        let mut value = event_json(event);
+        if let (Some(station), Some(object)) = (station, value.as_object_mut()) {
+            object.insert("station".to_owned(), station.into());
+        }
+        Some(value.to_string())
     } else {
-        event_human(event)
+        let line = event_human(event)?;
+        Some(tagged(&line, station))
+    }
+}
+
+/// `line` with the human fleet tag in front, if there is a station.
+pub fn tagged(line: &str, station: Option<&str>) -> String {
+    match station {
+        Some(station) => format!("[{station}] {line}"),
+        None => line.to_owned(),
     }
 }
 
@@ -80,9 +96,9 @@ impl Sink {
             loop {
                 tokio::select! {
                     event = rx.recv() => match event {
-                        Ok(event) => out.write(&event),
+                        Ok(event) => out.write(&event, None),
                         Err(broadcast::error::RecvError::Lagged(missed)) => {
-                            out.write_note(&format!("{missed} events were dropped"));
+                            out.write_note(&format!("{missed} events were dropped"), None);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
@@ -91,7 +107,38 @@ impl Sink {
             }
             // Whatever is still queued (the closing frames of a shutdown).
             while let Ok(event) = rx.try_recv() {
-                out.write(&event);
+                out.write(&event, None);
+            }
+        });
+        Ok(Self { stop, task })
+    }
+
+    /// Like [`Sink::spawn`] for a whole fleet: every line is tagged with its station id.
+    pub fn spawn_fleet(
+        mut events: FleetEvents,
+        json: bool,
+        log_file: Option<&Path>,
+    ) -> io::Result<Self> {
+        let file = log_file
+            .map(|path| OpenOptions::new().create(true).append(true).open(path))
+            .transpose()?
+            .map(BufWriter::new);
+        let (stop, mut stopped) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut out = Output { json, file };
+            loop {
+                tokio::select! {
+                    item = events.recv() => match item {
+                        Some(item) => out.write_item(&item),
+                        None => return,
+                    },
+                    _ = &mut stopped => break,
+                }
+            }
+            // Whatever is still queued (the closing frames of a shutdown).
+            events.stop();
+            while let Some(item) = events.recv().await {
+                out.write_item(&item);
             }
         });
         Ok(Self { stop, task })
@@ -110,17 +157,30 @@ struct Output {
 }
 
 impl Output {
-    fn write(&mut self, event: &Event) {
-        if let Some(line) = format_event(event, self.json) {
+    fn write(&mut self, event: &Event, station: Option<&str>) {
+        if let Some(line) = format_event(event, self.json, station) {
             self.line(&line);
         }
     }
 
-    fn write_note(&mut self, text: &str) {
+    fn write_item(&mut self, item: &FleetItem) {
+        match item {
+            FleetItem::Event(event) => self.write(&event.event, Some(&event.station_id)),
+            FleetItem::Lagged { station_id, missed } => {
+                self.write_note(&format!("{missed} events were dropped"), Some(station_id));
+            }
+        }
+    }
+
+    fn write_note(&mut self, text: &str, station: Option<&str>) {
         let line = if self.json {
-            json!({"type": "note", "text": text}).to_string()
+            let mut value = json!({"type": "note", "text": text});
+            if let (Some(station), Some(object)) = (station, value.as_object_mut()) {
+                object.insert("station".to_owned(), station.into());
+            }
+            value.to_string()
         } else {
-            format!("note: {text}")
+            tagged(&format!("note: {text}"), station)
         };
         self.line(&line);
     }

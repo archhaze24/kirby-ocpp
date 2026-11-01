@@ -13,6 +13,7 @@ use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Args, Parser, Subcommand};
 use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults, validate_ws_url};
+use kirby_ocpp_core::fleet::{FleetSpec, MAX_COUNT};
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::station::ResponseRule;
 
@@ -30,6 +31,7 @@ use kirby_ocpp_core::station::ResponseRule;
   kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001\n  \
   kirby-ocpp --url wss://csms.example/ocpp --tls-ca ca.pem --connectors 2\n  \
   kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session\n  \
+  kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n:03}' --count 10 --no-tui\n  \
   kirby-ocpp scenarios list\n\n\
 Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage or configuration error, 130 `run` interrupted by SIGINT."
 )]
@@ -48,6 +50,37 @@ pub struct Cli {
         default_value = defaults::CHARGE_POINT_ID, value_parser = non_empty
     )]
     pub id: String,
+
+    /// Number of stations to run (fleet mode, 1-1000); needs a `{n}` placeholder in the id
+    #[arg(global = true,
+        long, env = "OCPP_COUNT", value_name = "COUNT", default_value_t = 1,
+        value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_COUNT))
+    )]
+    pub count: u32,
+
+    /// Charge point id template, e.g. CP-{n:03} (default: the --id value)
+    #[arg(global = true, long, env = "OCPP_ID_TEMPLATE", value_name = "TEMPLATE", value_parser = non_empty)]
+    pub id_template: Option<String>,
+
+    /// Index substituted for {n} in the first station's id
+    #[arg(
+        global = true,
+        long,
+        env = "OCPP_FIRST_INDEX",
+        value_name = "INDEX",
+        default_value_t = 1
+    )]
+    pub first_index: u32,
+
+    /// Delay between starting two stations of a fleet in milliseconds
+    #[arg(
+        global = true,
+        long,
+        env = "OCPP_STAGGER_MS",
+        value_name = "MILLISECONDS",
+        default_value_t = 0
+    )]
+    pub stagger_ms: u64,
 
     /// Charge point vendor
     #[arg(global = true,
@@ -293,6 +326,17 @@ pub enum ScenariosCmd {
 }
 
 impl Cli {
+    /// The fleet this command line describes: the id template (`--id-template`, else
+    /// `--id`), the first index, the count and the stagger.
+    pub fn fleet_spec(&self) -> FleetSpec {
+        FleetSpec {
+            id_template: self.id_template.clone().unwrap_or_else(|| self.id.clone()),
+            first_index: self.first_index,
+            count: self.count,
+            stagger_ms: self.stagger_ms,
+        }
+    }
+
     /// Maps the parsed options onto the core configuration (not yet validated).
     ///
     /// # Errors

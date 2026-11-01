@@ -1,6 +1,7 @@
 //! `kirby-ocpp`: terminal OCPP 1.6J charge point emulator.
 
 mod cli;
+mod fleet;
 mod headless;
 
 use std::io::IsTerminal;
@@ -10,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
+use kirby_ocpp_core::fleet::Fleet;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::scenario::{
     CancelToken, Scenario, ScenarioReport, StepStatus, builtin, run_scenario,
@@ -44,14 +46,28 @@ async fn main() -> ExitCode {
         return scenarios(action);
     }
     let (print_config, no_tui, json) = (cli.print_config, cli.no_tui, cli.json);
+    let spec = cli.fleet_spec();
+    let templated = cli.id_template.is_some();
     let log_file = cli.log_file.clone();
     let connector = ConnectorId::new(cli.connector);
     let mut config = match cli.into_config() {
         Ok(config) => config,
         Err(error) => return usage_error(&error),
     };
+    // A fleet has more than one station. A single station keeps `--id` verbatim unless a
+    // template is given explicitly.
+    let is_fleet = spec.count > 1;
+    if is_fleet || templated {
+        match spec.ids() {
+            Ok(ids) => config.charge_point_id.clone_from(&ids[0]),
+            Err(error) => return usage_error(&error.to_string()),
+        }
+    }
     config.normalize();
     if let Err(error) = config.validate() {
+        return usage_error(&error.to_string());
+    }
+    if is_fleet && let Err(error) = Fleet::configs(&config, &spec) {
         return usage_error(&error.to_string());
     }
 
@@ -59,7 +75,20 @@ async fn main() -> ExitCode {
         // The URL may carry `user:password@`; never print credentials.
         let mut shown = config.clone();
         shown.url = kirby_ocpp_tui::text::redact_url(&shown.url);
-        return match serde_json::to_string_pretty(&shown) {
+        let printed = if is_fleet {
+            serde_json::to_string_pretty(&serde_json::json!({
+                "fleet": {
+                    "id_template": spec.id_template,
+                    "first_index": spec.first_index,
+                    "count": spec.count,
+                    "stagger_ms": spec.stagger_ms,
+                },
+                "config": shown,
+            }))
+        } else {
+            serde_json::to_string_pretty(&shown)
+        };
+        return match printed {
             Ok(json) => {
                 println!("{json}");
                 ExitCode::SUCCESS
@@ -72,10 +101,16 @@ async fn main() -> ExitCode {
     }
 
     match command {
+        Some(Cmd::Run(args)) if is_fleet => {
+            fleet::run(config, spec, &args, connector, json, log_file.as_deref()).await
+        }
         Some(Cmd::Run(args)) => run(config, &args, connector, json, log_file.as_deref()).await,
         Some(Cmd::Scenarios { .. }) => unreachable!("handled above"),
         None => {
             let tui = !no_tui && std::io::stdout().is_terminal();
+            if is_fleet {
+                return fleet::interactive(config, spec, tui, json, log_file.as_deref()).await;
+            }
             interactive(config, tui, json, log_file.as_deref()).await
         }
     }
@@ -263,7 +298,7 @@ async fn run(
         eprintln!("error: {error}");
     }
     if let Some(report) = &report {
-        print_report(report, json);
+        print_report(report, json, None);
         if let Some(path) = &args.report
             && let Err(error) = write_report(path, report)
         {
@@ -298,34 +333,39 @@ async fn connect_and_run(
     Ok(run_scenario(handle, scenario, cancel, None).await)
 }
 
-fn print_report(report: &ScenarioReport, json: bool) {
+/// Prints a scenario report; `station` (fleet mode) tags every line.
+fn print_report(report: &ScenarioReport, json: bool, station: Option<&str>) {
     if json {
         let mut value = serde_json::to_value(report).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
             object.insert("type".to_owned(), "report".into());
+            if let Some(station) = station {
+                object.insert("station".to_owned(), station.into());
+            }
         }
         println!("{value}");
         return;
     }
-    println!("scenario {}", report.scenario);
+    let say = |line: String| println!("{}", headless::tagged(&line, station));
+    say(format!("scenario {}", report.scenario));
     for step in &report.steps {
         let (mark, detail) = match &step.status {
             StepStatus::Passed => ("PASS", String::new()),
             StepStatus::Failed(reason) => ("FAIL", format!(": {reason}")),
             StepStatus::Skipped => ("SKIP", String::new()),
         };
-        println!(
+        say(format!(
             "  {mark} {:>2} {} ({} ms){detail}",
             step.index + 1,
             step.name,
             step.duration_ms
-        );
+        ));
     }
-    println!(
+    say(format!(
         "{} in {} ms",
         if report.passed { "PASSED" } else { "FAILED" },
         report.duration_ms
-    );
+    ));
 }
 
 fn write_report(path: &Path, report: &ScenarioReport) -> std::io::Result<()> {
