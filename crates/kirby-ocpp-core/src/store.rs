@@ -29,7 +29,9 @@ use thiserror::Error;
 
 use crate::ids::{ConnectorId, IdTag};
 use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
-use crate::station::authorization::IdTagInfo;
+use crate::station::authorization::AuthorizationCache;
+use crate::station::charging_profiles::ChargingProfileStore;
+use crate::station::local_auth_list::LocalAuthList;
 use crate::station::reservation::Reservation;
 use crate::station::transaction::TransactionState;
 
@@ -37,17 +39,26 @@ use crate::station::transaction::TransactionState;
 pub const STORE_VERSION: u32 = 1;
 
 /// Everything that survives a restart.
+///
+/// Stage 2a fills and restores: configuration values, local list and cache,
+/// availability (charge point and connectors), connector count, charging
+/// profiles, `meter_wh`, `last_id_tag`. `status`, `ev_connected`, `reservation`
+/// and `transaction` of a connector are written but **not restored** yet (a restored
+/// station starts with all connectors idle); stage 2b decides how to resume them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PersistedStation {
     pub version: u32,
     pub charge_point_id: String,
+    /// Availability of connector 0 (`ChangeAvailability` with `connectorId` 0).
+    pub charge_point_availability: AvailabilityType,
+    /// Number of connectors (`connectors.len()` normally equals it; the count only grows).
+    pub connector_count: u32,
     pub connectors: Vec<PersistedConnector>,
-    pub local_list_version: i32,
-    pub local_authorization_list: Vec<AuthEntry>,
-    pub authorization_cache: Vec<AuthEntry>,
-    /// Charging profiles as OCPP JSON until the smart-charging stage models them.
-    pub charging_profiles: Vec<Value>,
+    /// The local authorization list including its version.
+    pub local_authorization_list: LocalAuthList,
+    pub authorization_cache: AuthorizationCache,
+    pub charging_profiles: ChargingProfileStore,
     /// Mutable configuration key values.
     pub configuration: BTreeMap<String, String>,
 }
@@ -68,21 +79,15 @@ impl Default for PersistedStation {
         Self {
             version: STORE_VERSION,
             charge_point_id: String::new(),
+            charge_point_availability: AvailabilityType::Operative,
+            connector_count: 0,
             connectors: Vec::new(),
-            local_list_version: 0,
-            local_authorization_list: Vec::new(),
-            authorization_cache: Vec::new(),
-            charging_profiles: Vec::new(),
+            local_authorization_list: LocalAuthList::default(),
+            authorization_cache: AuthorizationCache::default(),
+            charging_profiles: ChargingProfileStore::default(),
             configuration: BTreeMap::new(),
         }
     }
-}
-
-/// An entry of the local authorization list or the cache.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuthEntry {
-    pub id_tag: IdTag,
-    pub id_tag_info: Option<IdTagInfo>,
 }
 
 /// Persisted part of a connector.
@@ -259,7 +264,8 @@ mod tests {
 
     fn sample() -> PersistedStation {
         let mut state = PersistedStation::new("CP-1");
-        state.local_list_version = 7;
+        state.connector_count = 1;
+        state.charge_point_availability = AvailabilityType::Inoperative;
         state
             .configuration
             .insert("HeartbeatInterval".into(), "60".into());

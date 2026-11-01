@@ -1,0 +1,279 @@
+//! Wiring of [`StationStore`] into the actor.
+//!
+//! TS reference: `src/station/persistence.ts`.
+//!
+//! * **When:** state changes call `mark_dirty()`; the first one arms a ~200 ms timer and the
+//!   write happens when it fires, so a burst of changes is one write. Rare, important events
+//!   (configuration changes, local list, availability, connector added, boot accepted)
+//!   call `flush_now()` instead. Nothing writes per meter tick (stage 2b marks the meter
+//!   energy dirty; the debounce coalesces it).
+//! * **How:** the snapshot of the persisted data is built in the actor (no locks), the write
+//!   runs on `spawn_blocking`, its result returns as `Internal::Saved`. At most one write is
+//!   in flight; changes that arrive meanwhile cause one more write afterwards, so overlapping
+//!   writes cannot leave stale data behind.
+//! * **Shutdown:** the in-flight write is awaited, then a final write if anything is dirty.
+//! * **Startup:** the file is read synchronously in `StationActor::new` (small, once) so the
+//!   first snapshot is already the restored one. A corrupt file is quarantined by the store
+//!   and the station starts fresh; a file from a *newer* version disables persistence for
+//!   this run (the file is never overwritten).
+//!
+//! What is restored in stage 2a: configuration values, local list and cache, charging
+//! profiles, availability (charge point and connectors, status derived from it), connector
+//! count (only grows) and per-connector `meter_wh` / `last_id_tag`. Transactions and
+//! reservations are written but not restored; connectors come back idle (see QUESTIONS.md).
+
+use std::time::Duration;
+
+use tokio::task::JoinHandle;
+
+use super::actor::{Internal, RestoredParts, StationActor, TimerKey};
+use super::connector::{charge_point_status, new_connector};
+use super::event::LogLevel;
+use super::snapshot::Snapshot;
+use crate::config::StationConfig;
+use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
+use crate::station::config_registry::ConfigSnapshot;
+use crate::store::{LoadOutcome, PersistedConnector, PersistedStation, StationStore, StoreError};
+
+/// Debounce between the first change and the write.
+pub(super) const FLUSH_DELAY: Duration = Duration::from_millis(200);
+
+pub(super) struct Persistence {
+    store: Option<StationStore>,
+    loaded: Option<PersistedStation>,
+    dirty: bool,
+    in_flight: Option<JoinHandle<()>>,
+    queued: bool,
+}
+
+impl Persistence {
+    /// Opens the store of `config` (if persistence is on) and reads the state file.
+    pub(super) fn open(config: &StationConfig, logs: &mut Vec<(LogLevel, String)>) -> Self {
+        let mut this = Self {
+            store: None,
+            loaded: None,
+            dirty: false,
+            in_flight: None,
+            queued: false,
+        };
+        if !config.persist {
+            return this;
+        }
+        let Some(dir) = config.state_dir_or_default() else {
+            logs.push((
+                LogLevel::Warn,
+                "no state directory could be determined; state is not persisted".to_owned(),
+            ));
+            return this;
+        };
+        let store = StationStore::new(&dir, &config.charge_point_id);
+        match store.load() {
+            Ok(LoadOutcome::Loaded(state)) => {
+                logs.push((
+                    LogLevel::Info,
+                    format!("restored station state from {}", store.path().display()),
+                ));
+                this.loaded = Some(*state);
+                this.store = Some(store);
+            }
+            Ok(LoadOutcome::Missing) => this.store = Some(store),
+            Ok(LoadOutcome::Quarantined { backup, reason }) => {
+                logs.push((
+                    LogLevel::Warn,
+                    format!(
+                        "state file was unusable ({reason}); moved to {} and starting fresh",
+                        backup.display()
+                    ),
+                ));
+                this.store = Some(store);
+            }
+            Err(error @ StoreError::UnsupportedVersion { .. }) => logs.push((
+                LogLevel::Error,
+                format!("{error}; state is not persisted during this run"),
+            )),
+            Err(error) => {
+                logs.push((
+                    LogLevel::Warn,
+                    format!("could not read the station state: {error}"),
+                ));
+                this.store = Some(store);
+            }
+        }
+        this
+    }
+
+    /// Applies the loaded state (if any) to the freshly built actor state.
+    pub(super) fn restore(
+        &mut self,
+        state: &mut Snapshot,
+        parts: &mut RestoredParts,
+        logs: &mut Vec<(LogLevel, String)>,
+    ) {
+        let Some(persisted) = self.loaded.take() else {
+            return;
+        };
+
+        // The connector count only grows.
+        let highest_saved = persisted
+            .connectors
+            .iter()
+            .map(|c| c.id.get())
+            .max()
+            .unwrap_or(0);
+        let count = persisted
+            .connector_count
+            .max(highest_saved)
+            .max(u32::try_from(state.connectors.len()).unwrap_or(u32::MAX));
+        for id in (u32::try_from(state.connectors.len()).unwrap_or(0) + 1)..=count {
+            state.connectors.push(new_connector(id));
+        }
+        parts.registry.set_connector_count(count);
+
+        let skipped = parts.registry.restore(&ConfigSnapshot {
+            values: persisted.configuration,
+        });
+        if !skipped.is_empty() {
+            logs.push((
+                LogLevel::Warn,
+                format!(
+                    "ignored persisted configuration keys: {}",
+                    skipped.join(", ")
+                ),
+            ));
+        }
+
+        state.availability = persisted.charge_point_availability;
+        state.charge_point.availability = persisted.charge_point_availability;
+        state.charge_point.status = charge_point_status(
+            persisted.charge_point_availability,
+            ConnectorStatus::Available,
+        );
+        for saved in persisted.connectors {
+            let Some(connector) = state.connectors.iter_mut().find(|c| c.id == saved.id) else {
+                continue;
+            };
+            connector.availability = saved.availability;
+            if saved.availability == AvailabilityType::Inoperative {
+                connector.status = ConnectorStatus::Unavailable;
+            }
+            connector.meter_wh = saved.meter_wh;
+            connector.last_id_tag = saved.last_id_tag;
+        }
+
+        parts.local_list = persisted.local_authorization_list;
+        parts.auth_cache = persisted.authorization_cache;
+        parts.profiles = persisted.charging_profiles;
+    }
+}
+
+impl StationActor {
+    /// The state worth keeping.
+    fn build_persisted(&self) -> PersistedStation {
+        PersistedStation {
+            charge_point_id: self.config.charge_point_id.clone(),
+            charge_point_availability: self.state.charge_point.availability,
+            connector_count: u32::try_from(self.state.connectors.len()).unwrap_or(u32::MAX),
+            connectors: self
+                .state
+                .connectors
+                .iter()
+                .map(|c| PersistedConnector {
+                    id: c.id,
+                    status: c.status,
+                    availability: c.availability,
+                    ev_connected: c.ev_connected,
+                    meter_wh: c.meter_wh,
+                    last_id_tag: c.last_id_tag.clone(),
+                    reservation: c.reservation.clone(),
+                    transaction: c.transaction.clone(),
+                })
+                .collect(),
+            local_authorization_list: self.local_list.clone(),
+            authorization_cache: self.auth_cache.clone(),
+            charging_profiles: self.profiles.clone(),
+            configuration: self.registry.snapshot().values,
+            ..PersistedStation::default()
+        }
+    }
+
+    /// Something worth persisting changed: write soon (debounced).
+    pub(super) fn mark_dirty(&mut self) {
+        if self.persistence.store.is_none() {
+            return;
+        }
+        self.persistence.dirty = true;
+        self.timers.set_if_idle(TimerKey::PersistFlush, FLUSH_DELAY);
+    }
+
+    /// An important change: write now (still off the actor task, and still one at a time).
+    pub(super) fn flush_now(&mut self) {
+        self.mark_dirty();
+        self.timers.cancel(&TimerKey::PersistFlush);
+        self.flush_persistence();
+    }
+
+    /// The debounce timer fired, or a flush was requested: start a write if needed.
+    pub(super) fn flush_persistence(&mut self) {
+        let Some(store) = self.persistence.store.clone() else {
+            return;
+        };
+        if !self.persistence.dirty {
+            return;
+        }
+        if self.persistence.in_flight.is_some() {
+            self.persistence.queued = true;
+            return;
+        }
+        self.persistence.dirty = false;
+        let data = self.build_persisted();
+        let internal = self.internal_tx.clone();
+        self.persistence.in_flight = Some(tokio::task::spawn_blocking(move || {
+            let _ = internal.send(Internal::Saved(store.save(&data)));
+        }));
+    }
+
+    pub(super) fn on_saved(&mut self, result: Result<(), StoreError>) {
+        self.persistence.in_flight = None;
+        if let Err(error) = result {
+            // Keep the data marked dirty so a later change retries the write.
+            self.persistence.dirty = true;
+            self.log(
+                LogLevel::Error,
+                format!("could not save station state: {error}"),
+            );
+        }
+        if self.persistence.queued {
+            self.persistence.queued = false;
+            self.flush_persistence();
+        }
+    }
+
+    /// Final write at shutdown: wait for the one in flight, then write what is dirty.
+    pub(super) async fn finish_persistence(&mut self) {
+        self.timers.cancel(&TimerKey::PersistFlush);
+        let mut had_in_flight = false;
+        if let Some(handle) = self.persistence.in_flight.take() {
+            let _ = handle.await;
+            // Its result message is never processed, so do not trust it: write again.
+            had_in_flight = true;
+        }
+        let Some(store) = self.persistence.store.clone() else {
+            return;
+        };
+        let needs_write = self.persistence.dirty || self.persistence.queued || had_in_flight;
+        if !needs_write {
+            return;
+        }
+        let data = self.build_persisted();
+        match tokio::task::spawn_blocking(move || store.save(&data)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => self.log(
+                LogLevel::Error,
+                format!("could not save station state: {error}"),
+            ),
+            Err(error) => self.log(LogLevel::Error, format!("state writer failed: {error}")),
+        }
+        self.persistence.dirty = false;
+        self.persistence.queued = false;
+    }
+}

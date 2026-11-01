@@ -147,9 +147,12 @@ impl Task {
 
         let stop = loop {
             let deadline = self.next_deadline();
+            // Biased: our replies to CSMS CALLs go out before any CALL we queued after
+            // them (a TriggerMessage.conf must precede the message it triggers).
             let step = tokio::select! {
-                command = commands.recv() => Step::Command(command),
+                biased;
                 reply = replies.recv() => Step::Reply(reply),
+                command = commands.recv() => Step::Command(command),
                 message = stream.next() => Step::Socket(message),
                 () = until(deadline) => Step::Timeouts,
                 () = tick(&mut ping) => Step::Ping,

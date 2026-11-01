@@ -1,57 +1,187 @@
 //! The station actor: the single task that owns all station state.
 //!
-//! Stub: it publishes the initial snapshot, answers [`Command::Shutdown`] and
-//! rejects every other command with [`StationError::NotImplemented`] (so callers
-//! never hang). Later stages add: the connection (`ws`), timers, per-connector
-//! state machines and the CSMS command handlers. Rules for whoever fills it in:
+//! Rules (see `docs/rewrite/ARCHITECTURE.md`):
 //!
 //! * state is mutated **only** here, never behind a lock;
-//! * after each mutation call `publish()` (snapshot + `StateChanged`);
-//! * never `await` a CSMS answer inline in the command loop in a way that blocks
-//!   other commands from being rejected/queued: use the outbound CALL queue.
+//! * the loop `select!`s over four sources: the command queue, the current connection's
+//!   events, the actor's internal channel (call results, connect results, store-write
+//!   results, log lines from call tasks) and the [`TimerWheel`];
+//! * nothing in the loop awaits the network or the disk: connecting, CALLs and store
+//!   writes run as spawned tasks that report back through the internal channel (see
+//!   [`super::calls`]); the only awaited work is the graceful shutdown;
+//! * the snapshot is published once per loop iteration, and only if it changed, which
+//!   coalesces bursts of mutations.
+//!
+//! The behaviour is split over files: `link` (connect, reconnect, boot, heartbeat),
+//! `calls` (outbound CALLs), `status` (StatusNotification discipline), `persistence`,
+//! `commands` (user commands) and `handlers/` (CSMS-originated CALLs).
 
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
+use std::time::Duration;
 
+use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, watch};
+use tokio::task::JoinHandle;
 
+use super::calls::PendingCall;
 use super::command::{Command, Outcome};
 use super::event::{Event, LogLevel, LogRecord};
 use super::handle::Envelope;
-use super::snapshot::Snapshot;
+use super::persistence::Persistence;
+use super::snapshot::{ConnectorSnapshot, Snapshot};
+use super::status::Trackers;
+use super::timers::TimerWheel;
 use crate::clock::Clock;
 use crate::config::StationConfig;
-use crate::error::StationError;
-use crate::ws::ConnectionState;
+use crate::error::{CallError, StationError};
+use crate::ids::ConnectorId;
+use crate::station::authorization::AuthorizationCache;
+use crate::station::charging_profiles::ChargingProfileStore;
+use crate::station::config_registry::ConfigRegistry;
+use crate::station::local_auth_list::LocalAuthList;
+use crate::store::StoreError;
+use crate::ws::{ConnectError, Connection, ConnectionEvent, ConnectionState};
+
+/// How long a graceful shutdown waits for the WebSocket close handshake.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
+
+/// Names of the timers the actor uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TimerKey {
+    /// Periodic `Heartbeat`.
+    Heartbeat,
+    /// Next reconnect attempt after a lost connection.
+    Reconnect,
+    /// Next `BootNotification` after `Pending` / `Rejected` / a failed attempt.
+    BootRetry,
+    /// `MinimumStatusDuration` debounce of one connector (0 = charge point).
+    StatusDebounce(ConnectorId),
+    /// Debounced write of the state file.
+    PersistFlush,
+}
+
+/// Messages from spawned tasks to the actor loop.
+pub(crate) enum Internal {
+    /// A connection attempt finished.
+    Connected {
+        generation: u64,
+        result: Result<(Connection, mpsc::Receiver<ConnectionEvent>), ConnectError>,
+    },
+    /// A CALL finished (after all its attempts).
+    CallDone {
+        token: u64,
+        generation: u64,
+        result: Result<Value, CallError>,
+    },
+    /// A state file write finished.
+    Saved(Result<(), StoreError>),
+    /// A log line from a spawned task.
+    Log(LogLevel, String),
+}
+
+/// The connection to the CSMS and everything about keeping it.
+#[derive(Default)]
+pub(crate) struct Link {
+    pub(crate) conn: Option<Connection>,
+    pub(crate) events: Option<mpsc::Receiver<ConnectionEvent>>,
+    /// Bumped whenever the link is replaced or torn down; stale task results carry an old value.
+    pub(crate) generation: u64,
+    /// The task opening the connection, while one is being opened.
+    pub(crate) connecting: Option<JoinHandle<()>>,
+    /// `false` after `Disconnect` / before the first `Connect`: no automatic reconnects.
+    pub(crate) wanted: bool,
+    /// Reconnect attempts made since the last reset (boot `Accepted`, manual `Connect`).
+    pub(crate) attempts: u32,
+    /// A `BootNotification` CALL is in flight.
+    pub(crate) boot_in_flight: bool,
+}
+
+/// State that persistence restores besides the snapshot.
+pub(super) struct RestoredParts {
+    pub(super) registry: ConfigRegistry,
+    pub(super) local_list: LocalAuthList,
+    pub(super) auth_cache: AuthorizationCache,
+    pub(super) profiles: ChargingProfileStore,
+}
 
 pub(crate) struct StationActor {
-    config: StationConfig,
-    clock: Arc<dyn Clock>,
+    pub(super) config: StationConfig,
+    pub(super) clock: Arc<dyn Clock>,
     commands: mpsc::Receiver<Envelope>,
     snapshot_tx: watch::Sender<Snapshot>,
     events: broadcast::Sender<Event>,
-    state: Snapshot,
+    /// The live model; published as the snapshot.
+    pub(super) state: Snapshot,
+    pub(super) registry: ConfigRegistry,
+    pub(super) local_list: LocalAuthList,
+    pub(super) auth_cache: AuthorizationCache,
+    pub(super) profiles: ChargingProfileStore,
+    pub(super) timers: TimerWheel<TimerKey>,
+    pub(super) internal_tx: mpsc::UnboundedSender<Internal>,
+    internal_rx: mpsc::UnboundedReceiver<Internal>,
+    pub(super) link: Link,
+    pub(super) calls: HashMap<u64, PendingCall>,
+    pub(super) next_call_token: u64,
+    pub(super) trackers: Trackers,
+    pub(super) persistence: Persistence,
+    /// CSMS time minus our clock at the last accepted `BootNotification`; for logs only.
+    pub(super) clock_offset: Option<chrono::Duration>,
+    /// Log lines produced before `run` started (store loading).
+    startup_logs: Vec<(LogLevel, String)>,
 }
 
 impl StationActor {
+    /// Builds the actor, restoring persisted state synchronously (one small file read), so
+    /// that the very first snapshot is already the restored one.
     pub(crate) fn new(
         config: StationConfig,
         clock: Arc<dyn Clock>,
         commands: mpsc::Receiver<Envelope>,
-        snapshot_tx: watch::Sender<Snapshot>,
         events: broadcast::Sender<Event>,
-    ) -> Self {
-        let state = Snapshot::initial(&config);
-        Self {
+    ) -> (Self, watch::Receiver<Snapshot>) {
+        let (internal_tx, internal_rx) = mpsc::unbounded_channel();
+        let mut startup_logs = Vec::new();
+        let mut state = Snapshot::initial(&config);
+        let mut persistence = Persistence::open(&config, &mut startup_logs);
+        let mut parts = RestoredParts {
+            registry: ConfigRegistry::new(&config),
+            local_list: LocalAuthList::default(),
+            auth_cache: AuthorizationCache::default(),
+            profiles: ChargingProfileStore::default(),
+        };
+        persistence.restore(&mut state, &mut parts, &mut startup_logs);
+        state.heartbeat_interval_secs = parts.registry.heartbeat_interval_secs();
+        state.local_list_version = parts.local_list.version();
+
+        let (snapshot_tx, snapshot_rx) = watch::channel(state.clone());
+        let actor = Self {
             config,
             clock,
             commands,
             snapshot_tx,
             events,
             state,
-        }
+            registry: parts.registry,
+            local_list: parts.local_list,
+            auth_cache: parts.auth_cache,
+            profiles: parts.profiles,
+            timers: TimerWheel::new(),
+            internal_tx,
+            internal_rx,
+            link: Link::default(),
+            calls: HashMap::new(),
+            next_call_token: 0,
+            trackers: BTreeMap::new(),
+            persistence,
+            clock_offset: None,
+            startup_logs,
+        };
+        (actor, snapshot_rx)
     }
 
     pub(crate) async fn run(mut self) {
+        let startup_logs = std::mem::take(&mut self.startup_logs);
         self.log(
             LogLevel::Info,
             format!(
@@ -60,35 +190,179 @@ impl StationActor {
                 self.state.connectors.len()
             ),
         );
-        while let Some(Envelope { command, reply }) = self.commands.recv().await {
-            let name = command.name();
-            tracing::debug!(command = name, "station command");
-            let result = match command {
-                Command::Shutdown => {
-                    // The requester may have gone away; nothing to do about that.
-                    let _ = reply.send(Ok(Outcome::Done));
-                    break;
+        for (level, text) in startup_logs {
+            self.log(level, text);
+        }
+        self.publish();
+
+        loop {
+            tokio::select! {
+                envelope = self.commands.recv() => match envelope {
+                    Some(Envelope { command: Command::Shutdown, reply }) => {
+                        self.shutdown().await;
+                        // The requester may have gone away; nothing to do about that.
+                        let _ = reply.send(Ok(Outcome::Done));
+                        break;
+                    }
+                    Some(Envelope { command, reply }) => self.execute(command, reply),
+                    None => {
+                        self.shutdown().await;
+                        break;
+                    }
+                },
+                event = next_link_event(&mut self.link.events) => self.on_connection_event(event),
+                Some(internal) = self.internal_rx.recv() => self.on_internal(internal),
+                key = self.timers.next() => self.on_timer(key),
+            }
+            self.publish();
+        }
+        self.log(LogLevel::Info, "station stopped".to_owned());
+        self.publish();
+    }
+
+    fn on_internal(&mut self, internal: Internal) {
+        match internal {
+            Internal::Connected { generation, result } => {
+                self.on_connect_result(generation, result);
+            }
+            Internal::CallDone {
+                token,
+                generation,
+                result,
+            } => self.on_call_done(token, generation, result),
+            Internal::Saved(result) => self.on_saved(result),
+            Internal::Log(level, text) => self.log(level, text),
+        }
+    }
+
+    fn on_timer(&mut self, key: TimerKey) {
+        match key {
+            TimerKey::Heartbeat => self.on_heartbeat_timer(),
+            TimerKey::Reconnect => self.on_reconnect_timer(),
+            TimerKey::BootRetry => self.on_boot_retry_timer(),
+            TimerKey::StatusDebounce(id) => self.status_timer_fired(id),
+            TimerKey::PersistFlush => self.flush_persistence(),
+        }
+    }
+
+    /// Graceful stop: tear the link down (closing the WebSocket and waiting briefly for the
+    /// handshake), fail what is in flight, write the state file.
+    async fn shutdown(&mut self) {
+        self.log(LogLevel::Info, "station shutting down".to_owned());
+        self.link.wanted = false;
+        self.timers.cancel_all();
+        self.fail_pending_calls(|| CallError::Closed { code: None });
+        if let Some(handle) = self.link.connecting.take() {
+            handle.abort();
+        }
+        self.link.generation += 1;
+        let connection = self.link.conn.take();
+        let events = self.link.events.take();
+        if let Some(connection) = connection {
+            connection.close();
+            if let Some(mut events) = events {
+                let mut frames = Vec::new();
+                let _ = tokio::time::timeout(CLOSE_GRACE, async {
+                    while let Some(event) = events.recv().await {
+                        match event {
+                            ConnectionEvent::Frame(record) => frames.push(record),
+                            ConnectionEvent::Closed { .. } => break,
+                            _ => {}
+                        }
+                    }
+                })
+                .await;
+                for record in frames {
+                    self.emit(Event::Frame(record));
                 }
-                _ => Err(StationError::NotImplemented { command: name }),
-            };
-            let _ = reply.send(result);
+            }
         }
         self.state.connection = ConnectionState::Disconnected;
+        self.state.registration = None;
         self.publish();
-        self.log(LogLevel::Info, "station stopped".to_owned());
+        self.finish_persistence().await;
     }
 
-    fn publish(&self) {
-        self.snapshot_tx.send_replace(self.state.clone());
-        // `Err` only means nobody is subscribed.
-        let _ = self.events.send(Event::StateChanged);
+    /// Publishes the snapshot if it changed since the last publication.
+    pub(super) fn publish(&mut self) {
+        let state = &self.state;
+        let changed = self.snapshot_tx.send_if_modified(|published| {
+            if published == state {
+                false
+            } else {
+                published.clone_from(state);
+                true
+            }
+        });
+        if changed {
+            // `Err` only means nobody is subscribed.
+            let _ = self.events.send(Event::StateChanged);
+        }
     }
 
-    fn log(&self, level: LogLevel, text: String) {
-        let _ = self.events.send(Event::Log(LogRecord {
+    pub(super) fn emit(&self, event: Event) {
+        let _ = self.events.send(event);
+    }
+
+    pub(super) fn log(&self, level: LogLevel, text: String) {
+        match level {
+            LogLevel::Error => tracing::error!("{text}"),
+            LogLevel::Warn => tracing::warn!("{text}"),
+            LogLevel::Info | LogLevel::Success => tracing::debug!("{text}"),
+        }
+        self.emit(Event::Log(LogRecord {
             ts: self.clock.now_utc(),
             level,
             text,
         }));
+    }
+
+    // ---- connector lookup ------------------------------------------------------
+
+    /// A connector by id; `0` is the charge point.
+    pub(super) fn find_connector(&self, id: ConnectorId) -> Option<&ConnectorSnapshot> {
+        self.state.connector(id)
+    }
+
+    pub(super) fn find_connector_mut(&mut self, id: ConnectorId) -> Option<&mut ConnectorSnapshot> {
+        if id.is_station() {
+            return Some(&mut self.state.charge_point);
+        }
+        self.state.connectors.iter_mut().find(|c| c.id == id)
+    }
+
+    /// A physical connector (`1..=n`).
+    pub(super) fn connector(&self, id: ConnectorId) -> Result<&ConnectorSnapshot, StationError> {
+        if id.is_station() {
+            return Err(StationError::UnknownConnector(id));
+        }
+        self.state
+            .connector(id)
+            .ok_or(StationError::UnknownConnector(id))
+    }
+
+    /// Connector `id` or the charge point (`0`).
+    pub(super) fn connector_or_station_mut(
+        &mut self,
+        id: ConnectorId,
+    ) -> Result<&mut ConnectorSnapshot, StationError> {
+        self.find_connector_mut(id)
+            .ok_or(StationError::UnknownConnector(id))
+    }
+}
+
+/// Next event of the current connection; pending while there is none. A connection
+/// task that vanished without a `Closed` event counts as closed.
+async fn next_link_event(events: &mut Option<mpsc::Receiver<ConnectionEvent>>) -> ConnectionEvent {
+    match events {
+        Some(receiver) => receiver
+            .recv()
+            .await
+            .unwrap_or_else(|| ConnectionEvent::Closed {
+                code: None,
+                reason: "connection task ended".to_owned(),
+                by_us: false,
+            }),
+        None => std::future::pending().await,
     }
 }

@@ -1,0 +1,175 @@
+//! CSMS-originated CALLs.
+//!
+//! The connection layer has already validated the payload against the schema and hands the
+//! actor an [`IncomingCall`] with a one-shot [`ReplyHandle`]. `dispatch_incoming` maps the
+//! action name to a typed handler `fn(&mut StationActor, Responder<A>, A::Req)`:
+//!
+//! * the payload is decoded into `A::Req`; a schema-valid payload that still does not fit the
+//!   typed request (e.g. an integer beyond `i32`) is answered with a `TypeConstraintViolation`
+//!   CALLERROR, never dropped;
+//! * a handler **consumes** its `Responder`, so it replies exactly once (the compiler enforces
+//!   it; a handler that forgot would trigger the `InternalError` drop fallback);
+//! * handlers never await; work they trigger (a `StatusNotification`, a `Boot`) is started
+//!   *after* the reply was queued and completes through a continuation;
+//! * unknown action names are answered `NotImplemented` (the connection layer normally
+//!   filters them already), actions of stage 2b `NotSupported`.
+//!
+//! One file per topic: `config` (Get/ChangeConfiguration), `data_transfer`, `local_list`
+//! (SendLocalList, GetLocalListVersion, ClearCache), `availability`
+//! (ChangeAvailability, UnlockConnector), `trigger` (TriggerMessage), `stage2b` (everything
+//! that is still to come, answered `NotSupported`). Stage 2b adds files here and moves
+//! entries from `stage2b` to their module in the table below.
+
+#![allow(
+    clippy::needless_pass_by_value,
+    reason = "handlers share the signature `fn(&mut StationActor, Responder<A>, A::Req)`"
+)]
+
+mod availability;
+mod config;
+mod data_transfer;
+mod local_list;
+mod stage2b;
+mod trigger;
+
+use super::actor::StationActor;
+use crate::ocpp::action::{Action, InboundAction};
+use crate::ocpp::frame::ErrorCode;
+use crate::ocpp::messages::{
+    CancelReservation, ChangeAvailability, ChangeConfiguration, ClearCache, ClearChargingProfile,
+    DataTransfer, GetCompositeSchedule, GetConfiguration, GetDiagnostics, GetLocalListVersion,
+    RemoteStartTransaction, RemoteStopTransaction, ReserveNow, Reset, SendLocalList,
+    SetChargingProfile, TriggerMessage, UnlockConnector, UpdateFirmware,
+};
+use crate::ocpp::responder::{ReplyHandle, Responder};
+use crate::station::event::LogLevel;
+use crate::ws::IncomingCall;
+
+/// A handler for the inbound action `A`.
+type Handler<A> = fn(&mut StationActor, Responder<A>, <A as Action>::Req);
+
+impl StationActor {
+    /// Routes an incoming CALL to its handler.
+    pub(super) fn dispatch_incoming(&mut self, call: IncomingCall) {
+        let IncomingCall {
+            action,
+            payload,
+            reply,
+            ..
+        } = call;
+        self.log(LogLevel::Info, format!("CSMS requests {action}"));
+        match action.as_str() {
+            ChangeConfiguration::NAME => {
+                self.invoke::<ChangeConfiguration>(payload, reply, config::change_configuration);
+            }
+            GetConfiguration::NAME => {
+                self.invoke::<GetConfiguration>(payload, reply, config::get_configuration);
+            }
+            ClearCache::NAME => self.invoke::<ClearCache>(payload, reply, local_list::clear_cache),
+            DataTransfer::NAME => {
+                self.invoke::<DataTransfer>(payload, reply, data_transfer::data_transfer);
+            }
+            GetLocalListVersion::NAME => {
+                self.invoke::<GetLocalListVersion>(payload, reply, local_list::get_version);
+            }
+            SendLocalList::NAME => {
+                self.invoke::<SendLocalList>(payload, reply, local_list::send_local_list);
+            }
+            ChangeAvailability::NAME => {
+                self.invoke::<ChangeAvailability>(
+                    payload,
+                    reply,
+                    availability::change_availability,
+                );
+            }
+            UnlockConnector::NAME => {
+                self.invoke::<UnlockConnector>(payload, reply, availability::unlock_connector);
+            }
+            TriggerMessage::NAME => {
+                self.invoke::<TriggerMessage>(payload, reply, trigger::trigger_message);
+            }
+            // stage 2b
+            CancelReservation::NAME => {
+                self.invoke::<CancelReservation>(payload, reply, stage2b::not_supported);
+            }
+            ClearChargingProfile::NAME => {
+                self.invoke::<ClearChargingProfile>(payload, reply, stage2b::not_supported);
+            }
+            GetCompositeSchedule::NAME => {
+                self.invoke::<GetCompositeSchedule>(payload, reply, stage2b::not_supported);
+            }
+            GetDiagnostics::NAME => {
+                self.invoke::<GetDiagnostics>(payload, reply, stage2b::not_supported);
+            }
+            RemoteStartTransaction::NAME => {
+                self.invoke::<RemoteStartTransaction>(payload, reply, stage2b::not_supported);
+            }
+            RemoteStopTransaction::NAME => {
+                self.invoke::<RemoteStopTransaction>(payload, reply, stage2b::not_supported);
+            }
+            ReserveNow::NAME => self.invoke::<ReserveNow>(payload, reply, stage2b::not_supported),
+            Reset::NAME => self.invoke::<Reset>(payload, reply, stage2b::not_supported),
+            SetChargingProfile::NAME => {
+                self.invoke::<SetChargingProfile>(payload, reply, stage2b::not_supported);
+            }
+            UpdateFirmware::NAME => {
+                self.invoke::<UpdateFirmware>(payload, reply, stage2b::not_supported);
+            }
+            other => {
+                self.log(LogLevel::Warn, format!("{other} is not an inbound action"));
+                let _ = reply.reject(
+                    ErrorCode::NotImplemented,
+                    format!("{other} is not implemented"),
+                );
+            }
+        }
+    }
+
+    /// Decodes the request and calls `handler`, or answers the decoding failure.
+    fn invoke<A: InboundAction>(
+        &mut self,
+        payload: serde_json::Value,
+        reply: ReplyHandle,
+        handler: Handler<A>,
+    ) {
+        let responder = Responder::<A>::new(reply);
+        match serde_json::from_value::<A::Req>(payload) {
+            Ok(request) => handler(self, responder, request),
+            Err(error) => {
+                self.log(
+                    LogLevel::Warn,
+                    format!("{} payload cannot be decoded: {error}", A::NAME),
+                );
+                let _ = responder.reject_error(
+                    ErrorCode::TypeConstraintViolation,
+                    format!("invalid {} payload: {error}", A::NAME),
+                );
+            }
+        }
+    }
+
+    /// Sends `response` as the CALLRESULT; a vanished connection is logged, not fatal.
+    pub(super) fn respond<A: Action>(&self, responder: Responder<A>, response: A::Res) {
+        if let Err(error) = responder.accept(response) {
+            self.log(
+                LogLevel::Warn,
+                format!("could not reply to {}: {error}", A::NAME),
+            );
+        }
+    }
+
+    /// Sends a CALLERROR as the answer.
+    pub(super) fn respond_error<A: Action>(
+        &self,
+        responder: Responder<A>,
+        code: ErrorCode,
+        description: impl Into<String>,
+    ) {
+        if let Err(error) = responder.reject_error(code, description) {
+            self.log(
+                LogLevel::Warn,
+                format!("could not reply to {}: {error}", A::NAME),
+            );
+        }
+    }
+}

@@ -179,6 +179,8 @@ impl Cli {
             charge_point_id: self.id,
             vendor: self.vendor,
             model: self.model,
+            serial_number: None,
+            firmware_version: None,
             initial_connector: ConnectorId::new(self.connector),
             connector_count: self.connectors,
             heartbeat_interval_secs: self.heartbeat,

@@ -16,9 +16,14 @@ use crate::ocpp::types::{
 /// Commands are plain data (`Clone`, `Debug`, serde) so scenarios can be
 /// described as data and replayed. They carry no reply channel: the answer is the
 /// `Result<Outcome, StationError>` returned by [`super::StationHandle::send`].
-/// The future resolves when the command has been **completed**, which includes
-/// waiting for the CSMS's answer to the CALL it triggers (up to the call timeout),
-/// so UIs should run it in a task instead of blocking their event loop.
+/// The future resolves when the command has been **completed**. Commands that *are* a CALL
+/// (`Boot`, `Heartbeat`, `DataTransfer`, `*StatusNotification`, `StatusNotification`,
+/// `SendRaw`, and in stage 2b `Authorize`, `StartTransaction`, ...) complete when the CSMS
+/// answered, up to the call timeout. Commands that change local state (`PlugIn`, `Unplug`,
+/// `SetConnectorStatus`, `Fault`, `AddConnector`, ...) complete as soon as the state changed;
+/// the resulting `StatusNotification` is queued by the station's status discipline and may be
+/// debounced (`MinimumStatusDuration`) or, while offline or unregistered, not sent at all.
+/// UIs should run commands in a task instead of blocking their event loop.
 ///
 /// The set mirrors the TS `Tui` action list (`docs/rewrite/ui-analysis.md`):
 /// Station tab (boot, heartbeat, reconnect, disconnect, connect, add connector),
@@ -46,7 +51,8 @@ pub enum Command {
     PlugIn { connector: ConnectorId },
     /// Simulate the EV being unplugged (stops a running transaction with `EVDisconnected`).
     Unplug { connector: ConnectorId },
-    /// Set a connector's status and send the matching StatusNotification.
+    /// Set a connector's status (connector 0 allowed); the StatusNotification follows per
+    /// the station's status discipline (see `station::status`).
     SetConnectorStatus {
         connector: ConnectorId,
         status: ConnectorStatus,

@@ -22,14 +22,26 @@
 //!
 //! # Submodules
 //!
-//! Besides the public types, the submodules below are stubs documenting what
-//! will live where; they map one-to-one to the TS files named in their docs.
+//! The actor is split by concern: `actor` (state + event loop), `link` (connect, reconnect,
+//! boot, heartbeat), `calls` (outbound CALLs), `status` (StatusNotification discipline),
+//! `persistence`, `commands` (user commands), `handlers/` (CSMS-originated CALLs) and
+//! `timers`. The pure, separately tested domain modules (`config_registry`,
+//! `local_auth_list`, `authorization`, ...) are public; the ones for stage 2b
+//! (`transaction`, `offline`, `maintenance`, `metering`, `reservation`, `smart_charging`) are
+//! still partly stubs. Each maps to the TS files named in its docs.
 
 mod actor;
+mod calls;
 mod command;
+mod commands;
 mod event;
 mod handle;
+mod handlers;
+mod link;
+mod persistence;
 mod snapshot;
+mod status;
+pub mod timers;
 
 pub mod authorization;
 pub mod charging_profiles;
@@ -45,7 +57,7 @@ pub mod transaction;
 
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 
 pub use self::authorization::{AuthSource, AuthorizationDecision, IdTagInfo};
@@ -68,7 +80,8 @@ const COMMAND_QUEUE: usize = 64;
 /// Capacity of the event broadcast (slow subscribers lag, see [`Event`]).
 const EVENT_BUFFER: usize = 1024;
 
-/// Entry point: spawns station actors.
+/// Entry point: spawns station actors. The station does **not** connect by itself: send
+/// [`Command::Connect`] (the CLI does so at startup).
 #[derive(Debug, Clone, Copy)]
 pub struct Station;
 
@@ -85,18 +98,11 @@ impl Station {
     ) -> (StationHandle, JoinHandle<()>) {
         config.normalize();
         let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
-        let (snapshot_tx, snapshot_rx) = watch::channel(Snapshot::initial(&config));
         let (event_tx, _) = broadcast::channel(EVENT_BUFFER);
 
-        let config = Arc::new(config.clone());
-        let handle = StationHandle::new(config, command_tx, snapshot_rx, event_tx.clone());
-        let actor = StationActor::new(
-            (*handle.config()).clone(),
-            clock,
-            command_rx,
-            snapshot_tx,
-            event_tx,
-        );
+        let (actor, snapshot_rx) =
+            StationActor::new(config.clone(), clock, command_rx, event_tx.clone());
+        let handle = StationHandle::new(Arc::new(config), command_tx, snapshot_rx, event_tx);
         (handle, tokio::spawn(actor.run()))
     }
 }
@@ -112,7 +118,9 @@ mod tests {
 
     fn spawn() -> (StationHandle, JoinHandle<()>) {
         let clock = ManualClock::new(Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap());
-        let config = StationConfig::new("ws://localhost:9000/ocpp").with_connectors(2);
+        let config = StationConfig::new("ws://localhost:9000/ocpp")
+            .with_connectors(2)
+            .without_persistence();
         Station::spawn(config, Arc::new(clock))
     }
 
@@ -130,15 +138,20 @@ mod tests {
     #[tokio::test]
     async fn unsupported_commands_error_instead_of_hanging() {
         let (handle, join) = spawn();
+        // stage 2b command: must answer, not hang.
         let err = handle
-            .send(Command::PlugIn {
+            .send(Command::MeterValues {
                 connector: ConnectorId::new(1),
+                wh_delta: 1,
+                measurands: None,
             })
             .await
             .unwrap_err();
         assert!(matches!(
             err,
-            StationError::NotImplemented { command: "plug_in" }
+            StationError::NotImplemented {
+                command: "meter_values"
+            }
         ));
         handle.shutdown().await.unwrap();
         join.await.unwrap();

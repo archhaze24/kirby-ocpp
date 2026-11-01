@@ -62,8 +62,9 @@ impl ConnectorSnapshot {
 
 /// Snapshot of the whole station (modelled on the TS `StationState`).
 ///
-/// Connector `0` is the charge point itself and is not in `connectors`; its
-/// availability is `availability`.
+/// Connector `0` is the charge point itself and is not in `connectors`; its state is
+/// `charge_point` (only status, error fields and availability are meaningful) and
+/// `availability` mirrors `charge_point.availability`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot {
     pub charge_point_id: String,
@@ -75,6 +76,8 @@ pub struct Snapshot {
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     /// Availability of connector 0 (the whole charge point).
     pub availability: AvailabilityType,
+    /// Connector 0 as it is reported in `StatusNotification` (`Available`, `Unavailable`, `Faulted`).
+    pub charge_point: ConnectorSnapshot,
     pub local_list_version: i32,
     pub diagnostics_status: DiagnosticsStatus,
     pub firmware_status: FirmwareStatus,
@@ -100,6 +103,7 @@ impl Snapshot {
             heartbeat_interval_secs: config.heartbeat_interval_secs,
             last_heartbeat_at: None,
             availability: AvailabilityType::Operative,
+            charge_point: ConnectorSnapshot::new(ConnectorId::STATION),
             local_list_version: 0,
             diagnostics_status: DiagnosticsStatus::Idle,
             firmware_status: FirmwareStatus::Idle,
@@ -117,7 +121,11 @@ impl Snapshot {
         self.registration == Some(RegistrationStatus::Accepted)
     }
 
+    /// A connector by id; `ConnectorId::STATION` gives the charge point itself.
     pub fn connector(&self, id: ConnectorId) -> Option<&ConnectorSnapshot> {
+        if id.is_station() {
+            return Some(&self.charge_point);
+        }
         self.connectors.iter().find(|c| c.id == id)
     }
 }
@@ -138,7 +146,11 @@ mod tests {
         let ids: Vec<u32> = snapshot.connectors.iter().map(|c| c.id.get()).collect();
         assert_eq!(ids, [1, 2]);
         assert!(snapshot.connector(ConnectorId::new(2)).is_some());
-        assert!(snapshot.connector(ConnectorId::STATION).is_none());
+        assert_eq!(
+            snapshot.connector(ConnectorId::STATION),
+            Some(&snapshot.charge_point)
+        );
+        assert_eq!(snapshot.charge_point.id, ConnectorId::STATION);
         assert!(
             snapshot
                 .connectors
