@@ -25,7 +25,7 @@ use crate::ocpp::types::{
 /// debounced (`MinimumStatusDuration`) or, while offline or unregistered, not sent at all.
 /// UIs should run commands in a task instead of blocking their event loop.
 ///
-/// The set mirrors the TS `Tui` action list (`docs/rewrite/ui-analysis.md`):
+/// The set mirrors the TS `Tui` action list:
 /// Station tab (boot, heartbeat, reconnect, disconnect, connect, add connector),
 /// Connector tab (plug, status cycle/set, StatusNotification, fault), Transaction
 /// tab (authorize, start, stop, meter values), Maintenance tab (outcomes and

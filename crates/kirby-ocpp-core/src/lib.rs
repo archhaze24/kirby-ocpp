@@ -3,8 +3,8 @@
 //! This crate has **no UI dependencies**. A UI (the `kirby-ocpp-tui` crate, a
 //! headless runner, a test) talks to the emulator exclusively through
 //! [`station::StationHandle`]: it sends typed [`station::Command`]s, reads
-//! [`station::Snapshot`]s and subscribes to [`station::Event`]s. See
-//! `docs/rewrite/ARCHITECTURE.md` for the big picture.
+//! [`station::Snapshot`]s and subscribes to [`station::Event`]s. See the
+//! crate modules for the big picture.
 
 pub mod clock;
 pub mod config;
