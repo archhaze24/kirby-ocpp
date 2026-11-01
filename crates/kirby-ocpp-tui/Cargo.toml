@@ -12,12 +12,22 @@ name = "kirby_ocpp_tui"
 
 [dependencies]
 kirby-ocpp-core.workspace = true
-crossterm.workspace = true
+base64.workspace = true
+chrono.workspace = true
+crossterm = { workspace = true, features = ["event-stream"] }
+futures-util.workspace = true
+nucleo-matcher.workspace = true
 ratatui.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["process", "signal", "fs", "rt"] }
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
 
 [dev-dependencies]
-tokio.workspace = true
+kirby-ocpp-testkit.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true

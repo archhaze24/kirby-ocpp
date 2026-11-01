@@ -171,10 +171,9 @@ async fn interactive(
                 stop_station(&handle, join).await;
                 return ExitCode::SUCCESS;
             }
-            Err(TuiError::NotImplemented { .. }) => {
-                eprintln!(
-                    "note: the terminal UI is not available yet; running headless (pass --no-tui to hide this)"
-                );
+            Err(error @ TuiError::Terminal(_)) => {
+                // The terminal could not be set up (no usable TTY): keep going headless.
+                eprintln!("note: {error}; running headless (pass --no-tui to hide this)");
             }
             Err(error) => {
                 stop_station(&handle, join).await;
