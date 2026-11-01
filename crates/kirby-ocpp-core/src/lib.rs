@@ -9,6 +9,7 @@
 pub mod clock;
 pub mod config;
 pub mod error;
+pub mod fleet;
 pub mod ids;
 pub mod ocpp;
 pub mod scenario;
