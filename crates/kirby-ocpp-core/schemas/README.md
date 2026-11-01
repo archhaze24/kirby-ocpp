@@ -9,4 +9,4 @@ The OCPP 1.6J specification package references Creative Commons Attribution-NoDe
 International (https://creativecommons.org/licenses/by-nd/4.0/legalcode). The files are included
 for conformance validation only and are not owned by this project; the project license applies to
 this project's own source code, not to Open Charge Alliance materials. The Open Charge Alliance
-does not sponsor or endorse this project. See `THIRD_PARTY_NOTICES.md` at the repository root.
+does not sponsor or endorse this project. See `crates/kirby-ocpp/THIRD_PARTY_NOTICES.md`.

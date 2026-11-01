@@ -308,19 +308,6 @@ fn help_lists_examples_and_exit_codes() {
 }
 
 #[test]
-fn bundled_notices_match_the_repository_copy() {
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../THIRD_PARTY_NOTICES.md");
-    let Ok(root) = std::fs::read_to_string(root) else {
-        return; // packaged crate: no repository root
-    };
-    let bundled = include_str!("../THIRD_PARTY_NOTICES.md");
-    assert_eq!(
-        root, bundled,
-        "update crates/kirby-ocpp/THIRD_PARTY_NOTICES.md"
-    );
-}
-
-#[test]
 fn print_config_does_not_leak_url_credentials() {
     let output = run(
         &["--print-config", "--url", "ws://user:hunter2@h:9000/ocpp"],

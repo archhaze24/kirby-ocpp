@@ -15,6 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const NOTICES = path.join(root, "crates", "kirby-ocpp", "THIRD_PARTY_NOTICES.md");
 const REPO = "archhaze24/kirby-ocpp";
 
 const PLATFORMS = [
@@ -114,9 +115,8 @@ async function main() {
     const target = path.join(dir, "bin", platform.exe);
     fs.copyFileSync(binary, target);
     fs.chmodSync(target, 0o755);
-    for (const doc of ["LICENSE", "THIRD_PARTY_NOTICES.md"]) {
-      fs.copyFileSync(path.join(root, doc), path.join(dir, doc));
-    }
+    fs.copyFileSync(path.join(root, "LICENSE"), path.join(dir, "LICENSE"));
+    fs.copyFileSync(NOTICES, path.join(dir, "THIRD_PARTY_NOTICES.md"));
     fs.writeFileSync(
       path.join(dir, "README.md"),
       `# ${platform.pkg}\n\nPrebuilt \`kirby-ocpp\` binary for ${platform.os}/${platform.cpu}. Install \`kirby-ocpp\` instead of this package: https://github.com/${REPO}\n`,
@@ -138,9 +138,10 @@ async function main() {
 
   const main = path.join(out, "kirby-ocpp");
   fs.cpSync(path.join(root, "npm", "kirby-ocpp"), main, { recursive: true });
-  for (const doc of ["README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"]) {
+  for (const doc of ["README.md", "LICENSE"]) {
     fs.copyFileSync(path.join(root, doc), path.join(main, doc));
   }
+  fs.copyFileSync(NOTICES, path.join(main, "THIRD_PARTY_NOTICES.md"));
   fs.chmodSync(path.join(main, "bin", "kirby-ocpp.js"), 0o755);
   writeJson(path.join(main, "package.json"), { ...template, version, optionalDependencies });
   console.log(`built kirby-ocpp@${version}`);
