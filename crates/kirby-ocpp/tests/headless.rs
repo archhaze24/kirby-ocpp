@@ -1,14 +1,17 @@
 //! Process tests of the scenario runner and the headless mode against a mock CSMS
 //! running in the test process.
 
+#[cfg(unix)]
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 
 use kirby_ocpp_testkit::{CsmsOptions, MockCsms};
 use serde_json::Value;
 use tempfile::TempDir;
 
+#[cfg(unix)]
 const STEP: Duration = Duration::from_secs(10);
 
 fn command(args: &[&str]) -> Command {
@@ -238,6 +241,7 @@ async fn headless_logs_jsonl_and_shuts_down_on_sigterm() {
     csms.shutdown().await;
 }
 
+#[cfg(unix)]
 fn read_lines(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
         .unwrap()
