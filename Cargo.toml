@@ -15,7 +15,7 @@ homepage = "https://github.com/archhaze24/kirby-ocpp#readme"
 # internal
 kirby-ocpp-core = { path = "crates/kirby-ocpp-core", version = "0.2.0-dev" }
 kirby-ocpp-tui = { path = "crates/kirby-ocpp-tui", version = "0.2.0-dev" }
-kirby-ocpp-testkit = { path = "crates/kirby-ocpp-testkit", version = "0.2.0-dev" }
+kirby-ocpp-testkit = { path = "crates/kirby-ocpp-testkit" }
 
 # external (latest stable at skeleton time; crates used only in later stages are
 # added to this table by the stage that first compiles against them)
