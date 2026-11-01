@@ -14,6 +14,7 @@ use clap::{ArgAction, Args, Parser, Subcommand};
 use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults, validate_ws_url};
 use kirby_ocpp_core::ids::ConnectorId;
+use kirby_ocpp_core::station::ResponseRule;
 
 /// Terminal OCPP 1.6J charge point emulator for CSMS testing.
 ///
@@ -206,6 +207,25 @@ pub struct Cli {
     )]
     pub tls_skip_verify: bool,
 
+    /// Misbehave on purpose when the CSMS sends a command: ACTION=BEHAVIOR[*COUNT]. Repeatable
+    #[arg(
+        global = true,
+        long = "rule",
+        env = "KIRBY_OCPP_RULES",
+        value_name = "ACTION=BEHAVIOR",
+        value_delimiter = ';',
+        value_parser = parse_rule,
+        long_help = "Overrides how the station answers one CSMS command, to test the CSMS against a \
+misbehaving charge point. Form: ACTION=BEHAVIOR[*COUNT]. BEHAVIOR is one of: reject (the \
+action's own rejection status, else CALLERROR NotSupported), delay:MS (handle normally, reply \
+MS ms later), error:CODE[:TEXT] (CALLERROR with an OCPP-J error code), drop (close the \
+connection without replying), ignore (never reply). *COUNT limits the rule to that many \
+CALLs. Repeat the flag for several rules; OCPP-style env var KIRBY_OCPP_RULES takes them \
+separated by `;`. Examples: --rule Reset=reject --rule GetConfiguration=delay:5000 \
+--rule ChangeConfiguration=error:InternalError*3"
+    )]
+    pub rule: Vec<ResponseRule>,
+
     /// Print the effective configuration as JSON and exit
     #[arg(global = true, long)]
     pub print_config: bool,
@@ -313,6 +333,7 @@ impl Cli {
             nominal_power_w: self.nominal_power_w,
             voltage_v: self.voltage_v,
             phases: self.phases,
+            response_rules: self.rule,
         })
     }
 }
@@ -320,6 +341,12 @@ impl Cli {
 fn parse_url(value: &str) -> Result<String, String> {
     validate_ws_url(value)?;
     Ok(value.to_owned())
+}
+
+fn parse_rule(value: &str) -> Result<ResponseRule, String> {
+    value
+        .parse()
+        .map_err(|error: kirby_ocpp_core::station::response_rules::RuleError| error.to_string())
 }
 
 fn non_empty(value: &str) -> Result<String, String> {

@@ -66,6 +66,10 @@ Registry keys, seeded from the station config: AllowOfflineTxForUnknownId, Autho
 
 Capability and limit keys (for example `NumberOfConnectors`, the `*MaxLength` keys, `SupportedFeatureProfiles`) are read-only. Writable values are persisted per charge point. Some keys (for example `BlinkRepeat`, `LightIntensity`) are stored and reported but drive no behaviour. Vendor-specific keys are not supported (`NotSupported`).
 
+## Testing aids (deliberate non-conformance)
+
+Response rules (`--rule`, `KIRBY_OCPP_RULES`, TUI, scenario steps `set_rule` / `clear_rules`) make the station answer a CSMS command in a way the specification forbids, on purpose: `reject` (the action's rejection status, or CALLERROR `NotSupported` where the response has none: `GetConfiguration`, `GetLocalListVersion`, `ClearChargingProfile`, `GetDiagnostics`, `UpdateFirmware`), `delay:MS`, `error:CODE[:TEXT]`, `drop` (close the socket without a reply) and `ignore` (no reply, so the CSMS times out; the "every CALL gets one reply" rule is deliberately waived, bypassing the `InternalError` drop fallback). Without a rule the station behaves as described above. Rules are runtime only; except for `delay` the command is not executed. See the README for the syntax.
+
 ## Known limits
 
 - No Security Whitepaper extensions, no OCPP 2.x, no JSON-over-SOAP; one WebSocket connection, subprotocol `ocpp1.6` by default.

@@ -25,6 +25,7 @@ const ENV_VARS: &[&str] = &[
     "OCPP_TLS_SKIP_VERIFY",
     "KIRBY_OCPP_NO_PERSIST",
     "KIRBY_OCPP_STATE_DIR",
+    "KIRBY_OCPP_RULES",
 ];
 
 fn run(args: &[&str], env: &[(&str, &str)]) -> Output {
@@ -368,4 +369,75 @@ fn print_config_does_not_leak_url_credentials() {
         "{text}"
     );
     assert!(text.contains("ws://h:9000/ocpp"), "{text}");
+}
+
+#[test]
+fn rules_default_to_none() {
+    assert_eq!(config(URL, &[])["response_rules"], serde_json::json!([]));
+}
+
+#[test]
+fn rule_flag_is_repeatable_and_shown_in_print_config() {
+    let c = config(
+        &with_url(&[
+            "--rule",
+            "reset=reject",
+            "--rule",
+            "GetConfiguration=delay:5000*2",
+            "--rule",
+            "ChangeConfiguration=error:InternalError:boom",
+        ]),
+        &[],
+    );
+    let rules = c["response_rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 3);
+    assert_eq!(rules[0]["action"], "Reset");
+    assert_eq!(rules[0]["behavior"]["kind"], "reject");
+    assert_eq!(rules[0]["remaining"], Value::Null);
+    assert_eq!(rules[1]["behavior"]["ms"], 5000);
+    assert_eq!(rules[1]["remaining"], 2);
+    assert_eq!(rules[2]["behavior"]["code"], "InternalError");
+    assert_eq!(rules[2]["behavior"]["description"], "boom");
+}
+
+#[test]
+fn rule_env_var_is_split_on_semicolons_and_the_flag_wins() {
+    let args = with_url(&[]);
+    let c = config(
+        &args,
+        &[("KIRBY_OCPP_RULES", "Reset=drop;ClearCache=ignore*1")],
+    );
+    assert_eq!(c["response_rules"].as_array().unwrap().len(), 2);
+    let c = config(
+        &with_url(&["--rule", "Reset=reject"]),
+        &[("KIRBY_OCPP_RULES", "Reset=drop;ClearCache=ignore")],
+    );
+    let rules = c["response_rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 1, "CLI > env");
+    assert_eq!(rules[0]["behavior"]["kind"], "reject");
+}
+
+#[test]
+fn invalid_rules_are_usage_errors() {
+    for bad in [
+        "Reset",
+        "Heartbeat=reject",
+        "Reset=explode",
+        "Reset=delay:abc",
+        "Reset=error:Nope",
+        "Reset=reject*0",
+    ] {
+        let output = run(&with_url(&["--print-config", "--rule", bad]), &[]);
+        assert_eq!(output.status.code(), Some(2), "{bad}");
+        assert!(
+            stderr(&output).contains("--rule"),
+            "{bad}: {}",
+            stderr(&output)
+        );
+    }
+    let output = run(
+        &with_url(&["--print-config"]),
+        &[("KIRBY_OCPP_RULES", "Reset=explode")],
+    );
+    assert_eq!(output.status.code(), Some(2));
 }

@@ -65,6 +65,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Skip certificate verification (testing only) |
 | `--no-persist` | `KIRBY_OCPP_NO_PERSIST` | off | Do not load or save station state |
 | `--state-dir` | `KIRBY_OCPP_STATE_DIR` | `~/.kirby-ocpp/stations` | State directory (`%USERPROFILE%` on Windows) |
+| `--rule ACTION=BEHAVIOR[*N]` | `KIRBY_OCPP_RULES` (`;`-separated) | none | Response rule for a CSMS command, repeatable; see [Response rules](#response-rules) |
 | `--print-config` | | | Print the effective configuration as JSON and exit |
 | `--no-tui` | | | Never start the TUI; log to stdout |
 | `--json` | | | JSON lines instead of text (events and the `run` report) |
@@ -97,7 +98,7 @@ Seven tabs, switched with `1`-`7` or `Tab`/`Shift-Tab`: Station, Connector, Tran
 | `?` | Help |
 | `q`, `Ctrl-C` | Quit |
 
-Actions: connect/disconnect/reconnect, BootNotification, Heartbeat, add connector; plug/unplug, set status, StatusNotification, fault toggle; Authorize, StartTransaction, StopTransaction (with reason), MeterValues; set diagnostics/firmware outcome and send their status notifications; DataTransfer, vendor ping and raw CALLs.
+Actions: connect/disconnect/reconnect, BootNotification, Heartbeat, add connector, response rules (`m` adds one, `Action=off` removes one, `M` clears all; active rules are listed in the Station pane); plug/unplug, set status, StatusNotification, fault toggle; Authorize, StartTransaction, StopTransaction (with reason), MeterValues; set diagnostics/firmware outcome and send their status notifications; DataTransfer, vendor ping and raw CALLs.
 
 Log view (Logs tab): CALL/RESULT/ERROR correlation, filters (all, calls, errors, station, csms; `f`), search (`s`), pause/follow (`p`), jump to newest (`G`), detail view with scroll (`Enter`; `c`/`y` copies), copy row (`y`) or visible rows (`Y`), export as JSONL (`e`, default `./kirby-ocpp-<id>-<timestamp>.jsonl`), clear with confirmation (`c`). The buffer keeps the last 2000 entries. Copying tries external clipboard tools first and falls back to the terminal's OSC 52 sequence.
 
@@ -150,7 +151,28 @@ reason = "Local"
 expect = { status = "Accepted" }
 ```
 
-Actions: `connect`, `disconnect`, `reconnect`, `boot`, `heartbeat`, `plug`, `unplug`, `authorize`, `start_tx`, `stop_tx`, `meter`, `status`, `fault`, `clear_fault`, `sleep`, `wait_for`, `expect_call` (`call`, optional `direction`, `match` payload subset), `send_raw` (`call`, `payload`, `validate`), `data_transfer`. Every step may have `name` and `expect` (`status`, `payload` subset, `error = true`). `wait_for` takes `condition = { kind = ... }` with kinds `connected`, `disconnected`, `registration`, `connector_status`, `tx_active`, `tx_idle`, `no_pending_messages`, and `timeout_ms` (default 5000). Unknown fields are rejected.
+Actions: `connect`, `disconnect`, `reconnect`, `boot`, `heartbeat`, `plug`, `unplug`, `authorize`, `start_tx`, `stop_tx`, `meter`, `status`, `fault`, `clear_fault`, `sleep`, `wait_for`, `expect_call` (`call`, optional `direction`, `match` payload subset), `send_raw` (`call`, `payload`, `validate`), `data_transfer`, `set_rule` (`rule`), `clear_rules` (optional `call`). Every step may have `name` and `expect` (`status`, `payload` subset, `error = true`). `wait_for` takes `condition = { kind = ... }` with kinds `connected`, `disconnected`, `registration`, `connector_status`, `tx_active`, `tx_idle`, `no_pending_messages`, and `timeout_ms` (default 5000). Unknown fields are rejected.
+
+## Response rules
+
+Response rules make the station misbehave on purpose, to test how a CSMS reacts. A rule overrides how one CSMS command (any of the 19 the station handles, e.g. `Reset`, `RemoteStartTransaction`, `ChangeConfiguration`) is answered. Form: `ACTION=BEHAVIOR[*COUNT]`, action names case-insensitive.
+
+| Behavior | Effect |
+| --- | --- |
+| `reject` | The action's own rejection (`Rejected`; `NotSupported` for `SendLocalList` and `UnlockConnector`). `GetConfiguration`, `GetLocalListVersion`, `ClearChargingProfile`, `GetDiagnostics` and `UpdateFirmware` have no rejection status, so they get CALLERROR `NotSupported`. |
+| `delay:MS` | The command is handled normally; only the reply is sent `MS` ms later (0 to 3600000). The station keeps working meanwhile. |
+| `error:CODE[:TEXT]` | CALLERROR with an OCPP 1.6 code (`NotImplemented`, `NotSupported`, `InternalError`, `ProtocolError`, `SecurityError`, `FormationViolation`, `PropertyConstraintViolation`, `OccurenceConstraintViolation`, `TypeConstraintViolation`, `GenericError`). |
+| `drop` | Close the WebSocket without replying; the normal reconnect lifecycle follows (disabled by `--no-reconnect`). |
+| `ignore` | Never reply, so the CSMS call timeout fires. |
+
+`*COUNT` applies the rule that many times and then removes it (default: unlimited). There is one rule per action; setting another replaces it. Except for `delay`, the command is **not executed** (no side effects). Rules are runtime only, never persisted. Set them with `--rule` (repeatable) or `KIRBY_OCPP_RULES` (separated by `;`, so texts must not contain `;`), in the TUI (Station tab, `m`), as scenario steps, or through `Command::SetResponseRule` / `ClearResponseRules` in the core API. Each application is logged (`response rule: Reset -> reject, 2 more`).
+
+```sh
+kirby-ocpp --url ws://localhost:9000/ocpp --rule Reset=reject --rule GetConfiguration=delay:5000 \
+  --rule ChangeConfiguration=error:InternalError*3 --rule RemoteStartTransaction=ignore*1
+```
+
+In scenarios: `action = "set_rule"` with `rule = "Reset=reject*2"`, and `action = "clear_rules"` with an optional `call = "Reset"` (all rules when omitted).
 
 ## Testing against a mock
 
