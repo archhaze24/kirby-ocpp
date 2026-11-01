@@ -200,6 +200,8 @@ async fn run_timeout_fails_the_scenario() {
     csms.shutdown().await;
 }
 
+// Sends a real SIGTERM through `kill`, which only exists on unix.
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn headless_logs_jsonl_and_shuts_down_on_sigterm() {
     let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
