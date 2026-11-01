@@ -3,14 +3,21 @@
 use std::sync::{Arc, OnceLock};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::ocpp::SchemaRegistry;
 use kirby_ocpp_core::ocpp::messages::registry::ACTIONS;
+use kirby_ocpp_core::ocpp::messages::{ChargingProfile, IdTagInfo};
 use kirby_ocpp_core::ocpp::types::{
-    ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus, Measurand, StopReason,
+    AuthorizationStatus, ChargePointErrorCode, ConfigurationStatus, ConnectorStatus,
+    DiagnosticsStatus, FirmwareStatus, Measurand, StopReason,
 };
+use kirby_ocpp_core::station::config_registry::{ConfigRegistry, ConfigSnapshot};
 use kirby_ocpp_core::station::response_rules::canonical_action;
-use kirby_ocpp_core::station::{DiagnosticsOutcome, FirmwareOutcome, ResponseRule};
+use kirby_ocpp_core::station::{
+    ConfigItem, DiagnosticsOutcome, FirmwareOutcome, LocalListEntry, ProfileSummary, ResponseRule,
+    Snapshot,
+};
 use serde_json::Value;
 
 use crate::text::TextInput;
@@ -38,6 +45,16 @@ pub enum FieldKind {
     Path,
     /// A response rule (`Action=behavior[*N]`) or `Action=off`.
     Rule,
+    /// A connector number, 0 (the whole station) included.
+    StationConnector,
+    /// The value of a configuration key; checked by the core registry.
+    ConfigValue,
+    /// Optional RFC 3339 timestamp.
+    Expiry,
+    /// Optional idTag (at most 20 characters).
+    OptionalIdTag,
+    /// A `csChargingProfiles` JSON object, checked against the `SetChargingProfile` schema.
+    ProfileJson,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +104,9 @@ pub enum FormKind {
     Search,
     Export,
     LoadScenario,
+    ConfigValue,
+    LocalEntry,
+    Profile,
 }
 
 /// What a valid form produced.
@@ -119,6 +139,18 @@ pub enum Submitted {
     Search(String),
     Export(String),
     LoadScenario(String),
+    ConfigValue {
+        key: String,
+        value: String,
+    },
+    LocalEntry {
+        id_tag: IdTag,
+        info: IdTagInfo,
+    },
+    Profile {
+        connector: ConnectorId,
+        profile: Box<ChargingProfile>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -136,6 +168,10 @@ pub struct Form {
     pub focus: usize,
     /// Highest valid connector number.
     pub max_connector: u32,
+    /// What the form edits (the configuration key).
+    pub context: String,
+    /// The station's configuration as far as the snapshot shows it, to check values with.
+    checker: Option<Box<ConfigRegistry>>,
 }
 
 impl Form {
@@ -255,6 +291,96 @@ impl Form {
         )
     }
 
+    /// Edit the value of a configuration key. Values are checked with the core registry,
+    /// loaded with the writable values of the snapshot.
+    pub fn config_value(item: &ConfigItem, snapshot: &Snapshot) -> Self {
+        let station = StationConfig::new("ws://localhost/ocpp")
+            .with_connectors(u32::try_from(snapshot.connectors.len()).unwrap_or(1).max(1));
+        let mut registry = ConfigRegistry::new(&station);
+        registry.restore(&ConfigSnapshot {
+            values: snapshot
+                .config
+                .iter()
+                .filter(|i| !i.readonly)
+                .map(|i| (i.key.clone(), i.value.clone()))
+                .collect(),
+        });
+        let mut form = Self::build(
+            FormKind::ConfigValue,
+            &format!("Set {} ({})", item.key, item.hint),
+            vec![Field::new("value", FieldKind::ConfigValue, &item.value)],
+            1,
+        );
+        form.context.clone_from(&item.key);
+        form.checker = Some(Box::new(registry));
+        form.validate_all();
+        form
+    }
+
+    /// Add or replace a local list entry; `current` prefills an edit.
+    pub fn local_entry(current: Option<&LocalListEntry>) -> Self {
+        let options: Vec<String> = AuthorizationStatus::ALL
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
+        let mut status = Field::new("status", FieldKind::Select, "").with_options(options);
+        if let Some(e) = current {
+            status.option = AuthorizationStatus::ALL
+                .iter()
+                .position(|s| *s == e.status)
+                .unwrap_or(0);
+        }
+        let expiry = current
+            .and_then(|e| e.expiry_date)
+            .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+            .unwrap_or_default();
+        let parent = current
+            .and_then(|e| e.parent_id_tag.clone())
+            .unwrap_or_default();
+        let mut form = Self::build(
+            FormKind::LocalEntry,
+            if current.is_some() {
+                "Edit local list entry (a changed idTag adds a new entry)"
+            } else {
+                "Add local list entry"
+            },
+            vec![
+                Field::new(
+                    "idTag",
+                    FieldKind::IdTag,
+                    current.map_or("", |e| e.id_tag.as_str()),
+                ),
+                status,
+                Field::new("expiry (RFC 3339, optional)", FieldKind::Expiry, &expiry),
+                Field::new("parentIdTag (optional)", FieldKind::OptionalIdTag, &parent),
+            ],
+            1,
+        );
+        form.validate_all();
+        form
+    }
+
+    /// Install a charging profile from JSON; `current` prefills an edit, else a template.
+    pub fn profile(current: Option<&ProfileSummary>, max_connector: u32) -> Self {
+        let json = current.map_or(PROFILE_TEMPLATE, |p| p.json.as_str());
+        let connector = current.map_or(0, |p| p.connector.get());
+        let mut form = Self::build(
+            FormKind::Profile,
+            "Install charging profile (SetChargingProfile rules)",
+            vec![
+                Field::new(
+                    "connector (0 = station)",
+                    FieldKind::StationConnector,
+                    &connector.to_string(),
+                ),
+                Field::new("csChargingProfiles (JSON)", FieldKind::ProfileJson, json),
+            ],
+            max_connector,
+        );
+        form.validate_all();
+        form
+    }
+
     fn build(kind: FormKind, title: &str, fields: Vec<Field>, max_connector: u32) -> Self {
         Self {
             kind,
@@ -262,6 +388,8 @@ impl Form {
             fields,
             focus: 0,
             max_connector,
+            context: String::new(),
+            checker: None,
         }
     }
 
@@ -339,7 +467,7 @@ impl Form {
 
     /// Fields that depend on each other (raw action + payload) re-validate together.
     fn after_edit(&mut self) {
-        if self.kind == FormKind::Raw {
+        if matches!(self.kind, FormKind::Raw | FormKind::Profile) {
             self.validate_field(1);
         }
     }
@@ -356,6 +484,20 @@ impl Form {
         let action = (self.kind == FormKind::Raw)
             .then(|| self.fields[0].options.get(self.fields[0].option).cloned())
             .flatten();
+        let config_error = (self.kind == FormKind::ConfigValue)
+            .then(|| {
+                let value = self.fields[i].input.text().trim();
+                self.checker
+                    .as_ref()
+                    .filter(|c| c.check(&self.context, value) != ConfigurationStatus::Accepted)
+                    .map(|c| {
+                        let hint = c.get(&self.context).map_or("", |e| e.hint());
+                        format!("not accepted: expects {hint}")
+                    })
+            })
+            .flatten();
+        let connector_text =
+            (self.kind == FormKind::Profile).then(|| self.fields[0].input.text().trim().to_owned());
         let f = &mut self.fields[i];
         let text = f.input.text().trim().to_owned();
         f.error = match f.kind {
@@ -377,6 +519,21 @@ impl Form {
             FieldKind::Text | FieldKind::Path => text.is_empty().then(|| "required".to_owned()),
             FieldKind::Json => validate_payload(f.input.text(), action.as_deref()),
             FieldKind::Rule => parse_rule_input(&text).err(),
+            FieldKind::StationConnector => match text.parse::<u32>() {
+                Ok(n) if n <= max => None,
+                _ => Some(format!("connector must be a number from 0 to {max}")),
+            },
+            FieldKind::ConfigValue => config_error,
+            FieldKind::Expiry => (!text.is_empty())
+                .then(|| chrono::DateTime::parse_from_rfc3339(&text).err())
+                .flatten()
+                .map(|_| "use RFC 3339, e.g. 2030-01-01T00:00:00Z".to_owned()),
+            FieldKind::OptionalIdTag => (!text.is_empty())
+                .then(|| IdTag::new(text).err().map(|e| e.to_string()))
+                .flatten(),
+            FieldKind::ProfileJson => {
+                validate_profile(f.input.text(), connector_text.as_deref().unwrap_or("0"))
+            }
             FieldKind::OptionalText | FieldKind::Select | FieldKind::Multi => None,
         };
     }
@@ -430,6 +587,24 @@ impl Form {
             FormKind::Search => Submitted::Search(self.fields[0].input.text().trim().to_owned()),
             FormKind::Export => Submitted::Export(text(0)),
             FormKind::LoadScenario => Submitted::LoadScenario(text(0)),
+            FormKind::ConfigValue => Submitted::ConfigValue {
+                key: self.context.clone(),
+                value: text(0),
+            },
+            FormKind::LocalEntry => Submitted::LocalEntry {
+                id_tag: IdTag::new(text(0)).ok()?,
+                info: IdTagInfo {
+                    status: *AuthorizationStatus::ALL.get(self.fields[1].option)?,
+                    expiry_date: opt(2)
+                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+                        .map(|d| d.with_timezone(&chrono::Utc)),
+                    parent_id_tag: opt(3).and_then(|t| IdTag::new(t).ok()),
+                },
+            },
+            FormKind::Profile => Submitted::Profile {
+                connector: ConnectorId::new(text(0).parse().ok()?),
+                profile: Box::new(serde_json::from_str(self.fields[1].input.text()).ok()?),
+            },
         })
     }
 }
@@ -471,6 +646,29 @@ fn validate_payload(text: &str, action: Option<&str>) -> Option<String> {
     let action = action?;
     schemas()
         .validate_request(action, &value)
+        .err()
+        .map(|e| e.to_string())
+}
+
+/// An example for the install form: a 16 A station-wide cap.
+pub const PROFILE_TEMPLATE: &str = r#"{"chargingProfileId":1,"stackLevel":0,"chargingProfilePurpose":"ChargePointMaxProfile","chargingProfileKind":"Absolute","chargingSchedule":{"chargingRateUnit":"A","chargingSchedulePeriod":[{"startPeriod":0,"limit":16.0}]}}"#;
+
+/// `None` when `text` is a `csChargingProfiles` object that satisfies the `SetChargingProfile`
+/// request schema (with `connector`) and fits the typed profile.
+fn validate_profile(text: &str, connector: &str) -> Option<String> {
+    let value: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => return Some(format!("invalid JSON: {e}")),
+    };
+    if !value.is_object() {
+        return Some("the profile must be a JSON object".to_owned());
+    }
+    let connector_id: u32 = connector.parse().unwrap_or(0);
+    let request = serde_json::json!({"connectorId": connector_id, "csChargingProfiles": value});
+    if let Err(e) = schemas().validate_request("SetChargingProfile", &request) {
+        return Some(e.to_string());
+    }
+    serde_json::from_value::<ChargingProfile>(value)
         .err()
         .map(|e| e.to_string())
 }

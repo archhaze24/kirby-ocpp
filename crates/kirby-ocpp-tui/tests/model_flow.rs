@@ -218,3 +218,67 @@ async fn boot_plug_authorize_start_stop_are_reflected_in_the_model() {
     join.await.unwrap();
     csms.shutdown().await;
 }
+
+#[tokio::test]
+async fn data_browser_edits_reach_the_station_and_come_back_in_the_snapshot() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let config = StationConfig::new(csms.charge_point_url("CP-DATA"))
+        .with_connectors(2)
+        .without_persistence();
+    let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
+    let mut d = Driver {
+        app: App::new(handle.snapshot(), "ws://mock", "Acme"),
+        events: handle.subscribe(),
+        handle: handle.clone(),
+    };
+    d.drain();
+
+    // Config key: set MeterValueSampleInterval to 45.
+    d.keys("K/SampleInterval").await;
+    d.key(KeyCode::Enter).await;
+    d.key(KeyCode::Enter).await;
+    assert!(matches!(d.app.mode, Mode::Form(_)), "{}", d.app.mode.name());
+    for _ in 0..8 {
+        d.key(KeyCode::Backspace).await;
+    }
+    d.keys("45").await;
+    d.key(KeyCode::Enter).await;
+    d.until("new value in the snapshot", |a| {
+        a.snapshot
+            .config
+            .iter()
+            .any(|i| i.key == "MeterValueSampleInterval" && i.value == "45")
+    })
+    .await;
+    assert!(matches!(d.app.mode, Mode::Browser(_)));
+
+    // Local list: add an entry.
+    d.key(KeyCode::Tab).await;
+    d.keys("aKIRBY").await;
+    d.key(KeyCode::Enter).await;
+    d.until("entry in the snapshot", |a| {
+        a.snapshot
+            .local_list
+            .entries
+            .iter()
+            .any(|e| e.id_tag == "KIRBY")
+    })
+    .await;
+    assert_eq!(d.app.snapshot.local_list.version, 1);
+
+    // Charging profile: install the template, then clear all.
+    d.key(KeyCode::Tab).await;
+    d.keys("i").await;
+    d.key(KeyCode::Enter).await;
+    d.until("profile in the snapshot", |a| {
+        !a.snapshot.charging_profiles.is_empty()
+    })
+    .await;
+    d.keys("cy").await;
+    d.until("no profiles", |a| a.snapshot.charging_profiles.is_empty())
+        .await;
+
+    handle.shutdown().await.unwrap();
+    join.await.unwrap();
+    csms.shutdown().await;
+}

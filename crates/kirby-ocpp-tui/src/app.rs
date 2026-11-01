@@ -4,13 +4,14 @@
 //! event loop executes (and whose results come back as [`Msg`]s).
 
 use crossterm::event::KeyEvent;
-use kirby_ocpp_core::ids::ConnectorId;
+use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::scenario::{
     Scenario, ScenarioProgress, ScenarioReport, StepReport, StepStatus, builtin,
 };
 use kirby_ocpp_core::station::{Command, Event, Outcome, Snapshot};
 
 use crate::actions::{self, ActionDef, ActionId, Context, Tab};
+use crate::browser::{Browser, Page};
 use crate::forms::{Choice, ChoiceKind, Form, Submitted};
 use crate::logview::{LogEntry, LogStore};
 use crate::palette::Palette;
@@ -49,9 +50,13 @@ pub struct Detail {
     pub copy: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfirmAction {
     ClearLog,
+    ClearLocalList,
+    RemoveLocalEntry(IdTag),
+    ClearProfiles,
+    RemoveProfile(i32),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +75,8 @@ pub enum Mode {
     Help,
     Detail(Detail),
     Confirm(Confirm),
+    /// Configuration keys, local list and charging profiles (see [`crate::browser`]).
+    Browser(Browser),
 }
 
 impl Mode {
@@ -82,6 +89,7 @@ impl Mode {
             Self::Help => "help",
             Self::Detail(_) => "detail",
             Self::Confirm(_) => "confirm",
+            Self::Browser(_) => "browser",
         }
     }
 }
@@ -160,6 +168,9 @@ pub struct App {
     pub connector: ConnectorId,
     pub action_sel: [usize; 7],
     pub mode: Mode,
+    /// The browser while a form, confirmation or detail opened from it is on screen; it comes
+    /// back when that one closes.
+    pub suspended: Option<Browser>,
     pub log: LogStore,
     pub notice: Option<Notice>,
     pub scenarios: Vec<Scenario>,
@@ -186,6 +197,7 @@ impl App {
             connector,
             action_sel: [0; 7],
             mode: Mode::Normal,
+            suspended: None,
             log: LogStore::default(),
             notice: None,
             catalog: actions::catalog(&scenarios),
@@ -294,6 +306,9 @@ impl App {
             ActionId::AddConnector => send(fx, Command::AddConnector),
             ActionId::RuleSet => self.mode = Mode::Form(Form::rule()),
             ActionId::RulesClear => send(fx, Command::ClearResponseRules { action: None }),
+            ActionId::BrowseConfig => self.mode = Mode::Browser(Browser::new(Page::Config)),
+            ActionId::BrowseLocalList => self.mode = Mode::Browser(Browser::new(Page::LocalList)),
+            ActionId::BrowseProfiles => self.mode = Mode::Browser(Browser::new(Page::Profiles)),
             ActionId::PlugToggle => {
                 if snap_conn.is_some_and(|s| s.ev_connected) {
                     send(fx, Command::Unplug { connector: c });
@@ -494,6 +509,33 @@ impl App {
                     show_response: false,
                 });
             }
+            Submitted::ConfigValue { key, value } => {
+                let label = format!("set {key}");
+                fx.push(Effect::Send {
+                    label,
+                    command: Command::SetConfiguration { key, value },
+                    show_response: false,
+                });
+            }
+            Submitted::LocalEntry { id_tag, info } => {
+                let label = format!("local list {id_tag}");
+                fx.push(Effect::Send {
+                    label,
+                    command: Command::SetLocalListEntry { id_tag, info },
+                    show_response: false,
+                });
+            }
+            Submitted::Profile { connector, profile } => {
+                let label = format!("install profile {}", profile.charging_profile_id);
+                fx.push(Effect::Send {
+                    label,
+                    command: Command::InstallChargingProfile {
+                        connector,
+                        profile: *profile,
+                    },
+                    show_response: false,
+                });
+            }
             Submitted::Search(text) => {
                 self.log.search = text;
                 let n = self.log.visible_count();
@@ -581,6 +623,10 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             Mode::Palette(p) => {
                 p.query.insert_str(&text);
                 p.refresh(&app.catalog);
+            }
+            Mode::Browser(b) if b.filtering => {
+                b.filter.insert_str(&text);
+                b.reset_selection();
             }
             _ => {}
         },

@@ -247,7 +247,7 @@ fn payload_text_is_displayed_inertly() {
         level: LogLevel::Warn,
         text: "[red]x[/red] \x1b[2J{bold}".into(),
     }));
-    let t = render(&a, 110, 30);
+    let t = render(&a, 110, 60);
     assert!(t.contains("[red]x[/red]") && !t.contains('\x1b'));
 }
 
@@ -286,4 +286,71 @@ fn active_response_rules_are_listed_in_the_station_pane() {
     a.snapshot.response_rules = vec!["Reset=reject*3".parse().unwrap()];
     let text = render(&a, 120, 40);
     assert!(text.contains("Reset=reject*3"), "{text}");
+}
+
+#[test]
+fn browser_pages_render_their_rows_and_details() {
+    let mut a = app();
+    update(
+        &mut a,
+        Msg::Snapshot(Box::new(crate::tests_support::snapshot_with_data())),
+    );
+    a.snapshot.connection = ConnectionState::Connected;
+    keys(&mut a, "K");
+    let text = render(&a, 110, 60);
+    assert!(
+        text.contains("1 Config keys (") && text.contains("3 Charging profiles (1)"),
+        "{text}"
+    );
+    assert!(text.contains("HeartbeatInterval = 30"), "{text}");
+    assert!(text.contains("NumberOfConnectors (ro) = 2"), "{text}");
+    assert!(text.contains("accepts:"), "{text}");
+    assert!(
+        text.contains("Enter edit") && text.contains("Esc close"),
+        "{text}"
+    );
+
+    keys(&mut a, "/numberof");
+    let text = render(&a, 110, 60);
+    assert!(
+        text.contains("/ numberof") && !text.contains("HeartbeatInterval = 30"),
+        "{text}"
+    );
+    key(&mut a, KeyCode::Esc);
+
+    keys(&mut a, "2");
+    let text = render(&a, 110, 60);
+    assert!(text.contains("version 3, 2 entries"), "{text}");
+    assert!(
+        text.contains("TAG-B") && text.contains("Blocked") && text.contains("2030-01-02 03:04"),
+        "{text}"
+    );
+    assert!(text.contains("parent PARENT"), "{text}");
+
+    keys(&mut a, "3");
+    let text = render(&a, 110, 60);
+    assert!(
+        text.contains("#7 conn 0 ChargePointMaxProfile Absolute stack 1  0s:16A"),
+        "{text}"
+    );
+    assert!(text.contains("1 period(s) in A"), "{text}");
+    assert!(
+        text.contains("i install") && text.contains("c clear"),
+        "{text}"
+    );
+}
+
+#[test]
+fn browser_survives_tiny_terminals_and_empty_data() {
+    let mut a = app();
+    for page in ["K", "L", "P"] {
+        keys(&mut a, page);
+        let text = render(&a, 80, 12);
+        assert!(text.contains("Station data"), "{text}");
+        render(&a, MIN_SIZE.0, MIN_SIZE.1);
+        render(&a, 30, 9);
+        key(&mut a, KeyCode::Esc);
+    }
+    keys(&mut a, "L");
+    assert!(render(&a, 100, 20).contains("(nothing here yet)"));
 }

@@ -10,7 +10,7 @@ use crate::forms::{Choice, Field, FieldKind, Form};
 use crate::palette::Palette;
 use crate::text::{sanitize, truncate, width};
 
-const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
+pub(super) const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
@@ -23,7 +23,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-fn popup(f: &mut Frame<'_>, rect: Rect, title: &str) -> Rect {
+pub(super) fn popup(f: &mut Frame<'_>, rect: Rect, title: &str) -> Rect {
     f.render_widget(Clear, rect);
     let block = Block::bordered()
         .border_style(Style::new().fg(Color::Cyan))
@@ -42,6 +42,7 @@ pub fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
         Mode::Help => help(f, area),
         Mode::Detail(d) => detail(f, d, area),
         Mode::Confirm(c) => confirm(f, c, area),
+        Mode::Browser(b) => super::browser::draw(f, app, b, area),
     }
 }
 
@@ -203,6 +204,9 @@ const HELP: &[&str] = &[
     "Esc                     close dialog / clear log search",
     "?                       this help",
     "q or Ctrl-C             quit",
+    "",
+    "Station tab: K config keys, L local auth list, P charging profiles (data browser:",
+    "     Tab/1-3 page, / filter, Enter edit; a add, i install, d delete, c clear)",
     "",
     "Log: Enter detail, y copy row, Y copy visible, f filter, s search,",
     "     p pause/follow, G newest, e export JSONL, c clear (asks first)",

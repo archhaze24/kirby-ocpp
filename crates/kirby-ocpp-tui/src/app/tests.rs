@@ -496,3 +496,267 @@ fn clearing_all_rules_needs_an_active_rule() {
         [Command::ClearResponseRules { action: None }]
     ));
 }
+
+// ---- data browser ---------------------------------------------------------
+
+fn data_app() -> App {
+    let mut a = app();
+    let snap = crate::tests_support::snapshot_with_data();
+    update(&mut a, Msg::Snapshot(Box::new(snap)));
+    a
+}
+
+fn browser_page(a: &App) -> crate::browser::Page {
+    let Mode::Browser(b) = &a.mode else {
+        panic!("expected the browser, got {}", a.mode.name())
+    };
+    b.page
+}
+
+fn only_command(fx: &[Effect]) -> &Command {
+    let cmds = sent(fx);
+    assert_eq!(cmds.len(), 1, "{fx:?}");
+    cmds[0]
+}
+
+#[test]
+fn station_tab_opens_the_three_browser_pages() {
+    use crate::browser::Page;
+    let mut a = data_app();
+    press(&mut a, "K");
+    assert_eq!(browser_page(&a), Page::Config);
+    code(&mut a, KeyCode::Tab);
+    assert_eq!(browser_page(&a), Page::LocalList);
+    press(&mut a, "3");
+    assert_eq!(browser_page(&a), Page::Profiles);
+    code(&mut a, KeyCode::BackTab);
+    assert_eq!(browser_page(&a), Page::LocalList);
+    code(&mut a, KeyCode::Esc);
+    assert!(matches!(a.mode, Mode::Normal));
+    press(&mut a, "L");
+    assert_eq!(browser_page(&a), Page::LocalList);
+    code(&mut a, KeyCode::Esc);
+    press(&mut a, "P");
+    assert_eq!(browser_page(&a), Page::Profiles);
+    // The palette finds them too.
+    code(&mut a, KeyCode::Esc);
+    press(&mut a, "/config keys");
+    code(&mut a, KeyCode::Enter);
+    assert_eq!(browser_page(&a), Page::Config);
+}
+
+#[test]
+fn editing_a_config_key_validates_and_returns_to_the_browser() {
+    let mut a = data_app();
+    press(&mut a, "K/heartbeat");
+    code(&mut a, KeyCode::Enter);
+    press(&mut a, "");
+    let Mode::Browser(b) = &a.mode else { panic!() };
+    assert!(!b.filtering);
+    assert_eq!(
+        b.rows(&a.snapshot)[0].text.split(' ').next(),
+        Some("HeartbeatInterval")
+    );
+
+    code(&mut a, KeyCode::Enter);
+    let Mode::Form(f) = &a.mode else {
+        panic!("{}", a.mode.name())
+    };
+    assert_eq!(f.kind, FormKind::ConfigValue);
+    assert!(f.title.contains("HeartbeatInterval") && f.title.contains("integer"));
+    assert!(f.fields[0].error.is_none());
+    press(&mut a, "x");
+    let Mode::Form(f) = &a.mode else { panic!() };
+    assert!(f.fields[0].error.as_ref().unwrap().contains("expects"));
+    code(&mut a, KeyCode::Enter);
+    assert!(
+        matches!(a.mode, Mode::Form(_)),
+        "an invalid value keeps the form open"
+    );
+
+    code(&mut a, KeyCode::Backspace);
+    for _ in 0..6 {
+        code(&mut a, KeyCode::Backspace);
+    }
+    press(&mut a, "45");
+    let fx = code(&mut a, KeyCode::Enter);
+    assert_eq!(
+        only_command(&fx),
+        &Command::SetConfiguration {
+            key: "HeartbeatInterval".into(),
+            value: "45".into()
+        }
+    );
+    assert_eq!(browser_page(&a), crate::browser::Page::Config);
+}
+
+#[test]
+fn readonly_config_keys_cannot_be_edited() {
+    let mut a = data_app();
+    press(&mut a, "K/NumberOfConnectors");
+    code(&mut a, KeyCode::Enter);
+    code(&mut a, KeyCode::Enter);
+    assert!(a.notice.as_ref().unwrap().text.contains("read-only"));
+    assert_eq!(browser_page(&a), crate::browser::Page::Config);
+}
+
+#[test]
+fn local_list_add_edit_remove_and_clear() {
+    let mut a = data_app();
+    press(&mut a, "L");
+    press(&mut a, "a");
+    let Mode::Form(f) = &a.mode else { panic!() };
+    assert_eq!(f.kind, FormKind::LocalEntry);
+    code(&mut a, KeyCode::Enter);
+    assert!(matches!(a.mode, Mode::Form(_)), "idTag is required");
+    press(&mut a, "NEW");
+    code(&mut a, KeyCode::Tab);
+    code(&mut a, KeyCode::Right); // status: Blocked
+    code(&mut a, KeyCode::Tab);
+    press(&mut a, "soon");
+    let Mode::Form(f) = &a.mode else { panic!() };
+    assert!(f.fields[2].error.is_some());
+    let fx = {
+        let Mode::Form(f) = &mut a.mode else { panic!() };
+        f.fields[2].input = crate::text::TextInput::new("2031-01-01T00:00:00Z");
+        code(&mut a, KeyCode::Enter)
+    };
+    let Command::SetLocalListEntry { id_tag, info } = only_command(&fx) else {
+        panic!("{fx:?}")
+    };
+    assert_eq!(id_tag.as_str(), "NEW");
+    assert_eq!(info.status.as_str(), "Blocked");
+    assert!(info.expiry_date.is_some());
+    assert_eq!(browser_page(&a), crate::browser::Page::LocalList);
+
+    // Edit the second entry: the form is prefilled.
+    press(&mut a, "j");
+    code(&mut a, KeyCode::Enter);
+    let Mode::Form(f) = &a.mode else { panic!() };
+    assert_eq!(f.fields[0].input.text(), "TAG-B");
+    assert_eq!(f.fields[1].options[f.fields[1].option], "Blocked");
+    assert_eq!(f.fields[2].input.text(), "2030-01-02T03:04:05Z");
+    assert_eq!(f.fields[3].input.text(), "PARENT");
+    code(&mut a, KeyCode::Esc);
+    assert_eq!(browser_page(&a), crate::browser::Page::LocalList);
+
+    // Remove asks first.
+    press(&mut a, "d");
+    assert!(matches!(a.mode, Mode::Confirm(_)));
+    let fx = press(&mut a, "y");
+    assert!(
+        matches!(only_command(&fx), Command::RemoveLocalListEntry { id_tag } if id_tag.as_str() == "TAG-B")
+    );
+    assert_eq!(browser_page(&a), crate::browser::Page::LocalList);
+    press(&mut a, "d");
+    let fx = press(&mut a, "n");
+    assert!(fx.is_empty());
+    assert_eq!(browser_page(&a), crate::browser::Page::LocalList);
+
+    press(&mut a, "c");
+    let fx = press(&mut a, "y");
+    assert_eq!(only_command(&fx), &Command::ClearLocalList);
+}
+
+#[test]
+fn empty_collections_explain_themselves() {
+    let mut a = app();
+    press(&mut a, "L");
+    press(&mut a, "c");
+    assert!(a.notice.as_ref().unwrap().text.contains("empty"));
+    assert_eq!(browser_page(&a), crate::browser::Page::LocalList);
+    press(&mut a, "3");
+    press(&mut a, "c");
+    assert!(
+        a.notice
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("no charging profiles")
+    );
+    press(&mut a, "d");
+    assert_eq!(browser_page(&a), crate::browser::Page::Profiles);
+}
+
+#[test]
+fn profiles_install_show_delete_and_clear() {
+    let mut a = data_app();
+    press(&mut a, "P");
+    press(&mut a, "i");
+    let Mode::Form(f) = &a.mode else { panic!() };
+    assert_eq!(f.kind, FormKind::Profile);
+    assert!(
+        f.fields.iter().all(|f| f.error.is_none()),
+        "the template is valid"
+    );
+    // A broken profile is reported live.
+    press(&mut a, "");
+    code(&mut a, KeyCode::Tab);
+    code(&mut a, KeyCode::End);
+    code(&mut a, KeyCode::Backspace);
+    let Mode::Form(f) = &a.mode else { panic!() };
+    assert!(f.fields[1].error.as_ref().unwrap().contains("invalid JSON"));
+    press(&mut a, "}");
+    // The schema is enforced too (limit must be a multiple of 0.1).
+    let Mode::Form(f) = &mut a.mode else { panic!() };
+    f.fields[1].input =
+        crate::text::TextInput::new(crate::tests_support::PROFILE_JSON.replace("16.0", "16.05"));
+    press(&mut a, " ");
+    let Mode::Form(f) = &a.mode else { panic!() };
+    assert!(f.fields[1].error.is_some());
+    let Mode::Form(f) = &mut a.mode else { panic!() };
+    f.fields[1].input = crate::text::TextInput::new(crate::tests_support::PROFILE_JSON);
+    f.fields[0].input = crate::text::TextInput::new("2");
+    press(&mut a, " ");
+    let fx = code(&mut a, KeyCode::Enter);
+    let Command::InstallChargingProfile { connector, profile } = only_command(&fx) else {
+        panic!("{fx:?}")
+    };
+    assert_eq!((connector.get(), profile.charging_profile_id), (2, 7));
+    assert_eq!(browser_page(&a), crate::browser::Page::Profiles);
+
+    // Connector out of range.
+    press(&mut a, "e");
+    let Mode::Form(f) = &mut a.mode else { panic!() };
+    f.fields[0].input = crate::text::TextInput::new("9");
+    press(&mut a, " ");
+    let Mode::Form(f) = &a.mode else { panic!() };
+    assert!(f.fields[0].error.as_ref().unwrap().contains("0 to 2"));
+    code(&mut a, KeyCode::Esc);
+
+    // Show, delete, clear.
+    code(&mut a, KeyCode::Enter);
+    let Mode::Detail(d) = &a.mode else { panic!() };
+    assert!(d.lines.iter().any(|l| l.contains("chargingProfileId")));
+    code(&mut a, KeyCode::Esc);
+    assert_eq!(browser_page(&a), crate::browser::Page::Profiles);
+    press(&mut a, "d");
+    let fx = press(&mut a, "y");
+    assert_eq!(
+        only_command(&fx),
+        &Command::ClearChargingProfiles { id: Some(7) }
+    );
+    press(&mut a, "c");
+    let fx = press(&mut a, "y");
+    assert_eq!(
+        only_command(&fx),
+        &Command::ClearChargingProfiles { id: None }
+    );
+}
+
+#[test]
+fn browser_keys_do_not_leak_to_the_station_tab() {
+    let mut a = data_app();
+    press(&mut a, "K");
+    // `c` is Connect on the Station tab, but inside the browser it is not.
+    let fx = press(&mut a, "c");
+    assert!(fx.is_empty());
+    assert_eq!(browser_page(&a), crate::browser::Page::Config);
+    // Typing while filtering never triggers commands or closes the browser.
+    press(&mut a, "/qjk1");
+    let Mode::Browser(b) = &a.mode else { panic!() };
+    assert!(b.filtering && b.filter.text() == "qjk1");
+    code(&mut a, KeyCode::Esc);
+    let Mode::Browser(b) = &a.mode else { panic!() };
+    assert!(!b.filtering && b.filter.is_empty());
+}

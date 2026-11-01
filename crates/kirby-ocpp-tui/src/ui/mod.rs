@@ -1,5 +1,6 @@
 //! Drawing. `draw` is a pure function of the [`App`]; it never mutates it.
 
+mod browser;
 mod overlays;
 mod panes;
 
@@ -228,6 +229,36 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         Mode::Help => vec![("Esc", "close")],
         Mode::Detail(_) => vec![("Esc", "close"), ("↑↓", "scroll"), ("c", "copy")],
         Mode::Confirm(_) => vec![("y", "yes"), ("n", "no")],
+        Mode::Browser(b) if b.filtering => {
+            vec![("Enter", "keep"), ("Esc", "clear"), ("↑↓", "move")]
+        }
+        Mode::Browser(b) => {
+            let mut v = match b.page {
+                crate::browser::Page::Config => vec![("Enter", "edit")],
+                crate::browser::Page::LocalList => {
+                    vec![
+                        ("a", "add"),
+                        ("Enter", "edit"),
+                        ("d", "remove"),
+                        ("c", "clear"),
+                    ]
+                }
+                crate::browser::Page::Profiles => vec![
+                    ("i", "install"),
+                    ("e", "edit"),
+                    ("Enter", "show"),
+                    ("d", "delete"),
+                    ("c", "clear"),
+                ],
+            };
+            v.extend([
+                ("/", "filter"),
+                ("Tab", "page"),
+                ("↑↓", "move"),
+                ("Esc", "close"),
+            ]);
+            v
+        }
     }
 }
 

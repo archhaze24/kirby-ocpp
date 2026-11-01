@@ -1,14 +1,16 @@
 //! Key handling. Each [`Mode`] owns its keys; nothing falls through to another mode.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use kirby_ocpp_core::ids::IdTag;
 use kirby_ocpp_core::ocpp::types::{
     ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus, StopReason,
 };
-use kirby_ocpp_core::station::{Command, DiagnosticsOutcome, FirmwareOutcome};
+use kirby_ocpp_core::station::{Command, DiagnosticsOutcome, FirmwareOutcome, ProfileSummary};
 
 use crate::actions::{ActionId, Tab};
-use crate::app::{App, ConfirmAction, Detail, Effect, Focus, Mode, NoticeLevel};
-use crate::forms::{Choice, ChoiceKind, FormEvent};
+use crate::app::{App, Confirm, ConfirmAction, Detail, Effect, Focus, Mode, NoticeLevel};
+use crate::browser::{Browser, Page};
+use crate::forms::{Choice, ChoiceKind, Form, FormEvent};
 use crate::palette::Palette;
 
 pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
@@ -35,14 +37,213 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         }
         Mode::Detail(d) => detail(app, d, key, fx),
         Mode::Confirm(c) => match key.code {
-            KeyCode::Char('y' | 'Y') => match c.action {
-                ConfirmAction::ClearLog => {
-                    app.log.clear();
-                    app.notify(NoticeLevel::Info, "log cleared");
-                }
-            },
+            KeyCode::Char('y' | 'Y') => confirmed(app, c.action, fx),
             _ => app.notify(NoticeLevel::Info, "cancelled"),
         },
+        Mode::Browser(b) => browser(app, b, key, fx),
+    }
+    // A form, confirmation or detail opened from the browser gives the screen back to it.
+    if matches!(app.mode, Mode::Normal)
+        && let Some(b) = app.suspended.take()
+    {
+        app.mode = Mode::Browser(b);
+    }
+}
+
+fn confirmed(app: &mut App, action: ConfirmAction, fx: &mut Vec<Effect>) {
+    let send = |fx: &mut Vec<Effect>, label: &str, command: Command| {
+        fx.push(Effect::Send {
+            label: label.to_owned(),
+            command,
+            show_response: false,
+        });
+    };
+    match action {
+        ConfirmAction::ClearLog => {
+            app.log.clear();
+            app.notify(NoticeLevel::Info, "log cleared");
+        }
+        ConfirmAction::ClearLocalList => send(fx, "clear local list", Command::ClearLocalList),
+        ConfirmAction::RemoveLocalEntry(id_tag) => {
+            let label = format!("remove {id_tag}");
+            send(fx, &label, Command::RemoveLocalListEntry { id_tag });
+        }
+        ConfirmAction::ClearProfiles => send(
+            fx,
+            "clear charging profiles",
+            Command::ClearChargingProfiles { id: None },
+        ),
+        ConfirmAction::RemoveProfile(id) => {
+            let label = format!("remove profile {id}");
+            send(fx, &label, Command::ClearChargingProfiles { id: Some(id) });
+        }
+    }
+}
+
+/// Keys of the data browser. `b` is taken out of `app.mode` by the caller; whatever it opens
+/// (a form, a confirmation, a detail) goes into `app.mode` and the browser into `app.suspended`.
+fn browser(app: &mut App, mut b: Browser, key: KeyEvent, fx: &mut Vec<Effect>) {
+    let _ = fx;
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if b.filtering {
+        match key.code {
+            KeyCode::Esc => {
+                b.filter = crate::text::TextInput::default();
+                b.filtering = false;
+                b.reset_selection();
+            }
+            KeyCode::Enter => b.filtering = false,
+            KeyCode::Up => b.move_by(-1, &app.snapshot),
+            KeyCode::Down => b.move_by(1, &app.snapshot),
+            KeyCode::Left => b.filter.left(),
+            KeyCode::Right => b.filter.right(),
+            KeyCode::Home => b.filter.home(),
+            KeyCode::End => b.filter.end(),
+            KeyCode::Backspace => {
+                b.filter.backspace();
+                b.reset_selection();
+            }
+            KeyCode::Delete => {
+                b.filter.delete();
+                b.reset_selection();
+            }
+            KeyCode::Char('u') if ctrl => {
+                b.filter = crate::text::TextInput::default();
+                b.reset_selection();
+            }
+            KeyCode::Char(c) if !ctrl => {
+                b.filter.insert_char(c);
+                b.reset_selection();
+            }
+            _ => {}
+        }
+        app.mode = Mode::Browser(b);
+        return;
+    }
+    let snap = &app.snapshot;
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            if b.filter.is_empty() {
+                return;
+            }
+            b.filter = crate::text::TextInput::default();
+            b.reset_selection();
+        }
+        KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => b.switch_page(1),
+        KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => b.switch_page(-1),
+        KeyCode::Char(d @ '1'..='3') => {
+            while b.page.index() != usize::from(d as u8 - b'1') {
+                b.switch_page(1);
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => b.move_by(-1, snap),
+        KeyCode::Down | KeyCode::Char('j') => b.move_by(1, snap),
+        KeyCode::PageUp => b.move_by(-10, snap),
+        KeyCode::PageDown => b.move_by(10, snap),
+        KeyCode::Home | KeyCode::Char('g') => b.select_edge(false, snap),
+        KeyCode::End | KeyCode::Char('G') => b.select_edge(true, snap),
+        KeyCode::Char('/') => b.filtering = true,
+        KeyCode::Char(c) if !ctrl => {
+            if let Some(next) = page_action(app, &b, key.code, c) {
+                app.suspended = Some(b);
+                app.mode = next;
+                return;
+            }
+        }
+        KeyCode::Enter | KeyCode::Delete => {
+            if let Some(next) = page_action(app, &b, key.code, '\n') {
+                app.suspended = Some(b);
+                app.mode = next;
+                return;
+            }
+        }
+        _ => {}
+    }
+    app.mode = Mode::Browser(b);
+}
+
+/// What the page-specific key opens, if anything (an explanation goes to the notice line).
+fn page_action(app: &mut App, b: &Browser, code: KeyCode, c: char) -> Option<Mode> {
+    let snap = &app.snapshot;
+    let row = b.selected_row(snap);
+    let enter = code == KeyCode::Enter;
+    let delete = code == KeyCode::Delete || c == 'd';
+    let max_connector = snap.connectors.last().map_or(1, |c| c.id.get());
+    match b.page {
+        Page::Config if enter || c == 'e' => {
+            let item = row.and_then(|r| snap.config.get(r.index))?;
+            if item.readonly {
+                let text = format!("{} is read-only", item.key);
+                app.notify(NoticeLevel::Error, text);
+                return None;
+            }
+            Some(Mode::Form(Form::config_value(item, snap)))
+        }
+        Page::LocalList if c == 'a' => Some(Mode::Form(Form::local_entry(None))),
+        Page::LocalList if enter || c == 'e' => {
+            let entry = row.and_then(|r| snap.local_list.entries.get(r.index))?;
+            Some(Mode::Form(Form::local_entry(Some(entry))))
+        }
+        Page::LocalList if delete => {
+            let entry = row.and_then(|r| snap.local_list.entries.get(r.index))?;
+            let id_tag = IdTag::new(entry.id_tag.clone()).ok()?;
+            Some(Mode::Confirm(Confirm {
+                message: format!("Remove {id_tag} from the local list?"),
+                action: ConfirmAction::RemoveLocalEntry(id_tag),
+            }))
+        }
+        Page::LocalList if c == 'c' => {
+            if snap.local_list.total == 0 {
+                app.notify(NoticeLevel::Error, "the local list is empty");
+                return None;
+            }
+            Some(Mode::Confirm(Confirm {
+                message: format!("Clear the local list ({} entries)?", snap.local_list.total),
+                action: ConfirmAction::ClearLocalList,
+            }))
+        }
+        Page::Profiles if c == 'i' => Some(Mode::Form(Form::profile(None, max_connector))),
+        Page::Profiles if c == 'e' => {
+            let p = row.and_then(|r| snap.charging_profiles.get(r.index))?;
+            Some(Mode::Form(Form::profile(Some(p), max_connector)))
+        }
+        Page::Profiles if enter => {
+            let p = row.and_then(|r| snap.charging_profiles.get(r.index))?;
+            Some(Mode::Detail(profile_detail(p)))
+        }
+        Page::Profiles if delete => {
+            let p = row.and_then(|r| snap.charging_profiles.get(r.index))?;
+            Some(Mode::Confirm(Confirm {
+                message: format!("Remove charging profile {}?", p.id),
+                action: ConfirmAction::RemoveProfile(p.id),
+            }))
+        }
+        Page::Profiles if c == 'c' => {
+            if snap.charging_profiles.is_empty() {
+                app.notify(NoticeLevel::Error, "no charging profiles are installed");
+                return None;
+            }
+            Some(Mode::Confirm(Confirm {
+                message: format!(
+                    "Clear all {} charging profiles?",
+                    snap.charging_profiles.len()
+                ),
+                action: ConfirmAction::ClearProfiles,
+            }))
+        }
+        _ => None,
+    }
+}
+
+fn profile_detail(p: &ProfileSummary) -> Detail {
+    let pretty = serde_json::from_str::<serde_json::Value>(&p.json)
+        .and_then(|v| serde_json::to_string_pretty(&v))
+        .unwrap_or_else(|_| p.json.clone());
+    Detail {
+        title: format!("Charging profile {} (connector {})", p.id, p.connector),
+        lines: pretty.lines().map(crate::text::sanitize).collect(),
+        scroll: 0,
+        copy: pretty,
     }
 }
 

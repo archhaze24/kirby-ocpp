@@ -13,12 +13,15 @@
 
 pub mod actions;
 pub mod app;
+pub mod browser;
 pub mod clipboard;
 pub mod forms;
 mod keys;
 pub mod logview;
 pub mod palette;
 mod terminal;
+#[cfg(test)]
+mod tests_support;
 pub mod text;
 pub mod ui;
 
