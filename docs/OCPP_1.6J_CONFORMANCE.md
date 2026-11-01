@@ -70,6 +70,8 @@ Capability and limit keys (for example `NumberOfConnectors`, the `*MaxLength` ke
 
 Response rules (`--rule`, `KIRBY_OCPP_RULES`, TUI, scenario steps `set_rule` / `clear_rules`) make the station answer a CSMS command in a way the specification forbids, on purpose: `reject` (the action's rejection status, or CALLERROR `NotSupported` where the response has none: `GetConfiguration`, `GetLocalListVersion`, `ClearChargingProfile`, `GetDiagnostics`, `UpdateFirmware`), `delay:MS`, `error:CODE[:TEXT]`, `drop` (close the socket without a reply) and `ignore` (no reply, so the CSMS times out; the "every CALL gets one reply" rule is deliberately waived, bypassing the `InternalError` drop fallback). Without a rule the station behaves as described above. Rules are runtime only; except for `delay` the command is not executed. See the README for the syntax.
 
+Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`, `RemoveLocalListEntry`, `ClearLocalList`, `InstallChargingProfile`, `ClearChargingProfiles`) are not messages and have no spec equivalent; they reuse the rules of `ChangeConfiguration`, `SendLocalList`, `SetChargingProfile` and `ClearChargingProfile`. The local list version is the one thing they decide themselves: an edit is a differential update with version `current + 1` (a CSMS that tracks versions sees a mismatch, which is the point of testing it), and a local clear is a full update with an empty list and version `0` ("no list"). Nothing is sent to the CSMS after a local edit.
+
 ## Known limits
 
 - No Security Whitepaper extensions, no OCPP 2.x, no JSON-over-SOAP; one WebSocket connection, subprotocol `ocpp1.6` by default.

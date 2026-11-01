@@ -100,6 +100,16 @@ Seven tabs, switched with `1`-`7` or `Tab`/`Shift-Tab`: Station, Connector, Tran
 
 Actions: connect/disconnect/reconnect, BootNotification, Heartbeat, add connector, response rules (`m` adds one, `Action=off` removes one, `M` clears all; active rules are listed in the Station pane); plug/unplug, set status, StatusNotification, fault toggle; Authorize, StartTransaction, StopTransaction (with reason), MeterValues; set diagnostics/firmware outcome and send their status notifications; DataTransfer, vendor ping and raw CALLs.
 
+Data browser (Station tab: `K` config keys, `L` local authorization list, `P` charging profiles; also in the palette): one popup with three pages, switched with `Tab`/`Shift-Tab`, `Left`/`Right` or `1`-`3`. `/` filters the rows fuzzily (`Enter` keeps the filter, `Esc` clears it), `Up/Down`/`j/k`/`PageUp/PageDown`/`g`/`G` move, `Esc`/`q` closes. Forms and confirmations opened from the browser return to it. Edits are local commands that behave like the CSMS-triggered ones, without a CSMS round trip:
+
+| Page | Keys |
+| --- | --- |
+| Config keys | `Enter`/`e` edits the selected key (read-only keys are marked `(ro)` and refuse); the value is checked live with the station's own rules, as `ChangeConfiguration` would, and applied with the same side effects (heartbeat/metering timers) and persistence |
+| Local auth list | `a` adds, `Enter`/`e` edits (idTag, status, expiry, parent), `d` removes, `c` clears (asks first). Each add/edit/remove is a differential update that bumps the list version by one; clear empties the list and resets the version to 0 |
+| Charging profiles | `i` installs a profile from JSON (a template is prefilled; paste your own: `csChargingProfiles` object plus connector, validated against the `SetChargingProfile` schema and the station's profile rules), `e` edits the selected one (same id replaces it), `Enter` shows its JSON (`c` there copies), `d` deletes it, `c` clears all (asks first) |
+
+The snapshot behind it (`Snapshot::config`, `local_list`, `charging_profiles`) is also available to API users; the local list view holds at most 500 entries (`total` has the real count).
+
 Log view (Logs tab): CALL/RESULT/ERROR correlation, filters (all, calls, errors, station, csms; `f`), search (`s`), pause/follow (`p`), jump to newest (`G`), detail view with scroll (`Enter`; `c`/`y` copies), copy row (`y`) or visible rows (`Y`), export as JSONL (`e`, default `./kirby-ocpp-<id>-<timestamp>.jsonl`), clear with confirmation (`c`). The buffer keeps the last 2000 entries. Copying tries external clipboard tools first and falls back to the terminal's OSC 52 sequence.
 
 Scenarios tab: one `Run: <name>` action per built-in scenario (keys `o`, `w`, `s`, `i` for the first four) and `l` to load a scenario file, `x` to cancel the running one.
