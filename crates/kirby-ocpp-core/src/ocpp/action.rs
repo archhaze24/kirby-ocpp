@@ -8,8 +8,9 @@
 //! # How the 28 message structs are defined (`ocpp/messages/`)
 //!
 //! OCPP 1.6 has 28 distinct actions: 10 initiated by the charge point, 19 by
-//! the central system, and `DataTransfer` which goes both ways. For each action
-//! `Foo` the `messages` module contains one file `foo.rs` with:
+//! the central system, and `DataTransfer` which goes both ways (the list with
+//! directions is `messages::registry::ACTIONS`). The `messages` module groups
+//! them by profile; for each action `Foo` it defines:
 //!
 //! * `pub struct FooRequest { .. }` and `pub struct FooResponse { .. }`,
 //!   `#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]`,
@@ -17,18 +18,18 @@
 //!   `#[serde(skip_serializing_if = "Option::is_none")]`, wire enums from
 //!   [`crate::ocpp::types`] and ids from [`crate::ids`] instead of bare numbers
 //!   and strings, timestamps as `chrono::DateTime<Utc>`;
-//! * a marker `pub struct Foo;` implementing [`Action`] and one or both of
+//! * a marker `pub struct Foo;` (declared with the `action!` macro) implementing [`Action`] and one or both of
 //!   [`OutboundAction`] (charge point -> CSMS) / [`InboundAction`] (CSMS ->
 //!   charge point);
-//! * unit tests that serialize a representative value, compare it to the exact
-//!   JSON from the OCPP spec, and parse it back.
+//! * a row in the table-driven test of `messages::registry`, which validates a
+//!   typed sample of every request and response against the bundled schemas and
+//!   roundtrips it.
 //!
 //! The structs are **not** the source of truth for validation: the bundled JSON
 //! schemas are (see [`crate::ocpp::schema`]). The connection layer validates
 //! the raw `serde_json::Value` against the schema first and only then calls
 //! `serde_json::from_value`, so a schema violation maps to the right CALLERROR
-//! code instead of an opaque serde error. The one worked example is
-//! [`crate::ocpp::messages::Heartbeat`].
+//! code instead of an opaque serde error. `Heartbeat` is the smallest example.
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;

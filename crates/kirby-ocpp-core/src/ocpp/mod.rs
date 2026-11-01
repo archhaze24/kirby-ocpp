@@ -12,4 +12,4 @@ pub mod types;
 pub use action::{Action, InboundAction, OutboundAction};
 pub use frame::{Direction, ErrorCode, Frame, FrameError, FrameRecord, MessageId};
 pub use responder::{ReplyError, ReplyHandle, Responder};
-pub use schema::{PayloadKind, SchemaKeyword, SchemaRegistry, SchemaViolation};
+pub use schema::{PayloadKind, SchemaIssue, SchemaKeyword, SchemaRegistry, SchemaViolation};
