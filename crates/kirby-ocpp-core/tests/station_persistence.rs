@@ -213,3 +213,67 @@ async fn changes_are_written_soon_without_waiting_for_shutdown() {
     station.shutdown().await.unwrap();
     join.await.unwrap();
 }
+
+#[tokio::test]
+async fn a_stop_in_flight_at_a_crash_is_restored_as_a_queued_stop() {
+    use kirby_ocpp_core::ids::{IdTag, TxId};
+    use kirby_ocpp_core::ocpp::types::StopReason;
+    use kirby_ocpp_core::station::transaction::{StoppingTransaction, TransactionState};
+    use kirby_ocpp_core::store::{PersistedConnector, PersistedStation};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config("ws://127.0.0.1:9/ocpp", &dir);
+    let store = StationStore::new(dir.path(), &config.charge_point_id);
+    let mut state = PersistedStation::new(config.charge_point_id.clone());
+    state.connector_count = 2;
+    state.connectors.push(PersistedConnector {
+        id: ConnectorId::new(1),
+        status: ConnectorStatus::Finishing,
+        availability: AvailabilityType::Operative,
+        ev_connected: true,
+        meter_wh: 42,
+        last_id_tag: None,
+        reservation: None,
+        transaction: TransactionState::Stopping(StoppingTransaction {
+            tx_id: TxId::Csms(7),
+            id_tag: Some(IdTag::new("TAG1").unwrap()),
+            reason: StopReason::Local,
+        }),
+    });
+    // Connector 2: an online start that was in flight at the crash (no queue entry).
+    state.connectors.push(PersistedConnector {
+        id: ConnectorId::new(2),
+        status: ConnectorStatus::Preparing,
+        availability: AvailabilityType::Operative,
+        ev_connected: true,
+        meter_wh: 0,
+        last_id_tag: None,
+        reservation: None,
+        transaction: TransactionState::PendingStart(
+            kirby_ocpp_core::station::transaction::PendingStart {
+                tx_id: TxId::Local(99),
+                id_tag: IdTag::new("TAG2").unwrap(),
+                started_at: t0(),
+                meter_start_wh: 0,
+                reservation_id: None,
+            },
+        ),
+    });
+    store.save(&state).unwrap();
+
+    let (station, join) = Station::spawn(config, Arc::new(ManualClock::new(t0())));
+    let snapshot = station.snapshot();
+    let two = snapshot.connector(ConnectorId::new(2)).unwrap();
+    assert!(two.transaction.is_idle());
+    assert_eq!(two.status, ConnectorStatus::Preparing);
+    assert_eq!(snapshot.pending_offline_messages, 1);
+    assert!(
+        snapshot
+            .connector(ConnectorId::new(1))
+            .unwrap()
+            .transaction
+            .is_idle()
+    );
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+}

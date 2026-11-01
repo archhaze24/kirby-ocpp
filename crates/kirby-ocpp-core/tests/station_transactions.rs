@@ -407,6 +407,16 @@ async fn offline_transactions_sync_in_order_before_the_status_resend() {
         last_tx < first_status,
         "sync before status re-send: {order:?}"
     );
+    let tx_order: Vec<&str> = order
+        .iter()
+        .map(String::as_str)
+        .filter(|a| *a == "StartTransaction" || *a == "StopTransaction")
+        .collect();
+    assert_eq!(
+        tx_order,
+        ["StartTransaction", "StopTransaction", "StartTransaction"],
+        "chronological, one entry at a time"
+    );
     let stop = rig.calls("StopTransaction", mark);
     assert_eq!(stop.len(), 1);
     assert_eq!(

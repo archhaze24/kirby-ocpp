@@ -38,6 +38,9 @@ use crate::store::{LoadOutcome, PersistedConnector, PersistedStation, StationSto
 /// Debounce between the first change and the write.
 pub(super) const FLUSH_DELAY: Duration = Duration::from_millis(200);
 
+/// A state file cannot make the station allocate more connectors than this (corrupt file guard).
+const MAX_RESTORED_CONNECTORS: u32 = 4096;
+
 pub(super) struct Persistence {
     store: Option<StationStore>,
     loaded: Option<PersistedStation>,
@@ -103,6 +106,7 @@ impl Persistence {
     }
 
     /// Applies the loaded state (if any) to the freshly built actor state.
+    #[allow(clippy::too_many_lines, reason = "one linear restore sequence")]
     pub(super) fn restore(
         &mut self,
         state: &mut Snapshot,
@@ -123,6 +127,7 @@ impl Persistence {
         let count = persisted
             .connector_count
             .max(highest_saved)
+            .min(MAX_RESTORED_CONNECTORS)
             .max(u32::try_from(state.connectors.len()).unwrap_or(u32::MAX));
         for id in (u32::try_from(state.connectors.len()).unwrap_or(0) + 1)..=count {
             state.connectors.push(new_connector(id));
@@ -168,12 +173,41 @@ impl Persistence {
                 connector.status = ConnectorStatus::Unavailable;
             }
         }
+        parts.queue = persisted.offline_queue;
+        // An online start whose CALL was in flight at a crash left no queue entry: nobody
+        // would ever resolve it, so the connector would stay blocked. It never happened.
+        for connector in &mut state.connectors {
+            if let crate::station::transaction::TransactionState::PendingStart(pending) =
+                &connector.transaction
+                && parts.queue.find_by_tx(pending.tx_id).is_none()
+            {
+                connector.transaction = crate::station::transaction::TransactionState::Idle;
+                connector.status = if connector.availability == AvailabilityType::Inoperative {
+                    ConnectorStatus::Unavailable
+                } else if connector.ev_connected {
+                    ConnectorStatus::Preparing
+                } else {
+                    ConnectorStatus::Available
+                };
+            }
+        }
         // A stop that was in flight when the station died is queued, not repeated blindly.
         for connector in &mut state.connectors {
             if let crate::station::transaction::TransactionState::Stopping(stopping) =
                 connector.transaction.clone()
             {
                 connector.transaction = crate::station::transaction::TransactionState::Idle;
+                let stop = crate::station::offline::StopInfo {
+                    id_tag: stopping.id_tag.clone(),
+                    meter_stop_wh: connector.meter_wh,
+                    timestamp: chrono::DateTime::UNIX_EPOCH,
+                    reason: stopping.reason,
+                    transaction_data: Vec::new(),
+                };
+                if let Some(entry) = parts.queue.find_by_tx(stopping.tx_id) {
+                    entry.stop = Some(stop);
+                    continue;
+                }
                 parts.queue.push(crate::station::offline::OfflineTx {
                     key: match stopping.tx_id {
                         crate::ids::TxId::Local(n) => n,
@@ -183,24 +217,16 @@ impl Persistence {
                     tx_id: stopping.tx_id,
                     id_tag: stopping
                         .id_tag
-                        .clone()
                         .unwrap_or_else(|| crate::ids::IdTag::new("UNKNOWN").expect("valid tag")),
                     started_at: chrono::DateTime::UNIX_EPOCH,
                     meter_start_wh: 0,
                     reservation_id: None,
                     start_pending: false,
-                    stop: Some(crate::station::offline::StopInfo {
-                        id_tag: stopping.id_tag,
-                        meter_stop_wh: connector.meter_wh,
-                        timestamp: chrono::DateTime::UNIX_EPOCH,
-                        reason: stopping.reason,
-                        transaction_data: Vec::new(),
-                    }),
+                    stop: Some(stop),
                 });
             }
         }
 
-        parts.queue = persisted.offline_queue;
         parts.local_list = persisted.local_authorization_list;
         parts.auth_cache = persisted.authorization_cache;
         parts.profiles = persisted.charging_profiles;

@@ -134,6 +134,8 @@ pub(crate) struct StationActor {
     pub(super) invalid_limits: HashMap<ConnectorId, u64>,
     /// Offline syncs of queue entries still running.
     pub(super) sync_outstanding: usize,
+    /// Queue keys not yet started by the running offline sync (entries run one at a time, in order).
+    pub(super) sync_keys: VecDeque<u64>,
     /// Boot attempts left after a `Reset` (`ResetRetries`).
     pub(super) reset_retries: Option<u32>,
     /// Simulated diagnostics/firmware steps still to report.
@@ -178,6 +180,7 @@ impl StationActor {
         state.local_list_version = parts.local_list.version();
         state.pending_offline_messages = parts.queue.pending_messages();
 
+        let queue_high_water = parts.queue.keys().into_iter().max().unwrap_or(0);
         let (snapshot_tx, snapshot_rx) = watch::channel(state.clone());
         let actor = Self {
             config,
@@ -191,9 +194,11 @@ impl StationActor {
             auth_cache: parts.auth_cache,
             profiles: parts.profiles,
             queue: parts.queue,
-            next_local: u64::try_from(clock_seed).unwrap_or(1),
+            // Never reuse a key still present in the restored queue (the wall clock may jump back).
+            next_local: u64::try_from(clock_seed).unwrap_or(1).max(queue_high_water),
             invalid_limits: HashMap::new(),
             sync_outstanding: 0,
+            sync_keys: VecDeque::new(),
             reset_retries: None,
             maintenance: VecDeque::new(),
             timers: TimerWheel::new(),

@@ -188,6 +188,7 @@ impl StationActor {
         self.timers.cancel(&TimerKey::Maintenance);
         self.maintenance.clear();
         self.sync_outstanding = 0;
+        self.sync_keys.clear();
         self.reset_status_tracking();
         self.state.registration = None;
         let code = match error {
