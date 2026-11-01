@@ -110,10 +110,23 @@ pub async fn run_scenario(
     cancel: &CancelToken,
     progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
 ) -> ScenarioReport {
+    run_scenario_with_events(handle, scenario, cancel, progress, handle.subscribe()).await
+}
+
+/// [`run_scenario`] with an explicit event subscription (tests use a tiny channel to force lag).
+#[doc(hidden)]
+pub async fn run_scenario_with_events(
+    handle: &StationHandle,
+    scenario: &Scenario,
+    cancel: &CancelToken,
+    progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
+    events: broadcast::Receiver<Event>,
+) -> ScenarioReport {
     let started = Instant::now();
     let mut ctx = Ctx {
         handle,
-        events: handle.subscribe(),
+        events,
+        lagged: 0,
         frames: Vec::new(),
         cursor: 0,
         cancel,
@@ -186,6 +199,9 @@ fn millis(duration: Duration) -> u64 {
 struct Ctx<'a> {
     handle: &'a StationHandle,
     events: broadcast::Receiver<Event>,
+    /// Events the subscription dropped because the runner fell behind (sticky). Frames may
+    /// be among them, so `expect_call` fails instead of waiting for a CALL that was lost.
+    lagged: u64,
     /// CALL frames seen since the run started.
     frames: Vec<FrameRecord>,
     /// Index into `frames` after the last matched `expect_call`.
@@ -206,7 +222,9 @@ impl Ctx<'_> {
         loop {
             match self.events.try_recv() {
                 Ok(event) => self.record(event),
-                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(broadcast::error::TryRecvError::Lagged(missed)) => {
+                    self.lagged = self.lagged.saturating_add(missed);
+                }
                 Err(_) => break,
             }
         }
@@ -264,6 +282,13 @@ impl Ctx<'_> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             self.pump();
+            if self.lagged > 0 {
+                return Err(format!(
+                    "the scenario runner fell behind and {} station events were dropped; \
+                     CALL frames may have been missed, so `expect_call` cannot be trusted",
+                    self.lagged
+                ));
+            }
             let found = self.frames[self.cursor..].iter().position(|record| {
                 record.frame.get(2).and_then(Value::as_str) == Some(call)
                     && direction.is_none_or(|d| d == record.direction)
@@ -277,7 +302,9 @@ impl Ctx<'_> {
             tokio::select! {
                 event = self.events.recv() => match event {
                     Ok(event) => self.record(event),
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(broadcast::error::RecvError::Lagged(missed)) => {
+                        self.lagged = self.lagged.saturating_add(missed);
+                    }
                     Err(broadcast::error::RecvError::Closed) => {
                         return Err("station stopped".to_owned());
                     }

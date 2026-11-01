@@ -211,3 +211,42 @@ async fn runner_refuses_two_scenarios_at_once() {
     assert!(!runner.is_running());
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn expect_call_fails_loudly_when_the_event_subscription_lagged() {
+    use kirby_ocpp_core::station::Event;
+    use tokio::sync::broadcast;
+
+    let rig = booted_rig().await;
+    // A subscription with room for 2 events that already lost 8: frames may be among them.
+    let (tx, rx) = broadcast::channel(2);
+    for _ in 0..10 {
+        tx.send(Event::StateChanged).unwrap();
+    }
+    let s = scenario(
+        r#"
+[[steps]]
+action = "expect_call"
+call = "Heartbeat"
+timeout_ms = 60000
+"#,
+    );
+    let report = kirby_ocpp_core::scenario::run_scenario_with_events(
+        &rig.station,
+        &s,
+        &CancelToken::new(),
+        None,
+        rx,
+    )
+    .await;
+    assert!(!report.passed);
+    match &report.steps[0].status {
+        StepStatus::Failed(reason) => {
+            assert!(reason.contains("fell behind"), "{reason}");
+            assert!(reason.contains("dropped"), "{reason}");
+        }
+        other => panic!("{other:?}"),
+    }
+    drop(tx);
+    rig.shutdown().await;
+}

@@ -16,6 +16,7 @@ use tokio::sync::watch;
 pub use self::model::{Action, Condition, DEFAULT_TIMEOUT_MS, Expect, Scenario, Step};
 pub use self::runner::{
     ScenarioProgress, ScenarioReport, ScenarioRunner, StepReport, StepStatus, run_scenario,
+    run_scenario_with_events,
 };
 
 /// Why a scenario could not be loaded or started.
