@@ -5,3 +5,5 @@ target/
 *.log
 docs/rewrite/
 AGENTS.md
+npm/dist/
+node_modules/
