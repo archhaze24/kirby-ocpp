@@ -1,7 +1,6 @@
-node_modules/
-dist/
+target/
 .idea/
+.vscode/
 .DS_Store
 *.log
-OCPP_1.6_documentation/
-target/
+docs/rewrite/

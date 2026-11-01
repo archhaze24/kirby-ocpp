@@ -21,12 +21,22 @@ use tokio::task::JoinHandle;
 use crate::cli::{Cli, Cmd, RunArgs, ScenariosCmd};
 use crate::headless::Sink;
 
+/// Project licence line and third-party notices (`--licenses`).
+const LICENSES: &str = concat!(
+    "kirby-ocpp is distributed under the MIT licence (see LICENSE in the source repository).\n\n",
+    include_str!("../THIRD_PARTY_NOTICES.md")
+);
+
 /// Bad usage or configuration.
 const EXIT_USAGE: u8 = 2;
 
 #[tokio::main]
 async fn main() -> ExitCode {
     let mut cli = Cli::parse();
+    if cli.licenses {
+        print!("{LICENSES}");
+        return ExitCode::SUCCESS;
+    }
     let command = cli.command.take();
     if let Some(Cmd::Scenarios { action }) = &command {
         return scenarios(action);
