@@ -278,3 +278,12 @@ fn connector_status_and_detail_labels_are_not_cut_or_glued() {
         assert!(!t.contains("availabilityOperative"), "{t}");
     }
 }
+
+#[test]
+fn active_response_rules_are_listed_in_the_station_pane() {
+    let mut a = app();
+    assert!(render(&a, 120, 40).contains("rules"));
+    a.snapshot.response_rules = vec!["Reset=reject*3".parse().unwrap()];
+    let text = render(&a, 120, 40);
+    assert!(text.contains("Reset=reject*3"), "{text}");
+}

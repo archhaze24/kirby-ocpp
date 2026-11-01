@@ -292,6 +292,8 @@ impl App {
             ActionId::Disconnect => send(fx, Command::Disconnect),
             ActionId::Connect => send(fx, Command::Connect),
             ActionId::AddConnector => send(fx, Command::AddConnector),
+            ActionId::RuleSet => self.mode = Mode::Form(Form::rule()),
+            ActionId::RulesClear => send(fx, Command::ClearResponseRules { action: None }),
             ActionId::PlugToggle => {
                 if snap_conn.is_some_and(|s| s.ev_connected) {
                     send(fx, Command::Unplug { connector: c });
@@ -472,6 +474,24 @@ impl App {
                         validate: true,
                     },
                     show_response: true,
+                });
+            }
+            Submitted::Rule(rule) => {
+                let label = format!("rule {rule}");
+                fx.push(Effect::Send {
+                    label,
+                    command: Command::SetResponseRule { rule },
+                    show_response: false,
+                });
+            }
+            Submitted::RuleOff(action) => {
+                let label = format!("rule {action} off");
+                fx.push(Effect::Send {
+                    label,
+                    command: Command::ClearResponseRules {
+                        action: Some(action),
+                    },
+                    show_response: false,
                 });
             }
             Submitted::Search(text) => {

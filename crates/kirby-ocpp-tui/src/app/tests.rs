@@ -440,3 +440,59 @@ fn snapshot_with_new_connectors_keeps_selection_valid() {
     update(&mut a, Msg::Snapshot(Box::new(s)));
     assert_eq!(a.connector.get(), 1);
 }
+
+#[test]
+fn response_rule_form_sets_and_clears_rules() {
+    let mut a = app();
+    press(&mut a, "m");
+    let Mode::Form(f) = &a.mode else {
+        panic!("the rule form opens on the Station tab")
+    };
+    assert_eq!(f.kind, FormKind::Rule);
+    // An invalid rule keeps the form open and explains itself.
+    press(&mut a, "Reset=explode");
+    let fx = code(&mut a, KeyCode::Enter);
+    assert!(fx.is_empty());
+    let Mode::Form(f) = &a.mode else {
+        panic!("invalid form stays open")
+    };
+    assert!(f.fields[0].error.as_deref().unwrap().contains("behavior"));
+    for _ in 0.."explode".len() {
+        code(&mut a, KeyCode::Backspace);
+    }
+    press(&mut a, "reject*2");
+    let fx = code(&mut a, KeyCode::Enter);
+    assert!(matches!(
+        sent(&fx)[..],
+        [Command::SetResponseRule { rule }] if rule.to_string() == "Reset=reject*2"
+    ));
+    assert!(matches!(a.mode, Mode::Normal));
+
+    // `Action=off` removes one rule.
+    press(&mut a, "mreset=off");
+    let fx = code(&mut a, KeyCode::Enter);
+    assert!(matches!(
+        sent(&fx)[..],
+        [Command::ClearResponseRules { action: Some(action) }] if action == "Reset"
+    ));
+}
+
+#[test]
+fn clearing_all_rules_needs_an_active_rule() {
+    let mut a = app();
+    let fx = press(&mut a, "M");
+    assert!(fx.is_empty());
+    assert!(
+        a.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("no response rules"))
+    );
+    let mut s = a.snapshot.clone();
+    s.response_rules.push("Reset=drop".parse().unwrap());
+    update(&mut a, Msg::Snapshot(Box::new(s)));
+    let fx = press(&mut a, "M");
+    assert!(matches!(
+        sent(&fx)[..],
+        [Command::ClearResponseRules { action: None }]
+    ));
+}

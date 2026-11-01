@@ -64,6 +64,8 @@ pub enum ActionId {
     Disconnect,
     Connect,
     AddConnector,
+    RuleSet,
+    RulesClear,
     PlugToggle,
     CycleStatus,
     SetStatus,
@@ -166,6 +168,20 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             'a',
             "Add connector",
             "Add one more connector to the station.",
+        ),
+        def(
+            A::RuleSet,
+            T::Station,
+            'm',
+            "Response rule...",
+            "Make the station misbehave on a CSMS command: Action=reject|delay:MS|error:Code|drop|ignore, optional *COUNT; Action=off removes a rule.",
+        ),
+        def(
+            A::RulesClear,
+            T::Station,
+            'M',
+            "Clear response rules",
+            "Remove every response rule; the station answers CSMS commands normally again.",
         ),
         def(
             A::PlugToggle,
@@ -418,6 +434,9 @@ pub fn disabled_reason(id: ActionId, cx: &Context<'_>) -> Option<String> {
         A::LogCopyVisible if cx.log_visible == 0 => Some("no rows to copy".to_owned()),
         A::RunScenario(_) | A::LoadScenario if cx.scenario_running => {
             Some("a scenario is already running".to_owned())
+        }
+        A::RulesClear if snap.response_rules.is_empty() => {
+            Some("no response rules are active".to_owned())
         }
         A::CancelScenario if !cx.scenario_running => Some("no scenario is running".to_owned()),
         _ => None,

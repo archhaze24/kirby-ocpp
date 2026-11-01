@@ -160,6 +160,18 @@ fn station_lines(app: &App) -> Vec<Line<'static>> {
             "queued",
             format!("{} offline message(s)", s.pending_offline_messages),
         ),
+        kv(
+            "rules",
+            if s.response_rules.is_empty() {
+                "none".to_owned()
+            } else {
+                s.response_rules
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        ),
     ]
 }
 

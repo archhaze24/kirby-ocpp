@@ -9,7 +9,8 @@ use kirby_ocpp_core::ocpp::messages::registry::ACTIONS;
 use kirby_ocpp_core::ocpp::types::{
     ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus, Measurand, StopReason,
 };
-use kirby_ocpp_core::station::{DiagnosticsOutcome, FirmwareOutcome};
+use kirby_ocpp_core::station::response_rules::canonical_action;
+use kirby_ocpp_core::station::{DiagnosticsOutcome, FirmwareOutcome, ResponseRule};
 use serde_json::Value;
 
 use crate::text::TextInput;
@@ -35,6 +36,8 @@ pub enum FieldKind {
     /// Any number of `options` (Left/Right moves, Space toggles).
     Multi,
     Path,
+    /// A response rule (`Action=behavior[*N]`) or `Action=off`.
+    Rule,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +82,7 @@ pub enum FormKind {
     StartTx,
     MeterCustom,
     DataTransfer,
+    Rule,
     Raw,
     Search,
     Export,
@@ -109,6 +113,9 @@ pub enum Submitted {
         action: String,
         payload: Value,
     },
+    Rule(ResponseRule),
+    /// `Action=off`: remove the rule of this (canonical) action.
+    RuleOff(String),
     Search(String),
     Export(String),
     LoadScenario(String),
@@ -188,6 +195,19 @@ impl Form {
                 Field::new("messageId (optional)", FieldKind::OptionalText, ""),
                 Field::new("data (optional)", FieldKind::OptionalText, ""),
             ],
+            1,
+        )
+    }
+
+    pub fn rule() -> Self {
+        Self::build(
+            FormKind::Rule,
+            "Response rule",
+            vec![Field::new(
+                "Action=reject | delay:MS | error:Code[:text] | drop | ignore [*N]; Action=off clears",
+                FieldKind::Rule,
+                "",
+            )],
             1,
         )
     }
@@ -356,6 +376,7 @@ impl Form {
                 .map(|_| "Wh delta must be a whole number, 0 or more".to_owned()),
             FieldKind::Text | FieldKind::Path => text.is_empty().then(|| "required".to_owned()),
             FieldKind::Json => validate_payload(f.input.text(), action.as_deref()),
+            FieldKind::Rule => parse_rule_input(&text).err(),
             FieldKind::OptionalText | FieldKind::Select | FieldKind::Multi => None,
         };
     }
@@ -398,6 +419,10 @@ impl Form {
                 message_id: opt(1),
                 data: opt(2),
             },
+            FormKind::Rule => match parse_rule_input(&text(0)).ok()? {
+                RuleInput::Set(rule) => Submitted::Rule(rule),
+                RuleInput::Off(action) => Submitted::RuleOff(action),
+            },
             FormKind::Raw => Submitted::Raw {
                 action: self.fields[0].options.get(self.fields[0].option)?.clone(),
                 payload: serde_json::from_str(self.fields[1].input.text()).ok()?,
@@ -407,6 +432,25 @@ impl Form {
             FormKind::LoadScenario => Submitted::LoadScenario(text(0)),
         })
     }
+}
+
+enum RuleInput {
+    Set(ResponseRule),
+    Off(String),
+}
+
+/// `Action=off` removes a rule; anything else is the compact rule syntax of the core.
+fn parse_rule_input(text: &str) -> Result<RuleInput, String> {
+    if let Some((action, rest)) = text.split_once('=')
+        && rest.trim().eq_ignore_ascii_case("off")
+    {
+        return canonical_action(action)
+            .map(|a| RuleInput::Off(a.to_owned()))
+            .map_err(|e| e.to_string());
+    }
+    text.parse::<ResponseRule>()
+        .map(RuleInput::Set)
+        .map_err(|e| e.to_string())
 }
 
 fn step(i: &mut usize, n: usize, d: isize) {
