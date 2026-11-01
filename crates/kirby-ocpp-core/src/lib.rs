@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub mod ids;
 pub mod ocpp;
+pub mod scenario;
 pub mod station;
 pub mod store;
 pub mod ws;

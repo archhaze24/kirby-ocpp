@@ -278,15 +278,6 @@ fn tls_cert_without_key_fails_validation() {
 }
 
 #[test]
-fn running_without_print_config_fails_cleanly_until_the_ui_exists() {
-    let output = run(URL, &[]);
-    assert_eq!(output.status.code(), Some(1));
-    let text = stderr(&output);
-    assert!(text.contains("not implemented yet"), "{text}");
-    assert!(!text.contains("panicked"), "{text}");
-}
-
-#[test]
 fn serial_and_firmware_flags_reach_the_config() {
     let mut args = URL.to_vec();
     args.extend(["--serial", "SN-9", "--firmware-version", "2.0.1"]);
