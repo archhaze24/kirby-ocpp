@@ -1156,7 +1156,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-ocpp"
-version = "0.2.0"
+version = "0.3.0-dev"
 dependencies = [
  "chrono",
  "clap",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-ocpp-core"
-version = "0.2.0"
+version = "0.3.0-dev"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1196,7 +1196,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-ocpp-testkit"
-version = "0.2.0"
+version = "0.3.0-dev"
 dependencies = [
  "chrono",
  "futures-util",
@@ -1213,7 +1213,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-ocpp-tui"
-version = "0.2.0"
+version = "0.3.0-dev"
 dependencies = [
  "base64 0.22.1",
  "chrono",
