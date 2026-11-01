@@ -39,7 +39,7 @@ pub fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
         Mode::Palette(p) => palette(f, app, p, area),
         Mode::Form(form) => self::form(f, form, area),
         Mode::Choice(c) => choice(f, c, area),
-        Mode::Help => help(f, area),
+        Mode::Help => help(f, app.in_fleet, area),
         Mode::Detail(d) => detail(f, d, area),
         Mode::Confirm(c) => confirm(f, c, area),
         Mode::Browser(b) => super::browser::draw(f, app, b, area),
@@ -212,12 +212,30 @@ const HELP: &[&str] = &[
     "     p pause/follow, G newest, e export JSONL, c clear (asks first)",
 ];
 
-fn help(f: &mut Frame<'_>, area: Rect) {
-    let h = u16::try_from(HELP.len() + 2).unwrap_or(u16::MAX);
+const FLEET_HELP: &[&str] = &[
+    "",
+    "Fleet (several stations; everything else acts on the SELECTED station):",
+    "< >                     previous / next station",
+    "Alt-1 .. Alt-9          jump to station 1..9",
+    "Alt-c / Alt-d           connect / disconnect ALL stations",
+    "selector row: id, + connected, ~ connecting, - offline, * transaction running",
+];
+
+pub fn help_lines(fleet: bool) -> Vec<&'static str> {
+    let mut lines = HELP.to_vec();
+    if fleet {
+        lines.extend(FLEET_HELP);
+    }
+    lines
+}
+
+fn help(f: &mut Frame<'_>, fleet: bool, area: Rect) {
+    let lines = help_lines(fleet);
+    let h = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
     let rect = centered(area, 80.min(area.width.saturating_sub(2)), h);
     let inner = popup(f, rect, "Help");
     f.render_widget(
-        Paragraph::new(HELP.iter().map(|l| Line::raw(*l)).collect::<Vec<_>>()),
+        Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>()),
         inner,
     );
 }

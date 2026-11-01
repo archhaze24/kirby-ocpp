@@ -133,7 +133,7 @@ Without a TTY (or with `--no-tui`) the tool connects and prints events until SIG
 
 ## Fleet mode
 
-`--count N` runs N independent stations in one process against the same CSMS, for load and multi-station tests (headless only for now: the terminal UI refuses `--count > 1` with exit 2, pass `--no-tui`).
+`--count N` runs N independent stations in one process against the same CSMS, for load and multi-station tests (terminal UI on a TTY, headless with `--no-tui` or without one).
 
 ```
 kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n:03}' --count 50 --stagger-ms 100 --no-tui
@@ -142,8 +142,17 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 run --scenari
 
 - The id comes from `--id-template`, or from `--id` when no template is given. `{n}` is the station index, `{n:03}` the index zero-padded to 3 digits; `{{` and `}}` are literal braces. With `--count` above 1 the template needs a placeholder (otherwise exit 2). `--first-index` (default 1) is the index of the first station, so `--count 3 --first-index 10` gives `CP-10`, `CP-11`, `CP-12`. `--count 1` without `--id-template` uses `--id` as is; with an explicit template it is expanded too.
 - Every station is a normal station (own connection, transactions, state file named after its id, so state files never collide). `--stagger-ms` waits that long between starting two stations.
+- The terminal UI shows a selector row on top (`1 CP-001+* 2 CP-002- ...`: index, id, connection glyph `+` connected, `~` connecting/retrying, `-` offline, `*` a transaction is running) and the selected station below. Everything else (status, log, actions, `K`/`L`/`P` browsers, forms, scenarios) works on the selected station only; each station keeps its own log (last 500 rows), dialogs and scenario progress, and events of the other stations keep being recorded. `Alt` combinations may need "Option as Meta" in macOS terminals. With `--count 1` there is no selector and no extra keys. Quit stops the whole fleet.
 - Output is tagged with the station id: `[CP-001] ...` in front of every human line, a `"station"` field in every JSON line, stdout and `--log-file` alike. With `--count 1` nothing is tagged.
 - `run --scenario` runs the scenario on every station at the same time and prints one report per station (tagged), then one aggregate line: `fleet: 3/3 stations PASSED`, or `fleet: 2/3 stations passed, FAILED: CP-2`. With `--json` the aggregate is `{"type":"fleet_report","passed":bool,"total":n,"passed_count":n,"failed":[ids],"stations":[...]}`. `--timeout` covers the whole fleet, stagger included. `--report out.json` writes one file per station: `out.CP-001.json` (characters of the id other than letters, digits, `-` and `_` become `_`).
+
+| Fleet key | Action |
+|---|---|
+| `<` `>` | Previous / next station |
+| `Alt-1` .. `Alt-9` | Jump to station 1..9 |
+| `Alt-c` / `Alt-d` | Connect / disconnect all stations |
+
+Selector keys work in normal mode only (inside a dialog they are plain input).
 - Exit codes: 0 only if every station passes, 1 if any fails or times out, 2 usage error, 130 SIGINT.
 - `--print-config` with `--count > 1` prints `{"fleet": {...}, "config": {...}}` where `config` is the first station.
 

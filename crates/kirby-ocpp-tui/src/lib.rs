@@ -15,6 +15,7 @@ pub mod actions;
 pub mod app;
 pub mod browser;
 pub mod clipboard;
+pub mod fleet;
 pub mod forms;
 mod keys;
 pub mod logview;
@@ -35,7 +36,8 @@ use kirby_ocpp_core::scenario::{CancelToken, Scenario, ScenarioRunner};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 
-use crate::app::{App, Effect, Msg, NoticeLevel, update};
+use crate::app::{App, Effect, Msg, NoticeLevel};
+use crate::fleet::{FleetApp, FleetEffect, FleetMsg, update_fleet};
 
 /// UI tuning knobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,98 +78,183 @@ async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-/// Runs the UI until the user quits. Does not shut the station down; the caller does.
+/// Runs the UI for one station until the user quits. Does not shut the station down; the
+/// caller does.
 pub async fn run(handle: StationHandle, options: TuiOptions) -> Result<(), TuiError> {
+    run_fleet(&[handle], options).await
+}
+
+/// What the loop receives from the station tasks.
+enum Inbound {
+    Msg(usize, Msg),
+    /// The station's event channel closed (the station ended).
+    Gone,
+}
+
+/// Sends messages for one station into the loop.
+#[derive(Clone)]
+struct Out {
+    tx: mpsc::UnboundedSender<Inbound>,
+    station: usize,
+}
+
+impl Out {
+    fn send(&self, msg: Msg) {
+        let _ = self.tx.send(Inbound::Msg(self.station, msg));
+    }
+}
+
+/// What the loop needs per station besides the model.
+struct Ctx {
+    handle: StationHandle,
+    runner: ScenarioRunner,
+    cancel: CancelToken,
+    out: Out,
+}
+
+/// Forwards one station's events and snapshots into the loop.
+fn forward_station(handle: &StationHandle, out: &Out, tx: &mpsc::UnboundedSender<Inbound>) {
+    let mut events = handle.subscribe();
+    let mut snapshots = handle.watch_snapshot();
+    let (out, tx) = (out.clone(), tx.clone());
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                ev = events.recv() => match ev {
+                    Ok(e) => out.send(Msg::Event(e)),
+                    Err(broadcast::error::RecvError::Lagged(n)) => out.send(Msg::Notice(
+                        NoticeLevel::Error,
+                        format!("log overflow: {n} events dropped"),
+                    )),
+                    Err(broadcast::error::RecvError::Closed) => {
+                        let _ = tx.send(Inbound::Gone);
+                        return;
+                    }
+                },
+                changed = snapshots.changed() => {
+                    if changed.is_err() {
+                        let _ = tx.send(Inbound::Gone);
+                        return;
+                    }
+                    out.send(Msg::Snapshot(Box::new(snapshots.borrow_and_update().clone())));
+                }
+            }
+        }
+    });
+}
+
+/// Runs the UI over one or more stations until the user quits. With more than one station
+/// a selector row is shown (see [`fleet`]). Does not shut the stations down; the caller does.
+pub async fn run_fleet(stations: &[StationHandle], options: TuiOptions) -> Result<(), TuiError> {
     let mut guard = terminal::TerminalGuard::enter()?;
-    let config = handle.config();
-    let mut app = App::new(
-        handle.snapshot(),
-        text::redact_url(&config.url),
-        config.vendor.clone(),
-    );
+    let apps: Vec<App> = stations
+        .iter()
+        .map(|handle| {
+            let config = handle.config();
+            App::new(
+                handle.snapshot(),
+                text::redact_url(&config.url),
+                config.vendor.clone(),
+            )
+        })
+        .collect();
+    let mut model = FleetApp::new(apps);
     if let Ok(size) = guard.terminal().size() {
-        app.size = (size.width, size.height);
+        for app in &mut model.apps {
+            app.size = (size.width, size.height);
+        }
     }
 
+    let (tx, mut rx) = mpsc::unbounded_channel::<Inbound>();
+    let mut ctxs: Vec<Ctx> = Vec::with_capacity(stations.len());
+    for (station, handle) in stations.iter().enumerate() {
+        let out = Out {
+            tx: tx.clone(),
+            station,
+        };
+        forward_station(handle, &out, &tx);
+        ctxs.push(Ctx {
+            handle: handle.clone(),
+            runner: ScenarioRunner::new(handle.clone()),
+            cancel: CancelToken::new(),
+            out,
+        });
+    }
+    let mut gone = 0;
     let mut keys = EventStream::new();
-    let mut station_events = handle.subscribe();
-    let mut snapshots = handle.watch_snapshot();
-    let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<Msg>();
-    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
-    let runner = ScenarioRunner::new(handle.clone());
-    let mut cancel = CancelToken::new();
     let mut tick = tokio::time::interval(options.tick_rate);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let signal = shutdown_signal();
     tokio::pin!(signal);
 
-    while !app.quit {
+    while !model.quit {
         let msg = tokio::select! {
             ev = keys.next() => match ev {
-                Some(Ok(TermEvent::Key(k))) => Msg::Key(k),
-                Some(Ok(TermEvent::Paste(s))) => Msg::Paste(s),
-                Some(Ok(TermEvent::Resize(w, h))) => Msg::Resize(w, h),
+                Some(Ok(TermEvent::Key(k))) => FleetMsg::Key(k),
+                Some(Ok(TermEvent::Paste(s))) => FleetMsg::Paste(s),
+                Some(Ok(TermEvent::Resize(w, h))) => FleetMsg::Resize(w, h),
                 Some(Ok(_)) => continue,
                 Some(Err(e)) => return Err(e.into()),
                 None => break,
             },
-            ev = station_events.recv() => match ev {
-                Ok(e) => Msg::Event(e),
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    Msg::Notice(NoticeLevel::Error, format!("log overflow: {n} events dropped"))
+            Some(inbound) = rx.recv() => match inbound {
+                Inbound::Msg(station, msg) => FleetMsg::Station { station, msg },
+                Inbound::Gone => {
+                    gone += 1;
+                    if gone >= ctxs.len() {
+                        break;
+                    }
+                    continue;
                 }
-                Err(broadcast::error::RecvError::Closed) => break,
             },
-            changed = snapshots.changed() => {
-                if changed.is_err() { break; }
-                Msg::Snapshot(Box::new(snapshots.borrow_and_update().clone()))
-            },
-            Some(p) = progress_rx.recv() => Msg::Scenario(p),
-            Some(m) = msg_rx.recv() => m,
-            _ = tick.tick() => Msg::Tick,
-            () = &mut signal => Msg::Signal,
+            _ = tick.tick() => FleetMsg::Tick,
+            () = &mut signal => FleetMsg::Signal,
         };
-        let is_tick = matches!(msg, Msg::Tick);
-        let effects = update(&mut app, msg);
-        for effect in effects {
-            execute(
-                effect,
-                &handle,
-                &runner,
-                &mut cancel,
-                &msg_tx,
-                &progress_tx,
-                &mut guard,
-            )
-            .await;
+        let is_tick = matches!(msg, FleetMsg::Tick);
+        for effect in update_fleet(&mut model, msg) {
+            match effect {
+                FleetEffect::Station { station, effect } => {
+                    if let Some(ctx) = ctxs.get_mut(station) {
+                        execute(effect, ctx, &mut guard).await;
+                    }
+                }
+                FleetEffect::ConnectAll => {
+                    for ctx in &ctxs {
+                        let h = ctx.handle.clone();
+                        tokio::spawn(async move { h.connect().await });
+                    }
+                }
+                FleetEffect::DisconnectAll => {
+                    for ctx in &ctxs {
+                        let h = ctx.handle.clone();
+                        tokio::spawn(async move { h.disconnect().await });
+                    }
+                }
+            }
         }
-        if is_tick && app.dirty {
-            guard.terminal().draw(|f| ui::draw(f, &app))?;
-            app.dirty = false;
+        if is_tick && model.dirty {
+            guard.terminal().draw(|f| ui::draw_fleet(f, &model))?;
+            model.dirty = false;
+            model.current_mut().dirty = false;
         }
+    }
+    for ctx in &ctxs {
+        ctx.cancel.cancel();
     }
     Ok(())
 }
 
-async fn execute(
-    effect: Effect,
-    handle: &StationHandle,
-    runner: &ScenarioRunner,
-    cancel: &mut CancelToken,
-    msg_tx: &mpsc::UnboundedSender<Msg>,
-    progress_tx: &mpsc::UnboundedSender<kirby_ocpp_core::scenario::ScenarioProgress>,
-    guard: &mut terminal::TerminalGuard,
-) {
+async fn execute(effect: Effect, ctx: &mut Ctx, guard: &mut terminal::TerminalGuard) {
     match effect {
         Effect::Send {
             label,
             command,
             show_response,
         } => {
-            let (h, tx) = (handle.clone(), msg_tx.clone());
+            let (h, out) = (ctx.handle.clone(), ctx.out.clone());
             tokio::spawn(async move {
                 let result = h.send(command).await.map_err(|e| e.to_string());
-                let _ = tx.send(Msg::CommandDone {
+                out.send(Msg::CommandDone {
                     label,
                     show_response,
                     result,
@@ -175,26 +262,22 @@ async fn execute(
             });
         }
         Effect::RunScenario(scenario) => {
-            *cancel = CancelToken::new();
-            spawn_scenario(*scenario, runner, cancel.clone(), msg_tx, progress_tx);
+            ctx.cancel = CancelToken::new();
+            spawn_scenario(*scenario, ctx);
         }
         Effect::RunScenarioFile(path) => {
             match tokio::task::spawn_blocking(move || Scenario::load(std::path::Path::new(&path)))
                 .await
             {
                 Ok(Ok(scenario)) => {
-                    *cancel = CancelToken::new();
-                    spawn_scenario(scenario, runner, cancel.clone(), msg_tx, progress_tx);
+                    ctx.cancel = CancelToken::new();
+                    spawn_scenario(scenario, ctx);
                 }
-                Ok(Err(e)) => {
-                    let _ = msg_tx.send(Msg::ScenarioError(e.to_string()));
-                }
-                Err(e) => {
-                    let _ = msg_tx.send(Msg::ScenarioError(e.to_string()));
-                }
+                Ok(Err(e)) => ctx.out.send(Msg::ScenarioError(e.to_string())),
+                Err(e) => ctx.out.send(Msg::ScenarioError(e.to_string())),
             }
         }
-        Effect::CancelScenario => cancel.cancel(),
+        Effect::CancelScenario => ctx.cancel.cancel(),
         Effect::Copy { text, what } => {
             let ext = tokio::time::timeout(
                 Duration::from_millis(500),
@@ -220,14 +303,14 @@ async fn execute(
                     format!("{what} is too large to copy; use export"),
                 )
             };
-            let _ = msg_tx.send(Msg::Notice(notice.0, notice.1));
+            ctx.out.send(Msg::Notice(notice.0, notice.1));
         }
         Effect::WriteFile { path, contents } => {
             let notice = match write_private(&path, contents).await {
                 Ok(()) => (NoticeLevel::Success, format!("log exported to {path}")),
                 Err(e) => (NoticeLevel::Error, format!("export to {path} failed: {e}")),
             };
-            let _ = msg_tx.send(Msg::Notice(notice.0, notice.1));
+            ctx.out.send(Msg::Notice(notice.0, notice.1));
         }
     }
 }
@@ -251,20 +334,22 @@ async fn write_private(path: &str, contents: String) -> std::io::Result<()> {
     .map_err(std::io::Error::other)?
 }
 
-fn spawn_scenario(
-    scenario: Scenario,
-    runner: &ScenarioRunner,
-    cancel: CancelToken,
-    msg_tx: &mpsc::UnboundedSender<Msg>,
-    progress_tx: &mpsc::UnboundedSender<kirby_ocpp_core::scenario::ScenarioProgress>,
-) {
-    let (runner, tx, progress) = (runner.clone(), msg_tx.clone(), progress_tx.clone());
+fn spawn_scenario(scenario: Scenario, ctx: &Ctx) {
+    let (runner, out, cancel) = (ctx.runner.clone(), ctx.out.clone(), ctx.cancel.clone());
+    let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+    let relay = out.clone();
     tokio::spawn(async move {
-        let msg = match runner.run(&scenario, &cancel, Some(&progress)).await {
+        while let Some(p) = progress_rx.recv().await {
+            relay.send(Msg::Scenario(p));
+        }
+    });
+    tokio::spawn(async move {
+        let msg = match runner.run(&scenario, &cancel, Some(&progress_tx)).await {
             Ok(report) => Msg::ScenarioDone(Box::new(report)),
             Err(e) => Msg::ScenarioError(e.to_string()),
         };
-        let _ = tx.send(msg);
+        drop(progress_tx);
+        out.send(msg);
     });
 }
 

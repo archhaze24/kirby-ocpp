@@ -1,4 +1,4 @@
-//! Fleet mode (`--count N`): N stations in one process, headless only for now.
+//! Fleet mode (`--count N`): N stations in one process, with the terminal UI or headless.
 //!
 //! Output of a fleet is tagged with the station id: `[id] ` in front of every human
 //! line, a `"station"` field in every JSON line (stdout and `--log-file` alike).
@@ -13,6 +13,7 @@ use kirby_ocpp_core::fleet::{Fleet, FleetSpec};
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::scenario::CancelToken;
 use kirby_ocpp_core::{Clock, StationConfig, SystemClock};
+use kirby_ocpp_tui::{TuiError, TuiOptions};
 use serde_json::{Value, json};
 
 use crate::cli::RunArgs;
@@ -26,7 +27,8 @@ fn clock() -> Arc<dyn Clock> {
     Arc::new(SystemClock)
 }
 
-/// Connects every station and logs tagged events until interrupted.
+/// Connects every station and shows them in the terminal UI, or logs tagged events until
+/// interrupted.
 pub async fn interactive(
     config: StationConfig,
     spec: FleetSpec,
@@ -34,16 +36,48 @@ pub async fn interactive(
     json: bool,
     log_file: Option<&Path>,
 ) -> ExitCode {
-    // FLEET-GUARD: remove in step B
-    if tui {
-        return usage_error(
-            "fleet mode (--count > 1) does not support the terminal UI yet; pass --no-tui",
-        );
-    }
     let mut fleet = match Fleet::spawn(&config, &spec, &clock()) {
         Ok(fleet) => fleet,
         Err(error) => return usage_error(&error.to_string()),
     };
+    if tui {
+        let handles: Vec<_> = fleet.stations().iter().map(|(_, h)| h.clone()).collect();
+        let mut ui = std::pin::pin!(kirby_ocpp_tui::run_fleet(&handles, TuiOptions::default()));
+        // Like the single station: connect at startup (staggered), while the UI is up.
+        // Connect failures are printed after the UI ends (stderr would garble the screen).
+        let mut connect_failures = Vec::new();
+        let result = {
+            let mut connecting = std::pin::pin!(fleet.connect_all());
+            tokio::select! {
+                result = &mut ui => Some(result),
+                failed = &mut connecting => {
+                    connect_failures = failed;
+                    None
+                }
+            }
+        };
+        let result = match result {
+            Some(result) => result,
+            None => ui.await,
+        };
+        for (id, error) in connect_failures {
+            eprintln!("error: [{id}] {error}");
+        }
+        match result {
+            Ok(()) => {
+                fleet.shutdown().await;
+                return ExitCode::SUCCESS;
+            }
+            Err(error @ TuiError::Terminal(_)) => {
+                eprintln!("note: {error}; running headless (pass --no-tui to hide this)");
+            }
+            Err(error) => {
+                fleet.shutdown().await;
+                eprintln!("error: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     let sink = match Sink::spawn_fleet(fleet.subscribe(), json, log_file) {
         Ok(sink) => sink,
         Err(error) => {

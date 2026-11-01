@@ -139,6 +139,11 @@ impl Default for LogStore {
 }
 
 impl LogStore {
+    /// Most rows kept.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub fn new(capacity: usize) -> Self {
         Self {
             entries: VecDeque::new(),

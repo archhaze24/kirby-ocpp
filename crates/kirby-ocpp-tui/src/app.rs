@@ -178,6 +178,8 @@ pub struct App {
     pub scenario: ScenarioView,
     pub dirty: bool,
     pub quit: bool,
+    /// One of several stations (the help mentions the station selector keys).
+    pub in_fleet: bool,
 }
 
 impl App {
@@ -205,6 +207,7 @@ impl App {
             scenario: ScenarioView::default(),
             dirty: true,
             quit: false,
+            in_fleet: false,
         }
     }
 

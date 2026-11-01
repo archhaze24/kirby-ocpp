@@ -4,6 +4,8 @@ mod browser;
 mod overlays;
 mod panes;
 
+pub use overlays::help_lines;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -12,6 +14,7 @@ use ratatui::widgets::Paragraph;
 
 use crate::actions::Tab;
 use crate::app::{App, Mode, NoticeLevel};
+use crate::fleet::{FleetApp, station_marks, visible_range};
 use crate::text::{truncate, width};
 
 /// Width from which the three-column layout is used.
@@ -23,7 +26,63 @@ pub fn dim() -> Style {
 }
 
 pub fn draw(f: &mut Frame<'_>, app: &App) {
-    let area = f.area();
+    draw_in(f, app, f.area());
+}
+
+/// Draws the whole fleet UI: with several stations a selector row on top and the
+/// selected station below; with one station exactly [`draw`].
+pub fn draw_fleet(f: &mut Frame<'_>, fleet: &FleetApp) {
+    if !fleet.is_fleet() || f.area().height < 2 {
+        draw_in(f, fleet.current(), f.area());
+        return;
+    }
+    let [strip, rest] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(f.area());
+    draw_selector(f, fleet, strip);
+    draw_in(f, fleet.current(), rest);
+}
+
+/// `n:id<glyph>[*]` per station, windowed around the selected one, count on the right.
+fn draw_selector(f: &mut Frame<'_>, fleet: &FleetApp, area: Rect) {
+    let total = fleet.apps.len();
+    let count = format!(" {}/{total}", fleet.selected + 1);
+    let avail = usize::from(area.width).saturating_sub(width(&count) + 4);
+    let labels: Vec<(String, Color)> = fleet
+        .apps
+        .iter()
+        .enumerate()
+        .map(|(i, app)| {
+            let (glyph, tx) = station_marks(&app.snapshot);
+            let color = match glyph {
+                '+' => Color::Green,
+                '~' => Color::Yellow,
+                _ => Color::Red,
+            };
+            let tx = if tx { "*" } else { "" };
+            let id = crate::text::sanitize(&app.snapshot.charge_point_id);
+            (format!(" {} {id}{glyph}{tx} ", i + 1), color)
+        })
+        .collect();
+    let widths: Vec<usize> = labels.iter().map(|(l, _)| width(l)).collect();
+    let (start, end) = visible_range(&widths, fleet.selected, avail);
+    let mut spans = vec![Span::styled(if start > 0 { "< " } else { "  " }, dim())];
+    for (i, (label, color)) in labels.iter().enumerate().take(end).skip(start) {
+        let style = if i == fleet.selected {
+            Style::new().fg(Color::Black).bg(*color)
+        } else {
+            Style::new().fg(*color)
+        };
+        spans.push(Span::styled(truncate(label, avail.max(1)), style));
+        spans.push(Span::raw(" "));
+    }
+    if end < total {
+        spans.push(Span::styled("> ", dim()));
+    }
+    spans.push(Span::styled(count, dim()));
+    f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_in(f: &mut Frame<'_>, app: &App, area: Rect) {
     if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
         let msg = format!(
             "terminal too small ({}x{}, need {}x{})",
