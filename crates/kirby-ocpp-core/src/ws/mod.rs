@@ -1,9 +1,5 @@
 //! The connection layer: one WebSocket (optionally TLS) to the CSMS.
 //!
-//! **Contract only.** The types and signatures below are final; the transport
-//! (tokio-tungstenite + rustls, ping/pong watchdog, subprotocol enforcement,
-//! pending-call table, outbound CALL queue) is filled in by the ocpp stage.
-//!
 //! # Model
 //!
 //! [`Connection::connect`] performs the handshake and returns a cloneable
@@ -23,23 +19,57 @@
 //!   ones are answered by the task itself and never reach the station.
 //! * On close, every pending and queued CALL fails with [`CallError::Closed`],
 //!   and outstanding reply handles are invalidated.
-//! * The WebSocket URL is `<base>/<percent-encoded charge point id>` built by
+//! * The WebSocket URL is `<base>/<percent-encoded id>` built by
 //!   [`charge_point_url`]; the negotiated subprotocol must equal the requested one
-//!   (close code 1002 otherwise).
+//!   (the connection is closed with 1002 otherwise).
+//!
+//! # Owner obligations
+//!
+//! The event receiver is bounded and the task waits for it when it has an event to
+//! deliver. An owner must therefore drain the receiver **while** it awaits
+//! [`Connection::call`]; awaiting a call without draining deadlocks.
+//!
+//! # Timeouts
+//!
+//! A CALL's timeout starts when the CALL is written to the socket, not when it is
+//! queued behind an earlier CALL. The connection attempt (TCP, TLS and the HTTP
+//! upgrade) is bounded by [`ConnectOptions::call_timeout`] as well.
 
+mod handshake;
+mod task;
+mod tls;
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::net::TcpStream;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout;
+use tokio_rustls::TlsConnector;
 use url::Url;
 
 use crate::config::TlsConfig;
 use crate::error::CallError;
+use crate::ocpp::SchemaRegistry;
 use crate::ocpp::action::OutboundAction;
 use crate::ocpp::frame::FrameRecord;
 use crate::ocpp::responder::ReplyHandle;
+
+/// Bounded capacity of the event channel.
+const EVENT_CAPACITY: usize = 64;
+
+/// The bundled OCPP schemas, compiled once for the whole process.
+static SCHEMAS: LazyLock<SchemaRegistry> =
+    LazyLock::new(|| SchemaRegistry::new().expect("bundled OCPP 1.6J schemas compile"));
+
+fn schemas() -> &'static SchemaRegistry {
+    &SCHEMAS
+}
 
 /// State of the link to the CSMS, as shown in snapshots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -60,11 +90,12 @@ pub enum ConnectionState {
 /// Options of a connection (everything not part of the URL/TLS/subprotocol triple).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectOptions {
-    /// WebSocket ping interval; `None` disables pings. Watchdog (as in the TS client):
+    /// WebSocket ping interval; `None` (or a zero duration) disables pings. Watchdog (as in the TS client):
     /// if the pong for the previous ping is still missing when the next tick fires,
     /// the socket is terminated.
     pub ping_interval: Option<Duration>,
-    /// Default timeout of [`Connection::call`] when none is given.
+    /// Default timeout of [`Connection::call`] when none is given. Also bounds the
+    /// connection attempt.
     pub call_timeout: Duration,
     /// Serialize outbound CALLs (default `true`). `false` allows several in flight.
     pub serialize_calls: bool,
@@ -85,7 +116,8 @@ impl Default for ConnectOptions {
 #[non_exhaustive]
 pub enum ConnectionEvent {
     /// A frame crossed the wire (either direction), for logs. Emitted for every
-    /// text frame, including unparsable ones.
+    /// text frame, including unparsable ones (whose `frame` is the raw text as a
+    /// JSON string).
     Frame(FrameRecord),
     /// A schema-valid CALL from the CSMS awaiting a reply.
     Call(IncomingCall),
@@ -94,9 +126,11 @@ pub enum ConnectionEvent {
     ProtocolWarning(String),
     /// The socket is gone. After this event no more events arrive.
     Closed {
+        /// WebSocket close code: the peer's, or ours for a close we initiated.
+        /// `Some(1006)` for an abnormal end without a close handshake.
         code: Option<u16>,
         reason: String,
-        /// `true` if we initiated the close.
+        /// `true` if we initiated the close (or terminated the socket ourselves).
         by_us: bool,
     },
 }
@@ -117,29 +151,36 @@ pub struct IncomingCall {
 pub enum ConnectError {
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
+    /// A TLS setting is inconsistent or the TLS handshake failed.
     #[error("TLS configuration error: {0}")]
     Tls(String),
+    /// A TLS file (CA certificate, client certificate or key) could not be read or parsed.
+    #[error("cannot use TLS file {}: {reason}", path.display())]
+    TlsFile { path: PathBuf, reason: String },
+    /// The TCP connection could not be established.
+    #[error("cannot reach the central system: {0}")]
+    Network(String),
     #[error("WebSocket handshake failed: {0}")]
     Handshake(String),
-    /// The server did not select the requested subprotocol.
+    /// The server did not select the requested subprotocol. The connection was
+    /// closed with code 1002 before this error is returned.
     #[error("central system did not negotiate required WebSocket subprotocol {expected}")]
     SubprotocolMismatch { expected: String },
+    /// The connection attempt (TCP, TLS and upgrade) exceeded [`ConnectOptions::call_timeout`].
     #[error("connection attempt timed out")]
     Timeout,
 }
 
 /// Cloneable handle to an open connection.
+///
+/// Dropping the last handle closes the connection gracefully.
 #[derive(Debug, Clone)]
 pub struct Connection {
-    _task: (),
+    commands: mpsc::UnboundedSender<task::Command>,
+    open: Arc<AtomicBool>,
+    default_timeout: Duration,
 }
 
-#[allow(
-    unused_variables,
-    clippy::unused_async,
-    clippy::unused_self,
-    reason = "signatures are final; bodies arrive with the ocpp stage"
-)]
 impl Connection {
     /// Opens a connection to `<url>/<charge_point_id>` requesting `subprotocol`.
     ///
@@ -152,18 +193,74 @@ impl Connection {
         subprotocol: &str,
         options: ConnectOptions,
     ) -> Result<(Self, mpsc::Receiver<ConnectionEvent>), ConnectError> {
-        unimplemented!("ocpp stage: websocket transport")
+        let url = charge_point_url(url, charge_point_id)?;
+        let attempt = options.call_timeout;
+        let default_timeout = options.call_timeout;
+
+        let (open, commands, events) = if url.scheme() == "wss" {
+            let config = tls::client_config(tls).await?;
+            let ws = timeout(attempt, async {
+                let tcp = tcp_connect(&url).await?;
+                let server_name = tls::server_name(&url, tls)?;
+                let stream = TlsConnector::from(config)
+                    .connect(server_name, tcp)
+                    .await
+                    .map_err(|e| ConnectError::Tls(format!("TLS handshake failed: {e}")))?;
+                handshake::upgrade(stream, &url, subprotocol).await
+            })
+            .await
+            .map_err(|_| ConnectError::Timeout)??;
+            task::spawn(ws, &options)
+        } else {
+            let ws = timeout(attempt, async {
+                let tcp = tcp_connect(&url).await?;
+                handshake::upgrade(tcp, &url, subprotocol).await
+            })
+            .await
+            .map_err(|_| ConnectError::Timeout)??;
+            task::spawn(ws, &options)
+        };
+
+        Ok((
+            Self {
+                commands,
+                open,
+                default_timeout,
+            },
+            events,
+        ))
     }
 
     /// Sends a CALL and waits for its CALLRESULT payload. `timeout` defaults to
     /// [`ConnectOptions::call_timeout`].
+    ///
+    /// The request is validated first: a schema violation returns
+    /// [`CallError::Schema`] and nothing is sent. Dropping the returned future does
+    /// not cancel the CALL; it is still sent (and its response discarded).
     pub async fn call(
         &self,
         action: &str,
         payload: Value,
         timeout: Option<Duration>,
     ) -> Result<Value, CallError> {
-        unimplemented!("ocpp stage: outbound CALL queue")
+        if !self.is_open() {
+            return Err(CallError::NotConnected);
+        }
+        schemas().validate_request(action, &payload)?;
+
+        let (reply, response) = oneshot::channel();
+        let call = task::OutboundCall {
+            action: action.to_owned(),
+            payload,
+            timeout: timeout.unwrap_or(self.default_timeout),
+            reply,
+        };
+        self.commands
+            .send(task::Command::Call(call))
+            .map_err(|_| CallError::NotConnected)?;
+        response
+            .await
+            .unwrap_or(Err(CallError::Closed { code: None }))
     }
 
     /// Typed variant of [`Connection::call`] for charge-point-initiated actions.
@@ -172,18 +269,52 @@ impl Connection {
         request: &A::Req,
         timeout: Option<Duration>,
     ) -> Result<A::Res, CallError> {
-        unimplemented!("ocpp stage: typed CALL")
+        let payload = serde_json::to_value(request).map_err(|source| CallError::Serialize {
+            action: A::NAME.to_owned(),
+            source,
+        })?;
+        let value = self.call(A::NAME, payload, timeout).await?;
+        serde_json::from_value(value).map_err(|source| CallError::Decode {
+            action: A::NAME.to_owned(),
+            source,
+        })
     }
 
     /// Starts a graceful close (WebSocket Close frame). Idempotent.
+    ///
+    /// The task sends the Close frame and waits (bounded) for the peer's reply, then
+    /// emits [`ConnectionEvent::Closed`] with `by_us: true`. Calls not yet answered
+    /// fail with [`CallError::Closed`].
     pub fn close(&self) {
-        unimplemented!("ocpp stage: close")
+        self.open.store(false, Ordering::SeqCst);
+        let _ = self.commands.send(task::Command::Close);
     }
 
-    /// `true` while the socket is open.
+    /// `true` while the socket is open (and no close has been requested).
     pub fn is_open(&self) -> bool {
-        unimplemented!("ocpp stage: state")
+        self.open.load(Ordering::SeqCst)
     }
+}
+
+/// Opens the TCP connection to the URL's host and port.
+async fn tcp_connect(url: &Url) -> Result<TcpStream, ConnectError> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| ConnectError::InvalidUrl(format!("{}: no host", redact(url))))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| ConnectError::InvalidUrl(format!("{}: no port", redact(url))))?;
+    TcpStream::connect((host, port))
+        .await
+        .map_err(|e| ConnectError::Network(format!("{host}:{port}: {e}")))
+}
+
+/// The URL without its userinfo, for error messages (passwords must not reach logs).
+fn redact(url: &Url) -> String {
+    let mut shown = url.clone();
+    let _ = shown.set_username("");
+    let _ = shown.set_password(None);
+    shown.to_string()
 }
 
 /// Builds the WebSocket URL for a charge point: `<base>/<percent-encoded id>`.
@@ -192,10 +323,12 @@ impl Connection {
 /// base are preserved (the TS code appended the id after the query, producing a broken
 /// URL). If the base path already ends with the (encoded) id it is used as is.
 pub fn charge_point_url(base: &str, charge_point_id: &str) -> Result<Url, ConnectError> {
-    let mut url = Url::parse(base).map_err(|e| ConnectError::InvalidUrl(format!("{base}: {e}")))?;
+    let mut url = Url::parse(base)
+        .map_err(|e| ConnectError::InvalidUrl(format!("{}: {e}", redact_text(base))))?;
     if !matches!(url.scheme(), "ws" | "wss") {
         return Err(ConnectError::InvalidUrl(format!(
-            "{base}: scheme must be ws or wss"
+            "{}: scheme must be ws or wss",
+            redact(&url)
         )));
     }
     let mut encoded = Url::parse("ws://h/").expect("static URL is valid");
@@ -212,11 +345,23 @@ pub fn charge_point_url(base: &str, charge_point_id: &str) -> Result<Url, Connec
     if already_there {
         return Ok(url);
     }
+    let shown = redact(&url);
     url.path_segments_mut()
-        .map_err(|()| ConnectError::InvalidUrl(format!("{base}: cannot be a base URL")))?
+        .map_err(|()| ConnectError::InvalidUrl(format!("{shown}: cannot be a base URL")))?
         .pop_if_empty()
         .push(charge_point_id);
     Ok(url)
+}
+
+/// Parse errors have no parsed URL; drop anything before `@` in the authority.
+fn redact_text(base: &str) -> String {
+    match base.split_once("://") {
+        Some((scheme, rest)) => match rest.split_once('@') {
+            Some((_, after)) => format!("{scheme}://<redacted>@{after}"),
+            None => base.to_owned(),
+        },
+        None => base.to_owned(),
+    }
 }
 
 #[cfg(test)]
@@ -260,6 +405,17 @@ mod tests {
             Err(ConnectError::InvalidUrl(_))
         ));
         assert!(charge_point_url("nonsense", "id").is_err());
+    }
+
+    #[test]
+    fn error_messages_do_not_show_the_password() {
+        let parse_error = charge_point_url("ws://user:secret@[bad/ocpp", "CP-1").unwrap_err();
+        assert!(!parse_error.to_string().contains("secret"), "{parse_error}");
+        let scheme_error = charge_point_url("http://user:secret@h/ocpp", "CP-1").unwrap_err();
+        assert!(
+            !scheme_error.to_string().contains("secret"),
+            "{scheme_error}"
+        );
     }
 
     #[test]
