@@ -119,7 +119,7 @@ impl StationActor {
                 }
                 return;
             };
-            connector.meter_wh += delta_wh;
+            connector.meter_wh = connector.meter_wh.saturating_add(delta_wh);
             (connector.meter_wh, connector.status, connector.tx_id())
         };
         if delta_wh > 0 {

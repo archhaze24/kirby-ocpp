@@ -156,7 +156,7 @@ impl StationActor {
             if max == 0 {
                 self.stop_transaction(id, StopReason::DeAuthorized, Some(id_tag.clone()), ignore());
             } else {
-                self.invalid_limits.insert(id, meter + max);
+                self.invalid_limits.insert(id, meter.saturating_add(max));
                 self.log(
                     LogLevel::Warn,
                     format!("Connector {id} will stop after {max}Wh because idTag {id_tag} is no longer authorized"),
@@ -605,17 +605,23 @@ impl StationActor {
             return self.sync_outstanding;
         }
         let keys = self.queue.keys();
-        self.sync_outstanding = keys.len();
-        for key in &keys {
-            self.sync_entry(*key);
+        let count = keys.len();
+        self.sync_outstanding = count;
+        self.sync_keys = keys.into();
+        // Entries are delivered one at a time so the CSMS sees start/stop in chronological order.
+        if let Some(first) = self.sync_keys.pop_front() {
+            self.sync_entry(first);
         }
-        keys.len()
+        count
     }
 
     fn sync_done(&mut self) {
         self.sync_outstanding = self.sync_outstanding.saturating_sub(1);
         if self.sync_outstanding == 0 {
+            self.sync_keys.clear();
             self.finish_boot_accepted();
+        } else if let Some(next) = self.sync_keys.pop_front() {
+            self.sync_entry(next);
         }
     }
 
