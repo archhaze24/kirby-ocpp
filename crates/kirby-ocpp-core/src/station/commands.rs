@@ -9,11 +9,10 @@
 //!   `StatusNotification`, `SendRaw`) are answered when the CSMS answered, with its payload
 //!   in `Outcome::Response`, or with the error that stopped the CALL. They are subject to the
 //!   registration gate (`calls.rs`), except `SendRaw`.
-//! * Commands that belong to stage 2b answer `StationError::NotImplemented`.
 
 use serde_json::Value;
 
-use super::actor::StationActor;
+use super::actor::{StationActor, TimerKey};
 use super::calls::{Origin, Reply};
 use super::command::{Command, Outcome};
 use super::connector::{
@@ -21,6 +20,7 @@ use super::connector::{
     status_after_fault_clear, status_after_unplug, trim_text,
 };
 use super::event::LogLevel;
+use super::transactions::{Done, reply_to};
 use crate::error::{CallError, StationError};
 use crate::ids::ConnectorId;
 use crate::ocpp::action::OutboundAction;
@@ -31,6 +31,7 @@ use crate::ocpp::messages::{
 };
 use crate::ocpp::types::{
     AvailabilityType, ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus,
+    StopReason,
 };
 
 /// How a failed CALL is reported to the caller of a command.
@@ -87,6 +88,33 @@ impl StationActor {
                 payload,
                 validate,
             } => self.send_raw(&action, payload, validate, reply),
+            Command::Authorize { id_tag } => self.authorize(id_tag, reply_to(reply)),
+            Command::StartTransaction { connector, id_tag } => {
+                self.start_transaction(connector, id_tag, reply_to(reply));
+            }
+            Command::StopTransaction {
+                connector,
+                reason,
+                id_tag,
+            } => self.stop_transaction(connector, reason, id_tag, reply_to(reply)),
+            Command::MeterValues {
+                connector,
+                wh_delta,
+                measurands,
+            } => self.meter_values_command(connector, wh_delta, measurands, reply),
+            Command::Unplug { connector } => self.unplug(connector, reply_to(reply)),
+            Command::Fault {
+                connector,
+                error_code,
+                info,
+                vendor_error_code,
+            } => self.fault(
+                connector,
+                error_code,
+                info.as_deref(),
+                vendor_error_code.as_deref(),
+                reply_to(reply),
+            ),
             other => {
                 // The remaining commands complete immediately.
                 let result = self.execute_now(other);
@@ -112,7 +140,6 @@ impl StationActor {
             }
             Command::AddConnector => Ok(self.add_connector()),
             Command::PlugIn { connector } => self.plug_in(connector),
-            Command::Unplug { connector } => self.unplug(connector),
             Command::SetConnectorStatus { connector, status } => self.set_status(connector, status),
             Command::CycleConnectorStatus { connector } => {
                 let current = self
@@ -121,17 +148,6 @@ impl StationActor {
                     .status;
                 self.set_status(connector, next_status(current))
             }
-            Command::Fault {
-                connector,
-                error_code,
-                info,
-                vendor_error_code,
-            } => self.fault(
-                connector,
-                error_code,
-                info.as_deref(),
-                vendor_error_code.as_deref(),
-            ),
             Command::ClearFault { connector } => self.clear_fault(connector),
             Command::SetDiagnosticsOutcome { outcome } => {
                 self.state.diagnostics_outcome = outcome;
@@ -149,7 +165,6 @@ impl StationActor {
                 );
                 Ok(Outcome::Done)
             }
-            // stage 2b: Authorize, StartTransaction, StopTransaction and MeterValues.
             other => Err(StationError::NotImplemented {
                 command: other.name(),
             }),
@@ -249,13 +264,10 @@ impl StationActor {
                 format!("cannot accept an EV while {}", connector.status),
             ));
         }
-        if !connector.transaction.is_idle() {
-            // stage 2b: plugging in during an offline-started transaction resumes charging.
-            return Err(StationError::NotImplemented {
-                command: "plug_in (during a transaction)",
-            });
-        }
-        let status = if connector.reservation.is_some() {
+        let resumes = !connector.transaction.is_idle();
+        let status = if resumes {
+            ConnectorStatus::Charging // a suspended transaction resumes
+        } else if connector.reservation.is_some() {
             ConnectorStatus::Reserved
         } else {
             ConnectorStatus::Preparing
@@ -263,27 +275,42 @@ impl StationActor {
         let connector = self.connector_or_station_mut(id)?;
         connector.ev_connected = true;
         connector.status = status;
+        if resumes {
+            self.reschedule_metering();
+        }
         self.status_changed(id);
         Ok(Outcome::Done)
     }
 
-    fn unplug(&mut self, id: ConnectorId) -> Result<Outcome, StationError> {
-        let connector = self.connector(id)?;
+    fn unplug(&mut self, id: ConnectorId, done: Done) {
+        let connector = match self.connector(id) {
+            Ok(connector) => connector,
+            Err(error) => return done(self, Err(error)),
+        };
         if !connector.transaction.is_idle() {
-            // stage 2b: unplugging stops the transaction (reason EVDisconnected) or suspends it.
-            return Err(StationError::NotImplemented {
-                command: "unplug (during a transaction)",
-            });
+            if self.registry.stop_transaction_on_ev_side_disconnect() {
+                let tag = connector.last_id_tag.clone();
+                return self.stop_transaction(id, StopReason::EVDisconnected, tag, done);
+            }
+            // StopTransactionOnEVSideDisconnect=false: the transaction is suspended.
+            self.timers.cancel(&TimerKey::MeterPeriodic(id));
+            if let Ok(connector) = self.connector_or_station_mut(id) {
+                connector.ev_connected = false;
+                connector.status = ConnectorStatus::SuspendedEV;
+            }
+            self.status_changed(id);
+            return done(self, Ok(Outcome::Done));
         }
         if !connector.ev_connected && connector.status != ConnectorStatus::Finishing {
-            return Err(invalid(id, "no EV is connected"));
+            return done(self, Err(invalid(id, "no EV is connected")));
         }
         let status = status_after_unplug(connector);
-        let connector = self.connector_or_station_mut(id)?;
-        connector.ev_connected = false;
-        connector.status = status;
+        if let Ok(connector) = self.connector_or_station_mut(id) {
+            connector.ev_connected = false;
+            connector.status = status;
+        }
         self.status_changed(id);
-        Ok(Outcome::Done)
+        done(self, Ok(Outcome::Done));
     }
 
     fn set_status(
@@ -314,26 +341,27 @@ impl StationActor {
         error_code: ChargePointErrorCode,
         info: Option<&str>,
         vendor_error_code: Option<&str>,
-    ) -> Result<Outcome, StationError> {
-        let current = self
-            .find_connector(id)
-            .ok_or(StationError::UnknownConnector(id))?;
+        done: Done,
+    ) {
+        let Some(current) = self.find_connector(id) else {
+            return done(self, Err(StationError::UnknownConnector(id)));
+        };
         if !current.transaction.is_idle() {
-            // stage 2b: a fault stops a running transaction with reason `Other` first.
-            return Err(StationError::NotImplemented {
-                command: "fault (during a transaction)",
-            });
+            // A fault stops a running transaction with reason `Other` first.
+            let tag = current.last_id_tag.clone();
+            self.stop_transaction(id, StopReason::Other, tag, super::transactions::ignore());
         }
         let vendor = self.config.vendor.clone();
-        let connector = self.connector_or_station_mut(id)?;
-        connector.status = ConnectorStatus::Faulted;
-        connector.error_code = fault_error_code(error_code);
-        connector.info = info.and_then(|text| trim_text(text, STATUS_TEXT_MAX));
-        connector.vendor_id = Some(vendor);
-        connector.vendor_error_code =
-            vendor_error_code.and_then(|text| trim_text(text, STATUS_TEXT_MAX));
+        if let Ok(connector) = self.connector_or_station_mut(id) {
+            connector.status = ConnectorStatus::Faulted;
+            connector.error_code = fault_error_code(error_code);
+            connector.info = info.and_then(|text| trim_text(text, STATUS_TEXT_MAX));
+            connector.vendor_id = Some(vendor);
+            connector.vendor_error_code =
+                vendor_error_code.and_then(|text| trim_text(text, STATUS_TEXT_MAX));
+        }
         self.status_changed(id);
-        Ok(Outcome::Done)
+        done(self, Ok(Outcome::Done));
     }
 
     fn clear_fault(&mut self, id: ConnectorId) -> Result<Outcome, StationError> {

@@ -13,7 +13,10 @@ use crate::ocpp::responder::Responder;
 use crate::ocpp::types::ConfigurationStatus;
 use crate::ocpp::types::RegistrationStatus;
 use crate::station::actor::StationActor;
-use crate::station::config_registry::{HEARTBEAT_INTERVAL, MINIMUM_STATUS_DURATION};
+use crate::station::config_registry::{
+    CLOCK_ALIGNED_DATA_INTERVAL, HEARTBEAT_INTERVAL, METER_VALUE_SAMPLE_INTERVAL,
+    MINIMUM_STATUS_DURATION,
+};
 use crate::station::event::LogLevel;
 
 pub(super) fn change_configuration(
@@ -56,8 +59,7 @@ impl StationActor {
             MINIMUM_STATUS_DURATION if self.registry.minimum_status_duration().is_zero() => {
                 self.flush_pending_statuses();
             }
-            // stage 2b: METER_VALUE_SAMPLE_INTERVAL and CLOCK_ALIGNED_DATA_INTERVAL re-schedule
-            // the meter samplers.
+            METER_VALUE_SAMPLE_INTERVAL | CLOCK_ALIGNED_DATA_INTERVAL => self.restart_metering(),
             _ => {}
         }
     }

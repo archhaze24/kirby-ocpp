@@ -769,18 +769,7 @@ async fn unknown_actions_are_not_implemented() {
     rig.shutdown().await;
 }
 
-#[tokio::test]
-async fn stage_2b_actions_are_answered_not_supported() {
-    let rig = booted().await;
-    for (action, request) in stage_2b_requests() {
-        rig.csms
-            .expect_call_error(action, request, &ErrorCode::NotSupported)
-            .await
-            .unwrap_or_else(|e| panic!("{action}: {e}"));
-    }
-    rig.shutdown().await;
-}
-
+/// One valid request of every action that earlier stages did not support.
 fn stage_2b_requests() -> Vec<(&'static str, Value)> {
     vec![
         ("CancelReservation", json!({"reservationId": 1})),

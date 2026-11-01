@@ -32,6 +32,7 @@ use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
 use crate::station::authorization::AuthorizationCache;
 use crate::station::charging_profiles::ChargingProfileStore;
 use crate::station::local_auth_list::LocalAuthList;
+use crate::station::offline::OfflineQueue;
 use crate::station::reservation::Reservation;
 use crate::station::transaction::TransactionState;
 
@@ -40,11 +41,8 @@ pub const STORE_VERSION: u32 = 1;
 
 /// Everything that survives a restart.
 ///
-/// Stage 2a fills and restores: configuration values, local list and cache,
-/// availability (charge point and connectors), connector count, charging
-/// profiles, `meter_wh`, `last_id_tag`. `status`, `ev_connected`, `reservation`
-/// and `transaction` of a connector are written but **not restored** yet (a restored
-/// station starts with all connectors idle); stage 2b decides how to resume them.
+/// Everything is restored on start: configuration, lists, profiles, availability, connector
+/// count, and per connector status, EV, meter, reservation, transaction, plus the offline queue.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PersistedStation {
@@ -59,6 +57,8 @@ pub struct PersistedStation {
     pub local_authorization_list: LocalAuthList,
     pub authorization_cache: AuthorizationCache,
     pub charging_profiles: ChargingProfileStore,
+    /// Transactions whose start and/or stop still has to reach the CSMS.
+    pub offline_queue: OfflineQueue,
     /// Mutable configuration key values.
     pub configuration: BTreeMap<String, String>,
 }
@@ -85,6 +85,7 @@ impl Default for PersistedStation {
             local_authorization_list: LocalAuthList::default(),
             authorization_cache: AuthorizationCache::default(),
             charging_profiles: ChargingProfileStore::default(),
+            offline_queue: OfflineQueue::default(),
             configuration: BTreeMap::new(),
         }
     }

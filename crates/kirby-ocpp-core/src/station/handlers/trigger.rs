@@ -2,8 +2,8 @@
 //!
 //! * All six requestable messages are supported. `MeterValues` sends one one-off sample
 //!   (context `Trigger`, measurands from `MeterValuesSampledData`) built from a transient
-//!   `SimulatedMeter` at the connector's stored energy; it does not advance the meter and,
-//!   until stage 2b, carries no `transactionId`. Connector 0 reports the sum of all connectors;
+//!   `SimulatedMeter` at the connector's stored energy; it does not advance the meter and
+//!   carries the `transactionId` of a running (non-local) transaction. Connector 0 reports the sum of all connectors;
 //!   without `connectorId` every physical connector (`1..=n`) is sampled.
 //! * `Diagnostics`/`FirmwareStatusNotification` report the **current** status, not `Idle`.
 //! * `StatusNotification` / `MeterValues` are connector specific: `connectorId` 0 is the
@@ -121,9 +121,6 @@ fn send_meter_values(actor: &mut StationActor, id: ConnectorId) {
         };
         (connector.meter_wh, connector.status, connector.tx_id())
     };
-    // stage 2b: with an active transaction, add `transactionId` (the running meter replaces
-    // this transient one).
-    let _ = active_tx;
     let measurands = actor.registry.measurands(METER_VALUES_SAMPLED_DATA);
     #[allow(
         clippy::cast_precision_loss,
@@ -140,7 +137,7 @@ fn send_meter_values(actor: &mut StationActor, id: ConnectorId) {
         Origin::Triggered,
         &MeterValuesRequest {
             connector_id: id,
-            transaction_id: None,
+            transaction_id: active_tx.and_then(crate::ids::TxId::wire),
             meter_value: vec![sample],
         },
         |_, _| {},

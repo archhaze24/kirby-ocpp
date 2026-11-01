@@ -6,7 +6,7 @@
 //! * a connector without a transaction changes at once (`Faulted` stays `Faulted`);
 //! * a connector with a transaction keeps running: the request is stored as
 //!   `pending_availability` and the answer is `Scheduled`; the pending change is applied by
-//!   [`StationActor::apply_pending_availability`] when the transaction ends (stage 2b calls it);
+//!   [`StationActor::apply_pending_availability`] when the transaction ends (the stop path calls it);
 //! * an unknown connector is `Rejected`; the change is persisted and every changed
 //!   connector (including 0) gets a `StatusNotification` after the reply.
 
@@ -88,8 +88,6 @@ pub(super) fn change_availability(
 
 impl StationActor {
     /// Applies an availability change that was waiting for the transaction on `id` to end.
-    // stage 2b: called by the transaction-end path.
-    #[allow(dead_code, reason = "called by the stage 2b transaction handling")]
     pub(in crate::station) fn apply_pending_availability(&mut self, id: ConnectorId) {
         let Some(connector) = self.find_connector_mut(id) else {
             return;
@@ -109,10 +107,18 @@ pub(super) fn unlock_connector(
     responder: Responder<UnlockConnector>,
     request: UnlockConnectorRequest,
 ) {
-    let status = match actor.connector(request.connector_id) {
-        Err(_) => UnlockStatus::NotSupported,
-        // stage 2b: with a running transaction, stop it (reason UnlockCommand) after replying.
-        Ok(_) => UnlockStatus::Unlocked,
+    let (status, running) = match actor.connector(request.connector_id) {
+        Err(_) => (UnlockStatus::NotSupported, false),
+        Ok(connector) => (UnlockStatus::Unlocked, !connector.transaction.is_idle()),
     };
     actor.respond(responder, UnlockConnectorResponse { status });
+    if running {
+        // A running transaction ends with reason UnlockCommand (after the reply).
+        actor.stop_transaction(
+            request.connector_id,
+            crate::ocpp::types::StopReason::UnlockCommand,
+            None,
+            crate::station::transactions::ignore(),
+        );
+    }
 }

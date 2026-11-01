@@ -26,9 +26,8 @@
 //! boot, heartbeat), `calls` (outbound CALLs), `status` (StatusNotification discipline),
 //! `persistence`, `commands` (user commands), `handlers/` (CSMS-originated CALLs) and
 //! `timers`. The pure, separately tested domain modules (`config_registry`,
-//! `local_auth_list`, `authorization`, ...) are public; the ones for stage 2b
-//! (`transaction`, `offline`, `maintenance`, `metering`, `reservation`, `smart_charging`) are
-//! still partly stubs. Each maps to the TS files named in its docs.
+//! `local_auth_list`, `authorization`, ...) are public; the transaction,
+//! offline-queue, metering, reservation, smart-charging and maintenance rules are pure too. Each maps to the TS files named in its docs.
 
 mod actor;
 mod calls;
@@ -39,9 +38,12 @@ mod handle;
 mod handlers;
 mod link;
 mod persistence;
+mod reservations;
+mod sampling;
 mod snapshot;
 mod status;
 pub mod timers;
+mod transactions;
 
 pub mod authorization;
 pub mod charging_profiles;
@@ -136,23 +138,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_commands_error_instead_of_hanging() {
+    async fn invalid_commands_error_instead_of_hanging() {
         let (handle, join) = spawn();
-        // stage 2b command: must answer, not hang.
+        // An unknown connector must be answered, not ignored.
         let err = handle
             .send(Command::MeterValues {
-                connector: ConnectorId::new(1),
+                connector: ConnectorId::new(9),
                 wh_delta: 1,
                 measurands: None,
             })
             .await
             .unwrap_err();
-        assert!(matches!(
-            err,
-            StationError::NotImplemented {
-                command: "meter_values"
-            }
-        ));
+        assert!(matches!(err, StationError::UnknownConnector(_)));
         handle.shutdown().await.unwrap();
         join.await.unwrap();
     }
