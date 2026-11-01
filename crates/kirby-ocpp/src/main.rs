@@ -29,6 +29,8 @@ const LICENSES: &str = concat!(
 
 /// Bad usage or configuration.
 const EXIT_USAGE: u8 = 2;
+/// `run` stopped by SIGINT (128 + 2, the shell convention).
+const EXIT_INTERRUPTED: u8 = 130;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -126,26 +128,25 @@ fn load_scenario(
     Ok(scenario)
 }
 
-/// Resolves on SIGINT or SIGTERM.
-async fn shutdown_signal() {
+/// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C).
+async fn shutdown_signal() -> bool {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
-                }
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => true,
+                _ = term.recv() => false,
             }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
-            }
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
+            true
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+        true
     }
 }
 
@@ -205,7 +206,7 @@ async fn interactive(
     if !tui && let Err(error) = handle.connect().await {
         eprintln!("error: {error}");
     }
-    shutdown_signal().await;
+    let _ = shutdown_signal().await;
     stop_station(&handle, join).await;
     sink.finish().await;
     ExitCode::SUCCESS
@@ -241,9 +242,11 @@ async fn run(
         })
     };
 
+    let mut interrupted = false;
     let outcome = tokio::select! {
         outcome = connect_and_run(&handle, &scenario, &cancel) => outcome,
-        () = shutdown_signal() => {
+        sigint = shutdown_signal() => {
+            interrupted = sigint;
             cancel.cancel();
             Err("interrupted".to_owned())
         }
@@ -268,7 +271,9 @@ async fn run(
             return ExitCode::FAILURE;
         }
     }
-    if report.is_some_and(|r| r.passed) {
+    if interrupted {
+        ExitCode::from(EXIT_INTERRUPTED)
+    } else if report.is_some_and(|r| r.passed) {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

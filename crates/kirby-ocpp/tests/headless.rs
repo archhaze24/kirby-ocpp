@@ -241,6 +241,40 @@ async fn headless_logs_jsonl_and_shuts_down_on_sigterm() {
     csms.shutdown().await;
 }
 
+// `run` interrupted by SIGINT exits 130 and still closes the WebSocket.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn run_exits_130_on_sigint() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let slow = write(
+        &dir,
+        "slow.toml",
+        "name = \"slow\"\n[[steps]]\naction = \"sleep\"\nms = 60000\n",
+    );
+    let args = station_args(&csms, &["run", "--scenario", &slow, "--json"]);
+    let child = command(&args.iter().map(String::as_str).collect::<Vec<_>>())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let pid = child.id().to_string();
+    csms.wait_for_call("BootNotification", STEP).await.unwrap();
+    csms.wait_for_call("StatusNotification", STEP)
+        .await
+        .unwrap();
+
+    let status = Command::new("kill").args(["-INT", &pid]).status().unwrap();
+    assert!(status.success());
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(output.status.code(), Some(130), "{}", stderr(&output));
+    assert!(stderr(&output).contains("interrupted"));
+    csms.wait_for_disconnect(STEP).await.unwrap();
+    csms.shutdown().await;
+}
+
 #[cfg(unix)]
 fn read_lines(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)

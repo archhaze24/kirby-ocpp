@@ -111,6 +111,7 @@ Without a TTY (or with `--no-tui`) the tool connects and prints events until SIG
 | 0 | Success (scenario passed, normal shutdown) |
 | 1 | Scenario failed or timed out, or a runtime error |
 | 2 | Usage or configuration error |
+| 130 | `run` interrupted by SIGINT (Ctrl-C); SIGTERM still ends it with 1 |
 
 ## Scenarios
 

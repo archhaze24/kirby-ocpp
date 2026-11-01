@@ -30,7 +30,7 @@ use kirby_ocpp_core::ids::ConnectorId;
   kirby-ocpp --url wss://csms.example/ocpp --tls-ca ca.pem --connectors 2\n  \
   kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session\n  \
   kirby-ocpp scenarios list\n\n\
-Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage or configuration error."
+Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage or configuration error, 130 `run` interrupted by SIGINT."
 )]
 #[allow(
     clippy::struct_excessive_bools,
