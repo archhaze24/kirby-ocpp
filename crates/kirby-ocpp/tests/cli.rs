@@ -287,3 +287,35 @@ fn serial_and_firmware_flags_reach_the_config() {
     let none = config(URL, &[]);
     assert!(none["serial_number"].is_null());
 }
+
+#[test]
+fn licenses_prints_notices_without_a_url() {
+    let output = run(&["--licenses"], &[]);
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("MIT licence"), "{text}");
+    assert!(text.contains("Open Charge Alliance"), "{text}");
+    assert!(text.contains("Rust dependencies"), "{text}");
+}
+
+#[test]
+fn help_lists_examples_and_exit_codes() {
+    let output = run(&["--help"], &[]);
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Examples:"), "{text}");
+    assert!(text.contains("--licenses"), "{text}");
+}
+
+#[test]
+fn bundled_notices_match_the_repository_copy() {
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../THIRD_PARTY_NOTICES.md");
+    let Ok(root) = std::fs::read_to_string(root) else {
+        return; // packaged crate: no repository root
+    };
+    let bundled = include_str!("../THIRD_PARTY_NOTICES.md");
+    assert_eq!(
+        root, bundled,
+        "update crates/kirby-ocpp/THIRD_PARTY_NOTICES.md"
+    );
+}

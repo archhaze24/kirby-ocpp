@@ -62,3 +62,9 @@ missing_panics_doc = "allow"
 doc_markdown = "allow" # OCPP action and key names are CamelCase prose
 must_use_candidate = "allow"
 return_self_not_must_use = "allow"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"

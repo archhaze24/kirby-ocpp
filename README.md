@@ -1,130 +1,162 @@
 # kirby-ocpp
 
-Terminal OCPP 1.6J charge point emulator for local and staging CSMS testing.
+Terminal OCPP 1.6J charge point emulator for local and staging CSMS testing, written in Rust.
 
-It runs as an interactive TUI, speaks OCPP 1.6 JSON over WebSocket, validates payloads against bundled OCPP 1.6J JSON schemas, and can persist station state per charge point id.
+It speaks OCPP 1.6 JSON over WebSocket (`ws://` and `wss://`, including mutual TLS), validates every payload against the bundled official OCPP 1.6J JSON schemas, persists station state per charge point id, and can be used three ways:
+
+- an interactive terminal UI (default when stdout is a terminal);
+- a headless event logger (`--no-tui`, `--json`);
+- a scripted scenario runner for CI (`kirby-ocpp run --scenario ...`).
 
 ## Install
 
-Run without installing:
+Build from source (Rust 1.88 or newer):
 
 ```bash
-npx kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001
+cargo install --path crates/kirby-ocpp
 ```
 
-Or install globally:
+Prebuilt binaries will be attached to GitHub releases once a release has been published; none exist yet. No crates.io or distro packages are published.
+
+## Quick start
 
 ```bash
-npm install -g kirby-ocpp
-kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001
+kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001          # TUI
+kirby-ocpp --url ws://localhost:9000/ocpp --no-tui --json       # headless, JSON lines
+kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 ```
 
-## Usage
+`--url` (or `OCPP_URL`) is the only required option. Precedence is flag, then environment variable, then default. Booleans accept `true/false/yes/no/y/n/on/off/1/0`.
 
-```bash
-kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001
+## Options
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `-u, --url` | `OCPP_URL` | required | CSMS WebSocket URL (`ws://` or `wss://`) |
+| `-i, --id` | `OCPP_CHARGE_POINT_ID` | `CP-001` | Charge point id |
+| `--vendor` | `OCPP_VENDOR` | `archhaze24` | BootNotification vendor |
+| `--model` | `OCPP_MODEL` | `KIRBY` | BootNotification model |
+| `--serial` | `OCPP_SERIAL` | none | Serial number (max 25 chars) |
+| `--firmware-version` | `OCPP_FIRMWARE_VERSION` | none | Firmware version (max 50 chars) |
+| `-c, --connector` | | `1` | Initial connector |
+| `--connectors` | | `1` | Number of connectors |
+| `--heartbeat` | | `30` | Fallback heartbeat interval (s) |
+| `--ws-subprotocol` | `OCPP_WS_SUBPROTOCOL` | `ocpp1.6` | Requested subprotocol |
+| `--ws-ping` | `OCPP_WS_PING_INTERVAL` | `30` | WebSocket ping interval (s), `0` disables |
+| `--reconnect <BOOL>` | `OCPP_RECONNECT` | `true` | Auto-reconnect after unexpected disconnect |
+| `--no-reconnect` | | | Disable auto-reconnect (wins over `--reconnect`) |
+| `--reconnect-initial-ms` | `OCPP_RECONNECT_INITIAL_MS` | `1000` | Initial backoff |
+| `--reconnect-max-ms` | `OCPP_RECONNECT_MAX_MS` | `30000` | Maximum backoff |
+| `--reconnect-max-attempts` | `OCPP_RECONNECT_MAX_ATTEMPTS` | `0` | `0` = unlimited |
+| `--call-timeout-ms` | `OCPP_CALL_TIMEOUT_MS` | `30000` | CALL response timeout |
+| `--tls-ca` | `OCPP_TLS_CA_FILE` | system roots | CA bundle (PEM) |
+| `--tls-cert`, `--tls-key` | `OCPP_TLS_CERT_FILE`, `OCPP_TLS_KEY_FILE` | | Client certificate and key for mTLS (both or neither) |
+| `--tls-server-name` | `OCPP_TLS_SERVER_NAME` | URL host | SNI / verification name override |
+| `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Skip certificate verification (testing only) |
+| `--no-persist` | `KIRBY_OCPP_NO_PERSIST` | off | Do not load or save station state |
+| `--state-dir` | `KIRBY_OCPP_STATE_DIR` | `~/.kirby-ocpp/stations` | State directory (`%USERPROFILE%` on Windows) |
+| `--print-config` | | | Print the effective configuration as JSON and exit |
+| `--no-tui` | | | Never start the TUI; log to stdout |
+| `--json` | | | JSON lines instead of text (events and the `run` report) |
+| `--log-file` | | | Also append the headless event log to a file |
+| `--licenses` | | | Print licence notices and exit |
+| `-V, --version`, `-h, --help` | | | |
+
+Options are global and may be placed before or after a subcommand.
+
+## TLS
+
+`wss://` uses rustls. Without `--tls-ca` the operating system trust store is used. Use `--tls-ca` for a private CA, `--tls-cert`/`--tls-key` for client authentication, `--tls-server-name` when the URL host differs from the certificate name, and `--tls-skip-verify` only against local self-signed servers.
+
+## State persistence
+
+Per charge point id, one JSON file `<state dir>/<id>.station.json` holds the local authorization list and its version, authorization cache, charging profiles, writable configuration values, availability, connector count and per-connector state (status, meter, reservation, transaction) and the offline transaction queue. Files are versioned and written atomically (temp file plus rename); a corrupt file or one belonging to another charge point is moved to `<file>.bak` and the station starts clean. `--no-persist` disables both loading and saving.
+
+## Terminal UI
+
+Seven tabs, switched with `1`-`7` or `Tab`/`Shift-Tab`: Station, Connector, Transaction, Maintenance, Data, Logs, Scenarios. Panes: connectors, actions, log (move focus with Left/Right).
+
+| Key | Action |
+| --- | --- |
+| `Up/Down`, `j/k`, `PageUp/PageDown` | Move in the focused pane |
+| `[` `]` | Previous / next connector |
+| `Enter` | Run the selected action / open the selected log row |
+| letters | Accelerators of the current tab's actions (shown in the list) |
+| `/` or `:` or `Ctrl-P` | Command palette (fuzzy search over all actions); `/` searches the log when the log pane is focused on the Logs tab |
+| `Esc` | Close dialog / clear log search |
+| `?` | Help |
+| `q`, `Ctrl-C` | Quit |
+
+Actions: connect/disconnect/reconnect, BootNotification, Heartbeat, add connector; plug/unplug, set status, StatusNotification, fault toggle; Authorize, StartTransaction, StopTransaction (with reason), MeterValues; set diagnostics/firmware outcome and send their status notifications; DataTransfer, vendor ping and raw CALLs.
+
+Log view (Logs tab): CALL/RESULT/ERROR correlation, filters (all, calls, errors, station, csms; `f`), search (`s`), pause/follow (`p`), jump to newest (`G`), detail view with scroll (`Enter`; `c`/`y` copies), copy row (`y`) or visible rows (`Y`), export as JSONL (`e`, default `./kirby-ocpp-<id>-<timestamp>.jsonl`), clear with confirmation (`c`). The buffer keeps the last 2000 entries. Copying tries external clipboard tools first and falls back to the terminal's OSC 52 sequence.
+
+Scenarios tab: one `Run: <name>` action per built-in scenario (keys `o`, `w`, `s`, `i` for the first four) and `l` to load a scenario file, `x` to cancel the running one.
+
+## Headless mode and exit codes
+
+Without a TTY (or with `--no-tui`) the tool connects and prints events until SIGINT/SIGTERM, then closes the WebSocket cleanly. With `--json` each line is one JSON object; frames carry a `payload` field.
+
+`kirby-ocpp run --scenario <name|file.toml> [--report report.json] [--timeout 60] [--id-tag TAG]` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`).
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success (scenario passed, normal shutdown) |
+| 1 | Scenario failed or timed out, or a runtime error |
+| 2 | Usage or configuration error |
+
+## Scenarios
+
+`kirby-ocpp scenarios list` lists the built-in scenarios (`charge-session`, `fault-recovery`, `finish-session`, `offline-sync`); `kirby-ocpp scenarios show <name>` prints one as TOML. Built-ins target connector 1 unless `--connector` is given.
+
+```toml
+name = "my-session"
+description = "Plug in, start, meter, stop"
+
+[[steps]]
+action = "plug"
+connector = 1
+
+[[steps]]
+action = "start_tx"
+connector = 1
+id_tag = "KIRBY-TAG"        # implicitly expects status Accepted
+
+[[steps]]
+action = "meter"
+connector = 1
+wh_delta = 1000
+
+[[steps]]
+action = "expect_call"      # a CALL seen since the last matched expect_call
+call = "MeterValues"
+timeout_ms = 3000
+
+[[steps]]
+action = "stop_tx"
+connector = 1
+reason = "Local"
+expect = { status = "Accepted" }
 ```
 
-Common options:
+Actions: `connect`, `disconnect`, `reconnect`, `boot`, `heartbeat`, `plug`, `unplug`, `authorize`, `start_tx`, `stop_tx`, `meter`, `status`, `fault`, `clear_fault`, `sleep`, `wait_for`, `expect_call` (`call`, optional `direction`, `match` payload subset), `send_raw` (`call`, `payload`, `validate`), `data_transfer`. Every step may have `name` and `expect` (`status`, `payload` subset, `error = true`). `wait_for` takes `condition = { kind = ... }` with kinds `connected`, `disconnected`, `registration`, `connector_status`, `tx_active`, `tx_idle`, `no_pending_messages`, and `timeout_ms` (default 5000). Unknown fields are rejected.
 
-```bash
-kirby-ocpp \
-  --url ws://localhost:9000/ocpp \
-  --id CP-001 \
-  --vendor Kirby \
-  --model TUI-16 \
-  --connector 1 \
-  --connectors 2 \
-  --heartbeat 30
-```
+## Testing against a mock
 
-WSS/TLS options:
-
-```bash
-kirby-ocpp \
-  --url wss://csms.example.com/ocpp \
-  --id CP-001 \
-  --tls-ca ./ca.pem \
-  --tls-cert ./client-cert.pem \
-  --tls-key ./client-key.pem
-```
-
-Useful runtime flags:
-
-- `--no-persist`: run an ephemeral station.
-- `--state-dir <path>`: choose where station state is stored.
-- `--ws-subprotocol <protocol>`: defaults to `ocpp1.6`.
-- `--ws-ping <seconds>`: WebSocket ping interval, `0` disables pings.
-- `--no-reconnect`: disable automatic reconnect.
-- `--reconnect-initial-ms <ms>`, `--reconnect-max-ms <ms>`, `--reconnect-max-attempts <count>`: reconnect backoff.
-- `--call-timeout-ms <ms>`: OCPP CALL response timeout.
-- `--tls-server-name <name>` and `--tls-skip-verify`: local/self-signed WSS testing.
-
-Environment variables mirror the main flags: `OCPP_URL`, `OCPP_CHARGE_POINT_ID`, `OCPP_VENDOR`, `OCPP_MODEL`, `OCPP_WS_SUBPROTOCOL`, `OCPP_WS_PING_INTERVAL`, `OCPP_RECONNECT`, `OCPP_RECONNECT_INITIAL_MS`, `OCPP_RECONNECT_MAX_MS`, `OCPP_RECONNECT_MAX_ATTEMPTS`, `OCPP_CALL_TIMEOUT_MS`, `OCPP_TLS_CA_FILE`, `OCPP_TLS_CERT_FILE`, `OCPP_TLS_KEY_FILE`, `OCPP_TLS_SERVER_NAME`, and `OCPP_TLS_SKIP_VERIFY`.
-
-## TUI
-
-The interface is organized into tabs. Use `1`-`7` or `Tab` / `Shift+Tab` to switch tabs, `Up` / `Down` to select an action, and `Enter` to run it.
-
-- `1` Station
-- `2` Connector
-- `3` Transaction
-- `4` Maintenance
-- `5` Data
-- `6` Logs
-- `7` Scenarios
-
-Global shortcuts:
-
-- `/`: command palette.
-- `[` / `]`: previous/next connector.
-- `+`: add connector.
-- `j` / `k`: scroll logs.
-- `G`: jump logs to bottom.
-- `F`: cycle log filter.
-- `l`: full-screen plain log view.
-- `y`: copy current log buffer.
-- `?`: help.
-- `q`: quit.
-
-Forms prompt for values such as `idTag`, connector id, measurands, and `DataTransfer` payloads. There is no built-in default RFID/idTag.
-On the Connector tab, `s` cycles the selected connector status and `S` opens a list of all OCPP connector statuses.
-
-## Persistence
-
-State is persisted by default per `chargePointId`. This includes mutable configuration, local auth lists/cache, charging profiles, connector meter values, reservations, and pending offline transactions.
-
-```bash
-kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001 --no-persist
-kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001 --state-dir ./station-state
-```
-
-## Scope
-
-kirby-ocpp targets OCPP 1.6J. It supports common Charge Point calls and Central System commands for booting, authorization, transactions, metering, local auth lists, reservations, availability, reset, diagnostics, firmware, smart charging, trigger messages, and data transfer.
-
-Detailed coverage is tracked in [docs/OCPP_1.6J_CONFORMANCE.md](docs/OCPP_1.6J_CONFORMANCE.md).
+`crates/kirby-ocpp-testkit` is a dev-only scripted mock CSMS (plain and TLS) used by the integration tests; it is not published. Use it from tests of your own, or point `kirby-ocpp` at any real or local CSMS.
 
 ## Development
 
-```bash
-npm install
-npm run dev -- --url ws://localhost:9000/ocpp --id CP-001
-```
-
-Before publishing:
+Workspace crates: `kirby-ocpp-core` (protocol, station state machine, scenarios, WebSocket/TLS; no terminal code), `kirby-ocpp-tui` (ratatui UI), `kirby-ocpp` (binary: CLI and headless runner), `kirby-ocpp-testkit` (mock CSMS, not published).
 
 ```bash
-npm run typecheck
-npm test
-npm run smoke
-npm run pack:check
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace          # includes doc tests and process-level CLI tests
 ```
 
-`npm run pack:check` builds the package, installs the generated tarball into a temporary directory, and verifies the installed CLI and bundled schemas.
+Protocol coverage is documented in [docs/OCPP_1.6J_CONFORMANCE.md](docs/OCPP_1.6J_CONFORMANCE.md).
 
-## Third-Party Materials
+## License
 
-This project is MIT licensed. Bundled OCPP 1.6J JSON schemas are sourced from the official Open Charge Alliance OCPP 1.6 download package and are included for validation/conformance. They are not owned by this project and are not covered by this project's MIT license.
-
-See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+MIT, see [LICENSE](LICENSE). The bundled OCPP JSON schemas belong to the Open Charge Alliance; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) or run `kirby-ocpp --licenses`. Crate licences are recorded in `Cargo.lock` and the crates' metadata.

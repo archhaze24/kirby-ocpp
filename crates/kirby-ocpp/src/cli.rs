@@ -15,9 +15,23 @@ use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults, validate_ws_url};
 use kirby_ocpp_core::ids::ConnectorId;
 
-/// Terminal OCPP charge point emulator.
+/// Terminal OCPP 1.6J charge point emulator for CSMS testing.
+///
+/// Without a subcommand it opens an interactive terminal UI (or, when stdout is not a
+/// terminal or with --no-tui, connects and logs events to stdout until interrupted).
+/// Precedence: command-line flag, then environment variable, then default.
 #[derive(Debug, Parser)]
-#[command(name = "kirby-ocpp", version, about)]
+#[command(
+    name = "kirby-ocpp",
+    version,
+    about,
+    after_help = "Examples:\n  \
+  kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001\n  \
+  kirby-ocpp --url wss://csms.example/ocpp --tls-ca ca.pem --connectors 2\n  \
+  kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session\n  \
+  kirby-ocpp scenarios list\n\n\
+Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage or configuration error."
+)]
 #[allow(
     clippy::struct_excessive_bools,
     reason = "a CLI struct mirrors its flags one to one"
@@ -186,6 +200,10 @@ pub struct Cli {
     /// Also append the headless event log to this file
     #[arg(global = true, long, value_name = "PATH", value_parser = non_empty_path)]
     pub log_file: Option<PathBuf>,
+
+    /// Print the third-party licence notices and exit
+    #[arg(long)]
+    pub licenses: bool,
 
     #[command(subcommand)]
     pub command: Option<Cmd>,
