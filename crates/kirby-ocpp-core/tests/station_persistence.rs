@@ -205,9 +205,14 @@ async fn changes_are_written_soon_without_waiting_for_shutdown() {
     let (station, join) = Station::spawn(config, Arc::new(ManualClock::new(t0())));
     station.send(Command::AddConnector).await.unwrap();
     // AddConnector is an "important" change: the file appears without a shutdown.
+    // Generous: the write is debounced and fsynced, and a full fsync on a shared macOS CI
+    // runner can take seconds. The point is that no shutdown is needed, not how fast it is.
     let started = std::time::Instant::now();
     while !store.path().exists() {
-        assert!(started.elapsed() < STEP, "state file was not written");
+        assert!(
+            started.elapsed() < STEP * 4,
+            "state file was not written without a shutdown"
+        );
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     station.shutdown().await.unwrap();
