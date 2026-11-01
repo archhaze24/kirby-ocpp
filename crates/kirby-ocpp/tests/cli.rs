@@ -278,6 +278,24 @@ fn tls_cert_without_key_fails_validation() {
 }
 
 #[test]
+fn zero_reconnect_delay_with_unlimited_attempts_is_a_usage_error() {
+    let output = run(&with_url(&["--reconnect-initial-ms", "0"]), &[]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(stderr(&output).contains("busy loop"), "{}", stderr(&output));
+    // Bounded attempts make a zero delay acceptable.
+    let shown = config(
+        &with_url(&[
+            "--reconnect-initial-ms",
+            "0",
+            "--reconnect-max-attempts",
+            "3",
+        ]),
+        &[],
+    );
+    assert_eq!(shown["reconnect"]["initial_delay_ms"], 0);
+}
+
+#[test]
 fn serial_and_firmware_flags_reach_the_config() {
     let mut args = URL.to_vec();
     args.extend(["--serial", "SN-9", "--firmware-version", "2.0.1"]);

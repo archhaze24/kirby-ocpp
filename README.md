@@ -52,7 +52,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--ws-ping` | `OCPP_WS_PING_INTERVAL` | `30` | WebSocket ping interval (s), `0` disables |
 | `--reconnect <BOOL>` | `OCPP_RECONNECT` | `true` | Auto-reconnect after unexpected disconnect |
 | `--no-reconnect` | | | Disable auto-reconnect (wins over `--reconnect`) |
-| `--reconnect-initial-ms` | `OCPP_RECONNECT_INITIAL_MS` | `1000` | Initial backoff |
+| `--reconnect-initial-ms` | `OCPP_RECONNECT_INITIAL_MS` | `1000` | Initial backoff; `0` is rejected (exit 2) unless `--reconnect-max-attempts` is set or reconnect is off |
 | `--reconnect-max-ms` | `OCPP_RECONNECT_MAX_MS` | `30000` | Maximum backoff |
 | `--reconnect-max-attempts` | `OCPP_RECONNECT_MAX_ATTEMPTS` | `0` | `0` = unlimited |
 | `--call-timeout-ms` | `OCPP_CALL_TIMEOUT_MS` | `30000` | CALL response timeout |

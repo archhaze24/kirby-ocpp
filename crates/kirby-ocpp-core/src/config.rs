@@ -157,6 +157,11 @@ pub enum ConfigError {
     NotPositive { field: &'static str },
     #[error("tls.cert_file and tls.key_file must be given together")]
     TlsCertKeyMismatch,
+    #[error(
+        "reconnect: a zero initial or maximum delay with unlimited attempts would retry in a \
+         busy loop; use a delay of at least 1 ms, limit the attempts or disable reconnect"
+    )]
+    ReconnectBusyLoop,
 }
 
 impl StationConfig {
@@ -267,6 +272,13 @@ impl StationConfig {
         if self.tls.cert_file.is_some() != self.tls.key_file.is_some() {
             return Err(ConfigError::TlsCertKeyMismatch);
         }
+        let reconnect = &self.reconnect;
+        if reconnect.enabled
+            && reconnect.max_attempts == 0
+            && reconnect.initial_delay_ms.min(reconnect.max_delay_ms) == 0
+        {
+            return Err(ConfigError::ReconnectBusyLoop);
+        }
         Ok(())
     }
 
@@ -350,6 +362,29 @@ mod tests {
                 "{url:?}"
             );
         }
+    }
+
+    #[test]
+    fn zero_reconnect_delay_with_unlimited_attempts_is_rejected() {
+        let with = |enabled, initial_delay_ms, max_delay_ms, max_attempts| {
+            StationConfig::new("ws://h/p")
+                .with_reconnect(ReconnectConfig {
+                    enabled,
+                    initial_delay_ms,
+                    max_delay_ms,
+                    max_attempts,
+                })
+                .validate()
+        };
+        assert_eq!(
+            with(true, 0, 30_000, 0),
+            Err(ConfigError::ReconnectBusyLoop)
+        );
+        assert_eq!(with(true, 1_000, 0, 0), Err(ConfigError::ReconnectBusyLoop));
+        // Bounded attempts, a real delay or reconnect off are all fine.
+        assert_eq!(with(true, 0, 30_000, 5), Ok(()));
+        assert_eq!(with(true, 1, 30_000, 0), Ok(()));
+        assert_eq!(with(false, 0, 0, 0), Ok(()));
     }
 
     #[test]
