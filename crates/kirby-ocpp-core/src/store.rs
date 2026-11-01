@@ -211,10 +211,15 @@ impl StationStore {
         temp.as_file().sync_all().map_err(|e| self.io_error(e))?;
         temp.persist(&self.path)
             .map_err(|e| self.io_error(e.error))?;
-        sync_dir(dir).map_err(|e| StoreError::Io {
-            path: dir.to_owned(),
-            source: e,
-        })
+        match sync_dir(dir) {
+            Ok(()) => Ok(()),
+            // The rename already happened; some filesystems cannot sync a directory.
+            Err(e) if dir_sync_unsupported(&e) => Ok(()),
+            Err(e) => Err(StoreError::Io {
+                path: dir.to_owned(),
+                source: e,
+            }),
+        }
     }
 
     fn quarantine(&self, reason: String) -> Result<LoadOutcome, StoreError> {
@@ -242,6 +247,14 @@ impl StationStore {
             source,
         }
     }
+}
+
+/// Whether a directory `fsync` failed only because the filesystem does not support it.
+fn dir_sync_unsupported(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
+    )
 }
 
 /// Makes the rename durable. Directories cannot be opened and synced on Windows (and NTFS
@@ -318,6 +331,16 @@ mod tests {
     use super::*;
     use crate::ids::TxId;
     use crate::station::transaction::ActiveTransaction;
+
+    #[test]
+    fn unsupported_directory_sync_is_not_a_save_failure() {
+        for kind in [io::ErrorKind::Unsupported, io::ErrorKind::InvalidInput] {
+            assert!(dir_sync_unsupported(&io::Error::from(kind)));
+        }
+        assert!(!dir_sync_unsupported(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+    }
 
     fn sample() -> PersistedStation {
         let mut state = PersistedStation::new("CP-1");

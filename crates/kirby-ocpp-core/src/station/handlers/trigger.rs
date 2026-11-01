@@ -1,9 +1,10 @@
 //! `TriggerMessage` (TS `handleTriggerMessage`, with the fixes from `core-analysis.md`).
 //!
 //! * All six requestable messages are supported. `MeterValues` sends one one-off sample
-//!   (context `Trigger`, measurands from `MeterValuesSampledData`) built from a transient
-//!   `SimulatedMeter` at the connector's stored energy; it does not advance the meter and
-//!   carries the `transactionId` of a running (non-local) transaction. Connector 0 reports the sum of all connectors;
+//!   (context `Trigger`, measurands from `MeterValuesSampledData`) built with `meter_value`
+//!   from `meter_reading`: the energy integrated so far is flushed into the connector's
+//!   register, and the sample carries the `transactionId` of a running (non-local)
+//!   transaction. Connector 0 reports the sum of all connectors;
 //!   without `connectorId` every physical connector (`1..=n`) is sampled.
 //! * `Diagnostics`/`FirmwareStatusNotification` report the **current** status, not `Idle`.
 //! * `StatusNotification` / `MeterValues` are connector specific: `connectorId` 0 is the

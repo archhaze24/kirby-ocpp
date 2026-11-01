@@ -245,7 +245,7 @@ async fn a_stop_in_flight_at_a_crash_is_restored_as_a_queued_stop() {
         id: ConnectorId::new(1),
         status: ConnectorStatus::Finishing,
         availability: AvailabilityType::Operative,
-        pending_availability: None,
+        pending_availability: Some(AvailabilityType::Inoperative),
         ev_connected: true,
         meter_wh: 42,
         last_id_tag: None,
@@ -261,7 +261,7 @@ async fn a_stop_in_flight_at_a_crash_is_restored_as_a_queued_stop() {
         id: ConnectorId::new(2),
         status: ConnectorStatus::Preparing,
         availability: AvailabilityType::Operative,
-        pending_availability: None,
+        pending_availability: Some(AvailabilityType::Inoperative),
         ev_connected: true,
         meter_wh: 0,
         last_id_tag: None,
@@ -282,15 +282,15 @@ async fn a_stop_in_flight_at_a_crash_is_restored_as_a_queued_stop() {
     let snapshot = station.snapshot();
     let two = snapshot.connector(ConnectorId::new(2)).unwrap();
     assert!(two.transaction.is_idle());
-    assert_eq!(two.status, ConnectorStatus::Preparing);
+    // The pending change lost its transaction: it is applied, not left stuck.
+    assert_eq!(two.pending_availability, None);
+    assert_eq!(two.availability, AvailabilityType::Inoperative);
+    assert_eq!(two.status, ConnectorStatus::Unavailable);
     assert_eq!(snapshot.pending_offline_messages, 1);
-    assert!(
-        snapshot
-            .connector(ConnectorId::new(1))
-            .unwrap()
-            .transaction
-            .is_idle()
-    );
+    let one = snapshot.connector(ConnectorId::new(1)).unwrap();
+    assert!(one.transaction.is_idle());
+    assert_eq!(one.pending_availability, None);
+    assert_eq!(one.availability, AvailabilityType::Inoperative);
     station.shutdown().await.unwrap();
     join.await.unwrap();
 }

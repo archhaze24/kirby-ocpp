@@ -69,7 +69,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--id-template` | `OCPP_ID_TEMPLATE` | the `--id` value | Charge point id template with `{n}` / `{n:03}` |
 | `--first-index` | `OCPP_FIRST_INDEX` | `1` | Index of the first station |
 | `--stagger-ms` | `OCPP_STAGGER_MS` | `0` | Delay between starting two stations (ms) |
-| `--rule ACTION=BEHAVIOR[*N]` | `KIRBY_OCPP_RULES` (`;`-separated) | none | Response rule for a CSMS command, repeatable; see [Response rules](#response-rules) |
+| `--rule ACTION=BEHAVIOR[*N]` | `KIRBY_OCPP_RULES` (`;` separates rules) | none | Response rule for a CSMS command, repeatable; see [Response rules](#response-rules) |
 | `--print-config` | | | Print the effective configuration as JSON and exit |
 | `--no-tui` | | | Never start the TUI; log to stdout |
 | `--json` | | | JSON lines instead of text (events and the `run` report) |
@@ -204,7 +204,7 @@ Response rules make the station misbehave on purpose, to test how a CSMS reacts.
 | `drop` | Close the WebSocket without replying; the normal reconnect lifecycle follows (disabled by `--no-reconnect`). |
 | `ignore` | Never reply, so the CSMS call timeout fires. |
 
-`*COUNT` applies the rule that many times and then removes it (default: unlimited). There is one rule per action; setting another replaces it. Except for `delay`, the command is **not executed** (no side effects). Rules are runtime only, never persisted. Set them with `--rule` (repeatable) or `KIRBY_OCPP_RULES` (separated by `;`, so texts must not contain `;`), in the TUI (Station tab, `m`), as scenario steps, or through `Command::SetResponseRule` / `ClearResponseRules` in the core API. Each application is logged (`response rule: Reset -> reject, 2 more`).
+`*COUNT` applies the rule that many times and then removes it (default: unlimited). There is one rule per action; setting another replaces it. Except for `delay`, the command is **not executed** (no side effects). Rules are runtime only, never persisted. Set them with `--rule` (repeatable) or `KIRBY_OCPP_RULES`; in both, `;` separates several rules, so a rule (e.g. an `error:` text) must not contain `;`, in the TUI (Station tab, `m`), as scenario steps, or through `Command::SetResponseRule` / `ClearResponseRules` in the core API. Each application is logged (`response rule: Reset -> reject, 2 more`).
 
 ```sh
 kirby-ocpp --url ws://localhost:9000/ocpp --rule Reset=reject --rule GetConfiguration=delay:5000 \

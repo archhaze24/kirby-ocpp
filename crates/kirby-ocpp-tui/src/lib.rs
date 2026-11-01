@@ -221,13 +221,29 @@ pub async fn run_fleet(stations: &[StationHandle], options: TuiOptions) -> Resul
                 FleetEffect::ConnectAll => {
                     for ctx in &ctxs {
                         let h = ctx.handle.clone();
-                        tokio::spawn(async move { h.connect().await });
+                        let out = ctx.out.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = h.connect().await {
+                                out.send(Msg::Notice(
+                                    NoticeLevel::Error,
+                                    format!("connect failed: {e}"),
+                                ));
+                            }
+                        });
                     }
                 }
                 FleetEffect::DisconnectAll => {
                     for ctx in &ctxs {
                         let h = ctx.handle.clone();
-                        tokio::spawn(async move { h.disconnect().await });
+                        let out = ctx.out.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = h.disconnect().await {
+                                out.send(Msg::Notice(
+                                    NoticeLevel::Error,
+                                    format!("disconnect failed: {e}"),
+                                ));
+                            }
+                        });
                     }
                 }
             }

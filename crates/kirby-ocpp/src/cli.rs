@@ -253,8 +253,8 @@ misbehaving charge point. Form: ACTION=BEHAVIOR[*COUNT]. BEHAVIOR is one of: rej
 action's own rejection status, else CALLERROR NotSupported), delay:MS (handle normally, reply \
 MS ms later), error:CODE[:TEXT] (CALLERROR with an OCPP-J error code), drop (close the \
 connection without replying), ignore (never reply). *COUNT limits the rule to that many \
-CALLs. Repeat the flag for several rules; OCPP-style env var KIRBY_OCPP_RULES takes them \
-separated by `;`. Examples: --rule Reset=reject --rule GetConfiguration=delay:5000 \
+CALLs. Repeat the flag or separate several rules with `;` (also in KIRBY_OCPP_RULES); a rule \
+must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=delay:5000 \
 --rule ChangeConfiguration=error:InternalError*3"
     )]
     pub rule: Vec<ResponseRule>,

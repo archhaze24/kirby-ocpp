@@ -228,6 +228,18 @@ impl Persistence {
             }
         }
 
+        // A change that waited for a transaction which no longer exists (reset above) has
+        // nothing left to wait for: apply it now.
+        for connector in &mut state.connectors {
+            if connector.transaction.is_idle()
+                && let Some(kind) = connector.pending_availability.take()
+            {
+                connector.availability = kind;
+                connector.status =
+                    crate::station::connector::status_after_availability_change(connector, kind);
+            }
+        }
+
         parts.local_list = persisted.local_authorization_list;
         parts.auth_cache = persisted.authorization_cache;
         parts.profiles = persisted.charging_profiles;

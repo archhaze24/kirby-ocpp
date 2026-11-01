@@ -13,8 +13,17 @@ use kirby_ocpp_core::ws::ConnectionState;
 use crate::app::{App, Effect, Mode, Msg, NoticeLevel, update};
 use crate::logview::LogStore;
 
-/// Log rows kept per station when there is more than one (memory stays bounded).
+/// Most log rows kept per station when there is more than one.
 pub const FLEET_LOG_CAPACITY: usize = 500;
+/// Fewest log rows kept per station, however large the fleet.
+const FLEET_LOG_MIN_CAPACITY: usize = 50;
+/// Log rows kept across the whole fleet (memory stays bounded as the fleet grows).
+const FLEET_LOG_TOTAL_BUDGET: usize = 20_000;
+
+/// Log rows kept per station in a fleet of `count` stations.
+pub fn fleet_log_capacity(count: usize) -> usize {
+    (FLEET_LOG_TOTAL_BUDGET / count.max(1)).clamp(FLEET_LOG_MIN_CAPACITY, FLEET_LOG_CAPACITY)
+}
 
 /// What the event loop must do for the fleet model.
 #[derive(Debug, Clone, PartialEq)]
@@ -58,9 +67,10 @@ impl FleetApp {
     /// the fleet help and a smaller log buffer.
     pub fn new(mut apps: Vec<App>) -> Self {
         if apps.len() > 1 {
+            let capacity = fleet_log_capacity(apps.len());
             for app in &mut apps {
                 app.in_fleet = true;
-                app.log = LogStore::new(FLEET_LOG_CAPACITY);
+                app.log = LogStore::new(capacity);
             }
         }
         Self {
@@ -469,6 +479,18 @@ mod tests {
         let fleet = fleet_of(2);
         assert_ne!(single.apps[0].log.capacity(), fleet.apps[0].log.capacity());
         assert_eq!(fleet.apps[0].log.capacity(), FLEET_LOG_CAPACITY);
+    }
+
+    #[test]
+    fn fleet_log_capacity_scales_down_with_the_fleet() {
+        assert_eq!(fleet_log_capacity(2), FLEET_LOG_CAPACITY);
+        assert_eq!(fleet_log_capacity(40), 500);
+        assert_eq!(fleet_log_capacity(100), 200);
+        assert_eq!(fleet_log_capacity(1000), 50);
+        assert_eq!(fleet_log_capacity(100_000), FLEET_LOG_MIN_CAPACITY);
+        assert_eq!(fleet_log_capacity(0), FLEET_LOG_CAPACITY);
+        let fleet = fleet_of(1000);
+        assert_eq!(fleet.apps[0].log.capacity(), 50);
     }
 
     #[test]
