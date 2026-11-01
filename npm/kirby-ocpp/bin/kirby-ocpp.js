@@ -6,11 +6,11 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
 const PLATFORMS = {
-  "linux-x64": "kirby-ocpp-linux-x64",
-  "linux-arm64": "kirby-ocpp-linux-arm64",
-  "darwin-x64": "kirby-ocpp-darwin-x64",
-  "darwin-arm64": "kirby-ocpp-darwin-arm64",
-  "win32-x64": "kirby-ocpp-win32-x64",
+  "linux-x64": "@archhaze24/kirby-ocpp-linux-x64",
+  "linux-arm64": "@archhaze24/kirby-ocpp-linux-arm64",
+  "darwin-x64": "@archhaze24/kirby-ocpp-darwin-x64",
+  "darwin-arm64": "@archhaze24/kirby-ocpp-darwin-arm64",
+  "win32-x64": "@archhaze24/kirby-ocpp-win32-x64",
 };
 
 function binaryPath() {

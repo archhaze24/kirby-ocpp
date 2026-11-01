@@ -5,7 +5,7 @@
 //
 // Without --assets the archives are downloaded from the GitHub release of that tag.
 // Output (one directory per package, ready for `npm publish`):
-//   <out>/kirby-ocpp-<os>-<arch>/   platform packages (binary in bin/)
+//   <out>/kirby-ocpp-<os>-<arch>/   platform packages @archhaze24/kirby-ocpp-<os>-<arch> (binary in bin/)
 //   <out>/kirby-ocpp/               main package (launcher + optionalDependencies)
 // Publish the platform packages first, the main package last (see npm/README.md).
 import { execFileSync } from "node:child_process";
@@ -18,11 +18,11 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const REPO = "archhaze24/kirby-ocpp";
 
 const PLATFORMS = [
-  { pkg: "kirby-ocpp-linux-x64", target: "x86_64-unknown-linux-gnu", os: "linux", cpu: "x64", ext: "tar.gz", exe: "kirby-ocpp" },
-  { pkg: "kirby-ocpp-linux-arm64", target: "aarch64-unknown-linux-gnu", os: "linux", cpu: "arm64", ext: "tar.gz", exe: "kirby-ocpp" },
-  { pkg: "kirby-ocpp-darwin-x64", target: "x86_64-apple-darwin", os: "darwin", cpu: "x64", ext: "tar.gz", exe: "kirby-ocpp" },
-  { pkg: "kirby-ocpp-darwin-arm64", target: "aarch64-apple-darwin", os: "darwin", cpu: "arm64", ext: "tar.gz", exe: "kirby-ocpp" },
-  { pkg: "kirby-ocpp-win32-x64", target: "x86_64-pc-windows-msvc", os: "win32", cpu: "x64", ext: "zip", exe: "kirby-ocpp.exe" },
+  { pkg: "@archhaze24/kirby-ocpp-linux-x64", target: "x86_64-unknown-linux-gnu", os: "linux", cpu: "x64", ext: "tar.gz", exe: "kirby-ocpp" },
+  { pkg: "@archhaze24/kirby-ocpp-linux-arm64", target: "aarch64-unknown-linux-gnu", os: "linux", cpu: "arm64", ext: "tar.gz", exe: "kirby-ocpp" },
+  { pkg: "@archhaze24/kirby-ocpp-darwin-x64", target: "x86_64-apple-darwin", os: "darwin", cpu: "x64", ext: "tar.gz", exe: "kirby-ocpp" },
+  { pkg: "@archhaze24/kirby-ocpp-darwin-arm64", target: "aarch64-apple-darwin", os: "darwin", cpu: "arm64", ext: "tar.gz", exe: "kirby-ocpp" },
+  { pkg: "@archhaze24/kirby-ocpp-win32-x64", target: "x86_64-pc-windows-msvc", os: "win32", cpu: "x64", ext: "zip", exe: "kirby-ocpp.exe" },
 ];
 
 function parseArgs(argv) {
@@ -36,6 +36,11 @@ function parseArgs(argv) {
   }
   if (!args.tag) throw new Error("usage: node npm/build.mjs vX.Y.Z [--assets <dir>] [--out <dir>]");
   return args;
+}
+
+// Output directory name of a package: the scope is dropped (`@archhaze24/kirby-ocpp-linux-x64` -> `kirby-ocpp-linux-x64`).
+function dirName(pkg) {
+  return pkg.split("/").pop();
 }
 
 function assetName(tag, platform) {
@@ -99,12 +104,12 @@ async function main() {
   const optionalDependencies = {};
   for (const platform of PLATFORMS) {
     const archive = await obtain(tag, platform, assets, work);
-    const unpacked = path.join(work, platform.pkg);
+    const unpacked = path.join(work, dirName(platform.pkg));
     extract(archive, unpacked);
     const binary = findFile(unpacked, platform.exe);
     if (!binary) throw new Error(`${platform.exe} not found in ${archive}`);
 
-    const dir = path.join(out, platform.pkg);
+    const dir = path.join(out, dirName(platform.pkg));
     fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
     const target = path.join(dir, "bin", platform.exe);
     fs.copyFileSync(binary, target);

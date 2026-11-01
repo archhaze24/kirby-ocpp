@@ -47,17 +47,17 @@ cargo publish -p kirby-ocpp
 
 ## 4. npm
 
-The wrapper has one launcher package (`kirby-ocpp`) and five platform packages (`kirby-ocpp-linux-x64`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) that carry the binaries; npm installs only the one matching the machine.
+The wrapper has one launcher package (`kirby-ocpp`) and five platform packages under the owner's personal scope (`@archhaze24/kirby-ocpp-linux-x64`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) that carry the binaries (unscoped names were rejected by npm's spam filter); npm installs only the one matching the machine.
 
 ```
 node npm/build.mjs v0.2.0            # downloads the release assets, writes npm/dist/*
 cd npm/dist
 for p in kirby-ocpp-linux-x64 kirby-ocpp-linux-arm64 kirby-ocpp-darwin-x64 kirby-ocpp-darwin-arm64 kirby-ocpp-win32-x64; do
-  (cd "$p" && npm publish --dry-run)   # look at the file list, then repeat without --dry-run
+  (cd "$p" && npm publish --dry-run --access public)   # look at the file list, then repeat without --dry-run
 done
 (cd kirby-ocpp && npm publish --dry-run)   # main package LAST, otherwise installs briefly fail
 ```
-Publish the five platform packages first, `kirby-ocpp` last. After 72 hours a version can no longer be unpublished; use `npm deprecate kirby-ocpp@0.2.0 "reason"` instead.
+Publish the five platform packages first with `npm publish --access public` (scoped packages need it), `kirby-ocpp` last (plain `npm publish`). The directory names in `npm/dist` have no scope (`kirby-ocpp-linux-x64` etc.). After 72 hours a version can no longer be unpublished; use `npm deprecate kirby-ocpp@0.2.0 "reason"` instead.
 
 ## 5. Verify
 
