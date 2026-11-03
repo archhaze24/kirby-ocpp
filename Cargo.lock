@@ -1175,10 +1175,12 @@ dependencies = [
 name = "kirby-csms-core"
 version = "0.4.0-dev"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "futures-util",
  "kirby-ocpp-core",
  "percent-encoding",
+ "rcgen",
  "rustls",
  "serde",
  "serde_json",
@@ -1187,6 +1189,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "x509-parser",
 ]
 
 [[package]]

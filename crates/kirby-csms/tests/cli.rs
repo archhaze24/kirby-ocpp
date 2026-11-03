@@ -9,7 +9,7 @@ use std::thread;
 use std::time::Duration;
 
 use kirby_ocpp_core::ids::IdTag;
-use kirby_ocpp_core::station::Snapshot;
+use kirby_ocpp_core::station::{Command as StationCommand, Snapshot};
 use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
 use serde_json::{Value, json};
 
@@ -30,6 +30,11 @@ const ENV_VARS: &[&str] = &[
     "KIRBY_CSMS_STDIN",
     "KIRBY_CSMS_SCRIPT",
     "KIRBY_CSMS_NO_TUI",
+    "KIRBY_CSMS_SECURITY_PROFILE",
+    "KIRBY_CSMS_AUTH_KEY",
+    "KIRBY_CSMS_AUTH_KEYS_FILE",
+    "KIRBY_CSMS_DEFAULT_AUTH_KEY",
+    "KIRBY_CSMS_TLS_CLIENT_CA",
 ];
 
 fn command(args: &[&str]) -> Command {
@@ -488,6 +493,19 @@ fn bad_input_exits_2() {
         vec!["--report", "r.json"],
         vec!["--call-timeout", "0"],
         vec!["--transaction-ids", "fixed"],
+        vec!["--security-profile", "4"],
+        vec!["--security-profile", "1"],
+        vec!["--security-profile", "2", "--default-auth-key", "k"],
+        vec!["--auth-key", "A=k"],
+        vec!["--security-profile", "1", "--auth-key", "nokey"],
+        vec![
+            "--security-profile",
+            "1",
+            "--auth-keys-file",
+            "/nonexistent/keys",
+        ],
+        vec!["--security-profile", "1", "--default-auth-key", ""],
+        vec!["--tls-client-ca", "ca.pem"],
     ] {
         let (code, _, stderr) = run_to_end(&args);
         assert_eq!(code, 2, "{args:?}: {stderr}");
@@ -501,6 +519,113 @@ fn bad_input_exits_2() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+/// A profile-1 station: id as user name, `key` as the AuthorizationKey. Does not wait for boot.
+async fn station_with_key(addr: &str, id: &str, key: &str) -> StationHandle {
+    let mut config = StationConfig::new(format!("ws://{addr}/ocpp")).with_charge_point_id(id);
+    config.persist = false;
+    config.reconnect.enabled = false;
+    let (handle, _join) = Station::spawn(config, Arc::new(SystemClock));
+    for (name, value) in [("AuthorizationKey", key), ("SecurityProfile", "1")] {
+        let outcome = handle
+            .send(StationCommand::SetConfiguration {
+                key: name.to_owned(),
+                value: value.to_owned(),
+            })
+            .await
+            .unwrap();
+        assert!(
+            matches!(outcome, kirby_ocpp_core::station::Outcome::Done),
+            "{name}: {outcome:?}"
+        );
+    }
+    handle.connect().await.unwrap();
+    handle
+}
+
+async fn booted(handle: &StationHandle) {
+    let mut snapshots = handle.watch_snapshot();
+    tokio::time::timeout(WAIT, snapshots.wait_for(Snapshot::booted))
+        .await
+        .expect("station did not boot")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn basic_auth_keys_from_flags_file_and_environment() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        dir.path(),
+        "keys.txt",
+        "# stations\nCP-FILE=fedcba9876543210\n",
+    );
+    let mut csms = Csms::start(&[
+        "--security-profile",
+        "1",
+        "--auth-key",
+        "CP-FLAG=0123456789abcdef",
+        "--auth-keys-file",
+        &file,
+        "--default-auth-key",
+        "00112233445566778899",
+    ]);
+    let addr = csms.addr.clone();
+    for (id, key) in [
+        ("CP-FLAG", "0123456789abcdef"),
+        ("CP-FILE", "fedcba9876543210"),
+        ("CP-OTHER", "00112233445566778899"),
+    ] {
+        let station = station_with_key(&addr, id, key).await;
+        booted(&station).await;
+        csms.wait(|v| v["type"] == "connected" && v["station"] == id);
+        let _ = station.shutdown().await;
+    }
+    // A wrong key is refused, reported, and never printed.
+    let station = station_with_key(&addr, "CP-FLAG", "ffffffffffffffff").await;
+    let failed = csms.wait(|v| v["type"] == "auth_failed");
+    assert_eq!(failed["station"], "CP-FLAG");
+    assert_eq!(failed["reason"], "invalid credentials");
+    let _ = station.shutdown().await;
+    let output = csms.seen.join("\n");
+    for secret in [
+        "0123456789abcdef",
+        "fedcba9876543210",
+        "00112233445566778899",
+        "ffffffffffffffff",
+    ] {
+        assert!(!output.contains(secret), "{secret} leaked: {output}");
+    }
+
+    // The environment variable (several entries) works without flags.
+    let mut env_csms = {
+        let mut child = command(&[
+            "--listen",
+            "127.0.0.1:0",
+            "--json",
+            "--security-profile",
+            "1",
+        ])
+        .env(
+            "KIRBY_CSMS_AUTH_KEY",
+            "CP-E1=aabbccddeeff0011;CP-E2=1100ffeeddccbbaa",
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+        let mut reader = BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let listening: Value = serde_json::from_str(&line).unwrap();
+        (child, listening["addr"].as_str().unwrap().to_owned())
+    };
+    let station = station_with_key(&env_csms.1, "CP-E2", "1100ffeeddccbbaa").await;
+    booted(&station).await;
+    let _ = station.shutdown().await;
+    let _ = env_csms.0.kill();
+    let _ = env_csms.0.wait();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

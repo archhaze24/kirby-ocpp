@@ -8,9 +8,8 @@ use crate::fault::Reply;
 
 /// The OCPP 1.6 actions a charge point may send to a central system.
 ///
-/// The Security Whitepaper actions (`SignCertificate`, `LogStatusNotification`,
-/// `SecurityEventNotification`, `SignedFirmwareStatusNotification`) are deliberately not
-/// listed: the engine has no behaviour for them yet, so it answers `NotSupported` (step S3).
+/// Includes the four Security Whitepaper actions (`SignCertificate`, `LogStatusNotification`,
+/// `SecurityEventNotification`, `SignedFirmwareStatusNotification`).
 pub const CHARGE_POINT_ACTIONS: &[&str] = &[
     "Authorize",
     "BootNotification",
@@ -18,7 +17,11 @@ pub const CHARGE_POINT_ACTIONS: &[&str] = &[
     "DiagnosticsStatusNotification",
     "FirmwareStatusNotification",
     "Heartbeat",
+    "LogStatusNotification",
     "MeterValues",
+    "SecurityEventNotification",
+    "SignCertificate",
+    "SignedFirmwareStatusNotification",
     "StartTransaction",
     "StatusNotification",
     "StopTransaction",
@@ -58,8 +61,12 @@ pub fn default_reply(
             "idTagInfo": start_info(id_tag, now),
         }),
         "DataTransfer" => json!({ "status": "Accepted", "data": "pong" }),
-        // StopTransaction, MeterValues, StatusNotification, Diagnostics- and
-        // FirmwareStatusNotification and unknown actions: an empty object.
+        // The CSMS never signs anything itself, but accepts the request (a test then
+        // scripts the `CertificateSigned` that follows).
+        "SignCertificate" => json!({ "status": "Accepted" }),
+        // StopTransaction, MeterValues, StatusNotification, Diagnostics-, Firmware-, Log- and
+        // SignedFirmwareStatusNotification, SecurityEventNotification and unknown actions: an
+        // empty object.
         _ => json!({}),
     };
     Reply::Result(body)
@@ -117,6 +124,26 @@ mod tests {
         };
         assert_eq!(body["transactionId"], 9);
         assert_eq!(body["idTagInfo"]["status"], "ConcurrentTx");
+    }
+
+    #[test]
+    fn security_actions_get_canned_answers() {
+        for action in [
+            "SignCertificate",
+            "LogStatusNotification",
+            "SecurityEventNotification",
+            "SignedFirmwareStatusNotification",
+        ] {
+            assert!(is_charge_point_action(action));
+            let Reply::Result(body) = default_reply(action, &json!({}), 5, None) else {
+                panic!("expected a result");
+            };
+            if action == "SignCertificate" {
+                assert_eq!(body, json!({"status": "Accepted"}));
+            } else {
+                assert_eq!(body, json!({}));
+            }
+        }
     }
 
     #[test]

@@ -36,6 +36,7 @@
 //! # }
 //! ```
 
+mod auth;
 mod config;
 mod defaults;
 mod error;
@@ -47,7 +48,7 @@ mod state;
 mod tls;
 mod typed;
 
-pub use config::CsmsConfig;
+pub use config::{CsmsConfig, SecurityPolicy, SecurityProfile};
 pub use defaults::{CHARGE_POINT_ACTIONS, default_reply, is_charge_point_action};
 pub use error::CsmsError;
 pub use event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
@@ -56,7 +57,8 @@ pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 pub use policy::{SubprotocolPolicy, TransactionIdAllocator, TransactionIds};
 pub use server::{CsmsHandle, CsmsServer, station_id_from_path};
 pub use state::{
-    BootInfo, ConnectorState, MAX_ACTIVE_TRANSACTIONS, MAX_CONNECTORS, Reported, StationState,
-    TransactionRecord, TransactionStatus,
+    BootInfo, CertificateRequest, ConnectorState, LogReport, MAX_ACTIVE_TRANSACTIONS,
+    MAX_CONNECTORS, MAX_SECURITY_EVENTS, Reported, SecurityEventRecord, SignedFirmwareReport,
+    StationState, TransactionRecord, TransactionStatus,
 };
-pub use tls::server_config_from_pem;
+pub use tls::{server_config_from_pem, server_config_with_client_ca};

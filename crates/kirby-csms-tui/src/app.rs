@@ -903,6 +903,8 @@ fn on_event(app: &mut App, event: CsmsEvent, fx: &mut Vec<Effect>) {
             app.ensure_station(&station, false);
             app.dirty_states.insert(station);
         }
+        // Shown by the UI in the security step (S3b); the headless output prints it already.
+        CsmsEvent::AuthFailed { .. } => {}
     }
 }
 

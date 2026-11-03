@@ -12,6 +12,9 @@ pub enum CsmsError {
     /// TLS material could not be turned into a server configuration.
     #[error("TLS setup failed: {0}")]
     Tls(String),
+    /// The configuration is inconsistent (nothing was started).
+    #[error("invalid configuration: {0}")]
+    Config(String),
     /// No station with this id is in the registry.
     #[error("unknown station {station}")]
     UnknownStation { station: String },

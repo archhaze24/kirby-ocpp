@@ -229,7 +229,12 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | Flag | Env (`KIRBY_CSMS_`) | Default | Meaning |
 | --- | --- | --- | --- |
 | `--listen ADDR` | `LISTEN` | `0.0.0.0:9000` | address, port 0 picks a free one |
-| `--tls-cert FILE`, `--tls-key FILE` | `TLS_CERT`, `TLS_KEY` | none | PEM, both or none, serves `wss://` (no mTLS) |
+| `--tls-cert FILE`, `--tls-key FILE` | `TLS_CERT`, `TLS_KEY` | none | PEM, both or none, serves `wss://` |
+| `--tls-client-ca FILE` | `TLS_CLIENT_CA` | none | CA certificate(s) (PEM) clients must be signed by (mutual TLS); needs `--tls-cert` |
+| `--security-profile 0..3` | `SECURITY_PROFILE` | 0 | Security Whitepaper profile, see below |
+| `--auth-key ID=KEY` | `AUTH_KEY` (`ID=KEY;ID=KEY`) | none | Basic Auth key of one station (repeatable) |
+| `--auth-keys-file FILE` | `AUTH_KEYS_FILE` | none | lines `ID=KEY` (`#` comments); keep it private, its permissions are not checked |
+| `--default-auth-key KEY` | `DEFAULT_AUTH_KEY` | none | key for stations without an entry |
 | `--subprotocol POLICY` | `SUBPROTOCOL` | `require:ocpp1.6` | `require:NAME`, `select:NAME`, `omit`, `reject` |
 | `--transaction-ids POLICY` | `TRANSACTION_IDS` | `fixed:123` | `fixed:ID` or `incrementing:FIRST` |
 | `--heartbeat-interval SECONDS` | `HEARTBEAT_INTERVAL` | 300 | interval in the BootNotification answer |
@@ -246,6 +251,8 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | `--licenses` | | | print third-party notices |
 
 Command line beats environment beats default; booleans are strict (`true/false/yes/no/y/n/on/off/1/0`).
+
+**Security profiles** (OCPP 1.6 Security Whitepaper): `0` accepts everybody. `1` requires HTTP Basic Auth (user name = station id from the URL, password = that station's key) over `ws://` or `wss://`; `2` is the same over TLS (`--tls-cert`/`--tls-key` required); `3` requires TLS with a client certificate signed by `--tls-client-ca` whose Common Name equals the station id. Profiles 1 and 2 need at least one key (`--auth-key`, `--auth-keys-file` or `--default-auth-key`); a station without a key is refused. The key is compared byte for byte with the password the station sends (the station's `AuthorizationKey` configuration value). Refusals answer HTTP 401 (403 for certificates) and print an `auth_failed` event (JSON: `{"type":"auth_failed","station":..,"remote_addr":..,"reason":..}`); keys are never printed. A failed TLS handshake under profile 3 is reported with `"station":null`. Invalid flag combinations exit with code 2. The CSMS also tracks what stations report (security events, `LogStatusNotification`, `SignedFirmwareStatusNotification`, the last `SignCertificate` CSR) in each station's state, and the engine has typed commands for `CertificateSigned`, `InstallCertificate`, `DeleteCertificate`, `GetInstalledCertificateIds`, `ExtendedTriggerMessage`, `GetLog` and `SignedUpdateFirmware` (headless: raw `action`/`payload` commands).
 
 ### Terminal UI
 

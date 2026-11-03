@@ -22,7 +22,8 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
 use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
-use crate::config::CsmsConfig;
+use crate::auth::{self, PeerIdentity};
+use crate::config::{CsmsConfig, SecurityProfile};
 use crate::defaults::{default_reply, is_charge_point_action};
 use crate::error::CsmsError;
 use crate::event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
@@ -93,7 +94,23 @@ pub struct CsmsServer;
 
 impl CsmsServer {
     /// Binds `config.listen` and starts serving.
+    ///
+    /// # Errors
+    ///
+    /// [`CsmsError::Config`] if the security profile needs TLS (2 and 3) and
+    /// [`CsmsConfig::tls`] is not set; [`CsmsError::Bind`] if the address is unavailable.
     pub async fn start(config: CsmsConfig) -> Result<CsmsHandle, CsmsError> {
+        if config.tls.is_none()
+            && matches!(
+                config.security.profile,
+                SecurityProfile::BasicAuthTls | SecurityProfile::MutualTls
+            )
+        {
+            return Err(CsmsError::Config(format!(
+                "security profile {} needs TLS (`tls` is not set)",
+                config.security.profile.number()
+            )));
+        }
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(CsmsError::Bind)?;
@@ -637,15 +654,34 @@ async fn serve_tcp(
     match acceptor {
         Some(acceptor) => {
             // A failed or stalled TLS handshake is never registered as a connection.
-            if let Ok(Ok(tls)) = timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
-                run_session(tls, peer, inner).await;
+            match timeout(HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                Ok(Ok(tls)) => {
+                    let leaf = tls
+                        .get_ref()
+                        .1
+                        .peer_certificates()
+                        .and_then(|chain| chain.first())
+                        .map(AsRef::as_ref);
+                    let identity = PeerIdentity::from_leaf(leaf);
+                    run_session(tls, peer, identity, inner).await;
+                }
+                // With profile 3 a failed handshake is most likely a missing or untrusted
+                // client certificate; say so (other profiles stay quiet about scanners).
+                _ if inner.config.security.profile == SecurityProfile::MutualTls => {
+                    inner.emit(CsmsEvent::AuthFailed {
+                        station: None,
+                        remote_addr: peer,
+                        reason: "TLS handshake failed".to_owned(),
+                    });
+                }
+                _ => {}
             }
         }
-        None => run_session(tcp, peer, inner).await,
+        None => run_session(tcp, peer, PeerIdentity::Plain, inner).await,
     }
 }
 
-async fn run_session<S>(stream: S, peer: SocketAddr, inner: Arc<Inner>)
+async fn run_session<S>(stream: S, peer: SocketAddr, identity: PeerIdentity, inner: Arc<Inner>)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -659,6 +695,14 @@ where
     let callback = |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
         let id = station_id_from_path(request.uri().path())
             .ok_or_else(|| refusal("no charge point id in the URL path"))?;
+        if let Err(denied) = auth::check(&inner.config.security, request, &id, &identity) {
+            inner.emit(CsmsEvent::AuthFailed {
+                station: Some(id),
+                remote_addr: peer,
+                reason: denied.reason.to_owned(),
+            });
+            return Err(denied.response());
+        }
         let chosen = inner
             .config
             .subprotocol

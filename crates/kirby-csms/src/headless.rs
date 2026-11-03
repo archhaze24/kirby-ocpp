@@ -126,6 +126,10 @@ pub fn station_summary(info: &StationInfo, state: Option<&StationState>) -> Valu
         }
         object.insert("connectors".to_owned(), connector_statuses(state));
         object.insert("active_transactions".to_owned(), active_transactions(state));
+        object.insert(
+            "security_events".to_owned(),
+            state.security_events_total.into(),
+        );
     }
     value
 }
@@ -270,6 +274,22 @@ impl Printer {
             }
             CsmsEvent::StateChanged { station } => {
                 self.print_state(station, &stamp, &clock.to_string());
+            }
+            CsmsEvent::AuthFailed {
+                station,
+                remote_addr,
+                reason,
+            } => {
+                let who = station
+                    .as_deref()
+                    .map_or_else(|| "unknown station".to_owned(), sanitize);
+                self.out.event(
+                    &json!({
+                        "type": "auth_failed", "ts": stamp, "station": station,
+                        "remote_addr": remote_addr.to_string(), "reason": reason
+                    }),
+                    &format!("{clock} {who} refused ({reason}) from {remote_addr}"),
+                );
             }
         }
     }

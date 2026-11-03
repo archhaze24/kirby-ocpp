@@ -1,25 +1,32 @@
-//! Typed CSMS commands: [`CsmsHandle::call_typed`] and thin wrappers for the 19 commands a
-//! central system sends. Requests and responses are the typed messages of `kirby-ocpp-core`.
+//! Typed CSMS commands: [`CsmsHandle::call_typed`] and thin wrappers for the 19 commands of OCPP 1.6
+//! and the 7 of the Security Whitepaper a central system sends. Requests and responses are the typed messages of `kirby-ocpp-core`.
 
 use std::sync::OnceLock;
 
 use kirby_ocpp_core::ids::{ConnectorId, IdTag, ReservationId};
 use kirby_ocpp_core::ocpp::messages::{
-    CancelReservation, CancelReservationRequest, CancelReservationResponse, ChangeAvailability,
-    ChangeAvailabilityRequest, ChangeAvailabilityResponse, ChangeConfiguration,
+    CancelReservation, CancelReservationRequest, CancelReservationResponse, CertificateHashData,
+    CertificateSigned, CertificateSignedRequest, CertificateSignedResponse, CertificateUse,
+    ChangeAvailability, ChangeAvailabilityRequest, ChangeAvailabilityResponse, ChangeConfiguration,
     ChangeConfigurationRequest, ChangeConfigurationResponse, ChargingProfile, ClearCache,
     ClearCacheRequest, ClearCacheResponse, ClearChargingProfile, ClearChargingProfileRequest,
     ClearChargingProfileResponse, DataTransfer, DataTransferRequest, DataTransferResponse,
+    DeleteCertificate, DeleteCertificateRequest, DeleteCertificateResponse, ExtendedMessageTrigger,
+    ExtendedTriggerMessage, ExtendedTriggerMessageRequest, ExtendedTriggerMessageResponse,
     GetCompositeSchedule, GetCompositeScheduleRequest, GetCompositeScheduleResponse,
     GetConfiguration, GetConfigurationRequest, GetConfigurationResponse, GetDiagnostics,
-    GetDiagnosticsRequest, GetDiagnosticsResponse, GetLocalListVersion, GetLocalListVersionRequest,
-    GetLocalListVersionResponse, RemoteStartTransaction, RemoteStartTransactionRequest,
-    RemoteStartTransactionResponse, RemoteStopTransaction, RemoteStopTransactionRequest,
-    RemoteStopTransactionResponse, ReserveNow, ReserveNowRequest, ReserveNowResponse, Reset,
-    ResetRequest, ResetResponse, SendLocalList, SendLocalListRequest, SendLocalListResponse,
-    SetChargingProfile, SetChargingProfileRequest, SetChargingProfileResponse, TriggerMessage,
-    TriggerMessageRequest, TriggerMessageResponse, UnlockConnector, UnlockConnectorRequest,
-    UnlockConnectorResponse, UpdateFirmware, UpdateFirmwareRequest, UpdateFirmwareResponse,
+    GetDiagnosticsRequest, GetDiagnosticsResponse, GetInstalledCertificateIds,
+    GetInstalledCertificateIdsRequest, GetInstalledCertificateIdsResponse, GetLocalListVersion,
+    GetLocalListVersionRequest, GetLocalListVersionResponse, GetLog, GetLogRequest, GetLogResponse,
+    InstallCertificate, InstallCertificateRequest, InstallCertificateResponse,
+    RemoteStartTransaction, RemoteStartTransactionRequest, RemoteStartTransactionResponse,
+    RemoteStopTransaction, RemoteStopTransactionRequest, RemoteStopTransactionResponse, ReserveNow,
+    ReserveNowRequest, ReserveNowResponse, Reset, ResetRequest, ResetResponse, SendLocalList,
+    SendLocalListRequest, SendLocalListResponse, SetChargingProfile, SetChargingProfileRequest,
+    SetChargingProfileResponse, SignedUpdateFirmware, SignedUpdateFirmwareRequest,
+    SignedUpdateFirmwareResponse, TriggerMessage, TriggerMessageRequest, TriggerMessageResponse,
+    UnlockConnector, UnlockConnectorRequest, UnlockConnectorResponse, UpdateFirmware,
+    UpdateFirmwareRequest, UpdateFirmwareResponse,
 };
 use kirby_ocpp_core::ocpp::types::{
     AvailabilityType, ChargingRateUnitType, MessageTrigger, ResetType,
@@ -300,5 +307,88 @@ impl CsmsHandle {
         req: GetDiagnosticsRequest,
     ) -> Result<GetDiagnosticsResponse, CsmsError> {
         self.call_typed::<GetDiagnostics>(station, req).await
+    }
+
+    /// `CertificateSigned` (Security Whitepaper): hands the station its signed certificate chain
+    /// (PEM, leaf first).
+    pub async fn certificate_signed(
+        &self,
+        station: &str,
+        certificate_chain: impl Into<String>,
+    ) -> Result<CertificateSignedResponse, CsmsError> {
+        let req = CertificateSignedRequest {
+            certificate_chain: certificate_chain.into(),
+        };
+        self.call_typed::<CertificateSigned>(station, req).await
+    }
+
+    /// `InstallCertificate`: installs a root certificate (PEM).
+    pub async fn install_certificate(
+        &self,
+        station: &str,
+        certificate_type: CertificateUse,
+        certificate: impl Into<String>,
+    ) -> Result<InstallCertificateResponse, CsmsError> {
+        let req = InstallCertificateRequest {
+            certificate_type,
+            certificate: certificate.into(),
+        };
+        self.call_typed::<InstallCertificate>(station, req).await
+    }
+
+    /// `DeleteCertificate`.
+    pub async fn delete_certificate(
+        &self,
+        station: &str,
+        certificate_hash_data: CertificateHashData,
+    ) -> Result<DeleteCertificateResponse, CsmsError> {
+        let req = DeleteCertificateRequest {
+            certificate_hash_data,
+        };
+        self.call_typed::<DeleteCertificate>(station, req).await
+    }
+
+    /// `GetInstalledCertificateIds`.
+    pub async fn get_installed_certificate_ids(
+        &self,
+        station: &str,
+        certificate_type: CertificateUse,
+    ) -> Result<GetInstalledCertificateIdsResponse, CsmsError> {
+        let req = GetInstalledCertificateIdsRequest { certificate_type };
+        self.call_typed::<GetInstalledCertificateIds>(station, req)
+            .await
+    }
+
+    /// `ExtendedTriggerMessage`.
+    pub async fn extended_trigger_message(
+        &self,
+        station: &str,
+        requested: ExtendedMessageTrigger,
+        connector: Option<ConnectorId>,
+    ) -> Result<ExtendedTriggerMessageResponse, CsmsError> {
+        let req = ExtendedTriggerMessageRequest {
+            requested_message: requested,
+            connector_id: connector,
+        };
+        self.call_typed::<ExtendedTriggerMessage>(station, req)
+            .await
+    }
+
+    /// `GetLog`.
+    pub async fn get_log(
+        &self,
+        station: &str,
+        req: GetLogRequest,
+    ) -> Result<GetLogResponse, CsmsError> {
+        self.call_typed::<GetLog>(station, req).await
+    }
+
+    /// `SignedUpdateFirmware`.
+    pub async fn signed_update_firmware(
+        &self,
+        station: &str,
+        req: SignedUpdateFirmwareRequest,
+    ) -> Result<SignedUpdateFirmwareResponse, CsmsError> {
+        self.call_typed::<SignedUpdateFirmware>(station, req).await
     }
 }

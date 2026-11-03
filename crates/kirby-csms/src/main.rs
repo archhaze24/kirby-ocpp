@@ -13,7 +13,10 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
-use kirby_csms_core::{CsmsConfig, CsmsEvent, CsmsHandle, CsmsServer, server_config_from_pem};
+use kirby_csms_core::{
+    CsmsConfig, CsmsEvent, CsmsHandle, CsmsServer, server_config_from_pem,
+    server_config_with_client_ca,
+};
 use kirby_ocpp_core::scenario::{JunitSuite, ScenarioReport, StepStatus, junit_xml};
 use tokio::sync::broadcast;
 
@@ -34,7 +37,7 @@ const EXIT_INTERRUPTED: u8 = 130;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let mut cli = Cli::parse();
     if cli.licenses {
         print!("{LICENSES}");
         return ExitCode::SUCCESS;
@@ -44,9 +47,32 @@ async fn main() -> ExitCode {
         Ok(script) => script,
         Err(error) => return usage_error(&error),
     };
+    if let Err(error) =
+        cli.apply_env_auth_keys(std::env::var("KIRBY_CSMS_AUTH_KEY").ok().as_deref())
+    {
+        return usage_error(&error);
+    }
+    if let Err(error) = cli.validate_security() {
+        return usage_error(&error);
+    }
     let mut config = cli.csms_config();
+    if let Some(path) = &cli.auth_keys_file {
+        match std::fs::read_to_string(path)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))
+            .and_then(|text| {
+                cli::parse_auth_keys_text(&text).map_err(|e| format!("{}: {e}", path.display()))
+            }) {
+            // Entries given on the command line win over the file.
+            Ok(keys) => {
+                for (id, key) in keys {
+                    config.security.keys.entry(id).or_insert(key);
+                }
+            }
+            Err(error) => return usage_error(&error),
+        }
+    }
     if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key)
-        && let Err(error) = load_tls(&mut config, cert, key)
+        && let Err(error) = load_tls(&mut config, cert, key, cli.tls_client_ca.as_deref())
     {
         return usage_error(&error);
     }
@@ -127,12 +153,21 @@ fn usage_error(error: &str) -> ExitCode {
     ExitCode::from(EXIT_USAGE)
 }
 
-fn load_tls(config: &mut CsmsConfig, cert: &Path, key: &Path) -> Result<(), String> {
+fn load_tls(
+    config: &mut CsmsConfig,
+    cert: &Path,
+    key: &Path,
+    client_ca: Option<&Path>,
+) -> Result<(), String> {
     let read = |path: &Path| {
         std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
     };
     let (cert, key) = (read(cert)?, read(key)?);
-    config.tls = Some(server_config_from_pem(&cert, &key).map_err(|e| e.to_string())?);
+    let tls = match client_ca {
+        Some(ca) => server_config_with_client_ca(&cert, &key, &read(ca)?),
+        None => server_config_from_pem(&cert, &key),
+    };
+    config.tls = Some(tls.map_err(|e| e.to_string())?);
     Ok(())
 }
 

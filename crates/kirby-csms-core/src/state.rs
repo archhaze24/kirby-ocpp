@@ -11,13 +11,16 @@
 //!
 //! [`CsmsConfig::transaction_history_cap`]: crate::CsmsConfig::transaction_history_cap
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use chrono::{DateTime, Utc};
 use kirby_ocpp_core::ocpp::messages::{
     BootNotificationRequest, BootNotificationResponse, DiagnosticsStatusNotificationRequest,
-    FirmwareStatusNotificationRequest, MeterValuesRequest, StartTransactionRequest,
-    StartTransactionResponse, StatusNotificationRequest, StopTransactionRequest,
+    FirmwareStatusNotificationRequest, LogStatusNotificationRequest, MAX_CERTIFICATE_LEN,
+    MAX_SECURITY_EVENT_TECH_INFO_LEN, MAX_SECURITY_EVENT_TYPE_LEN, MeterValuesRequest,
+    SecurityEventNotificationRequest, SignCertificateRequest, SignedFirmwareStatus,
+    SignedFirmwareStatusNotificationRequest, StartTransactionRequest, StartTransactionResponse,
+    StatusNotificationRequest, StopTransactionRequest, UploadLogStatus,
 };
 use kirby_ocpp_core::ocpp::types::{
     AuthorizationStatus, ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus,
@@ -31,6 +34,8 @@ pub const MAX_CONNECTORS: usize = 1024;
 /// Most simultaneously active transactions tracked per station; beyond it the oldest active
 /// one is dropped (a station that starts transactions and never stops them).
 pub const MAX_ACTIVE_TRANSACTIONS: usize = 256;
+/// Most security events kept per station (oldest dropped first).
+pub const MAX_SECURITY_EVENTS: usize = 100;
 
 /// What the engine knows about one station's protocol state. See the module docs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -53,6 +58,54 @@ pub struct StationState {
     /// `StopTransaction`s for a transaction id that has no active transaction here. They
     /// are counted, not recorded.
     pub unknown_stops: u64,
+    /// The last [`MAX_SECURITY_EVENTS`] `SecurityEventNotification`s, oldest first.
+    pub security_events: VecDeque<SecurityEventRecord>,
+    /// All `SecurityEventNotification`s answered with a result, including dropped ones.
+    pub security_events_total: u64,
+    /// Last `LogStatusNotification`.
+    pub log_status: Option<LogReport>,
+    /// Last `SignedFirmwareStatusNotification`.
+    pub signed_firmware_status: Option<SignedFirmwareReport>,
+    /// The CSR of the last `SignCertificate` we answered.
+    pub certificate_request: Option<CertificateRequest>,
+}
+
+/// One `SecurityEventNotification`. Text fields are cut to the schema's length limits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SecurityEventRecord {
+    pub event_type: String,
+    /// The timestamp the station put in the message.
+    pub timestamp: DateTime<Utc>,
+    pub tech_info: Option<String>,
+    /// Our clock.
+    pub received_at: DateTime<Utc>,
+}
+
+/// The last `LogStatusNotification`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LogReport {
+    pub status: UploadLogStatus,
+    pub request_id: Option<i32>,
+    /// Our clock.
+    pub at: DateTime<Utc>,
+}
+
+/// The last `SignedFirmwareStatusNotification`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SignedFirmwareReport {
+    pub status: SignedFirmwareStatus,
+    pub request_id: Option<i32>,
+    /// Our clock.
+    pub at: DateTime<Utc>,
+}
+
+/// The last `SignCertificate` request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CertificateRequest {
+    /// The PKCS#10 CSR (PEM), cut to the schema's length limit.
+    pub csr: String,
+    /// Our clock.
+    pub received_at: DateTime<Utc>,
 }
 
 /// A status the station reported, with the time we received it.
@@ -178,9 +231,55 @@ impl StationState {
                     });
                 })
                 .ok(),
+            "SecurityEventNotification" => self.on_security_event(request, now),
+            "LogStatusNotification" => LogStatusNotificationRequest::deserialize(request)
+                .map(|req| {
+                    self.log_status = Some(LogReport {
+                        status: req.status,
+                        request_id: req.request_id,
+                        at: now,
+                    });
+                })
+                .ok(),
+            "SignedFirmwareStatusNotification" => {
+                SignedFirmwareStatusNotificationRequest::deserialize(request)
+                    .map(|req| {
+                        self.signed_firmware_status = Some(SignedFirmwareReport {
+                            status: req.status,
+                            request_id: req.request_id,
+                            at: now,
+                        });
+                    })
+                    .ok()
+            }
+            "SignCertificate" => SignCertificateRequest::deserialize(request)
+                .map(|req| {
+                    self.certificate_request = Some(CertificateRequest {
+                        csr: truncate(req.csr, MAX_CERTIFICATE_LEN),
+                        received_at: now,
+                    });
+                })
+                .ok(),
             _ => None,
         }
         .is_some()
+    }
+
+    fn on_security_event(&mut self, request: &Value, now: DateTime<Utc>) -> Option<()> {
+        let req = SecurityEventNotificationRequest::deserialize(request).ok()?;
+        self.security_events.push_back(SecurityEventRecord {
+            event_type: truncate(req.event_type, MAX_SECURITY_EVENT_TYPE_LEN),
+            timestamp: req.timestamp,
+            tech_info: req
+                .tech_info
+                .map(|text| truncate(text, MAX_SECURITY_EVENT_TECH_INFO_LEN)),
+            received_at: now,
+        });
+        while self.security_events.len() > MAX_SECURITY_EVENTS {
+            self.security_events.pop_front();
+        }
+        self.security_events_total += 1;
+        Some(())
     }
 
     fn on_boot(&mut self, request: &Value, response: &Value, now: DateTime<Utc>) -> Option<()> {
@@ -340,6 +439,15 @@ impl StationState {
     }
 }
 
+/// Cuts `text` to at most `max` characters.
+fn truncate(text: String, max: usize) -> String {
+    if text.chars().count() <= max {
+        text
+    } else {
+        text.chars().take(max).collect()
+    }
+}
+
 /// A raw numeric sample as `f64`; signed data and non-numbers are skipped.
 fn sample_value(sample: &kirby_ocpp_core::ocpp::messages::SampledValue) -> Option<f64> {
     if sample.format == Some(kirby_ocpp_core::ocpp::types::ValueFormat::SignedData) {
@@ -417,6 +525,62 @@ mod tests {
         let other = json!({"connectorId": 1, "transactionId": 4, "meterValue": [{
             "timestamp": "2026-01-01T00:10:00.000Z", "sampledValue": [{"value": "1"}]}]});
         assert!(!state.apply("MeterValues", &other, &json!({}), now(), 2));
+    }
+
+    #[test]
+    fn security_reports_are_tracked_and_bounded() {
+        let mut state = StationState::default();
+        for n in 0..(MAX_SECURITY_EVENTS + 5) {
+            let req = json!({"type": "X".repeat(80), "timestamp": "2026-01-01T00:00:00.000Z",
+                "techInfo": n.to_string()});
+            assert!(state.apply("SecurityEventNotification", &req, &json!({}), now(), 2));
+        }
+        assert_eq!(state.security_events.len(), MAX_SECURITY_EVENTS);
+        assert_eq!(
+            state.security_events_total,
+            (MAX_SECURITY_EVENTS + 5) as u64
+        );
+        assert_eq!(
+            state.security_events[0].event_type.len(),
+            MAX_SECURITY_EVENT_TYPE_LEN
+        );
+        assert_eq!(state.security_events[0].tech_info.as_deref(), Some("5"));
+
+        let log = json!({"status": "Uploading", "requestId": 4});
+        assert!(state.apply("LogStatusNotification", &log, &json!({}), now(), 2));
+        assert_eq!(
+            state.log_status.as_ref().and_then(|l| l.request_id),
+            Some(4)
+        );
+        let fw = json!({"status": "Downloaded"});
+        assert!(state.apply(
+            "SignedFirmwareStatusNotification",
+            &fw,
+            &json!({}),
+            now(),
+            2
+        ));
+        assert!(state.signed_firmware_status.is_some());
+        let csr = json!({"csr": "C".repeat(MAX_CERTIFICATE_LEN + 10)});
+        assert!(state.apply(
+            "SignCertificate",
+            &csr,
+            &json!({"status": "Accepted"}),
+            now(),
+            2
+        ));
+        assert_eq!(
+            state.certificate_request.as_ref().map(|r| r.csr.len()),
+            Some(MAX_CERTIFICATE_LEN)
+        );
+        // Bad payloads change nothing.
+        assert!(!state.apply(
+            "LogStatusNotification",
+            &json!({"status": 1}),
+            &json!({}),
+            now(),
+            2
+        ));
     }
 
     #[test]

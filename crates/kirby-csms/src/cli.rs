@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Parser};
-use kirby_csms_core::{CsmsConfig, SubprotocolPolicy, TransactionIds};
+use kirby_csms_core::{CsmsConfig, SecurityProfile, SubprotocolPolicy, TransactionIds};
 
 /// Terminal OCPP 1.6J central system (CSMS) for charge point firmware development and load tests.
 ///
@@ -49,6 +49,37 @@ pub struct Cli {
     /// Server private key (PEM) for wss://; needs --tls-cert
     #[arg(long, env = "KIRBY_CSMS_TLS_KEY", value_name = "FILE", value_parser = non_empty_path, requires = "tls_cert")]
     pub tls_key: Option<PathBuf>,
+
+    /// Trusted CA certificate(s) (PEM) for client certificates; with --tls-cert, every client must
+    /// present a certificate signed by them (mutual TLS)
+    #[arg(long, env = "KIRBY_CSMS_TLS_CLIENT_CA", value_name = "FILE", value_parser = non_empty_path, requires = "tls_cert")]
+    pub tls_client_ca: Option<PathBuf>,
+
+    /// Security Whitepaper profile: 0 none, 1 Basic Auth, 2 Basic Auth + TLS, 3 TLS with client
+    /// certificates (the certificate's CN must equal the station id)
+    #[arg(
+        long, env = "KIRBY_CSMS_SECURITY_PROFILE", value_name = "0..3",
+        default_value_t = 0, value_parser = clap::value_parser!(u8).range(0..=3)
+    )]
+    pub security_profile: u8,
+
+    /// Basic Auth key of one station as ID=KEY (repeatable). The station sends the key as the
+    /// password and its id as the user name. Environment KIRBY_CSMS_AUTH_KEY holds several
+    /// entries separated by `;` (used only when no --auth-key is given)
+    #[arg(long = "auth-key", value_name = "ID=KEY", value_parser = parse_auth_key)]
+    pub auth_keys: Vec<(String, String)>,
+
+    /// File with Basic Auth keys: lines `ID=KEY` (blank lines and `#` comments are skipped). Keep
+    /// it private (not readable by others); the file's permissions are not checked
+    #[arg(long, env = "KIRBY_CSMS_AUTH_KEYS_FILE", value_name = "FILE", value_parser = non_empty_path)]
+    pub auth_keys_file: Option<PathBuf>,
+
+    /// Basic Auth key for stations without an ID=KEY entry
+    #[arg(
+        long, env = "KIRBY_CSMS_DEFAULT_AUTH_KEY", value_name = "KEY",
+        hide_env_values = true, value_parser = non_empty_secret
+    )]
+    pub default_auth_key: Option<String>,
 
     /// WebSocket subprotocol policy: require:NAME (refuse clients that do not offer it), select:NAME
     /// (always select it), omit (select nothing), reject (refuse every upgrade)
@@ -168,7 +199,87 @@ impl Cli {
         config.history_cap = self.history_cap;
         config.transaction_history_cap = self.transaction_history_cap;
         config.call_timeout = Duration::from_secs(self.call_timeout);
+        config.security.profile =
+            SecurityProfile::from_number(self.security_profile).unwrap_or_default();
+        config.security.keys.extend(self.auth_keys.iter().cloned());
         config
+            .security
+            .default_key
+            .clone_from(&self.default_auth_key);
+        config
+    }
+
+    /// Takes the keys from `KIRBY_CSMS_AUTH_KEY` (`ID=KEY;ID=KEY`) unless `--auth-key` was given.
+    pub fn apply_env_auth_keys(&mut self, env: Option<&str>) -> Result<(), String> {
+        let Some(text) = env.filter(|_| self.auth_keys.is_empty()) else {
+            return Ok(());
+        };
+        for part in text.split(';').filter(|part| !part.is_empty()) {
+            let pair = parse_auth_key(part).map_err(|e| format!("KIRBY_CSMS_AUTH_KEY: {e}"))?;
+            self.auth_keys.push(pair);
+        }
+        Ok(())
+    }
+
+    /// Checks the combination of the security flags (the engine checks TLS itself).
+    pub fn validate_security(&self) -> Result<(), String> {
+        let profile = self.security_profile;
+        let tls = self.tls_cert.is_some();
+        if profile >= 2 && !tls {
+            return Err(format!(
+                "--security-profile {profile} needs --tls-cert and --tls-key"
+            ));
+        }
+        if profile == 3 && self.tls_client_ca.is_none() {
+            return Err("--security-profile 3 needs --tls-client-ca".to_owned());
+        }
+        if profile != 3 && self.tls_client_ca.is_some() {
+            return Err("--tls-client-ca is only used with --security-profile 3".to_owned());
+        }
+        let has_keys = !self.auth_keys.is_empty()
+            || self.auth_keys_file.is_some()
+            || self.default_auth_key.is_some();
+        if matches!(profile, 1 | 2) && !has_keys {
+            return Err(format!(
+                "--security-profile {profile} needs --auth-key, --auth-keys-file or --default-auth-key"
+            ));
+        }
+        if !matches!(profile, 1 | 2) && has_keys {
+            return Err(
+                "authorization keys are only used with --security-profile 1 or 2".to_owned(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Splits `ID=KEY` at the first `=`.
+fn parse_auth_key(value: &str) -> Result<(String, String), String> {
+    match value.split_once('=') {
+        Some((id, key)) if !id.is_empty() && !key.is_empty() => Ok((id.to_owned(), key.to_owned())),
+        _ => Err("expected ID=KEY with a non-empty id and key".to_owned()),
+    }
+}
+
+/// Parses the contents of an `--auth-keys-file`. Errors name the line, never the key.
+pub fn parse_auth_keys_text(text: &str) -> Result<Vec<(String, String)>, String> {
+    let mut keys = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let pair = parse_auth_key(line).map_err(|e| format!("line {}: {e}", number + 1))?;
+        keys.push(pair);
+    }
+    Ok(keys)
+}
+
+fn non_empty_secret(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        Err("must not be empty".to_owned())
+    } else {
+        Ok(value.to_owned())
     }
 }
 
@@ -228,6 +339,91 @@ mod tests {
         assert!(!cli(&["--json"]).wants_tui(true, true));
         assert!(!cli(&["--stdin"]).wants_tui(true, true));
         assert!(!cli(&["--script", "s.toml"]).wants_tui(true, true));
+    }
+
+    #[test]
+    fn auth_key_parsing() {
+        assert_eq!(
+            parse_auth_key("CP-1=a=b"),
+            Ok(("CP-1".to_owned(), "a=b".to_owned()))
+        );
+        assert!(parse_auth_key("CP-1").is_err());
+        assert!(parse_auth_key("=k").is_err());
+        assert!(parse_auth_key("CP-1=").is_err());
+        let text = "# keys\n\nA=1\n  B=2  \n";
+        assert_eq!(
+            parse_auth_keys_text(text),
+            Ok(vec![
+                ("A".to_owned(), "1".to_owned()),
+                ("B".to_owned(), "2".to_owned())
+            ])
+        );
+        let error = parse_auth_keys_text("A=1\nsecretlooking").unwrap_err();
+        assert!(error.starts_with("line 2:") && !error.contains("secretlooking"));
+    }
+
+    #[test]
+    fn env_keys_are_split_and_lose_to_flags() {
+        let mut cli = Cli::parse_from(["kirby-csms"]);
+        cli.apply_env_auth_keys(Some("A=1;B=x=y;")).unwrap();
+        assert_eq!(cli.auth_keys.len(), 2);
+        assert_eq!(cli.auth_keys[1], ("B".to_owned(), "x=y".to_owned()));
+        let mut cli = Cli::parse_from(["kirby-csms", "--auth-key", "C=3;4"]);
+        cli.apply_env_auth_keys(Some("A=1")).unwrap();
+        assert_eq!(cli.auth_keys, [("C".to_owned(), "3;4".to_owned())]);
+        let mut cli = Cli::parse_from(["kirby-csms"]);
+        assert!(cli.apply_env_auth_keys(Some("nokey")).is_err());
+    }
+
+    #[test]
+    fn security_flag_combinations() {
+        let check = |args: &[&str]| {
+            Cli::parse_from(std::iter::once("kirby-csms").chain(args.iter().copied()))
+                .validate_security()
+        };
+        assert!(check(&[]).is_ok());
+        assert!(check(&["--security-profile", "1", "--auth-key", "A=k"]).is_ok());
+        assert!(check(&["--security-profile", "1"]).is_err());
+        assert!(check(&["--auth-key", "A=k"]).is_err());
+        assert!(check(&["--security-profile", "2", "--default-auth-key", "k"]).is_err());
+        assert!(
+            check(&[
+                "--security-profile",
+                "2",
+                "--default-auth-key",
+                "k",
+                "--tls-cert",
+                "c",
+                "--tls-key",
+                "k"
+            ])
+            .is_ok()
+        );
+        assert!(
+            check(&[
+                "--security-profile",
+                "3",
+                "--tls-cert",
+                "c",
+                "--tls-key",
+                "k"
+            ])
+            .is_err()
+        );
+        assert!(
+            check(&[
+                "--security-profile",
+                "3",
+                "--tls-cert",
+                "c",
+                "--tls-key",
+                "k",
+                "--tls-client-ca",
+                "ca"
+            ])
+            .is_ok()
+        );
+        assert!(check(&["--tls-cert", "c", "--tls-key", "k", "--tls-client-ca", "ca"]).is_err());
     }
 
     #[test]

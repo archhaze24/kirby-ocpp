@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -41,6 +42,85 @@ pub struct CsmsConfig {
     /// `Some` serves `wss://` with this rustls configuration; `None` serves plain `ws://`.
     /// Build one from PEM files' contents with [`crate::server_config_from_pem`].
     pub tls: Option<Arc<ServerConfig>>,
+    /// Who may connect. Default: everybody (profile 0). See [`SecurityPolicy`].
+    pub security: SecurityPolicy,
+}
+
+/// OCPP 1.6 Security Whitepaper connection security profile of the server.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SecurityProfile {
+    /// Profile 0: no authentication (plain `ws://` or server-auth-only `wss://`).
+    #[default]
+    None,
+    /// Profile 1: HTTP Basic Auth, over `ws://` or `wss://`.
+    BasicAuth,
+    /// Profile 2: HTTP Basic Auth over TLS ([`CsmsConfig::tls`] is required).
+    BasicAuthTls,
+    /// Profile 3: TLS with a required client certificate whose Common Name is the station id
+    /// ([`CsmsConfig::tls`] is required and must demand client certificates, see
+    /// [`crate::server_config_with_client_ca`]).
+    MutualTls,
+}
+
+impl SecurityProfile {
+    /// The whitepaper's profile number, 0 to 3.
+    pub fn number(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::BasicAuth => 1,
+            Self::BasicAuthTls => 2,
+            Self::MutualTls => 3,
+        }
+    }
+
+    /// The profile with this number, if there is one.
+    pub fn from_number(number: u8) -> Option<Self> {
+        match number {
+            0 => Some(Self::None),
+            1 => Some(Self::BasicAuth),
+            2 => Some(Self::BasicAuthTls),
+            3 => Some(Self::MutualTls),
+            _ => None,
+        }
+    }
+}
+
+/// Connection security of a [`crate::CsmsServer`].
+///
+/// With profiles 1 and 2 a station must send `Authorization: Basic base64(id:key)` where `id`
+/// is the station id from the URL and `key` equals the key configured for that id (its entry
+/// in [`SecurityPolicy::keys`], else [`SecurityPolicy::default_key`]); a station without a key
+/// is refused. With profile 3 the TLS client certificate's Common Name must equal the id.
+/// Refusals are HTTP 401 (403 for certificates) and emit [`crate::CsmsEvent::AuthFailed`].
+/// Keys never appear in events, logs or the `Debug` output.
+#[derive(Clone, Default)]
+pub struct SecurityPolicy {
+    pub profile: SecurityProfile,
+    /// Station id to the key (the "AuthorizationKey" of that station) used as the Basic Auth
+    /// password. Compared byte for byte.
+    pub keys: BTreeMap<String, String>,
+    /// Key for stations without an entry in `keys`.
+    pub default_key: Option<String>,
+}
+
+impl fmt::Debug for SecurityPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecurityPolicy")
+            .field("profile", &self.profile)
+            .field("keys", &self.keys.len())
+            .field("default_key", &self.default_key.is_some())
+            .finish()
+    }
+}
+
+impl SecurityPolicy {
+    /// The key a station must present, if one is configured.
+    pub(crate) fn key_for(&self, station: &str) -> Option<&str> {
+        self.keys
+            .get(station)
+            .or(self.default_key.as_ref())
+            .map(String::as_str)
+    }
 }
 
 impl CsmsConfig {
@@ -68,6 +148,7 @@ impl Default for CsmsConfig {
             max_message_size: 1024 * 1024,
             max_stations: 100_000,
             tls: None,
+            security: SecurityPolicy::default(),
         }
     }
 }
@@ -87,6 +168,7 @@ impl fmt::Debug for CsmsConfig {
             .field("max_message_size", &self.max_message_size)
             .field("max_stations", &self.max_stations)
             .field("tls", &self.tls.is_some())
+            .field("security", &self.security)
             .finish()
     }
 }
