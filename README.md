@@ -213,6 +213,83 @@ kirby-ocpp --url ws://localhost:9000/ocpp --rule Reset=reject --rule GetConfigur
 
 In scenarios: `action = "set_rule"` with `rule = "Reset=reject*2"`, and `action = "clear_rules"` with an optional `call = "Reset"` (all rules when omitted).
 
+## kirby-csms
+
+`kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware developers and load tests. It accepts any number of stations on `ws(s)://HOST:PORT/<any prefix>/<station id>` (the station id is the last path segment), answers their CALLs with canned replies, prints everything that happens and sends commands to stations. It is headless for now (no TUI yet).
+
+```
+kirby-csms --listen 0.0.0.0:9000
+kirby-csms --listen 127.0.0.1:0 --json --subprotocol omit
+kirby-csms --tls-cert cert.pem --tls-key key.pem
+kirby-csms --script suite.toml --junit junit.xml --timeout 120
+```
+
+The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","addr":"127.0.0.1:41234","url":"ws://127.0.0.1:41234"}`), so `--listen 127.0.0.1:0` works for tests. Then one line per event: station connected / disconnected (with reason), every frame in and out, and a compact line when connector statuses or active transactions of a station change. SIGINT or SIGTERM shuts down gracefully.
+
+| Flag | Env (`KIRBY_CSMS_`) | Default | Meaning |
+| --- | --- | --- | --- |
+| `--listen ADDR` | `LISTEN` | `0.0.0.0:9000` | address, port 0 picks a free one |
+| `--tls-cert FILE`, `--tls-key FILE` | `TLS_CERT`, `TLS_KEY` | none | PEM, both or none, serves `wss://` (no mTLS) |
+| `--subprotocol POLICY` | `SUBPROTOCOL` | `require:ocpp1.6` | `require:NAME`, `select:NAME`, `omit`, `reject` |
+| `--transaction-ids POLICY` | `TRANSACTION_IDS` | `fixed:123` | `fixed:ID` or `incrementing:FIRST` |
+| `--heartbeat-interval SECONDS` | `HEARTBEAT_INTERVAL` | 300 | interval in the BootNotification answer |
+| `--history-cap N` | `HISTORY_CAP` | 1000 | frames kept per station |
+| `--transaction-history-cap N` | `TRANSACTION_HISTORY_CAP` | 100 | stopped transactions kept per station |
+| `--call-timeout SECONDS` | `CALL_TIMEOUT` | 30 | wait for a station's answer to a command |
+| `--json` | `JSON` | off | JSON lines instead of text |
+| `--log-file PATH` | `LOG_FILE` | none | append every event as a JSON line |
+| `--stdin` | `STDIN` | auto | read JSON-line commands even on a terminal |
+| `--script FILE` | `SCRIPT` | none | run a TOML script, print the report, exit |
+| `--report PATH`, `--junit PATH` | | none | script report as JSON / JUnit XML |
+| `--timeout SECONDS` | | 60 | overall limit of a script run |
+| `--licenses` | | | print third-party notices |
+
+Command line beats environment beats default; booleans are strict (`true/false/yes/no/y/n/on/off/1/0`).
+
+### Commands on stdin
+
+Without `--script`, when stdin is not a terminal (or with `--stdin`), each input line is a JSON object and gets exactly one answer line. End of input does not stop the server. Answers are always JSON, also without `--json`.
+
+```
+{"station":"CP-1","action":"ChangeConfiguration","payload":{"key":"HeartbeatInterval","value":"60"},"timeout_ms":5000,"id":"my-tag"}
+-> {"type":"result","station":"CP-1","action":"ChangeConfiguration","ok":true,"result":{"status":"Accepted"},"id":"my-tag"}
+-> {"type":"result","station":"CP-1","action":"Reset","ok":false,"error":"CALLERROR NotSupported: ..."}
+{"cmd":"stations"}
+-> {"type":"stations","stations":[{"id":"CP-1","connected":true,"vendor":"...","model":"...","connectors":{"1":"Available"},"active_transactions":[]}]}
+```
+
+`payload` defaults to `{}`, `timeout_ms` to `--call-timeout`, `id` is optional and echoed. Payloads are sent as given (not schema-checked), so malformed requests can be tested. A CALLERROR, a timeout, an unknown station or a bad line is an `"ok":false` result with an `error` text, never a crash.
+
+### Scripts
+
+A script is TOML with sequential steps; the first failing step stops the run (later steps are `SKIP`). The stations are external processes (for example `kirby-ocpp`) that connect while the script waits.
+
+```toml
+name = "smoke"
+
+[[steps]]
+action = "wait_station"          # station = "CP-1" and/or count = N; default timeout 30000 ms
+station = "CP-1"
+booted = true                    # also wait for its BootNotification (default: the socket is open)
+
+[[steps]]
+action = "wait_call"             # an inbound CALL; optional station and payload_contains (subset match)
+call = "StartTransaction"
+payload_contains = { connectorId = 1 }
+timeout_ms = 20000
+
+[[steps]]
+action = "call"                  # raw CALL; expect_status checks payload.status, expect_error a CALLERROR
+station = "CP-1"
+call = "ChangeConfiguration"
+payload = { key = "HeartbeatInterval", value = "60" }
+expect_status = "Accepted"
+```
+
+Other steps: `sleep {ms}`, `respond {call, payload}` (answer every such CALL with this CALLRESULT payload), `clear_respond {call}`, `inject_fault {call, kind = "call_error" | "silence" | "close" | "invalid_payload", payload, times}`. Every step takes an optional `name`; `timeout_ms` defaults to 5000. The report looks like `kirby-ocpp run` (`PASS` / `FAIL` / `SKIP` per step; `--json` for a JSON report line).
+
+Exit codes: 0 success or clean shutdown, 1 script failed or timed out (or the server could not start), 2 usage, configuration or script error, 130 script interrupted by SIGINT.
+
 ## Testing against a mock
 
 `crates/kirby-ocpp-testkit` is a dev-only scripted mock CSMS (plain and TLS) used by the integration tests; it is not published. Use it from tests of your own, or point `kirby-ocpp` at any real or local CSMS.

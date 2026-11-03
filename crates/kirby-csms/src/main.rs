@@ -1,0 +1,208 @@
+//! `kirby-csms`: terminal OCPP 1.6J central system for charge point firmware development and
+//! load tests. Headless for now; see the `TUI` seam in `main`.
+
+mod cli;
+mod headless;
+mod script;
+mod stdin_cmd;
+
+use std::fmt::Write as _;
+use std::io::IsTerminal;
+use std::path::Path;
+use std::process::ExitCode;
+use std::time::{Duration, Instant};
+
+use clap::Parser;
+use kirby_csms_core::{CsmsConfig, CsmsEvent, CsmsHandle, CsmsServer, server_config_from_pem};
+use kirby_ocpp_core::scenario::{JunitSuite, ScenarioReport, StepStatus, junit_xml};
+use tokio::sync::broadcast;
+
+use crate::cli::Cli;
+use crate::headless::{Output, Sink};
+use crate::script::Script;
+
+/// Project licence line and third-party notices (`--licenses`).
+const LICENSES: &str = concat!(
+    "kirby-csms is distributed under the MIT licence (see LICENSE in the source repository).\n\n",
+    include_str!("../THIRD_PARTY_NOTICES.md")
+);
+
+/// Bad usage or configuration.
+const EXIT_USAGE: u8 = 2;
+/// A script run stopped by SIGINT (128 + 2, the shell convention).
+const EXIT_INTERRUPTED: u8 = 130;
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    let cli = Cli::parse();
+    if cli.licenses {
+        print!("{LICENSES}");
+        return ExitCode::SUCCESS;
+    }
+    // Everything that can be wrong with the input is found before the server binds.
+    let script = match cli.script.as_deref().map(Script::load).transpose() {
+        Ok(script) => script,
+        Err(error) => return usage_error(&error),
+    };
+    let mut config = cli.csms_config();
+    if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key)
+        && let Err(error) = load_tls(&mut config, cert, key)
+    {
+        return usage_error(&error);
+    }
+    let out = match Output::open(cli.json, cli.log_file.as_deref()) {
+        Ok(out) => out,
+        Err(error) => return usage_error(&format!("cannot open the log file: {error}")),
+    };
+
+    let handle = match CsmsServer::start(config).await {
+        Ok(handle) => handle,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // Subscribe first, print `listening`, then start printing events: that line always comes
+    // first and nothing is missed.
+    let sink_events = handle.subscribe();
+    let script_events = script.is_some().then(|| handle.subscribe());
+    headless::announce(&out, &handle);
+    let sink = Sink::spawn(&handle, sink_events, out.clone());
+
+    // Stdin commands: on request, or by default when stdin is a pipe or a file and no script
+    // is running. Never on a terminal by default (nobody types JSON lines unasked).
+    let stdin = cli.stdin || (script.is_none() && !std::io::stdin().is_terminal());
+    if stdin {
+        stdin_cmd::spawn(handle.clone(), out.clone());
+    }
+
+    // TUI: step D picks a terminal UI here (stdout is a terminal, no --script, no --json) and
+    // falls back to the headless serving below.
+    let code = if let (Some(script), Some(events)) = (&script, script_events) {
+        run_script(&cli, script, &handle, events, &out).await
+    } else {
+        let _ = shutdown_signal().await;
+        ExitCode::SUCCESS
+    };
+    handle.shutdown().await;
+    sink.finish().await;
+    code
+}
+
+fn usage_error(error: &str) -> ExitCode {
+    eprintln!("error: {error}");
+    ExitCode::from(EXIT_USAGE)
+}
+
+fn load_tls(config: &mut CsmsConfig, cert: &Path, key: &Path) -> Result<(), String> {
+    let read = |path: &Path| {
+        std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+    };
+    let (cert, key) = (read(cert)?, read(key)?);
+    config.tls = Some(server_config_from_pem(&cert, &key).map_err(|e| e.to_string())?);
+    Ok(())
+}
+
+/// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C).
+async fn shutdown_signal() -> bool {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => true,
+                _ = term.recv() => false,
+            }
+        } else {
+            let _ = tokio::signal::ctrl_c().await;
+            true
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        true
+    }
+}
+
+/// Runs the script against the live server, prints and writes the reports.
+async fn run_script(
+    cli: &Cli,
+    script: &Script,
+    handle: &CsmsHandle,
+    events: broadcast::Receiver<CsmsEvent>,
+    out: &Output,
+) -> ExitCode {
+    let deadline = Instant::now() + Duration::from_secs(cli.timeout);
+    let mut interrupted = false;
+    let report = tokio::select! {
+        report = script::run(script, handle, events, deadline) => Some(report),
+        sigint = shutdown_signal() => {
+            interrupted = sigint;
+            None
+        }
+    };
+    let Some(report) = report else {
+        eprintln!("error: interrupted");
+        return ExitCode::from(if interrupted { EXIT_INTERRUPTED } else { 1 });
+    };
+    print_report(&report, out);
+    let mut write_failed = false;
+    if let Some(path) = &cli.report
+        && let Err(error) = write_report(path, &report)
+    {
+        eprintln!("error: cannot write the report: {error}");
+        write_failed = true;
+    }
+    if let Some(path) = &cli.junit {
+        let suite = JunitSuite {
+            station: None,
+            scenario: &report.scenario,
+            outcome: Ok(&report),
+        };
+        if let Err(error) = std::fs::write(path, junit_xml(&[suite])) {
+            eprintln!("error: cannot write the JUnit report: {error}");
+            write_failed = true;
+        }
+    }
+    if write_failed || !report.passed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// Prints a script report like `kirby-ocpp run` does.
+fn print_report(report: &ScenarioReport, out: &Output) {
+    let mut value = serde_json::to_value(report).unwrap_or_default();
+    if let Some(object) = value.as_object_mut() {
+        object.insert("type".to_owned(), "report".into());
+    }
+    let mut human = format!("script {}", report.scenario);
+    for step in &report.steps {
+        let (mark, detail) = match &step.status {
+            StepStatus::Passed => ("PASS", String::new()),
+            StepStatus::Failed(reason) => ("FAIL", format!(": {reason}")),
+            StepStatus::Skipped => ("SKIP", String::new()),
+        };
+        let _ = write!(
+            human,
+            "\n  {mark} {:>2} {} ({} ms){detail}",
+            step.index + 1,
+            step.name,
+            step.duration_ms
+        );
+    }
+    let _ = write!(
+        human,
+        "\n{} in {} ms",
+        if report.passed { "PASSED" } else { "FAILED" },
+        report.duration_ms
+    );
+    out.event(&value, &human);
+}
+
+fn write_report(path: &Path, report: &ScenarioReport) -> std::io::Result<()> {
+    let text = serde_json::to_string_pretty(report).map_err(std::io::Error::other)?;
+    std::fs::write(path, text + "\n")
+}
