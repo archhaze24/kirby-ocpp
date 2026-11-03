@@ -47,7 +47,7 @@ use crate::ocpp::messages::{
 };
 use crate::ocpp::messages::{
     CertificateSigned, DeleteCertificate, ExtendedTriggerMessage, GetInstalledCertificateIds,
-    GetLog, InstallCertificate,
+    GetLog, InstallCertificate, SignedUpdateFirmware,
 };
 use crate::ocpp::responder::{ReplyHandle, Responder};
 use crate::station::event::LogLevel;
@@ -131,6 +131,11 @@ impl StationActor {
                 payload,
                 reply,
                 trigger::extended_trigger_message,
+            ),
+            SignedUpdateFirmware::NAME => self.invoke::<SignedUpdateFirmware>(
+                payload,
+                reply,
+                maintenance::signed_update_firmware,
             ),
             UpdateFirmware::NAME => {
                 self.invoke::<UpdateFirmware>(payload, reply, maintenance::update_firmware);

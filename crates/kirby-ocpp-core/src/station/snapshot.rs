@@ -11,7 +11,7 @@ use super::transaction::TransactionState;
 use super::views::{ConfigItem, LocalListView, ProfileSummary};
 use crate::config::StationConfig;
 use crate::ids::{ConnectorId, IdTag, TxId};
-use crate::ocpp::messages::UploadLogStatus;
+use crate::ocpp::messages::{SignedFirmwareStatus, UploadLogStatus};
 use crate::ocpp::types::{
     AvailabilityType, ChargePointErrorCode, ConnectorStatus, DiagnosticsStatus, FirmwareStatus,
     RegistrationStatus,
@@ -87,6 +87,10 @@ pub struct Snapshot {
     pub firmware_status: FirmwareStatus,
     /// Status of the last `GetLog` upload (`Idle` before any).
     pub log_status: UploadLogStatus,
+    /// Status of the last `SignedUpdateFirmware` (`Idle` before any).
+    pub signed_firmware_status: SignedFirmwareStatus,
+    /// `requestId` of the last `SignedUpdateFirmware`.
+    pub signed_firmware_request_id: Option<i32>,
     /// `requestId` of the last `GetLog`.
     pub log_request_id: Option<i32>,
     pub diagnostics_outcome: DiagnosticsOutcome,
@@ -132,6 +136,8 @@ impl Snapshot {
             diagnostics_status: DiagnosticsStatus::Idle,
             firmware_status: FirmwareStatus::Idle,
             log_status: UploadLogStatus::Idle,
+            signed_firmware_status: SignedFirmwareStatus::Idle,
+            signed_firmware_request_id: None,
             log_request_id: None,
             diagnostics_outcome: DiagnosticsOutcome::default(),
             firmware_outcome: FirmwareOutcome::default(),

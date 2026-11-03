@@ -196,6 +196,7 @@ impl StationActor {
         self.hard_reset_deadline = None;
         self.maintenance.clear();
         self.cancel_log_upload();
+        self.cancel_signed_firmware();
         self.sync_outstanding = 0;
         self.sync_keys.clear();
         self.reset_status_tracking();

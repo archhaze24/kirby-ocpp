@@ -769,37 +769,6 @@ async fn unknown_actions_are_not_implemented() {
     rig.shutdown().await;
 }
 
-/// Security Whitepaper actions without behaviour yet (S2b-2: signed firmware): each
-/// gets exactly one CALLERROR `NotSupported`, and the station stays usable afterwards.
-#[tokio::test]
-async fn security_whitepaper_actions_get_one_not_supported_reply() {
-    let rig = booted().await;
-    let calls = [(
-        "SignedUpdateFirmware",
-        json!({"requestId": 1, "firmware": {"location": "https://example.com/fw", "retrieveDateTime": "2031-01-01T00:00:00Z", "signingCertificate": "PEM", "signature": "c2ln"}}),
-    )];
-    for (action, request) in calls {
-        rig.csms
-            .expect_call_error(action, request, &ErrorCode::NotSupported)
-            .await
-            .unwrap();
-    }
-    // A schema violation is still answered by the validator, not by the handler.
-    rig.csms
-        .expect_call_error(
-            "GetLog",
-            json!({}),
-            &ErrorCode::OccurenceConstraintViolation,
-        )
-        .await
-        .unwrap();
-    rig.csms
-        .expect_status("ClearCache", json!({}), "Accepted")
-        .await
-        .unwrap();
-    rig.shutdown().await;
-}
-
 /// One valid request of every action that earlier stages did not support.
 fn stage_2b_requests() -> Vec<(&'static str, Value)> {
     vec![

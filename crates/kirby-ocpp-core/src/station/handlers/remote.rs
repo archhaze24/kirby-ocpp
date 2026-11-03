@@ -172,6 +172,7 @@ impl StationActor {
         self.timers.cancel(&TimerKey::Maintenance);
         self.maintenance.clear();
         self.cancel_log_upload();
+        self.cancel_signed_firmware();
         self.timers
             .cancel_where(|k| matches!(k, TimerKey::MeterPeriodic(_) | TimerKey::MeterAligned));
 

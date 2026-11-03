@@ -11,16 +11,20 @@ use crate::ocpp::messages::{
     DiagnosticsStatusNotification, DiagnosticsStatusNotificationRequest,
     FirmwareStatusNotification, FirmwareStatusNotificationRequest, GetDiagnostics,
     GetDiagnosticsRequest, GetDiagnosticsResponse, GetLog, GetLogRequest, GetLogResponse,
-    LogStatus, LogStatusNotification, LogStatusNotificationRequest, LogType, UpdateFirmware,
-    UpdateFirmwareRequest, UpdateFirmwareResponse, UploadLogStatus,
+    LogStatus, LogStatusNotification, LogStatusNotificationRequest, LogType, SignedFirmwareStatus,
+    SignedFirmwareStatusNotification, SignedFirmwareStatusNotificationRequest,
+    SignedUpdateFirmware, SignedUpdateFirmwareRequest, SignedUpdateFirmwareResponse,
+    UpdateFirmware, UpdateFirmwareRequest, UpdateFirmwareResponse, UpdateFirmwareStatus,
+    UploadLogStatus,
 };
 use crate::ocpp::responder::Responder;
 use crate::ocpp::types::{DiagnosticsStatus, FirmwareStatus};
 use crate::station::actor::{StationActor, TimerKey};
 use crate::station::calls::Origin;
+use crate::station::certificates::parse_pem_chain;
 use crate::station::event::LogLevel;
 use crate::station::maintenance::{
-    MAX_DELAY, Step, plan_diagnostics, plan_firmware, plan_log, valid_log_location,
+    MAX_DELAY, Step, plan_diagnostics, plan_firmware, plan_log, plan_signed, valid_log_location,
 };
 
 fn non_negative(value: Option<i32>) -> u32 {
@@ -114,6 +118,7 @@ pub(super) fn update_firmware(
     request: UpdateFirmwareRequest,
 ) {
     actor.respond(responder, UpdateFirmwareResponse {});
+    actor.last_firmware_signed = false;
     let plan = plan_firmware(
         actor.state.firmware_outcome,
         non_negative(request.retries),
@@ -126,7 +131,128 @@ pub(super) fn update_firmware(
     actor.run_plan(plan, Some(wait));
 }
 
+/// Checks the signing certificate of a `SignedUpdateFirmware`: it must parse, be valid now and,
+/// when a manufacturer root is installed, chain to one (issuer name match, no signature check).
+fn check_signing_certificate(actor: &StationActor, pem: &str) -> Result<(), String> {
+    let chain = parse_pem_chain(pem)?;
+    let now = actor.clock.now_utc();
+    if let Some(bad) = chain.iter().find(|cert| !cert.valid_at(now)) {
+        return Err(format!("{} is expired or not yet valid", bad.subject));
+    }
+    if actor.certs.chains_to_manufacturer_root(&chain) == Some(false) {
+        return Err("does not chain to an installed manufacturer root".to_owned());
+    }
+    Ok(())
+}
+
+/// `SignedUpdateFirmware` (Security Whitepaper): validation, then a simulated update that reports
+/// `SignedFirmwareStatusNotification` with the `requestId` (plans: `plan_signed`; the outcome
+/// comes from `SetFirmwareOutcome`). The signature is never verified for real. A request while
+/// another signed update runs is `AcceptedCanceled`; the cancelled update sends no further status
+/// (the enum has no cancelled value). No `RevokedCertificate` (no revocation data).
+pub(super) fn signed_update_firmware(
+    actor: &mut StationActor,
+    responder: Responder<SignedUpdateFirmware>,
+    request: SignedUpdateFirmwareRequest,
+) {
+    let firmware = &request.firmware;
+    let refusal = if !valid_log_location(&firmware.location) {
+        actor.log(
+            LogLevel::Warn,
+            "SignedUpdateFirmware rejected: location is not an ftp/ftps/http/https/sftp URL"
+                .to_owned(),
+        );
+        Some(UpdateFirmwareStatus::Rejected)
+    } else if let Err(reason) = check_signing_certificate(actor, &firmware.signing_certificate) {
+        actor.log(
+            LogLevel::Warn,
+            format!("SignedUpdateFirmware: invalid signing certificate: {reason}"),
+        );
+        actor.security_event("InvalidFirmwareSigningCertificate", Some(&reason));
+        Some(UpdateFirmwareStatus::InvalidCertificate)
+    } else {
+        None
+    };
+    if let Some(status) = refusal {
+        actor.respond(responder, SignedUpdateFirmwareResponse { status });
+        return;
+    }
+    let canceled = !actor.signed_fw.is_empty();
+    actor.cancel_signed_firmware();
+    actor.respond(
+        responder,
+        SignedUpdateFirmwareResponse {
+            status: if canceled {
+                UpdateFirmwareStatus::AcceptedCanceled
+            } else {
+                UpdateFirmwareStatus::Accepted
+            },
+        },
+    );
+    let now = actor.clock.now_utc();
+    let until =
+        |at: chrono::DateTime<chrono::Utc>| (at - now).to_std().ok().filter(|d| !d.is_zero());
+    let retrieve_wait = until(firmware.retrieve_date_time);
+    let install_wait = firmware.install_date_time.and_then(until);
+    let plan = plan_signed(
+        actor.state.firmware_outcome,
+        non_negative(request.retries),
+        Duration::from_secs(u64::from(non_negative(request.retry_interval))),
+        retrieve_wait,
+        install_wait,
+    );
+    actor.last_firmware_signed = true;
+    actor.signed_fw_request_id = Some(request.request_id);
+    actor.state.signed_firmware_request_id = Some(request.request_id);
+    actor.state.signed_firmware_status = SignedFirmwareStatus::Idle;
+    actor.signed_fw = plan.into();
+    if let Some((delay, _)) = actor.signed_fw.front().copied() {
+        actor.timers.set(TimerKey::SignedFirmware, delay);
+    }
+}
+
 impl StationActor {
+    /// Drops the remaining signed-update statuses (disconnect, reset, a newer request).
+    pub(in crate::station) fn cancel_signed_firmware(&mut self) {
+        self.timers.cancel(&TimerKey::SignedFirmware);
+        self.signed_fw.clear();
+    }
+
+    pub(in crate::station) fn on_signed_firmware_timer(&mut self) {
+        let Some((_, status)) = self.signed_fw.pop_front() else {
+            return;
+        };
+        self.report_signed_firmware(status);
+        match status {
+            SignedFirmwareStatus::InvalidSignature => self.security_event(
+                "InvalidFirmwareSignature",
+                self.signed_fw_request_id
+                    .map(|id| format!("requestId {id}"))
+                    .as_deref(),
+            ),
+            SignedFirmwareStatus::Installed => self.security_event("FirmwareUpdated", None),
+            _ => {}
+        }
+        if let Some((delay, _)) = self.signed_fw.front().copied() {
+            self.timers.set(TimerKey::SignedFirmware, delay);
+        }
+    }
+
+    /// Sends one `SignedFirmwareStatusNotification` and remembers it as the current status.
+    pub(in crate::station) fn report_signed_firmware(&mut self, status: SignedFirmwareStatus) {
+        self.state.signed_firmware_status = status;
+        let request_id = if status == SignedFirmwareStatus::Idle {
+            None
+        } else {
+            self.signed_fw_request_id
+        };
+        self.call::<SignedFirmwareStatusNotification>(
+            Origin::Station,
+            &SignedFirmwareStatusNotificationRequest { status, request_id },
+            |_, _| {},
+        );
+    }
+
     fn run_plan(&mut self, plan: Vec<(Duration, Step)>, first_delay: Option<Duration>) {
         self.maintenance = plan.into();
         if let Some((delay, _)) = self.maintenance.front().copied() {

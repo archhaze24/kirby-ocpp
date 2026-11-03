@@ -36,16 +36,15 @@ use crate::ocpp::messages::{
 };
 use crate::ocpp::messages::{
     CertificateSigned, DeleteCertificate, ExtendedTriggerMessage, GetInstalledCertificateIds,
-    GetLog, InstallCertificate,
+    GetLog, InstallCertificate, SignedUpdateFirmware,
 };
 
 /// The inbound actions a rule can target.
 ///
-/// The 19 OCPP 1.6 commands plus six commands of the Security Whitepaper (`CertificateSigned`,
+/// The 19 OCPP 1.6 commands plus seven commands of the Security Whitepaper (`CertificateSigned`,
 /// `DeleteCertificate`, `ExtendedTriggerMessage`, `GetInstalledCertificateIds`, `GetLog`,
-/// `InstallCertificate`). `SignedUpdateFirmware` is not listed: the station has no handler for it
-/// yet (it answers CALLERROR `NotSupported`).
-pub const INBOUND_ACTIONS: [&str; 25] = [
+/// `InstallCertificate`, `SignedUpdateFirmware`).
+pub const INBOUND_ACTIONS: [&str; 26] = [
     CancelReservation::NAME,
     CertificateSigned::NAME,
     ChangeAvailability::NAME,
@@ -68,6 +67,7 @@ pub const INBOUND_ACTIONS: [&str; 25] = [
     Reset::NAME,
     SendLocalList::NAME,
     SetChargingProfile::NAME,
+    SignedUpdateFirmware::NAME,
     TriggerMessage::NAME,
     UnlockConnector::NAME,
     UpdateFirmware::NAME,
@@ -290,7 +290,8 @@ pub fn reject_payload(action: &str) -> Option<Value> {
             || a == SetChargingProfile::NAME
             || a == TriggerMessage::NAME
             || a == ExtendedTriggerMessage::NAME
-            || a == GetLog::NAME =>
+            || a == GetLog::NAME
+            || a == SignedUpdateFirmware::NAME =>
         {
             "Rejected"
         }

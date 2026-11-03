@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ocpp::messages::UploadLogStatus;
+use crate::ocpp::messages::{SignedFirmwareStatus, UploadLogStatus};
 use crate::ocpp::types::{DiagnosticsStatus, FirmwareStatus};
 
 /// Result the emulator should simulate for the next `GetDiagnostics`.
@@ -35,6 +35,12 @@ pub enum FirmwareOutcome {
     Success,
     DownloadFailure,
     InstallationFailure,
+    /// `SignedUpdateFirmware` only: the signature check fails (`InvalidSignature`). A plain
+    /// `UpdateFirmware` has no signature and treats it like `InstallationFailure`.
+    InvalidSignature,
+    /// `SignedUpdateFirmware` only: the install reboots and then fails verification
+    /// (`InstallVerificationFailed`). A plain `UpdateFirmware` treats it like `InstallationFailure`.
+    InstallVerificationFailed,
 }
 
 impl FirmwareOutcome {
@@ -42,6 +48,8 @@ impl FirmwareOutcome {
         Self::Success,
         Self::DownloadFailure,
         Self::InstallationFailure,
+        Self::InvalidSignature,
+        Self::InstallVerificationFailed,
     ];
 }
 
@@ -119,6 +127,71 @@ pub fn plan_log(
         .collect()
 }
 
+/// The status reports of a simulated `SignedUpdateFirmware`.
+///
+/// `Downloading`, `Downloaded`, `SignatureVerified`, `Installing`, `InstallRebooting`,
+/// `Installed` for success. A future retrieve time adds a leading `DownloadScheduled` and holds `Downloading` for `retrieve_wait` (at most [`MAX_DELAY`]); a future
+/// install time adds `InstallScheduled` and holds the step before `Installing` for `install_wait`
+/// (at most [`MAX_DELAY`]). Failures: `DownloadFailed`, `InvalidSignature` (after `Downloaded`),
+/// `InstallationFailed` (after `Installing`), `InstallVerificationFailed` (after
+/// `InstallRebooting`). Download and installation failures repeat the attempt like
+/// [`plan_firmware`]; signature and verification failures are final.
+pub fn plan_signed(
+    outcome: FirmwareOutcome,
+    retries: u32,
+    retry_interval: Duration,
+    retrieve_wait: Option<Duration>,
+    install_wait: Option<Duration>,
+) -> Vec<(Duration, SignedFirmwareStatus)> {
+    use SignedFirmwareStatus as S;
+    let installing = |last: &[S]| {
+        let mut attempt = vec![S::Downloading, S::Downloaded, S::SignatureVerified];
+        if install_wait.is_some() {
+            attempt.push(S::InstallScheduled);
+        }
+        attempt.push(S::Installing);
+        attempt.extend_from_slice(last);
+        attempt
+    };
+    let (attempt, retries): (Vec<S>, u32) = match outcome {
+        FirmwareOutcome::Success => (installing(&[S::InstallRebooting, S::Installed]), 0),
+        FirmwareOutcome::DownloadFailure => (vec![S::Downloading, S::DownloadFailed], retries),
+        FirmwareOutcome::InstallationFailure => (installing(&[S::InstallationFailed]), retries),
+        FirmwareOutcome::InvalidSignature => {
+            (vec![S::Downloading, S::Downloaded, S::InvalidSignature], 0)
+        }
+        FirmwareOutcome::InstallVerificationFailed => (
+            installing(&[S::InstallRebooting, S::InstallVerificationFailed]),
+            0,
+        ),
+    };
+    let mut steps = Vec::new();
+    if retrieve_wait.is_some() {
+        steps.push(S::DownloadScheduled);
+    }
+    let head = steps.len();
+    steps.extend(repeat(&attempt, retries));
+    let mut plan: Vec<(Duration, S)> = steps.iter().map(|s| (STEP_DELAY, *s)).collect();
+    for (index, entry) in plan.iter_mut().enumerate().skip(head) {
+        if (index - head) > 0 && (index - head) % attempt.len() == 0 {
+            entry.0 = retry_interval.min(MAX_DELAY);
+        }
+    }
+    if let Some(wait) = retrieve_wait
+        && let Some(entry) = plan.get_mut(head)
+    {
+        entry.0 = wait.min(MAX_DELAY);
+    }
+    if let Some(wait) = install_wait {
+        for entry in &mut plan {
+            if entry.1 == S::Installing {
+                entry.0 = wait.min(MAX_DELAY);
+            }
+        }
+    }
+    plan
+}
+
 /// Whether `location` is an upload target the emulator accepts: an absolute URL with a host and
 /// one of the schemes ftp, ftps, http, https, sftp.
 pub fn valid_log_location(location: &str) -> bool {
@@ -140,7 +213,9 @@ pub fn plan_firmware(
             0,
         ),
         FirmwareOutcome::DownloadFailure => (vec![F::Downloading, F::DownloadFailed], retries),
-        FirmwareOutcome::InstallationFailure => (
+        FirmwareOutcome::InstallationFailure
+        | FirmwareOutcome::InvalidSignature
+        | FirmwareOutcome::InstallVerificationFailed => (
             vec![
                 F::Downloading,
                 F::Downloaded,
@@ -160,11 +235,11 @@ pub fn plan_firmware(
     )
 }
 
-fn with_delays(
-    steps: &[Step],
+fn with_delays<T: Copy>(
+    steps: &[T],
     attempt_len: usize,
     retry_interval: Duration,
-) -> Vec<(Duration, Step)> {
+) -> Vec<(Duration, T)> {
     steps
         .iter()
         .enumerate()
@@ -252,6 +327,65 @@ mod tests {
         ] {
             assert!(!valid_log_location(bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn signed_plans() {
+        use SignedFirmwareStatus as S;
+        let steps = |plan: Vec<(Duration, S)>| plan.into_iter().map(|(_, s)| s).collect::<Vec<_>>();
+        assert_eq!(
+            steps(plan_signed(
+                FirmwareOutcome::Success,
+                3,
+                Duration::ZERO,
+                None,
+                None
+            )),
+            [
+                S::Downloading,
+                S::Downloaded,
+                S::SignatureVerified,
+                S::Installing,
+                S::InstallRebooting,
+                S::Installed
+            ]
+        );
+        let wait = Some(Duration::from_millis(30));
+        let scheduled = plan_signed(FirmwareOutcome::Success, 0, Duration::ZERO, wait, wait);
+        assert_eq!(scheduled[0].1, S::DownloadScheduled);
+        assert_eq!(scheduled[4].1, S::InstallScheduled);
+        assert_eq!(scheduled[5], (Duration::from_millis(30), S::Installing));
+        assert_eq!(
+            steps(plan_signed(
+                FirmwareOutcome::InvalidSignature,
+                3,
+                Duration::ZERO,
+                None,
+                None
+            )),
+            [S::Downloading, S::Downloaded, S::InvalidSignature]
+        );
+        let failing = plan_signed(
+            FirmwareOutcome::DownloadFailure,
+            1,
+            Duration::from_millis(5),
+            None,
+            None,
+        );
+        assert_eq!(failing.len(), 4);
+        assert_eq!(failing[2].0, Duration::from_millis(5));
+        assert_eq!(
+            plan_signed(
+                FirmwareOutcome::InstallVerificationFailed,
+                0,
+                Duration::ZERO,
+                None,
+                None
+            )
+            .last()
+            .map(|e| e.1),
+            Some(S::InstallVerificationFailed)
+        );
     }
 
     #[test]

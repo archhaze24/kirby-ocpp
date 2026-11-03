@@ -64,6 +64,7 @@ pub struct ParsedCert {
     pub serial: String,
     pub not_before: i64,
     pub not_after: i64,
+    subject_raw: Vec<u8>,
     issuer_raw: Vec<u8>,
     key_bits: Vec<u8>,
     spki_der: Vec<u8>,
@@ -84,6 +85,7 @@ impl ParsedCert {
             serial: serial_hex(cert.tbs_certificate.raw_serial()),
             not_before: validity.not_before.timestamp(),
             not_after: validity.not_after.timestamp(),
+            subject_raw: cert.subject().as_raw().to_vec(),
             issuer_raw: cert.issuer().as_raw().to_vec(),
             key_bits: cert.public_key().subject_public_key.data.to_vec(),
             spki_der: cert.public_key().raw.to_vec(),
@@ -286,6 +288,26 @@ impl CertificateStore {
             out.push(leaf.summary("ChargePointCertificate"));
         }
         out
+    }
+
+    /// Whether some certificate of `chain` is an installed manufacturer root or was issued by one
+    /// (issuer name equals the root's subject; the signature is not verified). `None` when no
+    /// manufacturer root is installed.
+    pub fn chains_to_manufacturer_root(&self, chain: &[ParsedCert]) -> Option<bool> {
+        let roots: Vec<ParsedCert> = self
+            .parsed_roots()
+            .into_iter()
+            .filter(|(kind, _)| *kind == CertificateUse::ManufacturerRootCertificate)
+            .map(|(_, cert)| cert)
+            .collect();
+        if roots.is_empty() {
+            return None;
+        }
+        Some(chain.iter().any(|cert| {
+            roots
+                .iter()
+                .any(|root| cert.der == root.der || cert.issuer_raw == root.subject_raw)
+        }))
     }
 
     /// Trust anchors as PEM text, for the TLS layer.

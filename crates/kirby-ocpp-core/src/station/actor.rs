@@ -72,6 +72,8 @@ pub(crate) enum TimerKey {
     Maintenance,
     /// Next simulated `GetLog` upload status.
     LogUpload,
+    /// Next simulated `SignedUpdateFirmware` status.
+    SignedFirmware,
     /// A hard `Reset` waits for in-flight CALLs, then reconnects.
     HardReset,
 }
@@ -181,6 +183,12 @@ pub(crate) struct StationActor {
     /// a firmware update), with the request id they belong to.
     pub(super) log_upload: VecDeque<(Duration, crate::ocpp::messages::UploadLogStatus)>,
     pub(super) log_request_id: Option<i32>,
+    /// Simulated `SignedUpdateFirmware` statuses still to report, and their request id.
+    pub(super) signed_fw: VecDeque<(Duration, crate::ocpp::messages::SignedFirmwareStatus)>,
+    pub(super) signed_fw_request_id: Option<i32>,
+    /// The last firmware update was a `SignedUpdateFirmware` (decides which notification an
+    /// `ExtendedTriggerMessage` for firmware status sends).
+    pub(super) last_firmware_signed: bool,
     pub(super) timers: TimerWheel<TimerKey>,
     pub(super) internal_tx: mpsc::UnboundedSender<Internal>,
     internal_rx: mpsc::UnboundedReceiver<Internal>,
@@ -273,6 +281,9 @@ impl StationActor {
             maintenance: VecDeque::new(),
             log_upload: VecDeque::new(),
             log_request_id: None,
+            signed_fw: VecDeque::new(),
+            signed_fw_request_id: None,
+            last_firmware_signed: false,
             timers: TimerWheel::new(),
             internal_tx,
             internal_rx,
@@ -367,6 +378,7 @@ impl StationActor {
             TimerKey::ReservationExpiry(id) => self.on_reservation_timer(id),
             TimerKey::Maintenance => self.on_maintenance_timer(),
             TimerKey::LogUpload => self.on_log_timer(),
+            TimerKey::SignedFirmware => self.on_signed_firmware_timer(),
             TimerKey::HardReset => self.on_hard_reset_timer(),
         }
     }

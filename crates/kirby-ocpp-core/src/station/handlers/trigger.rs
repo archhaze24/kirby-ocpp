@@ -24,6 +24,9 @@ use crate::ocpp::messages::{
     LogStatusNotificationRequest, MeterValues, MeterValuesRequest, TriggerMessage,
     TriggerMessageRequest, TriggerMessageResponse, TriggerMessageStatus, UploadLogStatus,
 };
+use crate::ocpp::messages::{
+    SignedFirmwareStatus, SignedFirmwareStatusNotification, SignedFirmwareStatusNotificationRequest,
+};
 use crate::ocpp::responder::Responder;
 use crate::ocpp::types::{MessageTrigger, ReadingContext, RegistrationStatus};
 use crate::station::actor::StationActor;
@@ -120,6 +123,20 @@ pub(super) fn extended_trigger_message(
         return;
     }
     match common {
+        Some(MessageTrigger::FirmwareStatusNotification) if actor.last_firmware_signed => {
+            // The current firmware update is a signed one: report it in its own message.
+            let status = actor.state.signed_firmware_status;
+            let request_id = if status == SignedFirmwareStatus::Idle {
+                None
+            } else {
+                actor.signed_fw_request_id
+            };
+            actor.call::<SignedFirmwareStatusNotification>(
+                Origin::Triggered,
+                &SignedFirmwareStatusNotificationRequest { status, request_id },
+                |_, _| {},
+            );
+        }
         Some(trigger) => start(actor, trigger, request.connector_id),
         None if message == E::LogStatusNotification => {
             let status = if actor.log_upload.is_empty() {
