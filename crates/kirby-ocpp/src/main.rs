@@ -297,13 +297,14 @@ async fn run(
     if let Some(error) = &setup_error {
         eprintln!("error: {error}");
     }
+    let mut write_failed = false;
     if let Some(report) = &report {
         print_report(report, json, None);
         if let Some(path) = &args.report
             && let Err(error) = write_report(path, report)
         {
             eprintln!("error: cannot write the report: {error}");
-            return ExitCode::FAILURE;
+            write_failed = true;
         }
     }
     if !interrupted && let Some(path) = &args.junit {
@@ -316,10 +317,12 @@ async fn run(
         };
         if let Err(error) = write_junit(path, &[suite]) {
             eprintln!("error: cannot write the JUnit report: {error}");
-            return ExitCode::FAILURE;
+            write_failed = true;
         }
     }
-    if interrupted {
+    if write_failed {
+        ExitCode::FAILURE
+    } else if interrupted {
         ExitCode::from(EXIT_INTERRUPTED)
     } else if report.is_some_and(|r| r.passed) {
         ExitCode::SUCCESS
