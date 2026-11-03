@@ -1,9 +1,11 @@
+//! Reply and fault script types shared by the engine and the test mock CSMS.
+
 use std::sync::Arc;
 
 use kirby_ocpp_core::ocpp::ErrorCode;
 use serde_json::Value;
 
-/// What the mock CSMS does with one CP-originated CALL.
+/// What the central system does with one charge-point-originated CALL.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Reply {
     /// Send a CALLRESULT with this payload. The payload is not validated, so it
@@ -19,23 +21,25 @@ pub enum Reply {
 
 /// A scripted one-off failure for the next N occurrences of one action.
 ///
-/// Faults take precedence over responders set with [`crate::MockCsms::respond`]
-/// and over the default answers. Build one, then pass it to
-/// [`crate::MockCsms::inject`]:
+/// Faults take precedence over responders and over the default answers. Build one,
+/// then pass it to the server's `inject`:
 ///
 /// ```
-/// use kirby_ocpp_testkit::Fault;
+/// use kirby_csms_core::Fault;
 ///
 /// // The next two StartTransaction calls get a CALLERROR, then answers resume.
 /// let fault = Fault::call_error("StartTransaction").times(2);
 /// # let _ = fault;
 /// ```
 #[derive(Debug, Clone, PartialEq)]
-#[must_use = "a Fault does nothing until it is passed to MockCsms::inject"]
+#[must_use = "a Fault does nothing until it is injected into a server"]
 pub struct Fault {
-    pub(crate) action: String,
-    pub(crate) reply: Reply,
-    pub(crate) remaining: usize,
+    /// Action the fault applies to.
+    pub action: String,
+    /// What to do instead of the normal answer.
+    pub reply: Reply,
+    /// Occurrences left; the fault is dropped when this reaches zero.
+    pub remaining: usize,
 }
 
 impl Fault {
@@ -78,5 +82,5 @@ impl Fault {
     }
 }
 
-/// A per-action responder installed with [`crate::MockCsms::respond`].
-pub(crate) type Responder = Arc<dyn Fn(&Value) -> Reply + Send + Sync>;
+/// A per-action responder: payload of the CALL in, [`Reply`] out.
+pub type Responder = Arc<dyn Fn(&Value) -> Reply + Send + Sync>;

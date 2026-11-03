@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use kirby_csms_core::{Fault, Reply, Responder};
 use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -19,8 +20,7 @@ use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::error::{TestkitError, TestkitResult};
-use crate::fault::{Fault, Reply, Responder};
-use crate::options::{CsmsOptions, SubprotocolPolicy};
+use crate::options::CsmsOptions;
 use crate::record::{ConnectionInfo, Received};
 use crate::state::{Outbound, Shared, StartedCall, wait_until};
 use crate::tls::{self, TlsMaterial, TlsOpts};
@@ -469,7 +469,7 @@ where
     #[allow(clippy::result_large_err)]
     let callback = |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
         let offered = offered_protocols(request);
-        let chosen = select_subprotocol(&shared.subprotocol, &offered).map_err(refusal)?;
+        let chosen = shared.subprotocol.select(&offered).map_err(refusal)?;
         if let Some(name) = &chosen {
             let value = HeaderValue::from_str(name)
                 .map_err(|_| refusal("invalid subprotocol name in configuration"))?;
@@ -532,22 +532,6 @@ fn offered_protocols(request: &Request) -> Vec<String> {
         .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty())
         .collect()
-}
-
-/// The subprotocol to select (`None` selects nothing), or the reason the upgrade is refused.
-fn select_subprotocol(
-    policy: &SubprotocolPolicy,
-    offered: &[String],
-) -> Result<Option<String>, &'static str> {
-    match policy {
-        SubprotocolPolicy::Require(name) if offered.iter().any(|offer| offer == name) => {
-            Ok(Some(name.clone()))
-        }
-        SubprotocolPolicy::Require(_) => Err("required subprotocol was not offered"),
-        SubprotocolPolicy::Select(name) => Ok(Some(name.clone())),
-        SubprotocolPolicy::Omit => Ok(None),
-        SubprotocolPolicy::Reject => Err("handshake rejected by configuration"),
-    }
 }
 
 /// An HTTP 400 refusal. `ErrorResponse` is large, but its shape is fixed by tungstenite's

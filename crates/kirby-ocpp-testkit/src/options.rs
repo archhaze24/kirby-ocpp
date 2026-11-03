@@ -1,43 +1,8 @@
 use std::time::Duration;
 
+use kirby_csms_core::{SubprotocolPolicy, TransactionIds};
+
 use crate::tls::TlsOpts;
-
-/// How the mock CSMS answers the WebSocket subprotocol negotiation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SubprotocolPolicy {
-    /// Select `name` if the client offered it; refuse the upgrade (HTTP 400) otherwise.
-    /// The default is `Require("ocpp1.6")`.
-    Require(String),
-    /// Always select `name`, even if the client did not offer it. Use this to test
-    /// a charge point that must notice a protocol it did not ask for.
-    Select(String),
-    /// Accept the upgrade without selecting any subprotocol (no
-    /// `Sec-WebSocket-Protocol` response header).
-    Omit,
-    /// Refuse every upgrade with HTTP 400.
-    Reject,
-}
-
-impl Default for SubprotocolPolicy {
-    fn default() -> Self {
-        Self::Require("ocpp1.6".to_owned())
-    }
-}
-
-/// How `StartTransaction` transaction ids are allocated by the default responder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TransactionIds {
-    /// Every `StartTransaction` gets this id (the TS harness uses 123).
-    Fixed(i32),
-    /// The first `StartTransaction` gets this id, each following one gets the next integer.
-    Incrementing(i32),
-}
-
-impl Default for TransactionIds {
-    fn default() -> Self {
-        Self::Fixed(123)
-    }
-}
 
 /// Configuration of a [`crate::MockCsms`].
 #[derive(Debug, Clone, PartialEq, Eq)]

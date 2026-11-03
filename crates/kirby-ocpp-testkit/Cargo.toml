@@ -14,6 +14,7 @@ name = "kirby_ocpp_testkit"
 [dependencies]
 chrono.workspace = true
 futures-util.workspace = true
+kirby-csms-core.workspace = true
 kirby-ocpp-core.workspace = true
 rcgen.workspace = true
 rustls.workspace = true

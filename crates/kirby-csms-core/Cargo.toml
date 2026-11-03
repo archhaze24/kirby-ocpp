@@ -1,0 +1,29 @@
+[package]
+name = "kirby-csms-core"
+description = "OCPP 1.6J central system (CSMS) engine: multi-station WebSocket server, command queue, scripted replies (no UI)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "kirby_csms_core"
+
+[dependencies]
+chrono.workspace = true
+futures-util.workspace = true
+kirby-ocpp-core.workspace = true
+percent-encoding.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

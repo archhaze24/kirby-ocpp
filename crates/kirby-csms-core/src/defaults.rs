@@ -6,10 +6,31 @@ use serde_json::{Value, json};
 
 use crate::fault::Reply;
 
+/// The OCPP 1.6 actions a charge point may send to a central system.
+pub const CHARGE_POINT_ACTIONS: &[&str] = &[
+    "Authorize",
+    "BootNotification",
+    "DataTransfer",
+    "DiagnosticsStatusNotification",
+    "FirmwareStatusNotification",
+    "Heartbeat",
+    "MeterValues",
+    "StartTransaction",
+    "StatusNotification",
+    "StopTransaction",
+];
+
+/// Whether `action` is one a charge point may initiate in OCPP 1.6.
+pub fn is_charge_point_action(action: &str) -> bool {
+    CHARGE_POINT_ACTIONS.contains(&action)
+}
+
 /// The default answer for `action`, used when no fault or responder applies.
 ///
-/// `transaction_id` must be `Some` for `StartTransaction`. Unknown actions get `{}`.
-pub(crate) fn reply(
+/// `transaction_id` must be `Some` for `StartTransaction`. Actions that are not
+/// charge-point actions get `{}`; callers that want `NotSupported` for them check
+/// [`is_charge_point_action`] first.
+pub fn default_reply(
     action: &str,
     payload: &Value,
     heartbeat_interval: u32,
@@ -69,4 +90,34 @@ fn expired(now: DateTime<Utc>) -> String {
 /// JavaScript `Date.prototype.toISOString` format (millisecond precision, `Z`).
 fn iso(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn magic_id_tags_map_to_statuses() {
+        let Reply::Result(body) = default_reply("Authorize", &json!({"idTag": "BADTAG"}), 5, None)
+        else {
+            panic!("expected a result");
+        };
+        assert_eq!(body["idTagInfo"]["status"], "Blocked");
+        let Reply::Result(body) = default_reply(
+            "StartTransaction",
+            &json!({"idTag": "CONCURRENTSTART"}),
+            5,
+            Some(9),
+        ) else {
+            panic!("expected a result");
+        };
+        assert_eq!(body["transactionId"], 9);
+        assert_eq!(body["idTagInfo"]["status"], "ConcurrentTx");
+    }
+
+    #[test]
+    fn charge_point_actions_are_recognised() {
+        assert!(is_charge_point_action("Heartbeat"));
+        assert!(!is_charge_point_action("Reset"));
+    }
 }

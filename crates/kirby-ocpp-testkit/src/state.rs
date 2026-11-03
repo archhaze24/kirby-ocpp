@@ -9,14 +9,13 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use chrono::Utc;
+use kirby_csms_core::{Fault, Reply, Responder, SubprotocolPolicy, TransactionIds, default_reply};
 use kirby_ocpp_core::ocpp::Frame;
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc, oneshot};
 
-use crate::defaults;
 use crate::error::{TestkitError, TestkitResult};
-use crate::fault::{Fault, Reply, Responder};
-use crate::options::{CsmsOptions, SubprotocolPolicy, TransactionIds};
+use crate::options::CsmsOptions;
 use crate::record::{ConnectionInfo, Received, charge_point_id_from_path};
 
 /// Close code used for injected and dropped connections.
@@ -213,7 +212,7 @@ impl Shared {
         }
         let transaction_id =
             (action == "StartTransaction").then(|| state.allocate_transaction_id());
-        defaults::reply(action, payload, self.heartbeat_interval, transaction_id)
+        default_reply(action, payload, self.heartbeat_interval, transaction_id)
     }
 
     /// Handles one inbound text frame from `connection`. Returns the frame to send back, if any.

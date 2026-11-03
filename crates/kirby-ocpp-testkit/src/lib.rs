@@ -53,9 +53,7 @@
 //! they should not block. A test that drives the charge point from another task should wait with
 //! the `wait_for_*` methods, not with fixed sleeps.
 
-mod defaults;
 mod error;
-mod fault;
 mod options;
 mod record;
 mod server;
@@ -63,9 +61,10 @@ mod state;
 mod tls;
 
 pub use error::{TestkitError, TestkitResult};
-pub use fault::{Fault, Reply};
+pub use kirby_csms_core::{Fault, Reply};
+pub use kirby_csms_core::{SubprotocolPolicy, TransactionIds};
 pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
-pub use options::{CsmsOptions, SubprotocolPolicy, TransactionIds};
+pub use options::CsmsOptions;
 pub use record::{ConnectionInfo, Received};
 pub use server::MockCsms;
 pub use tls::{TlsMaterial, TlsOpts};
