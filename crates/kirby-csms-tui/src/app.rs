@@ -246,6 +246,12 @@ pub struct App {
     pub results: HashMap<String, VecDeque<ResultRecord>>,
     /// Response rules and faults the engine has active.
     pub rules: Rules,
+    /// The server's connection security profile (0 to 3).
+    pub security_profile: u8,
+    /// Connections refused by the security policy since the UI started.
+    pub auth_failures: u64,
+    last_auth_notice: Option<DateTime<Utc>>,
+    next_request_id: i32,
 }
 
 /// Input to [`update`].
@@ -366,7 +372,18 @@ impl App {
             pending: 0,
             results: HashMap::new(),
             rules: Rules::default(),
+            security_profile: 0,
+            auth_failures: 0,
+            last_auth_notice: None,
+            next_request_id: 1,
         }
+    }
+
+    /// A fresh request id for `GetLog` / `SignedUpdateFirmware` forms.
+    pub fn take_request_id(&mut self) -> i32 {
+        let id = self.next_request_id;
+        self.next_request_id = if id >= 1_000_000 { 1 } else { id + 1 };
+        id
     }
 
     pub fn notify(&mut self, level: NoticeLevel, text: impl Into<String>) {
@@ -903,8 +920,30 @@ fn on_event(app: &mut App, event: CsmsEvent, fx: &mut Vec<Effect>) {
             app.ensure_station(&station, false);
             app.dirty_states.insert(station);
         }
-        // Shown by the UI in the security step (S3b); the headless output prints it already.
-        CsmsEvent::AuthFailed { .. } => {}
+        CsmsEvent::AuthFailed {
+            station,
+            remote_addr,
+            reason,
+        } => {
+            app.auth_failures += 1;
+            app.dirty = true;
+            // At most one notice per second, however many connections are refused.
+            let due = app
+                .last_auth_notice
+                .is_none_or(|t| app.now - t >= chrono::Duration::seconds(1));
+            if due {
+                app.last_auth_notice = Some(app.now);
+                let who = station.map_or_else(
+                    || "unknown station".to_owned(),
+                    |s| kirby_ocpp_tui::text::truncate(&kirby_ocpp_tui::text::sanitize(&s), 40),
+                );
+                let reason = kirby_ocpp_tui::text::sanitize(&reason);
+                app.notify(
+                    NoticeLevel::Error,
+                    format!("refused {who} from {remote_addr}: {reason}"),
+                );
+            }
+        }
     }
 }
 

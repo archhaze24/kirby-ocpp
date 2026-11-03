@@ -35,6 +35,14 @@ pub enum ActionId {
     ClearCache,
     SetProfile,
     DataTransfer,
+    GetLog,
+    InstallCertificate,
+    DeleteCertificate,
+    CertificateIds,
+    ExtendedTrigger,
+    SignedFirmware,
+    CertificateSigned,
+    SecurityEvents,
     Raw,
     Rule,
     RemoveRule,
@@ -135,6 +143,54 @@ pub const CATALOG: &[ActionDef] = &[
         "Data transfer",
         "DataTransfer to the station",
         Some('D'),
+    ),
+    def(
+        ActionId::GetLog,
+        "Get log (security)",
+        "GetLog: ask the station to upload its diagnostics or security log",
+        Some('l'),
+    ),
+    def(
+        ActionId::InstallCertificate,
+        "Install certificate (security)",
+        "InstallCertificate: install a root certificate from pasted PEM",
+        Some('I'),
+    ),
+    def(
+        ActionId::DeleteCertificate,
+        "Delete certificate (security)",
+        "DeleteCertificate by hash data",
+        Some('d'),
+    ),
+    def(
+        ActionId::CertificateIds,
+        "Installed certificates (security)",
+        "GetInstalledCertificateIds, the answer opens in a popup",
+        Some('L'),
+    ),
+    def(
+        ActionId::ExtendedTrigger,
+        "Extended trigger message (security)",
+        "ExtendedTriggerMessage, e.g. SignChargePointCertificate",
+        Some('E'),
+    ),
+    def(
+        ActionId::SignedFirmware,
+        "Signed update firmware (security)",
+        "SignedUpdateFirmware with signing certificate and signature",
+        Some('S'),
+    ),
+    def(
+        ActionId::CertificateSigned,
+        "Certificate signed (security)",
+        "CertificateSigned: hand the station its certificate chain (PEM)",
+        Some('X'),
+    ),
+    def(
+        ActionId::SecurityEvents,
+        "Security events",
+        "the last security events the selected station reported",
+        Some('e'),
     ),
     def(
         ActionId::Raw,
@@ -319,11 +375,76 @@ fn configuration_lines(answer: &Value) -> Vec<String> {
     out
 }
 
+/// Readable lines of a `GetInstalledCertificateIds` answer.
+fn certificate_lines(answer: &Value) -> Vec<String> {
+    let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or("?").to_owned();
+    let entries = answer
+        .get("certificateHashData")
+        .and_then(Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let mut out = vec![format!("{} certificates", entries.len())];
+    for (i, entry) in entries.iter().enumerate() {
+        out.push(format!(
+            "{}. {}  serial {}",
+            i + 1,
+            text(entry, "hashAlgorithm"),
+            text(entry, "serialNumber")
+        ));
+        out.push(format!(
+            "     issuerNameHash {}",
+            text(entry, "issuerNameHash")
+        ));
+        out.push(format!(
+            "     issuerKeyHash  {}",
+            text(entry, "issuerKeyHash")
+        ));
+    }
+    out
+}
+
+/// The scrollable list of the security events a station reported, newest first.
+fn security_events_detail(station: &str, state: &kirby_csms_core::StationState) -> Detail {
+    let mut lines = vec![format!(
+        "{} reported, the last {} are kept (newest first)",
+        state.security_events_total,
+        state.security_events.len()
+    )];
+    for e in state.security_events.iter().rev() {
+        let info = e
+            .tech_info
+            .as_deref()
+            .map_or_else(String::new, |t| format!("  {t}"));
+        lines.push(sanitize(&format!(
+            "{}  {}{info}",
+            e.timestamp.format("%Y-%m-%d %H:%M:%S"),
+            e.event_type
+        )));
+    }
+    let copy = lines.join("\n");
+    Detail {
+        title: format!(
+            "Security events of {}",
+            truncate(&sanitize(station), NOTICE_TEXT)
+        ),
+        lines,
+        scroll: 0,
+        copy,
+    }
+}
+
 /// Statuses that mean the station refused.
 fn refused(status: &str) -> bool {
     matches!(
         status,
-        "Rejected" | "NotSupported" | "UnlockFailed" | "Failed" | "Unknown" | "NotImplemented"
+        "Rejected"
+            | "NotSupported"
+            | "UnlockFailed"
+            | "Failed"
+            | "Unknown"
+            | "NotImplemented"
+            | "NotFound"
+            | "InvalidCertificate"
+            | "RevokedCertificate"
     )
 }
 
@@ -384,6 +505,13 @@ impl App {
             | ActionId::ClearCache
             | ActionId::SetProfile
             | ActionId::DataTransfer
+            | ActionId::GetLog
+            | ActionId::InstallCertificate
+            | ActionId::DeleteCertificate
+            | ActionId::CertificateIds
+            | ActionId::ExtendedTrigger
+            | ActionId::SignedFirmware
+            | ActionId::CertificateSigned
             | ActionId::Raw => (!connected).then(|| "station is disconnected".to_owned()),
             ActionId::RemoteStop => {
                 if !connected {
@@ -394,6 +522,11 @@ impl App {
                     None
                 }
             }
+            ActionId::SecurityEvents => self
+                .state
+                .as_ref()
+                .is_none_or(|s| s.security_events.is_empty())
+                .then(|| "no security events".to_owned()),
             ActionId::Rule | ActionId::Fault | ActionId::CopyId => None,
             ActionId::RemoveRule => self
                 .rules
@@ -451,6 +584,36 @@ impl App {
             ActionId::ClearCache => self.send(st, Command::ClearCache, fx),
             ActionId::SetProfile => self.mode = Mode::Form(Box::new(Form::set_profile(st))),
             ActionId::DataTransfer => self.mode = Mode::Form(Box::new(Form::data_transfer(st))),
+            ActionId::GetLog => {
+                let request_id = self.take_request_id();
+                self.mode = Mode::Form(Box::new(Form::get_log(st, request_id)));
+            }
+            ActionId::InstallCertificate => {
+                self.mode = Mode::Form(Box::new(Form::install_certificate(st)));
+            }
+            ActionId::DeleteCertificate => {
+                self.mode = Mode::Form(Box::new(Form::delete_certificate(st)));
+            }
+            ActionId::CertificateIds => {
+                self.mode = Mode::Form(Box::new(Form::get_installed_certificate_ids(st)));
+            }
+            ActionId::ExtendedTrigger => {
+                self.mode = Mode::Form(Box::new(Form::extended_trigger(st)));
+            }
+            ActionId::SignedFirmware => {
+                let request_id = self.take_request_id();
+                self.mode = Mode::Form(Box::new(Form::signed_update_firmware(
+                    st, request_id, self.now,
+                )));
+            }
+            ActionId::CertificateSigned => {
+                self.mode = Mode::Form(Box::new(Form::certificate_signed(st)));
+            }
+            ActionId::SecurityEvents => {
+                if let Some(state) = &self.state {
+                    self.mode = Mode::Detail(security_events_detail(&station, state));
+                }
+            }
             ActionId::Raw => self.mode = Mode::Form(Box::new(Form::raw(st, None))),
             ActionId::Rule => self.mode = Mode::Form(Box::new(Form::rule())),
             ActionId::RemoveRule => {
@@ -588,6 +751,11 @@ impl App {
                 lines.push("--- answer ---".to_owned());
                 if matches!(command, Command::GetConfiguration { .. }) {
                     lines.extend(configuration_lines(answer).iter().map(|l| sanitize(l)));
+                    lines.push(String::new());
+                    lines.push("--- raw answer ---".to_owned());
+                }
+                if matches!(command, Command::GetInstalledCertificateIds(_)) {
+                    lines.extend(certificate_lines(answer).iter().map(|l| sanitize(l)));
                     lines.push(String::new());
                     lines.push("--- raw answer ---".to_owned());
                 }

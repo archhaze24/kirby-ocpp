@@ -168,6 +168,11 @@ impl CsmsHandle {
         format!("{scheme}://{}", self.inner.local_addr)
     }
 
+    /// The configured connection security profile.
+    pub fn security_profile(&self) -> SecurityProfile {
+        self.inner.config.security.profile
+    }
+
     /// Subscribes to server events. See [`CsmsEvent`] for lag behaviour.
     pub fn subscribe(&self) -> broadcast::Receiver<CsmsEvent> {
         self.inner.events.subscribe()

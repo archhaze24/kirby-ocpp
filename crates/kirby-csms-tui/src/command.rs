@@ -3,7 +3,10 @@
 
 use kirby_csms_core::{CsmsError, CsmsHandle, Frame};
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
-use kirby_ocpp_core::ocpp::messages::ChargingProfile;
+use kirby_ocpp_core::ocpp::messages::{
+    CertificateHashData, CertificateUse, ChargingProfile, ExtendedMessageTrigger, GetLogRequest,
+    SignedUpdateFirmwareRequest,
+};
 use kirby_ocpp_core::ocpp::types::{AvailabilityType, MessageTrigger, ResetType};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -47,6 +50,21 @@ pub enum Command {
         message_id: Option<String>,
         data: Option<String>,
     },
+    GetLog(Box<GetLogRequest>),
+    InstallCertificate {
+        certificate_type: CertificateUse,
+        certificate: String,
+    },
+    DeleteCertificate(CertificateHashData),
+    GetInstalledCertificateIds(CertificateUse),
+    ExtendedTriggerMessage {
+        message: ExtendedMessageTrigger,
+        connector: Option<u32>,
+    },
+    SignedUpdateFirmware(Box<SignedUpdateFirmwareRequest>),
+    CertificateSigned {
+        chain: String,
+    },
     /// Any action with a free-form payload, sent as is.
     Raw {
         action: String,
@@ -69,6 +87,13 @@ impl Command {
             Self::ClearCache => "ClearCache",
             Self::SetChargingProfile { .. } => "SetChargingProfile",
             Self::DataTransfer { .. } => "DataTransfer",
+            Self::GetLog(_) => "GetLog",
+            Self::InstallCertificate { .. } => "InstallCertificate",
+            Self::DeleteCertificate(_) => "DeleteCertificate",
+            Self::GetInstalledCertificateIds(_) => "GetInstalledCertificateIds",
+            Self::ExtendedTriggerMessage { .. } => "ExtendedTriggerMessage",
+            Self::SignedUpdateFirmware(_) => "SignedUpdateFirmware",
+            Self::CertificateSigned { .. } => "CertificateSigned",
             Self::Raw { action, .. } => action,
         }
     }
@@ -117,6 +142,27 @@ impl Command {
                 }
                 v
             }
+            Self::GetLog(req) => json!(req),
+            Self::InstallCertificate {
+                certificate_type,
+                certificate,
+            } => json!({
+                "certificateType": certificate_type.as_str(),
+                "certificate": certificate,
+            }),
+            Self::DeleteCertificate(hash) => json!({ "certificateHashData": hash }),
+            Self::GetInstalledCertificateIds(kind) => {
+                json!({ "certificateType": kind.as_str() })
+            }
+            Self::ExtendedTriggerMessage { message, connector } => {
+                let mut v = json!({ "requestedMessage": message.as_str() });
+                if let Some(c) = connector {
+                    v["connectorId"] = json!(c);
+                }
+                v
+            }
+            Self::SignedUpdateFirmware(req) => json!(req),
+            Self::CertificateSigned { chain } => json!({ "certificateChain": chain }),
             Self::Raw { payload, .. } => payload.clone(),
         }
     }
@@ -140,7 +186,9 @@ impl Command {
     /// Whether a successful answer is worth a popup instead of just a notice.
     pub fn answer_is_content(&self, response: &Value) -> bool {
         match self {
-            Self::GetConfiguration { .. } | Self::Raw { .. } => true,
+            Self::GetConfiguration { .. }
+            | Self::GetInstalledCertificateIds(_)
+            | Self::Raw { .. } => true,
             Self::DataTransfer { .. } => response.get("data").is_some(),
             _ => false,
         }
@@ -237,6 +285,34 @@ pub async fn run(handle: &CsmsHandle, station: &str, command: &Command) -> CmdOu
                 .data_transfer(station, vendor_id.clone(), message_id.clone(), data.clone())
                 .await,
         ),
+        Command::GetLog(req) => finish(handle.get_log(station, (**req).clone()).await),
+        Command::InstallCertificate {
+            certificate_type,
+            certificate,
+        } => finish(
+            handle
+                .install_certificate(station, *certificate_type, certificate.clone())
+                .await,
+        ),
+        Command::DeleteCertificate(hash) => {
+            finish(handle.delete_certificate(station, hash.clone()).await)
+        }
+        Command::GetInstalledCertificateIds(kind) => {
+            finish(handle.get_installed_certificate_ids(station, *kind).await)
+        }
+        Command::ExtendedTriggerMessage { message, connector } => finish(
+            handle
+                .extended_trigger_message(station, *message, connector.map(ConnectorId::new))
+                .await,
+        ),
+        Command::SignedUpdateFirmware(req) => finish(
+            handle
+                .signed_update_firmware(station, (**req).clone())
+                .await,
+        ),
+        Command::CertificateSigned { chain } => {
+            finish(handle.certificate_signed(station, chain.clone()).await)
+        }
         Command::Raw { action, payload } => match handle
             .call(station, action, payload.clone())
             .await

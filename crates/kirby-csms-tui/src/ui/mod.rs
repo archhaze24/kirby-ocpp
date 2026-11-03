@@ -98,6 +98,24 @@ fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
             dim(),
         ),
     ];
+    if app.security_profile > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(chip(
+            &format!("security profile {}", app.security_profile),
+            Color::Blue,
+        ));
+    }
+    if app.auth_failures > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(chip(
+            &format!(
+                "{} auth failure{}",
+                app.auth_failures,
+                if app.auth_failures == 1 { "" } else { "s" }
+            ),
+            Color::Red,
+        ));
+    }
     if app.pending > 0 {
         spans.push(Span::raw(" "));
         spans.push(chip(&format!("{} pending", app.pending), Color::Yellow));

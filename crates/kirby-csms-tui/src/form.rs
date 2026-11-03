@@ -2,11 +2,18 @@
 //! server's scripted behaviour. The key handling follows the emulator's forms; the field set
 //! is its own (the emulator's `Form` is tied to its station actions).
 
+use std::fmt::Write as _;
+
+use chrono::{DateTime, SecondsFormat, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kirby_csms_core::CHARGE_POINT_ACTIONS;
 use kirby_ocpp_core::ids::IdTag;
-use kirby_ocpp_core::ocpp::messages::ChargingProfile;
 use kirby_ocpp_core::ocpp::messages::registry::ACTIONS;
+use kirby_ocpp_core::ocpp::messages::{
+    CertificateHashData, CertificateUse, ChargingProfile, ExtendedMessageTrigger, GetLogRequest,
+    HashAlgorithm, LogParameters, LogType, MAX_CERTIFICATE_CHAIN_LEN, MAX_CERTIFICATE_LEN,
+    SignedFirmware, SignedUpdateFirmwareRequest,
+};
 use kirby_ocpp_core::ocpp::types::{AvailabilityType, MessageTrigger, ResetType};
 use kirby_ocpp_tui::forms::{PROFILE_TEMPLATE, schemas};
 use kirby_ocpp_tui::text::TextInput;
@@ -44,6 +51,19 @@ pub enum FieldKind {
     KeyList,
     /// One of `options` (Left/Right, or the first letter).
     Select,
+    /// One or more PEM blocks, at most `max` characters once normalised. A paste turns line
+    /// breaks into spaces; the blocks are rebuilt on submit.
+    Pem {
+        max: usize,
+    },
+    /// A whole number from 0 (a request id, retries); may be left empty when `optional`.
+    Count {
+        optional: bool,
+    },
+    /// An RFC 3339 time; may be left empty when `optional`.
+    Timestamp {
+        optional: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +116,13 @@ pub enum FormKind {
     Availability,
     SetProfile,
     DataTransfer,
+    GetLog,
+    InstallCertificate,
+    DeleteCertificate,
+    GetInstalledCertificateIds,
+    ExtendedTrigger,
+    SignedFirmware,
+    CertificateSigned,
     Raw,
     Rule,
     Fault,
@@ -183,9 +210,8 @@ where
     items.into_iter().map(|s| s.as_ref().to_owned()).collect()
 }
 
-/// The actions a central system may send (`DataTransfer` included). That includes the 7
-/// Security Whitepaper actions, which are reachable here through the raw CALL form only; they
-/// get typed forms with the CSMS security step.
+/// The actions a central system may send (`DataTransfer` included), including the 7
+/// Security Whitepaper actions (which also have typed forms).
 pub fn csms_actions() -> Vec<String> {
     ACTIONS
         .iter()
@@ -380,6 +406,182 @@ impl Form {
         )
     }
 
+    /// `request_id` is the suggested id of the log request.
+    pub fn get_log(station: &str, request_id: i32) -> Self {
+        Self::build(
+            FormKind::GetLog,
+            "GetLog",
+            station,
+            vec![
+                Field::select("logType", names(LogType::ALL.iter().map(|t| t.as_str()))),
+                Field::new(
+                    "requestId",
+                    FieldKind::Count { optional: false },
+                    &request_id.to_string(),
+                ),
+                Field::new("remoteLocation (upload URL)", FieldKind::Text, ""),
+                Field::new(
+                    "retries (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "retryInterval s (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "oldestTimestamp (optional)",
+                    FieldKind::Timestamp { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "latestTimestamp (optional)",
+                    FieldKind::Timestamp { optional: true },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    pub fn install_certificate(station: &str) -> Self {
+        Self::build(
+            FormKind::InstallCertificate,
+            "InstallCertificate",
+            station,
+            vec![
+                Field::select(
+                    "certificateType",
+                    names(CertificateUse::ALL.iter().map(|t| t.as_str())),
+                ),
+                Field::new(
+                    "certificate (PEM, paste)",
+                    FieldKind::Pem {
+                        max: MAX_CERTIFICATE_LEN,
+                    },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    pub fn delete_certificate(station: &str) -> Self {
+        Self::build(
+            FormKind::DeleteCertificate,
+            "DeleteCertificate",
+            station,
+            vec![
+                Field::select(
+                    "hashAlgorithm",
+                    names(HashAlgorithm::ALL.iter().map(|t| t.as_str())),
+                ),
+                Field::new("issuerNameHash (hex)", FieldKind::Text, ""),
+                Field::new("issuerKeyHash (hex)", FieldKind::Text, ""),
+                Field::new("serialNumber (hex)", FieldKind::Text, ""),
+            ],
+        )
+    }
+
+    pub fn get_installed_certificate_ids(station: &str) -> Self {
+        Self::build(
+            FormKind::GetInstalledCertificateIds,
+            "GetInstalledCertificateIds",
+            station,
+            vec![Field::select(
+                "certificateType",
+                names(CertificateUse::ALL.iter().map(|t| t.as_str())),
+            )],
+        )
+    }
+
+    pub fn extended_trigger(station: &str) -> Self {
+        let mut message = Field::select(
+            "message",
+            names(ExtendedMessageTrigger::ALL.iter().map(|t| t.as_str())),
+        );
+        message.option = message
+            .options
+            .iter()
+            .position(|o| o == "SignChargePointCertificate")
+            .unwrap_or(0);
+        Self::build(
+            FormKind::ExtendedTrigger,
+            "ExtendedTriggerMessage",
+            station,
+            vec![
+                message,
+                Field::new(
+                    "connector (optional)",
+                    FieldKind::Connector {
+                        min: 1,
+                        optional: true,
+                    },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    /// `request_id` is the suggested id; the retrieve time defaults to `now`.
+    pub fn signed_update_firmware(station: &str, request_id: i32, now: DateTime<Utc>) -> Self {
+        Self::build(
+            FormKind::SignedFirmware,
+            "SignedUpdateFirmware",
+            station,
+            vec![
+                Field::new("location (firmware URL)", FieldKind::Text, ""),
+                Field::new(
+                    "retrieveDateTime",
+                    FieldKind::Timestamp { optional: false },
+                    &now.to_rfc3339_opts(SecondsFormat::Secs, true),
+                ),
+                Field::new(
+                    "requestId",
+                    FieldKind::Count { optional: false },
+                    &request_id.to_string(),
+                ),
+                Field::new(
+                    "retries (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "retryInterval s (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "signingCertificate (PEM, paste)",
+                    FieldKind::Pem {
+                        max: MAX_CERTIFICATE_LEN,
+                    },
+                    "",
+                ),
+                Field::new("signature (base64)", FieldKind::Text, ""),
+                Field::new(
+                    "installDateTime (optional)",
+                    FieldKind::Timestamp { optional: true },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    pub fn certificate_signed(station: &str) -> Self {
+        Self::build(
+            FormKind::CertificateSigned,
+            "CertificateSigned",
+            station,
+            vec![Field::new(
+                "certificateChain (PEM, paste)",
+                FieldKind::Pem {
+                    max: MAX_CERTIFICATE_CHAIN_LEN,
+                },
+                "",
+            )],
+        )
+    }
+
     pub fn raw(station: &str, initial_action: Option<&str>) -> Self {
         let mut action = Field::select("action", csms_actions());
         if let Some(i) = initial_action.and_then(|a| action.options.iter().position(|o| o == a)) {
@@ -533,6 +735,14 @@ impl Form {
             .unwrap_or_default()
     }
 
+    /// The normalised PEM of a `Pem` field.
+    fn pem(&self, i: usize) -> Option<String> {
+        let FieldKind::Pem { max } = self.fields.get(i)?.kind else {
+            return None;
+        };
+        normalize_pem(&self.text(i), max).ok()
+    }
+
     fn validate_field(&mut self, i: usize) {
         let first = self.fields.first();
         let action = first.and_then(|f| f.chosen()).map(str::to_owned);
@@ -583,6 +793,26 @@ impl Form {
                 }
             }
             FieldKind::KeyList => validate_keys(&text),
+            FieldKind::Pem { max } => normalize_pem(&text, max).err(),
+            FieldKind::Count { optional } => {
+                if text.is_empty() && optional {
+                    None
+                } else {
+                    match text.parse::<i32>() {
+                        Ok(n) if n >= 0 => None,
+                        _ => Some("a whole number, 0 or more".to_owned()),
+                    }
+                }
+            }
+            FieldKind::Timestamp { optional } => {
+                if text.is_empty() && optional {
+                    None
+                } else {
+                    DateTime::parse_from_rfc3339(&text)
+                        .err()
+                        .map(|_| "a time like 2026-01-31T12:00:00Z".to_owned())
+                }
+            }
         };
     }
 
@@ -604,6 +834,12 @@ impl Form {
                 .map(str::to_owned)
         };
         let number = |i: usize| self.text(i).parse::<u32>().ok();
+        let count = |i: usize| self.text(i).parse::<i32>().ok();
+        let time = |i: usize| {
+            DateTime::parse_from_rfc3339(&self.text(i))
+                .ok()
+                .map(|t| t.with_timezone(&Utc))
+        };
         let submitted = match self.kind {
             FormKind::RemoteStart => Submitted::Send(Command::RemoteStart {
                 id_tag: self.text(0),
@@ -646,6 +882,53 @@ impl Form {
                 message_id: opt(self.text(1)),
                 data: opt(self.text(2)),
             }),
+            FormKind::GetLog => Submitted::Send(Command::GetLog(Box::new(GetLogRequest {
+                log_type: chosen(0)?.parse().ok()?,
+                request_id: count(1)?,
+                retries: count(3),
+                retry_interval: count(4),
+                log: LogParameters {
+                    remote_location: self.text(2),
+                    oldest_timestamp: time(5),
+                    latest_timestamp: time(6),
+                },
+            }))),
+            FormKind::InstallCertificate => Submitted::Send(Command::InstallCertificate {
+                certificate_type: chosen(0)?.parse().ok()?,
+                certificate: self.pem(1)?,
+            }),
+            FormKind::DeleteCertificate => {
+                Submitted::Send(Command::DeleteCertificate(CertificateHashData {
+                    hash_algorithm: chosen(0)?.parse().ok()?,
+                    issuer_name_hash: self.text(1),
+                    issuer_key_hash: self.text(2),
+                    serial_number: self.text(3),
+                }))
+            }
+            FormKind::GetInstalledCertificateIds => Submitted::Send(
+                Command::GetInstalledCertificateIds(chosen(0)?.parse().ok()?),
+            ),
+            FormKind::ExtendedTrigger => Submitted::Send(Command::ExtendedTriggerMessage {
+                message: chosen(0)?.parse().ok()?,
+                connector: number(1),
+            }),
+            FormKind::SignedFirmware => Submitted::Send(Command::SignedUpdateFirmware(Box::new(
+                SignedUpdateFirmwareRequest {
+                    retries: count(3),
+                    retry_interval: count(4),
+                    request_id: count(2)?,
+                    firmware: SignedFirmware {
+                        location: self.text(0),
+                        retrieve_date_time: time(1)?,
+                        install_date_time: time(7),
+                        signing_certificate: self.pem(5)?,
+                        signature: self.text(6),
+                    },
+                },
+            ))),
+            FormKind::CertificateSigned => Submitted::Send(Command::CertificateSigned {
+                chain: self.pem(0)?,
+            }),
             FormKind::Raw => Submitted::Send(Command::Raw {
                 action: chosen(0)?,
                 payload: serde_json::from_str(self.fields.get(1)?.input.text()).ok()?,
@@ -682,6 +965,48 @@ impl Form {
         }
         Some(submitted)
     }
+}
+
+/// Rebuilds PEM blocks from text whose line breaks may have become spaces (a paste into a
+/// single-line field): each block gets its header, base64 lines of 64 characters and footer.
+fn normalize_pem(text: &str, max: usize) -> Result<String, String> {
+    let mut out = String::new();
+    let mut rest = text.trim();
+    if rest.is_empty() {
+        return Err("required".to_owned());
+    }
+    while !rest.is_empty() {
+        let after = rest
+            .strip_prefix("-----BEGIN ")
+            .ok_or_else(|| "expected a PEM block starting with -----BEGIN ...-----".to_owned())?;
+        let (label, body_and_tail) = after
+            .split_once("-----")
+            .ok_or_else(|| "unterminated -----BEGIN line".to_owned())?;
+        let footer = format!("-----END {label}-----");
+        let (body, tail) = body_and_tail
+            .split_once(footer.as_str())
+            .ok_or_else(|| format!("missing {}", kirby_ocpp_tui::text::sanitize(&footer)))?;
+        let data: String = body.split_whitespace().collect();
+        if data.is_empty()
+            || !data
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        {
+            return Err("the PEM body is not base64".to_owned());
+        }
+        let _ = writeln!(out, "-----BEGIN {label}-----");
+        for chunk in data.as_bytes().chunks(64) {
+            out.push_str(&String::from_utf8_lossy(chunk));
+            out.push('\n');
+        }
+        out.push_str(&footer);
+        out.push('\n');
+        rest = tail.trim_start();
+    }
+    if out.chars().count() > max {
+        return Err(format!("longer than {max} characters"));
+    }
+    Ok(out)
 }
 
 fn step(i: &mut usize, n: usize, d: isize) {

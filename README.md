@@ -274,7 +274,7 @@ Left: the stations (dot: green connected, dim disconnected, yellow replaced by a
 | `?` | help |
 | `q`, `Ctrl-C` | quit |
 
-Actions on the selected station open a form (`Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels). Fields are checked as you type, and the request is checked against the OCPP 1.6J schema before anything is sent; errors show under the field. Commands run in the background (several can be in flight, the header shows `N pending`); the answer appears in the status line (`Reset (Soft) on CP-1: Accepted`, or the CALLERROR code and text, or a timeout) and is kept in a history of the last 20 results per station. Answers that carry content (GetConfiguration as a readable key list with `(readonly)` marks and unknown keys, raw calls, DataTransfer with data) open in a popup (`c` copies).
+Connections refused by the security profile show as a status-line notice (at most one per second) and a `N auth failures` chip in the header, next to a `security profile N` chip. Actions on the selected station open a form (`Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels). Fields are checked as you type, and the request is checked against the OCPP 1.6J schema before anything is sent; errors show under the field. Commands run in the background (several can be in flight, the header shows `N pending`); the answer appears in the status line (`Reset (Soft) on CP-1: Accepted`, or the CALLERROR code and text, or a timeout) and is kept in a history of the last 20 results per station. Answers that carry content (GetConfiguration as a readable key list with `(readonly)` marks and unknown keys, raw calls, DataTransfer with data) open in a popup (`c` copies).
 
 | Key | Action |
 | --- | --- |
@@ -286,7 +286,13 @@ Actions on the selected station open a form (`Tab` next field, `Left` `Right` or
 | `u` `A` `C` | UnlockConnector / ChangeAvailability / ClearCache |
 | `P` | SetChargingProfile (connector and profile JSON, validated against the schema) |
 | `D` | DataTransfer |
-| `w` | raw call: any of the 19 central system actions with a JSON payload checked against its request schema |
+| `l` | GetLog (log type, request id, upload URL, optional retries and time range) |
+| `I` `d` | InstallCertificate (paste the PEM; line breaks become spaces in the field and are rebuilt on submit) / DeleteCertificate (hash algorithm and the three hashes) |
+| `L` | GetInstalledCertificateIds (the hash data opens as a readable list) |
+| `E` | ExtendedTriggerMessage (`SignChargePointCertificate` preselected) |
+| `S` `X` | SignedUpdateFirmware (URL, retrieve time, request id, signing certificate PEM, signature) / CertificateSigned (PEM chain) |
+| `e` | the last 100 security events the station reported (scrollable); the Station pane shows the last three, the last log and signed firmware status and a CSR marker |
+| `w` | raw call: any of the 26 central system actions with a JSON payload checked against its request schema |
 | `r` | the last results of the selected station (`Enter` opens one) |
 | `m` | response rule: answer every station's CALLs of one action with a fixed payload |
 | `i` | inject a fault for the next N occurrences of an action: `call_error`, `silence`, `close`, `invalid_payload` |

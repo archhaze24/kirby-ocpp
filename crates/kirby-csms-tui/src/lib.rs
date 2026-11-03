@@ -253,6 +253,7 @@ where
     let mut events = handle.subscribe();
     let mut events_open = true;
     let mut app = App::new(handle.url(), Utc::now());
+    app.security_profile = handle.security_profile().number();
     if let Ok(size) = terminal.size() {
         app.size = (size.width, size.height);
     }
@@ -320,5 +321,7 @@ where
 
 #[cfg(test)]
 mod command_tests;
+#[cfg(test)]
+mod security_tests;
 #[cfg(test)]
 mod tests;

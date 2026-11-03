@@ -236,10 +236,54 @@ fn info_lines(
             "calls received {received}  failed {}  unknown stops {}",
             s.failed_calls, s.unknown_stops
         ));
+        out.extend(security_lines(app, s));
     }
     out.into_iter()
         .map(|l| Line::raw(truncate(&sanitize(&l), w)))
         .collect()
+}
+
+/// What the station reported under the Security Whitepaper: nothing when it reported nothing.
+fn security_lines(app: &App, s: &StationState) -> Vec<String> {
+    let mut parts = Vec::new();
+    if s.security_events_total > 0 {
+        parts.push(format!("security events {}", s.security_events_total));
+    }
+    if let Some(l) = &s.log_status {
+        let id = l.request_id.map_or_else(String::new, |i| format!(" #{i}"));
+        parts.push(format!("log {}{id} ({} ago)", l.status, age(app.now, l.at)));
+    }
+    if let Some(f) = &s.signed_firmware_status {
+        let id = f.request_id.map_or_else(String::new, |i| format!(" #{i}"));
+        parts.push(format!(
+            "signed firmware {}{id} ({} ago)",
+            f.status,
+            age(app.now, f.at)
+        ));
+    }
+    if let Some(r) = &s.certificate_request {
+        parts.push(format!(
+            "CSR received ({} ago)",
+            age(app.now, r.received_at)
+        ));
+    }
+    let mut out = Vec::new();
+    if !parts.is_empty() {
+        out.push(parts.join("  "));
+    }
+    // The last three events, newest first (`e` lists them all).
+    for e in s.security_events.iter().rev().take(3) {
+        let info = e
+            .tech_info
+            .as_deref()
+            .map_or_else(String::new, |t| format!(" {t}"));
+        out.push(format!(
+            "  {} {}{info}",
+            e.received_at.format("%H:%M:%S"),
+            e.event_type
+        ));
+    }
+    out
 }
 
 fn connectors(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
