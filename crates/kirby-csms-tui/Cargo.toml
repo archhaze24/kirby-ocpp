@@ -6,6 +6,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords = ["ocpp", "ev-charging", "csms", "tui"]
+categories = ["command-line-utilities", "development-tools::testing", "network-programming"]
 
 [lib]
 name = "kirby_csms_tui"

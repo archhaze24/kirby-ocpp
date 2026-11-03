@@ -1,0 +1,14 @@
+{
+  "name": "@archhaze24/kirby-csms",
+  "version": "0.0.0-template",
+  "description": "Terminal OCPP 1.6J central system (CSMS) for charge point firmware development and load tests",
+  "keywords": ["ocpp", "ocpp16", "ev", "csms", "central-system", "charge-point", "tui"],
+  "license": "MIT",
+  "author": "archhaze24",
+  "repository": { "type": "git", "url": "git+https://github.com/archhaze24/kirby-ocpp.git" },
+  "homepage": "https://github.com/archhaze24/kirby-ocpp#readme",
+  "bin": { "kirby-csms": "bin/kirby-csms.js" },
+  "files": ["bin", "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md"],
+  "engines": { "node": ">=18" },
+  "optionalDependencies": {}
+}

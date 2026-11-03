@@ -432,6 +432,13 @@ ms = 1
 }
 
 #[test]
+fn version_works_without_arguments() {
+    let (code, stdout, _) = run_to_end(&["--version"]);
+    assert_eq!(code, 0);
+    assert!(stdout.starts_with("kirby-csms "), "{stdout}");
+}
+
+#[test]
 fn script_timeout_exits_1() {
     let dir = tempfile::tempdir().unwrap();
     let csms = script_run(

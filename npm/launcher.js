@@ -1,9 +1,14 @@
 #!/usr/bin/env node
-// Launcher: runs the native kirby-ocpp binary shipped by the matching platform package.
+// Launcher: runs the native binary shipped by the matching platform package. One script
+// serves both launcher packages: build.mjs copies it to bin/<name>.js and the binary name
+// (`kirby-ocpp` or `kirby-csms`) is taken from the script's own file name. Both binaries
+// live in the same @archhaze24/kirby-ocpp-<platform> packages.
 "use strict";
 
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
+
+const NAME = path.basename(__filename, ".js");
 
 // Candidate packages per platform, in order of preference. The musl build is fully static,
 // so on Linux x64 it is also a valid fallback when the glibc package was not installed.
@@ -37,12 +42,12 @@ function binaryPath() {
   const candidates = PLATFORMS[key];
   if (!candidates) {
     throw new Error(
-      `kirby-ocpp has no prebuilt binary for ${key}. Supported: ${Object.keys(PLATFORMS).join(", ")}. ` +
-        "Build from source instead: cargo install kirby-ocpp",
+      `${NAME} has no prebuilt binary for ${key}. Supported: ${Object.keys(PLATFORMS).join(", ")}. ` +
+        `Build from source instead: cargo install ${NAME}`,
     );
   }
   const ordered = key === "linux-x64" && isMusl() ? [...candidates].reverse() : candidates;
-  const exe = process.platform === "win32" ? "kirby-ocpp.exe" : "kirby-ocpp";
+  const exe = process.platform === "win32" ? `${NAME}.exe` : NAME;
   for (const pkg of ordered) {
     try {
       const manifest = require.resolve(`${pkg}/package.json`);
@@ -53,7 +58,7 @@ function binaryPath() {
   }
   throw new Error(
     `The platform package ${ordered[0]} is not installed (npm skipped the optional dependency). ` +
-      "Reinstall without --omit=optional, or run: cargo install kirby-ocpp",
+      `Reinstall without --omit=optional, or run: cargo install ${NAME}`,
   );
 }
 
@@ -61,13 +66,13 @@ let binary;
 try {
   binary = binaryPath();
 } catch (error) {
-  console.error(`kirby-ocpp: ${error.message}`);
+  console.error(`${NAME}: ${error.message}`);
   process.exit(1);
 }
 
 const result = spawnSync(binary, process.argv.slice(2), { stdio: "inherit" });
 if (result.error) {
-  console.error(`kirby-ocpp: could not run ${binary}: ${result.error.message}`);
+  console.error(`${NAME}: could not run ${binary}: ${result.error.message}`);
   process.exit(1);
 }
 if (result.signal) {
