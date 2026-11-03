@@ -36,6 +36,13 @@ impl StationActor {
         key: &str,
         value: &str,
     ) -> ConfigurationStatus {
+        if let Err(reason) = self.check_security_change(key, value) {
+            self.log(
+                LogLevel::Warn,
+                format!("ChangeConfiguration {key} -> Rejected: {reason}"),
+            );
+            return ConfigurationStatus::Rejected;
+        }
         let status = self.registry.change(key, value);
         if status != ConfigurationStatus::Accepted {
             self.log(
@@ -44,15 +51,17 @@ impl StationActor {
             );
             return status;
         }
-        let canonical = self
+        let (canonical, secret) = self
             .registry
             .get(key)
-            .map_or(key, |entry| entry.key)
-            .to_owned();
+            .map_or((key, false), |entry| (entry.key, entry.secret()));
+        let canonical = canonical.to_owned();
+        let shown = if secret { "********" } else { value };
         self.log(
             LogLevel::Info,
-            format!("configuration {canonical} set to {value}"),
+            format!("configuration {canonical} set to {shown}"),
         );
+        self.on_security_key_changed(&canonical);
         self.flush_now();
         self.on_configuration_changed(&canonical);
         status
@@ -99,7 +108,7 @@ pub(super) fn get_configuration(
         .map(|entry| ConfigurationKey {
             key: entry.key.to_owned(),
             readonly: entry.readonly,
-            value: Some(entry.value.clone()),
+            value: (!entry.secret()).then(|| entry.value.clone()),
         })
         .collect();
     let unknown_key = report.unknown_key;

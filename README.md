@@ -194,7 +194,7 @@ Actions: `connect`, `disconnect`, `reconnect`, `boot`, `heartbeat`, `plug`, `unp
 
 ## Response rules
 
-Response rules make the station misbehave on purpose, to test how a CSMS reacts. A rule overrides how one CSMS command (any of the 19 the station handles, e.g. `Reset`, `RemoteStartTransaction`, `ChangeConfiguration`) is answered. Form: `ACTION=BEHAVIOR[*COUNT]`, action names case-insensitive.
+Response rules make the station misbehave on purpose, to test how a CSMS reacts. A rule overrides how one CSMS command (any of the 23 the station handles: the 19 of OCPP 1.6 and the four certificate commands of the Security Whitepaper, e.g. `Reset`, `RemoteStartTransaction`, `InstallCertificate`) is answered. Form: `ACTION=BEHAVIOR[*COUNT]`, action names case-insensitive.
 
 | Behavior | Effect |
 | --- | --- |

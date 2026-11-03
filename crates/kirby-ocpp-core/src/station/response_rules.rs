@@ -1,6 +1,6 @@
 //! Response rules: make the station misbehave on purpose when the CSMS sends a command.
 //!
-//! A rule overrides the normal handling of one inbound action (one of the 19 CSMS commands).
+//! A rule overrides the normal handling of one inbound action (one of the CSMS commands, see [`INBOUND_ACTIONS`]).
 //! It exists to test how a CSMS reacts to a flaky or hostile charge point.
 //!
 //! Compact text form (CLI `--rule`, TUI form): `<Action>=<behavior>[*<count>]` with
@@ -34,22 +34,31 @@ use crate::ocpp::messages::{
     RemoteStartTransaction, RemoteStopTransaction, ReserveNow, Reset, SendLocalList,
     SetChargingProfile, TriggerMessage, UnlockConnector, UpdateFirmware,
 };
+use crate::ocpp::messages::{
+    CertificateSigned, DeleteCertificate, GetInstalledCertificateIds, InstallCertificate,
+};
 
 /// The inbound actions a rule can target.
 ///
-/// The 7 Security Whitepaper CSMS actions are not listed: the station has no handler for them
-/// yet (it answers CALLERROR `NotSupported`), so a rule would have nothing to change.
-pub const INBOUND_ACTIONS: [&str; 19] = [
+/// The 19 OCPP 1.6 commands plus the four certificate commands of the Security Whitepaper
+/// (`CertificateSigned`, `DeleteCertificate`, `GetInstalledCertificateIds`, `InstallCertificate`).
+/// `GetLog`, `ExtendedTriggerMessage` and `SignedUpdateFirmware` are not listed: the station has no
+/// handler for them yet (it answers CALLERROR `NotSupported`).
+pub const INBOUND_ACTIONS: [&str; 23] = [
     CancelReservation::NAME,
+    CertificateSigned::NAME,
     ChangeAvailability::NAME,
     ChangeConfiguration::NAME,
     ClearCache::NAME,
     ClearChargingProfile::NAME,
     DataTransfer::NAME,
+    DeleteCertificate::NAME,
     GetCompositeSchedule::NAME,
     GetConfiguration::NAME,
     GetDiagnostics::NAME,
+    GetInstalledCertificateIds::NAME,
     GetLocalListVersion::NAME,
+    InstallCertificate::NAME,
     RemoteStartTransaction::NAME,
     RemoteStopTransaction::NAME,
     ReserveNow::NAME,
@@ -100,7 +109,7 @@ pub enum RuleError {
         "expected <Action>=<behavior>[*<count>], e.g. Reset=reject or GetConfiguration=delay:5000"
     )]
     Format,
-    #[error("unknown action `{0}` (expected one of the 19 CSMS commands, e.g. Reset)")]
+    #[error("unknown action `{0}` (expected one of the CSMS commands, e.g. Reset)")]
     UnknownAction(String),
     #[error(
         "unknown behavior `{0}` (expected reject, delay:<ms>, error:<Code>[:<text>], drop or ignore)"
@@ -281,6 +290,9 @@ pub fn reject_payload(action: &str) -> Option<Value> {
             "Rejected"
         }
         a if a == SendLocalList::NAME || a == UnlockConnector::NAME => "NotSupported",
+        a if a == InstallCertificate::NAME || a == CertificateSigned::NAME => "Rejected",
+        a if a == DeleteCertificate::NAME => "Failed",
+        a if a == GetInstalledCertificateIds::NAME => "NotFound",
         _ => return None,
     };
     Some(json!({ "status": status }))

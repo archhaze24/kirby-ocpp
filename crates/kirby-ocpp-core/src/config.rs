@@ -92,6 +92,27 @@ pub struct TlsConfig {
     pub server_name: Option<String>,
     /// TS: `!tlsRejectUnauthorized`. Disables certificate verification (testing only).
     pub skip_verify: bool,
+    /// Client identity held in memory (the certificate the CSMS signed for us, Security Profile 3).
+    /// Filled in by the station at connect time; never serialized.
+    #[serde(skip)]
+    pub identity_pem: Option<IdentityPem>,
+    /// Extra trust anchors (installed Central System root certificates, PEM); filled in by the
+    /// station at connect time and used in addition to `ca_file` / the system roots.
+    #[serde(skip)]
+    pub extra_roots_pem: Vec<String>,
+}
+
+/// A client certificate chain and its private key as PEM text.
+#[derive(Clone, PartialEq, Eq)]
+pub struct IdentityPem {
+    pub chain_pem: String,
+    pub key_pem: String,
+}
+
+impl std::fmt::Debug for IdentityPem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdentityPem").finish_non_exhaustive()
+    }
 }
 
 /// Everything needed to run one emulated charge point.

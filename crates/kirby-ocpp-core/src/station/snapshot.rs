@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::certificates::CertificateSummary;
 use super::maintenance::{DiagnosticsOutcome, FirmwareOutcome};
 use super::reservation::Reservation;
 use super::response_rules::ResponseRule;
@@ -95,6 +96,14 @@ pub struct Snapshot {
     pub local_list: LocalListView,
     /// Installed charging profiles, in installation order.
     pub charging_profiles: Vec<ProfileSummary>,
+    /// Security events waiting for a connection.
+    pub pending_security_events: u32,
+    /// `SecurityProfile` (0..=3); takes effect at the next (re)connect.
+    pub security_profile: u8,
+    /// Installed certificates (roots and the station's own), no key material.
+    pub certificates: Vec<CertificateSummary>,
+    /// A certificate request (`SignCertificate`) is waiting for its `CertificateSigned`.
+    pub certificate_request_pending: bool,
     /// Connectors `1..=n`, ordered by id.
     pub connectors: Vec<ConnectorSnapshot>,
 }
@@ -124,6 +133,10 @@ impl Snapshot {
             config: Vec::new(),
             local_list: LocalListView::default(),
             charging_profiles: Vec::new(),
+            pending_security_events: 0,
+            security_profile: 0,
+            certificates: Vec::new(),
+            certificate_request_pending: false,
             connectors: (1..=count)
                 .map(|id| ConnectorSnapshot::new(ConnectorId::new(id)))
                 .collect(),

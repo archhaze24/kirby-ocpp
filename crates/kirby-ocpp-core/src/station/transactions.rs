@@ -768,6 +768,11 @@ impl StationActor {
         }
         self.reschedule_metering();
         self.resend_all_statuses();
+        if std::mem::take(&mut self.startup_event_pending) {
+            self.security_event("StartupOfTheDevice", None);
+        } else {
+            self.flush_security_events();
+        }
     }
 }
 

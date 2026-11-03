@@ -17,7 +17,7 @@
 //! One file per topic: `config` (Get/ChangeConfiguration), `data_transfer`, `local_list`
 //! (SendLocalList, GetLocalListVersion, ClearCache), `availability`
 //! (ChangeAvailability, UnlockConnector), `trigger` (TriggerMessage), `remote` (RemoteStart/Stop,
-//! Reset), `rules` (response rules applied before the handler), `reservation`, `smart` (charging profiles), `maintenance` (diagnostics, firmware).
+//! Reset), `rules` (response rules applied before the handler), `reservation`, `smart` (charging profiles), `maintenance` (diagnostics, firmware), `security` (certificates).
 
 #![allow(
     clippy::needless_pass_by_value,
@@ -32,6 +32,7 @@ mod maintenance;
 mod remote;
 mod reservation;
 mod rules;
+mod security;
 mod smart;
 mod trigger;
 
@@ -44,6 +45,9 @@ use crate::ocpp::messages::{
     RemoteStartTransaction, RemoteStopTransaction, ReserveNow, Reset, SendLocalList,
     SetChargingProfile, TriggerMessage, UnlockConnector, UpdateFirmware,
 };
+use crate::ocpp::messages::{
+    CertificateSigned, DeleteCertificate, GetInstalledCertificateIds, InstallCertificate,
+};
 use crate::ocpp::responder::{ReplyHandle, Responder};
 use crate::station::event::LogLevel;
 use crate::station::response_rules::INBOUND_ACTIONS;
@@ -54,6 +58,7 @@ type Handler<A> = fn(&mut StationActor, Responder<A>, <A as Action>::Req);
 
 impl StationActor {
     /// Routes an incoming CALL to its handler.
+    #[allow(clippy::too_many_lines, reason = "one flat dispatch table")]
     pub(super) fn dispatch_incoming(&mut self, call: IncomingCall) {
         let IncomingCall {
             action,
@@ -130,6 +135,20 @@ impl StationActor {
                 self.invoke::<RemoteStopTransaction>(payload, reply, remote::remote_stop);
             }
             Reset::NAME => self.invoke::<Reset>(payload, reply, remote::reset),
+            InstallCertificate::NAME => {
+                self.invoke::<InstallCertificate>(payload, reply, security::install_certificate);
+            }
+            DeleteCertificate::NAME => {
+                self.invoke::<DeleteCertificate>(payload, reply, security::delete_certificate);
+            }
+            GetInstalledCertificateIds::NAME => self.invoke::<GetInstalledCertificateIds>(
+                payload,
+                reply,
+                security::get_installed_certificate_ids,
+            ),
+            CertificateSigned::NAME => {
+                self.invoke::<CertificateSigned>(payload, reply, security::certificate_signed);
+            }
             other => {
                 // Security Whitepaper actions (GetLog, InstallCertificate, ...) pass the schema
                 // check but have no behaviour yet: refuse them with exactly one CALLERROR.

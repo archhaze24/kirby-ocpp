@@ -152,6 +152,10 @@ timeout_ms = 4000
     let cancel = CancelToken::new();
     // `join!` polls the runner first, which subscribes to events before any step runs.
     let (report, ()) = tokio::join!(run_scenario(&rig.station, &s, &cancel, None), async {
+        // The inbound CALL must come after the station's own Heartbeat (steps are ordered).
+        csms.wait_for_call("Heartbeat", station_support::STEP)
+            .await
+            .unwrap();
         let _ = csms
             .send_call(
                 "GetConfiguration",

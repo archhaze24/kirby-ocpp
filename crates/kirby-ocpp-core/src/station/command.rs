@@ -136,6 +136,16 @@ pub enum Command {
     },
     /// Remove the charging profile with this id, or all of them for `None`.
     ClearChargingProfiles { id: Option<i32> },
+    /// Create a key pair and a CSR and send `SignCertificate` (Security Whitepaper). The
+    /// outcome is the CSMS' `SignCertificate.conf`; the certificate arrives later as
+    /// `CertificateSigned`.
+    RequestCertificate,
+    /// Report a security event (`SecurityEventNotification`); `event_type` must be one of the
+    /// whitepaper's event names (see `station::security`). Queued while the station is offline.
+    SendSecurityEvent {
+        event_type: String,
+        tech_info: Option<String>,
+    },
     /// Stop the station: close the connection gracefully, flush state, end the actor.
     Shutdown,
 }
@@ -175,6 +185,8 @@ impl Command {
             Self::ClearLocalList => "clear_local_list",
             Self::InstallChargingProfile { .. } => "install_charging_profile",
             Self::ClearChargingProfiles { .. } => "clear_charging_profiles",
+            Self::RequestCertificate => "request_certificate",
+            Self::SendSecurityEvent { .. } => "send_security_event",
             Self::Shutdown => "shutdown",
         }
     }

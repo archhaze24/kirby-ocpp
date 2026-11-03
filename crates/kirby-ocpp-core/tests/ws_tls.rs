@@ -184,6 +184,7 @@ async fn mutual_tls_with_a_ca_issued_client_certificate_is_accepted() {
         )),
         server_name: Some("localhost".to_owned()),
         skip_verify: false,
+        ..TlsConfig::default()
     };
     let (connection, _events) = connect_with_tls(&charge_point_url(&csms), &tls, options()).await;
     assert!(connection.is_open());
@@ -309,5 +310,26 @@ async fn key_file_without_a_private_key_is_a_typed_file_error() {
         matches!(result, Err(ConnectError::TlsFile { .. })),
         "{result:?}"
     );
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn in_memory_identity_and_installed_roots_work_like_files() {
+    let csms = start_tls(true).await;
+    let material = csms.tls_material().expect("material").clone();
+    let tls = TlsConfig {
+        extra_roots_pem: vec![material.ca_cert_pem().to_owned()],
+        identity_pem: Some(kirby_ocpp_core::config::IdentityPem {
+            chain_pem: material.client_cert_pem().to_owned(),
+            key_pem: material.client_key_pem().to_owned(),
+        }),
+        server_name: Some("localhost".to_owned()),
+        ..TlsConfig::default()
+    };
+    let (connection, _events) = connect_with_tls(&charge_point_url(&csms), &tls, options()).await;
+    assert!(connection.is_open());
+    csms.wait_for_connection(ws_support::STEP)
+        .await
+        .expect("connection recorded");
     csms.shutdown().await;
 }

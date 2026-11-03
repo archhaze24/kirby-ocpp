@@ -31,15 +31,19 @@ use thiserror::Error;
 use crate::ids::{ConnectorId, IdTag};
 use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
 use crate::station::authorization::AuthorizationCache;
+use crate::station::certificates::CertificateStore;
 use crate::station::charging_profiles::ChargingProfileStore;
 use crate::station::local_auth_list::LocalAuthList;
 use crate::station::offline::OfflineQueue;
 use crate::station::reservation::Reservation;
+use crate::station::security::PendingSecurityEvent;
 use crate::station::transaction::TransactionState;
 
 /// Current on-disk format version.
 /// Version 3 added the install time of charging profiles (`StoredProfile::installed_at`).
-pub const STORE_VERSION: u32 = 3;
+/// Version 4 added the certificate store and the queued security events (older files load with
+/// both empty; secrets live in a separate file, see [`StationSecrets`]).
+pub const STORE_VERSION: u32 = 4;
 
 /// Everything that survives a restart.
 ///
@@ -63,6 +67,10 @@ pub struct PersistedStation {
     pub offline_queue: OfflineQueue,
     /// Mutable configuration key values.
     pub configuration: BTreeMap<String, String>,
+    /// Installed root certificates and the station's own chain (public data; added in version 4).
+    pub certificates: CertificateStore,
+    /// Security events waiting for a connection (added in version 4).
+    pub security_events: Vec<PendingSecurityEvent>,
 }
 
 impl PersistedStation {
@@ -89,7 +97,38 @@ impl Default for PersistedStation {
             charging_profiles: ChargingProfileStore::default(),
             offline_queue: OfflineQueue::default(),
             configuration: BTreeMap::new(),
+            certificates: CertificateStore::default(),
+            security_events: Vec::new(),
         }
+    }
+}
+
+/// Secrets of one charge point, kept out of the main state file: `<name>.station.secrets.json`,
+/// written atomically with mode `0600` on Unix (like the state file).
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StationSecrets {
+    pub version: u32,
+    /// The `AuthorizationKey` (Basic Auth password).
+    pub authorization_key: Option<String>,
+    /// Private key (PEM) of the installed charge point certificate.
+    pub charge_point_key_pem: Option<String>,
+    /// Private key (PEM) of a `SignCertificate` request that has not been answered yet.
+    pub pending_key_pem: Option<String>,
+}
+
+impl std::fmt::Debug for StationSecrets {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StationSecrets").finish_non_exhaustive()
+    }
+}
+
+impl StationSecrets {
+    /// Nothing secret is held.
+    pub fn is_empty(&self) -> bool {
+        self.authorization_key.is_none()
+            && self.charge_point_key_pem.is_none()
+            && self.pending_key_pem.is_none()
     }
 }
 
@@ -198,19 +237,58 @@ impl StationStore {
         Ok(LoadOutcome::Loaded(Box::new(state)))
     }
 
+    /// Path of the secrets file next to the state file.
+    pub fn secrets_path(&self) -> PathBuf {
+        let text = self.path.to_string_lossy();
+        let base = text.strip_suffix(".station.json").unwrap_or(&text);
+        PathBuf::from(format!("{base}.station.secrets.json"))
+    }
+
+    /// Reads the secrets file; a missing or unreadable one is "no secrets".
+    pub fn load_secrets(&self) -> Result<StationSecrets, StoreError> {
+        let path = self.secrets_path();
+        match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| StoreError::Io {
+                path,
+                source: io::Error::new(io::ErrorKind::InvalidData, e.to_string()),
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(StationSecrets::default()),
+            Err(source) => Err(StoreError::Io { path, source }),
+        }
+    }
+
+    /// Atomically replaces the secrets file (removes it when `secrets` is empty).
+    pub fn save_secrets(&self, secrets: &StationSecrets) -> Result<(), StoreError> {
+        let path = self.secrets_path();
+        if secrets.is_empty() {
+            return match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(source) => Err(StoreError::Io { path, source }),
+            };
+        }
+        let mut copy = secrets.clone();
+        copy.version = STORE_VERSION;
+        let json = serde_json::to_vec_pretty(&copy).map_err(StoreError::Serialize)?;
+        self.write_atomic(&path, &json)
+    }
+
     /// Atomically replaces the state file (creating the directory if needed).
     pub fn save(&self, state: &PersistedStation) -> Result<(), StoreError> {
         let json = serde_json::to_vec_pretty(state).map_err(StoreError::Serialize)?;
-        let dir = self.path.parent().unwrap_or_else(|| Path::new("."));
+        self.write_atomic(&self.path, &json)
+    }
+
+    fn write_atomic(&self, path: &Path, json: &[u8]) -> Result<(), StoreError> {
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
         fs::create_dir_all(dir).map_err(|e| StoreError::Io {
             path: dir.to_owned(),
             source: e,
         })?;
         let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(|e| self.io_error(e))?;
-        temp.write_all(&json).map_err(|e| self.io_error(e))?;
+        temp.write_all(json).map_err(|e| self.io_error(e))?;
         temp.as_file().sync_all().map_err(|e| self.io_error(e))?;
-        temp.persist(&self.path)
-            .map_err(|e| self.io_error(e.error))?;
+        temp.persist(path).map_err(|e| self.io_error(e.error))?;
         match sync_dir(dir) {
             Ok(()) => Ok(()),
             // The rename already happened; some filesystems cannot sync a directory.

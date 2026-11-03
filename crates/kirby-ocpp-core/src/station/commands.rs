@@ -89,6 +89,7 @@ impl StationActor {
                 payload,
                 validate,
             } => self.send_raw(&action, payload, validate, reply),
+            Command::RequestCertificate => self.request_certificate(reply),
             Command::Authorize { id_tag } => self.authorize(id_tag, reply_to(reply)),
             Command::StartTransaction { connector, id_tag } => {
                 self.start_transaction(connector, id_tag, reply_to(reply));
@@ -200,6 +201,10 @@ impl StationActor {
                 self.install_charging_profile(connector, profile)
             }
             Command::ClearChargingProfiles { id } => self.clear_charging_profiles(id),
+            Command::SendSecurityEvent {
+                event_type,
+                tech_info,
+            } => self.send_security_event(&event_type, tech_info.as_deref()),
             other => Err(StationError::NotImplemented {
                 command: other.name(),
             }),

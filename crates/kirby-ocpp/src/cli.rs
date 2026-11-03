@@ -375,6 +375,7 @@ impl Cli {
                 key_file: self.tls_key,
                 server_name: self.tls_server_name,
                 skip_verify: self.tls_skip_verify,
+                ..TlsConfig::default()
             },
             persist: !self.no_persist,
             state_dir: self.state_dir,

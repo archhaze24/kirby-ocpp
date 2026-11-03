@@ -42,6 +42,7 @@ mod persistence;
 mod power;
 mod reservations;
 mod sampling;
+mod secure;
 mod snapshot;
 mod status;
 pub mod timers;
@@ -49,6 +50,7 @@ mod transactions;
 mod views;
 
 pub mod authorization;
+pub mod certificates;
 pub mod charging_profiles;
 pub mod config_registry;
 pub mod connector;
@@ -58,6 +60,7 @@ pub mod metering;
 pub mod offline;
 pub mod reservation;
 pub mod response_rules;
+pub mod security;
 pub mod smart_charging;
 pub mod transaction;
 

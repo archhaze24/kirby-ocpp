@@ -110,7 +110,8 @@ impl StationActor {
             LogLevel::Info,
             format!("connecting to {}", redact_url(&self.config.url)),
         );
-        let config = self.config.clone();
+        let mut config = self.config.clone();
+        self.apply_security_transport(&mut config);
         let options = self.connect_options();
         let internal = self.internal_tx.clone();
         self.link.connecting = Some(tokio::spawn(async move {
@@ -146,6 +147,7 @@ impl StationActor {
             }
             Err(error) => {
                 self.log(LogLevel::Error, format!("connection failed: {error}"));
+                self.report_connect_failure(&error);
                 self.state.connection = ConnectionState::Disconnected;
                 self.schedule_reconnect();
             }

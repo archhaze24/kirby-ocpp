@@ -769,30 +769,19 @@ async fn unknown_actions_are_not_implemented() {
     rig.shutdown().await;
 }
 
-/// Security Whitepaper actions pass schema validation but have no behaviour yet (S2): each
+/// Security Whitepaper actions without behaviour yet (S2b: logs, firmware, extended trigger): each
 /// gets exactly one CALLERROR `NotSupported`, and the station stays usable afterwards.
 #[tokio::test]
 async fn security_whitepaper_actions_get_one_not_supported_reply() {
     let rig = booted().await;
-    let hash = json!({"hashAlgorithm": "SHA256", "issuerNameHash": "ab", "issuerKeyHash": "cd", "serialNumber": "01"});
     let calls = [
-        ("CertificateSigned", json!({"certificateChain": "PEM"})),
-        ("DeleteCertificate", json!({"certificateHashData": hash})),
         (
             "ExtendedTriggerMessage",
             json!({"requestedMessage": "SignChargePointCertificate"}),
         ),
         (
-            "GetInstalledCertificateIds",
-            json!({"certificateType": "CentralSystemRootCertificate"}),
-        ),
-        (
             "GetLog",
             json!({"logType": "SecurityLog", "requestId": 1, "log": {"remoteLocation": "https://example.com/logs"}}),
-        ),
-        (
-            "InstallCertificate",
-            json!({"certificateType": "ManufacturerRootCertificate", "certificate": "PEM"}),
         ),
         (
             "SignedUpdateFirmware",

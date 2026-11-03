@@ -34,7 +34,7 @@ impl From<&ConfigEntry> for ConfigItem {
     fn from(entry: &ConfigEntry) -> Self {
         Self {
             key: entry.key.to_owned(),
-            value: entry.value.clone(),
+            value: entry.display_value(),
             readonly: entry.readonly,
             hint: entry.hint().to_owned(),
         }

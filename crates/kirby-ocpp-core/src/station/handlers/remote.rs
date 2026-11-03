@@ -163,6 +163,10 @@ impl StationActor {
             LogLevel::Warn,
             format!("{kind} reset accepted; rebooting station"),
         );
+        self.security_event(
+            "ResetOrReboot",
+            Some(&format!("{kind} reset requested by the CSMS")),
+        );
         self.timers.cancel(&TimerKey::Heartbeat);
         self.timers.cancel(&TimerKey::BootRetry);
         self.timers.cancel(&TimerKey::Maintenance);

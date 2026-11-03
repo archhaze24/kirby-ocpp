@@ -45,10 +45,10 @@ where
 
     let head = parse_head(&read_head(&mut stream).await?)?;
     if head.status != 101 {
-        return Err(handshake_error(format!(
-            "the central system answered `{}` instead of 101 Switching Protocols",
-            head.status_line
-        )));
+        return Err(ConnectError::HttpStatus {
+            status: head.status,
+            line: head.status_line,
+        });
     }
     let upgrades = head
         .header("upgrade")

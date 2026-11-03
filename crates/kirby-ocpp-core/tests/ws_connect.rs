@@ -84,7 +84,7 @@ async fn refused_upgrade_is_a_handshake_error() {
     )
     .await;
     assert!(
-        matches!(result, Err(ConnectError::Handshake(_))),
+        matches!(result, Err(ConnectError::HttpStatus { .. })),
         "{result:?}"
     );
 }

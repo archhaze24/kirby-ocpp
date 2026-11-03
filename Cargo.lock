@@ -1234,12 +1234,15 @@ dependencies = [
  "kirby-ocpp-testkit",
  "percent-encoding",
  "proptest",
+ "rcgen",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
@@ -1247,6 +1250,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "x509-parser",
 ]
 
 [[package]]

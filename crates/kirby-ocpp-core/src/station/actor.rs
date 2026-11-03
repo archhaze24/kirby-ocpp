@@ -37,11 +37,13 @@ use crate::config::StationConfig;
 use crate::error::{CallError, StationError};
 use crate::ids::ConnectorId;
 use crate::station::authorization::AuthorizationCache;
+use crate::station::certificates::CertificateStore;
 use crate::station::charging_profiles::ChargingProfileStore;
 use crate::station::config_registry::ConfigRegistry;
 use crate::station::local_auth_list::LocalAuthList;
 use crate::station::offline::OfflineQueue;
-use crate::store::StoreError;
+use crate::station::security::PendingSecurityEvent;
+use crate::store::{StationSecrets, StoreError};
 use crate::ws::{ConnectError, Connection, ConnectionEvent, ConnectionState};
 
 /// How long a graceful shutdown waits for the WebSocket close handshake.
@@ -123,8 +125,15 @@ pub(super) struct RestoredParts {
     pub(super) auth_cache: AuthorizationCache,
     pub(super) profiles: ChargingProfileStore,
     pub(super) queue: OfflineQueue,
+    pub(super) certs: CertificateStore,
+    pub(super) secrets: StationSecrets,
+    pub(super) security_events: Vec<PendingSecurityEvent>,
 }
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent dirty/pending flags of one actor"
+)]
 pub(crate) struct StationActor {
     pub(super) config: StationConfig,
     pub(super) clock: Arc<dyn Clock>,
@@ -138,6 +147,16 @@ pub(crate) struct StationActor {
     pub(super) auth_cache: AuthorizationCache,
     pub(super) profiles: ChargingProfileStore,
     pub(super) queue: OfflineQueue,
+    /// Installed root certificates and the station's own chain.
+    pub(super) certs: CertificateStore,
+    /// Secrets kept in their own file: authorization key, private keys.
+    pub(super) secrets: StationSecrets,
+    /// Security events that could not be sent yet (bounded).
+    pub(super) security_events: Vec<PendingSecurityEvent>,
+    /// The certificate summaries of the snapshot are out of date.
+    pub(super) certs_dirty: bool,
+    /// `StartupOfTheDevice` is sent once per process, after the first accepted boot.
+    pub(super) startup_event_pending: bool,
     /// The local list changed since `Snapshot::local_list` was built.
     pub(super) local_list_dirty: bool,
     /// Counter for station-local transaction ids and queue keys.
@@ -194,6 +213,9 @@ impl StationActor {
             auth_cache: AuthorizationCache::default(),
             profiles: ChargingProfileStore::default(),
             queue: OfflineQueue::default(),
+            certs: CertificateStore::default(),
+            secrets: StationSecrets::default(),
+            security_events: Vec::new(),
         };
         persistence.restore(&mut state, &mut parts, &mut startup_logs);
         // Profiles saved before store version 3 have no install time: count it from now.
@@ -209,6 +231,11 @@ impl StationActor {
             &mut local_list_dirty,
         );
 
+        state.certificates = parts.certs.summaries();
+        state.security_profile = parts.registry.security_profile();
+        state.pending_security_events =
+            u32::try_from(parts.security_events.len()).unwrap_or(u32::MAX);
+        state.certificate_request_pending = parts.secrets.pending_key_pem.is_some();
         let queue_high_water = parts.queue.keys().into_iter().max().unwrap_or(0);
         let (snapshot_tx, snapshot_rx) = watch::channel(state.clone());
         let actor = Self {
@@ -223,6 +250,11 @@ impl StationActor {
             auth_cache: parts.auth_cache,
             profiles: parts.profiles,
             queue: parts.queue,
+            certs: parts.certs,
+            secrets: parts.secrets,
+            security_events: parts.security_events,
+            certs_dirty: false,
+            startup_event_pending: true,
             local_list_dirty,
             // Never reuse a key still present in the restored queue (the wall clock may jump back).
             next_local: u64::try_from(clock_seed).unwrap_or(1).max(queue_high_water),
@@ -372,6 +404,13 @@ impl StationActor {
     /// Publishes the snapshot if it changed since the last publication.
     pub(super) fn publish(&mut self) {
         self.state.pending_offline_messages = self.queue.pending_messages();
+        self.state.security_profile = self.registry.security_profile();
+        self.state.pending_security_events =
+            u32::try_from(self.security_events.len()).unwrap_or(u32::MAX);
+        self.state.certificate_request_pending = self.secrets.pending_key_pem.is_some();
+        if std::mem::take(&mut self.certs_dirty) {
+            self.state.certificates = self.certs.summaries();
+        }
         super::views::refresh(
             &mut self.state,
             &self.registry,

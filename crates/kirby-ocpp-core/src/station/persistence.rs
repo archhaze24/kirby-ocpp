@@ -33,7 +33,9 @@ use super::snapshot::Snapshot;
 use crate::config::StationConfig;
 use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
 use crate::station::config_registry::ConfigSnapshot;
-use crate::store::{LoadOutcome, PersistedConnector, PersistedStation, StationStore, StoreError};
+use crate::store::{
+    LoadOutcome, PersistedConnector, PersistedStation, StationSecrets, StationStore, StoreError,
+};
 
 /// Debounce between the first change and the write.
 pub(super) const FLUSH_DELAY: Duration = Duration::from_millis(200);
@@ -47,6 +49,10 @@ pub(super) struct Persistence {
     dirty: bool,
     in_flight: Option<JoinHandle<()>>,
     queued: bool,
+    /// Secrets read at startup (restored once).
+    loaded_secrets: Option<StationSecrets>,
+    /// The secrets file has to be rewritten with the next write.
+    pub(super) secrets_dirty: bool,
 }
 
 impl Persistence {
@@ -58,6 +64,8 @@ impl Persistence {
             dirty: false,
             in_flight: None,
             queued: false,
+            loaded_secrets: None,
+            secrets_dirty: false,
         };
         if !config.persist {
             return this;
@@ -70,6 +78,13 @@ impl Persistence {
             return this;
         };
         let store = StationStore::new(&dir, &config.charge_point_id);
+        match store.load_secrets() {
+            Ok(secrets) => this.loaded_secrets = Some(secrets),
+            Err(error) => logs.push((
+                LogLevel::Warn,
+                format!("could not read the station secrets: {error}"),
+            )),
+        }
         match store.load() {
             Ok(LoadOutcome::Loaded(state)) => {
                 logs.push((
@@ -113,9 +128,17 @@ impl Persistence {
         parts: &mut RestoredParts,
         logs: &mut Vec<(LogLevel, String)>,
     ) {
+        if let Some(secrets) = self.loaded_secrets.take() {
+            if let Some(key) = &secrets.authorization_key {
+                parts.registry.set_authorization_key(key);
+            }
+            parts.secrets = secrets;
+        }
         let Some(persisted) = self.loaded.take() else {
             return;
         };
+        parts.certs = persisted.certificates;
+        parts.security_events = persisted.security_events;
 
         // The connector count only grows.
         let highest_saved = persisted
@@ -274,8 +297,16 @@ impl StationActor {
             charging_profiles: self.profiles.clone(),
             offline_queue: self.queue.clone(),
             configuration: self.registry.snapshot().values,
+            certificates: self.certs.clone(),
+            security_events: self.security_events.clone(),
             ..PersistedStation::default()
         }
+    }
+
+    /// A secret (authorization key, private key) changed: write the secrets file soon.
+    pub(super) fn mark_secrets_dirty(&mut self) {
+        self.persistence.secrets_dirty = true;
+        self.mark_dirty();
     }
 
     /// Something worth persisting changed: write soon (debounced).
@@ -309,9 +340,16 @@ impl StationActor {
         }
         self.persistence.dirty = false;
         let data = self.build_persisted();
+        let secrets =
+            std::mem::take(&mut self.persistence.secrets_dirty).then(|| self.secrets.clone());
         let internal = self.internal_tx.clone();
         self.persistence.in_flight = Some(tokio::task::spawn_blocking(move || {
-            let _ = internal.send(Internal::Saved(store.save(&data)));
+            let mut result = store.save(&data);
+            if let Some(secrets) = secrets {
+                let saved = store.save_secrets(&secrets);
+                result = result.and(saved);
+            }
+            let _ = internal.send(Internal::Saved(result));
         }));
     }
 
@@ -320,6 +358,7 @@ impl StationActor {
         if let Err(error) = result {
             // Keep the data marked dirty so a later change retries the write.
             self.persistence.dirty = true;
+            self.persistence.secrets_dirty = true;
             self.log(
                 LogLevel::Error,
                 format!("could not save station state: {error}"),
@@ -343,12 +382,24 @@ impl StationActor {
         let Some(store) = self.persistence.store.clone() else {
             return;
         };
-        let needs_write = self.persistence.dirty || self.persistence.queued || had_in_flight;
+        let needs_write = self.persistence.dirty
+            || self.persistence.queued
+            || had_in_flight
+            || self.persistence.secrets_dirty;
         if !needs_write {
             return;
         }
         let data = self.build_persisted();
-        match tokio::task::spawn_blocking(move || store.save(&data)).await {
+        let secrets_changed = std::mem::take(&mut self.persistence.secrets_dirty);
+        let secrets = (secrets_changed || had_in_flight).then(|| self.secrets.clone());
+        let write = move || {
+            let result = store.save(&data);
+            match secrets {
+                Some(secrets) => result.and(store.save_secrets(&secrets)),
+                None => result,
+            }
+        };
+        match tokio::task::spawn_blocking(write).await {
             Ok(Ok(())) => {}
             Ok(Err(error)) => self.log(
                 LogLevel::Error,

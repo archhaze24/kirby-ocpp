@@ -37,7 +37,9 @@ pub(super) async fn client_config(tls: &TlsConfig) -> Result<Arc<ClientConfig>, 
                 algorithms: provider.signature_verification_algorithms,
             }))
     } else {
-        builder.with_root_certificates(trust_roots(tls.ca_file.as_deref()).await?)
+        builder.with_root_certificates(
+            trust_roots(tls.ca_file.as_deref(), &tls.extra_roots_pem).await?,
+        )
     };
 
     let config = match client_identity(tls).await? {
@@ -63,15 +65,24 @@ pub(super) fn server_name(url: &Url, tls: &TlsConfig) -> Result<ServerName<'stat
         .map_err(|_| ConnectError::Tls(format!("invalid TLS server name `{name}`")))
 }
 
-async fn trust_roots(ca_file: Option<&Path>) -> Result<RootCertStore, ConnectError> {
+async fn trust_roots(
+    ca_file: Option<&Path>,
+    extra_pem: &[String],
+) -> Result<RootCertStore, ConnectError> {
     let mut roots = RootCertStore::empty();
+    for pem in extra_pem {
+        for certificate in CertificateDer::pem_slice_iter(pem.as_bytes()).flatten() {
+            // An unusable installed certificate is skipped; the others still count.
+            let _ = roots.add(certificate);
+        }
+    }
     if let Some(path) = ca_file {
         for certificate in read_certificates(path).await? {
             roots
                 .add(certificate)
                 .map_err(|e| file_error(path, format!("not a usable CA certificate: {e}")))?;
         }
-    } else {
+    } else if extra_pem.is_empty() {
         let loaded = rustls_native_certs::load_native_certs();
         roots.add_parsable_certificates(loaded.certs);
         if roots.is_empty() {
@@ -87,7 +98,17 @@ async fn client_identity(
     tls: &TlsConfig,
 ) -> Result<Option<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>)>, ConnectError> {
     match (&tls.cert_file, &tls.key_file) {
-        (None, None) => Ok(None),
+        (None, None) => {
+            let Some(identity) = &tls.identity_pem else {
+                return Ok(None);
+            };
+            let chain = CertificateDer::pem_slice_iter(identity.chain_pem.as_bytes())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| ConnectError::Tls(format!("stored client certificate: {e}")))?;
+            let key = PrivateKeyDer::from_pem_slice(identity.key_pem.as_bytes())
+                .map_err(|e| ConnectError::Tls(format!("stored client key: {e}")))?;
+            Ok(Some((chain, key)))
+        }
         (Some(cert_path), Some(key_path)) => {
             let chain = read_certificates(cert_path).await?;
             let bytes = tokio::fs::read(key_path)

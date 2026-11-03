@@ -16,6 +16,8 @@ chrono.workspace = true
 futures-util.workspace = true
 jsonschema.workspace = true
 percent-encoding.workspace = true
+rcgen.workspace = true
+ring.workspace = true
 rustls.workspace = true
 rustls-native-certs.workspace = true
 serde.workspace = true
@@ -28,11 +30,13 @@ tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
+x509-parser.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 kirby-ocpp-testkit.workspace = true
 proptest.workspace = true
+time.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 
 [lints]

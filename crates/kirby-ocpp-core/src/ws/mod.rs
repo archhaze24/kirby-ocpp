@@ -162,6 +162,11 @@ pub enum ConnectError {
     Network(String),
     #[error("WebSocket handshake failed: {0}")]
     Handshake(String),
+    /// The server answered the upgrade request with an HTTP status other than 101.
+    #[error(
+        "WebSocket handshake failed: the central system answered `{line}` instead of 101 Switching Protocols"
+    )]
+    HttpStatus { status: u16, line: String },
     /// The server did not select the requested subprotocol. The connection was
     /// closed with code 1002 before this error is returned.
     #[error("central system did not negotiate required WebSocket subprotocol {expected}")]

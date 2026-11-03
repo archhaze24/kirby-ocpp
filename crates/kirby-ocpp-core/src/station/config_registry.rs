@@ -38,8 +38,14 @@ use crate::ocpp::types::{ChargingRateUnitType, ConfigurationStatus, Measurand};
 // Canonical spelling of every registry key.
 pub const ALLOW_OFFLINE_TX_FOR_UNKNOWN_ID: &str = "AllowOfflineTxForUnknownId";
 pub const AUTHORIZATION_CACHE_ENABLED: &str = "AuthorizationCacheEnabled";
+pub const AUTHORIZATION_KEY: &str = "AuthorizationKey";
 pub const AUTHORIZE_REMOTE_TX_REQUESTS: &str = "AuthorizeRemoteTxRequests";
 pub const BLINK_REPEAT: &str = "BlinkRepeat";
+pub const CERTIFICATE_SIGNED_MAX_CHAIN_SIZE: &str = "CertificateSignedMaxChainSize";
+pub const CERTIFICATE_STORE_MAX_LENGTH: &str = "CertificateStoreMaxLength";
+pub const ADDITIONAL_ROOT_CERTIFICATE_CHECK: &str = "AdditionalRootCertificateCheck";
+pub const CPO_NAME: &str = "CpoName";
+pub const SECURITY_PROFILE: &str = "SecurityProfile";
 pub const CHARGE_POINT_MODEL: &str = "ChargePointModel";
 pub const CHARGE_POINT_SERIAL_NUMBER: &str = "ChargePointSerialNumber";
 pub const CHARGE_POINT_VENDOR: &str = "ChargePointVendor";
@@ -138,6 +144,12 @@ enum Kind {
     Measurands,
     /// Comma-separated phase rotations: `<rotation>` or `<connectorId>.<rotation>`.
     PhaseRotations,
+    /// Integer 0..=3 (`SecurityProfile`). Transport rules are checked by the station.
+    SecurityProfile,
+    /// Write-only secret, 16..=40 printable ASCII characters (`AuthorizationKey`).
+    Secret,
+    /// Free text of at most 50 characters (`CpoName`).
+    Name,
 }
 
 impl Kind {
@@ -150,6 +162,9 @@ impl Kind {
             Self::PositiveInt => "integer, 1 or more",
             Self::Measurands => "comma-separated measurand names",
             Self::PhaseRotations => "comma-separated phase rotations (RST, 1.RST, ...)",
+            Self::SecurityProfile => "0, 1, 2 or 3; can only be raised",
+            Self::Secret => "write-only; 16 to 40 printable ASCII characters",
+            Self::Name => "text, at most 50 characters",
         }
     }
 
@@ -167,6 +182,11 @@ impl Kind {
                 let mut items = list_items(value).peekable();
                 items.peek().is_some() && items.all(is_phase_rotation_item)
             }
+            Self::SecurityProfile => parse_int(value).is_some_and(|n| (0..=3).contains(&n)),
+            Self::Secret => {
+                (16..=40).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_graphic())
+            }
+            Self::Name => value.chars().count() <= 50,
         }
     }
 }
@@ -184,6 +204,21 @@ pub struct ConfigEntry {
 }
 
 impl ConfigEntry {
+    /// `true` for write-only keys (`AuthorizationKey`): the value must never be shown,
+    /// logged or persisted in the state file.
+    pub fn secret(&self) -> bool {
+        self.kind == Kind::Secret
+    }
+
+    /// The value as it may be shown: secrets are masked (`""` when unset).
+    pub fn display_value(&self) -> String {
+        if self.secret() && !self.value.is_empty() {
+            "********".to_owned()
+        } else {
+            self.value.clone()
+        }
+    }
+
     /// Short description of the accepted values ("read-only" for read-only keys).
     pub fn hint(&self) -> &'static str {
         if self.readonly {
@@ -358,7 +393,7 @@ impl ConfigRegistry {
             values: self
                 .entries
                 .iter()
-                .filter(|entry| !entry.readonly)
+                .filter(|entry| !entry.readonly && !entry.secret())
                 .map(|entry| (entry.key.to_owned(), entry.value.clone()))
                 .collect(),
         }
@@ -423,6 +458,34 @@ impl ConfigRegistry {
 
     pub fn local_authorize_offline(&self) -> bool {
         self.boolean(LOCAL_AUTHORIZE_OFFLINE)
+    }
+
+    /// `SecurityProfile` (0..=3).
+    pub fn security_profile(&self) -> u8 {
+        u8::try_from(self.number(SECURITY_PROFILE)).unwrap_or(0)
+    }
+
+    /// The `AuthorizationKey` (Basic Auth password), if one is set.
+    pub fn authorization_key(&self) -> Option<&str> {
+        self.value(AUTHORIZATION_KEY).filter(|v| !v.is_empty())
+    }
+
+    /// Installs the `AuthorizationKey` without validation (restored from the secrets file).
+    pub fn set_authorization_key(&mut self, key: &str) {
+        self.set_internal(AUTHORIZATION_KEY, key.to_owned());
+    }
+
+    /// `CpoName`, empty when unset.
+    pub fn cpo_name(&self) -> &str {
+        self.value(CPO_NAME).unwrap_or_default()
+    }
+
+    pub fn certificate_store_max_length(&self) -> usize {
+        usize::try_from(self.number(CERTIFICATE_STORE_MAX_LENGTH)).unwrap_or(usize::MAX)
+    }
+
+    pub fn certificate_signed_max_chain_size(&self) -> usize {
+        usize::try_from(self.number(CERTIFICATE_SIGNED_MAX_CHAIN_SIZE)).unwrap_or(usize::MAX)
     }
 
     pub fn local_pre_authorize(&self) -> bool {
@@ -625,9 +688,13 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
 
     vec![
         writable(ALLOW_OFFLINE_TX_FOR_UNKNOWN_ID, Kind::Boolean, "true"),
+        read_only(ADDITIONAL_ROOT_CERTIFICATE_CHECK, "false"),
         writable(AUTHORIZATION_CACHE_ENABLED, Kind::Boolean, "true"),
+        writable(AUTHORIZATION_KEY, Kind::Secret, ""),
         writable(AUTHORIZE_REMOTE_TX_REQUESTS, Kind::Boolean, "false"),
         writable(BLINK_REPEAT, Kind::NonNegativeInt, "0"),
+        read_only(CERTIFICATE_SIGNED_MAX_CHAIN_SIZE, "10000"),
+        read_only(CERTIFICATE_STORE_MAX_LENGTH, "8"),
         read_only(CHARGE_POINT_MODEL, config.model.clone()),
         read_only(CHARGE_POINT_SERIAL_NUMBER, config.charge_point_id.clone()),
         read_only(CHARGE_POINT_VENDOR, config.vendor.clone()),
@@ -669,6 +736,7 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
             Kind::PositiveInt,
             config.heartbeat_interval_secs.to_string(),
         ),
+        writable(CPO_NAME, Kind::Name, ""),
         writable(LIGHT_INTENSITY, Kind::NonNegativeInt, "0"),
         writable(LOCAL_AUTH_LIST_ENABLED, Kind::Boolean, "true"),
         read_only(LOCAL_AUTH_LIST_MAX_LENGTH, LOCAL_LIST_LIMIT.to_string()),
@@ -706,6 +774,7 @@ fn second_half_entries(connectors: u32) -> Vec<ConfigEntry> {
         read_only(NUMBER_OF_CONNECTORS, connectors.to_string()),
         read_only(RESERVE_CONNECTOR_ZERO_SUPPORTED, "true"),
         writable(RESET_RETRIES, Kind::NonNegativeInt, "0"),
+        writable(SECURITY_PROFILE, Kind::SecurityProfile, "0"),
         read_only(
             SEND_LOCAL_LIST_MAX_LENGTH,
             SEND_LOCAL_LIST_LIMIT.to_string(),
@@ -771,7 +840,7 @@ mod tests {
     #[test]
     fn registry_has_every_advertised_key_once() {
         let registry = registry();
-        assert_eq!(registry.entries().len(), 46);
+        assert_eq!(registry.entries().len(), 52);
         let mut names: Vec<String> = registry
             .entries()
             .iter()
@@ -779,7 +848,7 @@ mod tests {
             .collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 46, "duplicate key names");
+        assert_eq!(names.len(), 52, "duplicate key names");
     }
 
     #[test]
@@ -1059,7 +1128,62 @@ mod tests {
         assert!(!snapshot.values.contains_key("ChargePointVendor"));
         assert_eq!(
             snapshot.values.len(),
-            registry.entries().iter().filter(|e| !e.readonly).count()
+            registry
+                .entries()
+                .iter()
+                .filter(|e| !e.readonly && !e.secret())
+                .count()
+        );
+        assert!(!snapshot.values.contains_key("AuthorizationKey"));
+    }
+
+    #[test]
+    fn security_keys_validate_and_mask() {
+        let mut registry = registry();
+        assert_eq!(registry.security_profile(), 0);
+        assert_eq!(
+            registry.change("SecurityProfile", "4"),
+            ConfigurationStatus::Rejected
+        );
+        assert_eq!(
+            registry.change("SecurityProfile", "2"),
+            ConfigurationStatus::Accepted
+        );
+        assert_eq!(registry.security_profile(), 2);
+        assert_eq!(
+            registry.change("AuthorizationKey", "short"),
+            ConfigurationStatus::Rejected
+        );
+        assert_eq!(
+            registry.change("AuthorizationKey", &"k".repeat(41)),
+            ConfigurationStatus::Rejected
+        );
+        assert_eq!(
+            registry.change("authorizationkey", "0123456789abcdef"),
+            ConfigurationStatus::Accepted
+        );
+        assert_eq!(registry.authorization_key(), Some("0123456789abcdef"));
+        let entry = registry.get("AuthorizationKey").unwrap();
+        assert!(entry.secret());
+        assert_eq!(entry.display_value(), "********");
+        for key in [
+            "CertificateStoreMaxLength",
+            "AdditionalRootCertificateCheck",
+            "CertificateSignedMaxChainSize",
+        ] {
+            assert_eq!(
+                registry.change(key, "1"),
+                ConfigurationStatus::Rejected,
+                "{key}"
+            );
+        }
+        assert_eq!(
+            registry.change("CpoName", &"x".repeat(51)),
+            ConfigurationStatus::Rejected
+        );
+        assert_eq!(
+            registry.change("CpoName", "ACME"),
+            ConfigurationStatus::Accepted
         );
     }
 
