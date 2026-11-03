@@ -14,7 +14,7 @@ use clap::Parser;
 use kirby_ocpp_core::fleet::Fleet;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::scenario::{
-    CancelToken, Scenario, ScenarioReport, StepStatus, builtin, run_scenario,
+    CancelToken, JunitSuite, Scenario, ScenarioReport, StepStatus, builtin, junit_xml, run_scenario,
 };
 use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
 use kirby_ocpp_tui::{TuiError, TuiOptions};
@@ -306,6 +306,19 @@ async fn run(
             return ExitCode::FAILURE;
         }
     }
+    if !interrupted && let Some(path) = &args.junit {
+        let suite = JunitSuite {
+            station: None,
+            scenario: &scenario.name,
+            outcome: report
+                .as_ref()
+                .ok_or_else(|| setup_error.as_deref().unwrap_or("no report")),
+        };
+        if let Err(error) = write_junit(path, &[suite]) {
+            eprintln!("error: cannot write the JUnit report: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
     if interrupted {
         ExitCode::from(EXIT_INTERRUPTED)
     } else if report.is_some_and(|r| r.passed) {
@@ -366,6 +379,10 @@ fn print_report(report: &ScenarioReport, json: bool, station: Option<&str>) {
         if report.passed { "PASSED" } else { "FAILED" },
         report.duration_ms
     ));
+}
+
+fn write_junit(path: &Path, suites: &[JunitSuite<'_>]) -> std::io::Result<()> {
+    std::fs::write(path, junit_xml(suites))
 }
 
 fn write_report(path: &Path, report: &ScenarioReport) -> std::io::Result<()> {

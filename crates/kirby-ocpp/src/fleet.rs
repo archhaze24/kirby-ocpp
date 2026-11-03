@@ -11,7 +11,7 @@ use std::time::Duration;
 use futures_util::future::join_all;
 use kirby_ocpp_core::fleet::{Fleet, FleetSpec};
 use kirby_ocpp_core::ids::ConnectorId;
-use kirby_ocpp_core::scenario::CancelToken;
+use kirby_ocpp_core::scenario::{CancelToken, JunitSuite, ScenarioReport};
 use kirby_ocpp_core::{Clock, StationConfig, SystemClock};
 use kirby_ocpp_tui::{TuiError, TuiOptions};
 use serde_json::{Value, json};
@@ -20,7 +20,7 @@ use crate::cli::RunArgs;
 use crate::headless::Sink;
 use crate::{
     EXIT_INTERRUPTED, EXIT_USAGE, connect_and_run, load_scenario, print_report, shutdown_signal,
-    usage_error, write_report,
+    usage_error, write_junit, write_report,
 };
 
 fn clock() -> Arc<dyn Clock> {
@@ -148,12 +148,7 @@ pub async fn run(
             let (scenario, cancel) = (&scenario, &cancel);
             async move {
                 let delay = stagger.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX));
-                if !delay.is_zero() {
-                    tokio::select! {
-                        () = tokio::time::sleep(delay) => {}
-                        () = cancel.cancelled() => {}
-                    }
-                }
+                wait_or_cancel(delay, cancel).await;
                 connect_and_run(handle, scenario, cancel).await
             }
         });
@@ -206,11 +201,50 @@ pub async fn run(
         }
     }
     print_aggregate(ids.len(), &failed, &stations, json);
+    write_failed |= args
+        .junit
+        .as_ref()
+        .is_some_and(|path| !write_fleet_junit(path, &scenario.name, &ids, &outcomes));
 
     if write_failed || !failed.is_empty() {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Sleeps for `delay`, or until the run is cancelled.
+async fn wait_or_cancel(delay: Duration, cancel: &CancelToken) {
+    if !delay.is_zero() {
+        tokio::select! {
+            () = tokio::time::sleep(delay) => {}
+            () = cancel.cancelled() => {}
+        }
+    }
+}
+
+/// Writes one JUnit file with a suite per station; `false` if it could not be written.
+fn write_fleet_junit(
+    path: &Path,
+    scenario: &str,
+    ids: &[String],
+    outcomes: &[Result<ScenarioReport, String>],
+) -> bool {
+    let suites: Vec<JunitSuite<'_>> = ids
+        .iter()
+        .zip(outcomes)
+        .map(|(id, outcome)| JunitSuite {
+            station: Some(id),
+            scenario,
+            outcome: outcome.as_ref().map_err(String::as_str),
+        })
+        .collect();
+    match write_junit(path, &suites) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("error: cannot write the JUnit report: {error}");
+            false
+        }
     }
 }
 

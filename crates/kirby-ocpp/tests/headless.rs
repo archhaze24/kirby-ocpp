@@ -146,11 +146,34 @@ async fn run_human_output_and_failing_scenario_exit_code() {
         "bad.toml",
         "name = \"bad\"\n[[steps]]\naction = \"authorize\"\nid_tag = \"BADTAG\"\n[[steps]]\naction = \"heartbeat\"\n",
     );
-    let output = run(station_args(&csms, &["run", "--scenario", &file])).await;
+    let junit = dir.path().join("junit.xml");
+    let output = run(station_args(
+        &csms,
+        &[
+            "run",
+            "--scenario",
+            &file,
+            "--junit",
+            junit.to_str().unwrap(),
+        ],
+    ))
+    .await;
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("FAIL") && text.contains("Blocked"), "{text}");
     assert!(text.contains("SKIP") && text.contains("FAILED"), "{text}");
+    let xml = std::fs::read_to_string(&junit).unwrap();
+    assert!(
+        xml.contains(
+            "<testsuite name=\"bad\" tests=\"2\" failures=\"1\" errors=\"0\" skipped=\"1\""
+        ),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<failure message=") && xml.contains("Blocked"),
+        "{xml}"
+    );
+    assert!(xml.contains("<skipped/>"), "{xml}");
     csms.shutdown().await;
 }
 

@@ -155,10 +155,21 @@ async fn run_scenario_on_every_station_human_output() {
             "10",
             "--report",
             report.to_str().unwrap(),
+            "--junit",
+            dir.path().join("junit.xml").to_str().unwrap(),
         ],
     ))
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let xml = std::fs::read_to_string(dir.path().join("junit.xml")).unwrap();
+    assert_eq!(xml.matches("<testsuite ").count(), 2, "{xml}");
+    for id in ["CP-1", "CP-2"] {
+        assert!(
+            xml.contains(&format!("<testsuite name=\"charge-session [{id}]\"")),
+            "{xml}"
+        );
+    }
+    assert!(xml.contains("failures=\"0\" errors=\"0\""), "{xml}");
     let text = stdout(&output);
     for id in ["CP-1", "CP-2"] {
         assert!(

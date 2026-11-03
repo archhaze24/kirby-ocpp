@@ -122,7 +122,7 @@ Scenarios tab: one `Run: <name>` action per built-in scenario (keys `o`, `w`, `s
 
 Without a TTY (or with `--no-tui`) the tool connects and prints events until SIGINT/SIGTERM, then closes the WebSocket cleanly. With `--json` each line is one JSON object; frames carry a `payload` field.
 
-`kirby-ocpp run --scenario <name|file.toml> [--report report.json] [--timeout 60] [--id-tag TAG]` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`).
+`kirby-ocpp run --scenario <name|file.toml> [--report report.json] [--junit junit.xml] [--timeout 60] [--id-tag TAG]` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`). `--junit junit.xml` also writes a JUnit XML report for CI: one `<testsuite>` per run, one `<testcase>` per step (failed step = `<failure>`, skipped = `<skipped/>`); a run that could not connect or boot is a suite with one errored `setup` case.
 
 | Code | Meaning |
 | --- | --- |
@@ -144,7 +144,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 run --scenari
 - Every station is a normal station (own connection, transactions, state file named after its id, so state files never collide). `--stagger-ms` waits that long between starting two stations.
 - The terminal UI shows a selector row on top (`1 CP-001+* 2 CP-002- ...`: index, id, connection glyph `+` connected, `~` connecting/retrying, `-` offline, `*` a transaction is running) and the selected station below. Everything else (status, log, actions, `K`/`L`/`P` browsers, forms, scenarios) works on the selected station only; each station keeps its own log (last 500 rows), dialogs and scenario progress, and events of the other stations keep being recorded. `Alt` combinations may need "Option as Meta" in macOS terminals. With `--count 1` there is no selector and no extra keys. Quit stops the whole fleet.
 - Output is tagged with the station id: `[CP-001] ...` in front of every human line, a `"station"` field in every JSON line, stdout and `--log-file` alike. With `--count 1` nothing is tagged.
-- `run --scenario` runs the scenario on every station at the same time and prints one report per station (tagged), then one aggregate line: `fleet: 3/3 stations PASSED`, or `fleet: 2/3 stations passed, FAILED: CP-2`. With `--json` the aggregate is `{"type":"fleet_report","passed":bool,"total":n,"passed_count":n,"failed":[ids],"stations":[...]}`. `--timeout` covers the whole fleet, stagger included. `--report out.json` writes one file per station: `out.CP-001.json` (characters of the id other than letters, digits, `-` and `_` become `_`).
+- `run --scenario` runs the scenario on every station at the same time and prints one report per station (tagged), then one aggregate line: `fleet: 3/3 stations PASSED`, or `fleet: 2/3 stations passed, FAILED: CP-2`. With `--json` the aggregate is `{"type":"fleet_report","passed":bool,"total":n,"passed_count":n,"failed":[ids],"stations":[...]}`. `--timeout` covers the whole fleet, stagger included. `--report out.json` writes one file per station: `out.CP-001.json` (characters of the id other than letters, digits, `-` and `_` become `_`). `--junit` writes one file for the whole fleet, with a suite `scenario [CP-001]` per station.
 
 | Fleet key | Action |
 |---|---|

@@ -305,6 +305,10 @@ pub struct RunArgs {
     #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
     pub report: Option<PathBuf>,
 
+    /// Write a JUnit XML report to this file (one file; one test suite per station in a fleet)
+    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    pub junit: Option<PathBuf>,
+
     /// Give up (and fail) after this many seconds, connecting included
     #[arg(
         long, value_name = "SECONDS", default_value_t = 60,
