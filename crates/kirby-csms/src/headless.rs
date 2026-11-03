@@ -48,7 +48,19 @@ impl Output {
     /// An event: `human` on stdout, or `value` with `--json`; `value` goes to the log file.
     pub fn event(&self, value: &Value, human: &str) {
         let json_line = value.to_string();
-        self.write(if self.json { &json_line } else { human }, &json_line);
+        if self.json {
+            self.write(&json_line, &json_line);
+        } else {
+            // Station ids and texts come from the network: no control characters on a
+            // terminal. Callers sanitize attacker-controlled parts; the newlines of
+            // multi-line texts (the script report) are the only control characters kept.
+            let clean = human
+                .split('\n')
+                .map(sanitize)
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.write(&clean, &json_line);
+        }
     }
 
     /// A machine line (stdin command results): JSON on stdout in both modes.
@@ -61,7 +73,7 @@ impl Output {
     pub fn note(&self, text: &str) {
         self.event(
             &json!({"type": "note", "text": text}),
-            &format!("note: {text}"),
+            &format!("note: {}", sanitize(text)),
         );
     }
 
@@ -75,6 +87,13 @@ impl Output {
             let _ = writeln!(file, "{file_line}").and_then(|()| file.flush());
         }
     }
+}
+
+/// Replaces control characters (which could drive the terminal, or fake extra lines) with a dot.
+pub fn sanitize(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { '\u{b7}' } else { c })
+        .collect()
 }
 
 /// Prints the `listening` line.
@@ -197,14 +216,14 @@ impl Printer {
             CsmsEvent::Connected { station } => {
                 self.out.event(
                     &json!({"type": "connected", "ts": stamp, "station": station}),
-                    &format!("{clock} {station} connected"),
+                    &format!("{clock} {} connected", sanitize(station)),
                 );
             }
             CsmsEvent::Disconnected { station, reason } => {
                 let reason = reason_name(*reason);
                 self.out.event(
                     &json!({"type": "disconnected", "ts": stamp, "station": station, "reason": reason}),
-                    &format!("{clock} {station} disconnected ({reason})"),
+                    &format!("{clock} {} disconnected ({reason})", sanitize(station)),
                 );
             }
             CsmsEvent::Frame {
@@ -225,20 +244,28 @@ impl Printer {
                 }
                 self.out.event(
                     &value,
-                    &format!("{clock} {station} {arrow} {}", frame.to_json_string()),
+                    &format!(
+                        "{clock} {} {arrow} {}",
+                        sanitize(station),
+                        sanitize(&frame.to_json_string())
+                    ),
                 );
             }
             CsmsEvent::Malformed { station, text } => {
                 self.out.event(
                     &json!({"type": "malformed", "ts": stamp, "station": station, "text": text}),
-                    &format!("{clock} {station} sent malformed text: {text}"),
+                    &format!(
+                        "{clock} {} sent malformed text: {}",
+                        sanitize(station),
+                        sanitize(text)
+                    ),
                 );
             }
             CsmsEvent::Forgotten { station } => {
                 self.last_state.remove(station);
                 self.out.event(
                     &json!({"type": "forgotten", "ts": stamp, "station": station}),
-                    &format!("{clock} {station} forgotten"),
+                    &format!("{clock} {} forgotten", sanitize(station)),
                 );
             }
             CsmsEvent::StateChanged { station } => {
@@ -276,7 +303,8 @@ impl Printer {
             .collect::<Vec<_>>()
             .join(" ");
         let human = format!(
-            "{clock} {station} state: connectors [{connectors}] active transactions [{active}]"
+            "{clock} {} state: connectors [{connectors}] active transactions [{active}]",
+            sanitize(station)
         );
         let mut value = view.clone();
         if let Some(object) = value.as_object_mut() {
@@ -319,5 +347,18 @@ pub fn frame_json(frame: &Frame) -> Value {
             "kind": "error", "id": id.clone(), "code": code.as_str(),
             "description": description, "details": details
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_are_neutralised() {
+        let hostile = "CP\u{1b}]0;x\u{7}\nnext\u{9b}31m";
+        let clean = sanitize(hostile);
+        assert!(!clean.chars().any(char::is_control), "{clean:?}");
+        assert!(clean.starts_with("CP"));
     }
 }

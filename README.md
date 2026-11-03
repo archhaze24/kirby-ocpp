@@ -238,6 +238,7 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | `--call-timeout SECONDS` | `CALL_TIMEOUT` | 30 | wait for a station's answer to a command |
 | `--json` | `JSON` | off | JSON lines instead of text |
 | `--log-file PATH` | `LOG_FILE` | none | append every event as a JSON line |
+| `--no-tui` | `NO_TUI` | off | never open the terminal UI, log to stdout |
 | `--stdin` | `STDIN` | auto | read JSON-line commands even on a terminal |
 | `--script FILE` | `SCRIPT` | none | run a TOML script, print the report, exit |
 | `--report PATH`, `--junit PATH` | | none | script report as JSON / JUnit XML |
@@ -327,6 +328,8 @@ call = "ChangeConfiguration"
 payload = { key = "HeartbeatInterval", value = "60" }
 expect_status = "Accepted"
 ```
+
+`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived earlier than the previous wait's match). CALLs that arrive while other steps run are kept (the last 10 000).
 
 Other steps: `sleep {ms}`, `respond {call, payload}` (answer every such CALL with this CALLRESULT payload), `clear_respond {call}`, `inject_fault {call, kind = "call_error" | "silence" | "close" | "invalid_payload", payload, times}`. Every step takes an optional `name`; `timeout_ms` defaults to 5000. The report looks like `kirby-ocpp run` (`PASS` / `FAIL` / `SKIP` per step; `--json` for a JSON report line).
 

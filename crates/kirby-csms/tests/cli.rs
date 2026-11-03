@@ -29,6 +29,7 @@ const ENV_VARS: &[&str] = &[
     "KIRBY_CSMS_LOG_FILE",
     "KIRBY_CSMS_STDIN",
     "KIRBY_CSMS_SCRIPT",
+    "KIRBY_CSMS_NO_TUI",
 ];
 
 fn command(args: &[&str]) -> Command {
@@ -122,6 +123,12 @@ impl Csms {
     fn send(&mut self, line: &str) {
         let stdin = self.stdin.as_mut().unwrap();
         writeln!(stdin, "{line}").unwrap();
+        stdin.flush().unwrap();
+    }
+
+    fn send_raw(&mut self, bytes: &[u8]) {
+        let stdin = self.stdin.as_mut().unwrap();
+        stdin.write_all(bytes).unwrap();
         stdin.flush().unwrap();
     }
 
@@ -233,6 +240,14 @@ async fn stdin_commands_round_trip() {
     csms.send("this is not json");
     let reply = csms.wait(|v| v["type"] == "result" && v["ok"] == false);
     assert!(reply["error"].as_str().unwrap().contains("invalid JSON"));
+
+    // Invalid UTF-8 gets an answer and does not stop the reader.
+    csms.send_raw(b"\xff\xfe\n");
+    let reply = csms.wait(|v| v["type"] == "result" && v["ok"] == false);
+    assert!(
+        reply["error"].as_str().unwrap().contains("UTF-8"),
+        "{reply}"
+    );
 
     csms.send(
         &json!({"station": "NOPE", "action": "Reset", "payload": {"type": "Soft"}}).to_string(),
@@ -492,5 +507,90 @@ async fn serves_wss_with_a_self_signed_certificate() {
     assert!(listening.contains("wss://"), "{listening}");
     let station = station(&csms.addr.clone(), "CP-TLS", true).await;
     csms.wait(|v| v["type"] == "connected" && v["station"] == "CP-TLS");
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn human_output_neutralises_hostile_station_ids() {
+    let mut child = command(&["--listen", "127.0.0.1:0", "--no-tui"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, lines) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let first = lines.recv_timeout(WAIT).expect("listening line");
+    let addr = first
+        .strip_prefix("listening on ws://")
+        .unwrap_or_else(|| panic!("unexpected first line {first:?}"))
+        .to_owned();
+
+    // ESC ] 0 ; x BEL, then a newline that would fake a second log line.
+    let id = "evil\u{1b}]0;x\u{7}\nfake";
+    let _station = station(&addr, id, false).await;
+    let mut seen = Vec::new();
+    loop {
+        let line = lines.recv_timeout(WAIT).expect("station lines");
+        seen.push(line.clone());
+        if line.contains("BootNotification") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(seen.iter().any(|l| l.contains("evil")), "{seen:#?}");
+    for line in &seen {
+        assert!(!line.chars().any(char::is_control), "{line:?}");
+        assert!(!line.starts_with("fake"), "{line:?}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_call_matches_in_any_order_and_consumes_each_call_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut csms = script_run(
+        dir.path(),
+        r#"
+name = "order"
+[[steps]]
+action = "wait_station"
+station = "CP-1"
+[[steps]]
+action = "wait_call"
+call = "Authorize"
+payload_contains = { idTag = "TAG2" }
+[[steps]]
+action = "wait_call"
+call = "Authorize"
+payload_contains = { idTag = "TAG1" }
+[[steps]]
+action = "wait_call"
+call = "Authorize"
+payload_contains = { idTag = "TAG1" }
+timeout_ms = 300
+"#,
+        &[],
+    );
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    for tag in ["TAG1", "TAG2"] {
+        station.authorize(IdTag::new(tag).unwrap()).await.unwrap();
+    }
+    // TAG2 arrived after TAG1 but is waited for first; the second wait for TAG1 finds it
+    // already consumed and times out.
+    let printed = csms.wait(|v| v["type"] == "report");
+    assert_eq!(printed["passed"], false, "{printed}");
+    let steps = printed["steps"].as_array().unwrap();
+    let status = |i: usize| steps[i]["status"].to_string();
+    assert!(status(1).contains("passed"), "{printed}");
+    assert!(status(2).contains("passed"), "{printed}");
+    assert!(status(3).contains("ailed"), "{printed}");
     let _ = station.shutdown().await;
 }

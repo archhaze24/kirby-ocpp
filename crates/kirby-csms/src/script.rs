@@ -22,17 +22,25 @@
 //! `respond {call, payload}`, `clear_respond {call}`,
 //! `inject_fault {call, kind = "call_error"|"silence"|"close"|"invalid_payload", payload?, times}`.
 //! Every step takes an optional `name`.
+//!
+//! `wait_call` consumes the CALL it matches (each CALL satisfies at most one `wait_call`), but
+//! waits may come in any order: a later wait can match a CALL that arrived before an earlier
+//! wait's match. CALLs that arrive while other steps run are kept (the last 10 000).
 
 use std::collections::VecDeque;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Fault, Frame, Reply};
 use kirby_ocpp_core::scenario::{ScenarioReport, StepReport, StepStatus};
 use serde::Deserialize;
 use serde_json::Value;
+use tokio::sync::Notify;
 use tokio::sync::broadcast;
-use tokio::sync::broadcast::error::{RecvError, TryRecvError};
+use tokio::sync::broadcast::error::RecvError;
+use tokio::task::JoinHandle;
 use tokio::time::timeout_at;
 
 /// Longest accepted wait or sleep: one day.
@@ -301,22 +309,106 @@ impl Step {
     }
 }
 
-/// An inbound CALL seen by the runner.
+/// An inbound CALL seen by the pump.
 #[derive(Debug)]
 struct Seen {
     station: String,
     action: String,
     payload: Value,
+    /// A `wait_call` took it already.
+    consumed: bool,
+}
+
+/// What the pump task collects while steps run.
+#[derive(Default)]
+struct Backlog {
+    seen: Mutex<VecDeque<Seen>>,
+    /// Events were lost to a slow receiver; `wait_call` may have missed a CALL.
+    lagged: AtomicBool,
+    /// The engine's event stream ended.
+    closed: AtomicBool,
+    /// Signalled after every event (the single waiter is the runner).
+    wake: Notify,
+}
+
+/// Moves engine events into the [`Backlog`] continuously, also during long steps, so the
+/// broadcast buffer cannot overflow while the runner is busy. Aborted on drop.
+struct Pump {
+    task: JoinHandle<()>,
+}
+
+impl Pump {
+    fn spawn(mut events: broadcast::Receiver<CsmsEvent>, backlog: Arc<Backlog>) -> Self {
+        let task = tokio::spawn(async move {
+            loop {
+                match events.recv().await {
+                    Ok(event) => backlog.record(event),
+                    Err(RecvError::Lagged(_)) => backlog.lagged.store(true, Ordering::Relaxed),
+                    Err(RecvError::Closed) => {
+                        backlog.closed.store(true, Ordering::Relaxed);
+                        backlog.wake.notify_one();
+                        return;
+                    }
+                }
+                backlog.wake.notify_one();
+            }
+        });
+        Self { task }
+    }
+}
+
+impl Drop for Pump {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl Backlog {
+    fn record(&self, event: CsmsEvent) {
+        if let CsmsEvent::Frame {
+            station,
+            direction: Direction::In,
+            frame: Frame::Call {
+                action, payload, ..
+            },
+        } = event
+        {
+            let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+            if seen.len() >= SEEN_CAP {
+                seen.pop_front();
+            }
+            seen.push_back(Seen {
+                station,
+                action,
+                payload,
+                consumed: false,
+            });
+        }
+    }
+
+    /// Consumes the oldest unconsumed CALL that fits.
+    fn take_call(&self, station: Option<&str>, call: &str, contains: Option<&Value>) -> bool {
+        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let found = seen.iter_mut().find(|seen| {
+            !seen.consumed
+                && seen.action == call
+                && station.is_none_or(|id| seen.station == id)
+                && contains.is_none_or(|expected| json_subset(expected, &seen.payload))
+        });
+        match found {
+            Some(seen) => {
+                seen.consumed = true;
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 struct Runner<'a> {
     handle: &'a CsmsHandle,
-    events: broadcast::Receiver<CsmsEvent>,
-    seen: VecDeque<Seen>,
-    /// Index into `seen` of the first CALL `wait_call` may still match.
-    cursor: usize,
-    /// Events were lost to a slow receiver; `wait_call` may have missed a CALL.
-    lagged: bool,
+    backlog: Arc<Backlog>,
+    _pump: Pump,
 }
 
 /// Runs the script against the live server. `deadline` bounds the whole run: the step that is
@@ -331,12 +423,11 @@ pub async fn run(
     deadline: Instant,
 ) -> ScenarioReport {
     let started = Instant::now();
+    let backlog = Arc::new(Backlog::default());
     let mut runner = Runner {
         handle,
-        events,
-        seen: VecDeque::new(),
-        cursor: 0,
-        lagged: false,
+        _pump: Pump::spawn(events, Arc::clone(&backlog)),
+        backlog,
     };
     let mut steps = Vec::with_capacity(script.steps.len());
     let mut failed = false;
@@ -393,7 +484,6 @@ impl Runner<'_> {
                 let need = count.unwrap_or(1);
                 let count = *count;
                 loop {
-                    self.drain();
                     if self.stations_ready(station.as_deref(), count, booted) {
                         return Ok(());
                     }
@@ -419,12 +509,14 @@ impl Runner<'_> {
             } => {
                 let end = end_of(*timeout_ms);
                 loop {
-                    self.drain();
-                    if self.take_call(station.as_deref(), call, payload_contains.as_ref()) {
+                    if self
+                        .backlog
+                        .take_call(station.as_deref(), call, payload_contains.as_ref())
+                    {
                         return Ok(());
                     }
                     if self.next_event(end).await.is_err() {
-                        let lost = if self.lagged {
+                        let lost = if self.backlog.lagged.load(Ordering::Relaxed) {
                             " (events were dropped, a CALL may have been missed)"
                         } else {
                             ""
@@ -518,72 +610,14 @@ impl Runner<'_> {
         named_ok && count_ok
     }
 
-    /// Moves every queued event into the `seen` list.
-    fn drain(&mut self) {
-        loop {
-            match self.events.try_recv() {
-                Ok(event) => self.record(event),
-                Err(TryRecvError::Lagged(_)) => self.lagged = true,
-                Err(TryRecvError::Empty | TryRecvError::Closed) => return,
-            }
-        }
-    }
-
-    /// Waits for one more event. `Err` when `end` passed or the event stream is gone.
+    /// Waits until the pump saw another event. `Err` when `end` passed or the stream is gone.
     async fn next_event(&mut self, end: tokio::time::Instant) -> Result<(), ()> {
-        match timeout_at(end, self.events.recv()).await {
-            Ok(Ok(event)) => {
-                self.record(event);
-                Ok(())
-            }
-            Ok(Err(RecvError::Lagged(_))) => {
-                self.lagged = true;
-                Ok(())
-            }
-            Ok(Err(RecvError::Closed)) | Err(_) => Err(()),
+        if self.backlog.closed.load(Ordering::Relaxed) {
+            return Err(());
         }
-    }
-
-    fn record(&mut self, event: CsmsEvent) {
-        if let CsmsEvent::Frame {
-            station,
-            direction: Direction::In,
-            frame: Frame::Call {
-                action, payload, ..
-            },
-        } = event
-        {
-            if self.seen.len() >= SEEN_CAP {
-                self.seen.pop_front();
-                self.cursor = self.cursor.saturating_sub(1);
-            }
-            self.seen.push_back(Seen {
-                station,
-                action,
-                payload,
-            });
-        }
-    }
-
-    /// Finds the first unmatched CALL that fits and moves the cursor behind it.
-    fn take_call(&mut self, station: Option<&str>, call: &str, contains: Option<&Value>) -> bool {
-        let found = self
-            .seen
-            .iter()
-            .enumerate()
-            .skip(self.cursor)
-            .find(|(_, seen)| {
-                seen.action == call
-                    && station.is_none_or(|id| seen.station == id)
-                    && contains.is_none_or(|expected| json_subset(expected, &seen.payload))
-            });
-        match found {
-            Some((index, _)) => {
-                self.cursor = index + 1;
-                true
-            }
-            None => false,
-        }
+        timeout_at(end, self.backlog.wake.notified())
+            .await
+            .map_err(|_| ())
     }
 }
 

@@ -291,7 +291,7 @@ pub const HELP: &[&str] = &[
     "a                       log of the selected station <-> all stations",
     ": (colon)               command palette: every action below, fuzzy search",
     "?                       this help",
-    "q or Ctrl-C             quit the UI (the server keeps its own lifecycle)",
+    "q or Ctrl-C             quit the UI and stop the server",
     "",
     "Actions on the selected station (a form opens; Enter sends, Esc cancels, Tab next field,",
     "     Left/Right or a letter picks an option); answers show up in the status line:",
