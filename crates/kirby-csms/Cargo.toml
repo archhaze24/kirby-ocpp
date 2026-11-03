@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 kirby-csms-core.workspace = true
+kirby-csms-tui.workspace = true
 kirby-ocpp-core.workspace = true
 chrono.workspace = true
 clap.workspace = true

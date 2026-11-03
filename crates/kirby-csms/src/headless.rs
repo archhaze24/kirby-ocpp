@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{SecondsFormat, Utc};
@@ -21,6 +22,8 @@ use tokio::task::JoinHandle;
 #[derive(Debug)]
 pub struct Output {
     json: bool,
+    /// Off while the terminal UI owns the screen: lines then go to the log file only.
+    stdout: AtomicBool,
     file: Mutex<Option<BufWriter<File>>>,
 }
 
@@ -32,8 +35,14 @@ impl Output {
             .map(BufWriter::new);
         Ok(Arc::new(Self {
             json,
+            stdout: AtomicBool::new(true),
             file: Mutex::new(file),
         }))
+    }
+
+    /// Turns the stdout lines on or off (the log file is unaffected).
+    pub fn set_stdout(&self, on: bool) {
+        self.stdout.store(on, Ordering::Relaxed);
     }
 
     /// An event: `human` on stdout, or `value` with `--json`; `value` goes to the log file.
@@ -58,7 +67,9 @@ impl Output {
 
     fn write(&self, stdout_line: &str, file_line: &str) {
         // A closed pipe must not kill the server.
-        let _ = writeln!(io::stdout().lock(), "{stdout_line}");
+        if self.stdout.load(Ordering::Relaxed) {
+            let _ = writeln!(io::stdout().lock(), "{stdout_line}");
+        }
         let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
         if let Some(file) = file.as_mut() {
             let _ = writeln!(file, "{file_line}").and_then(|()| file.flush());

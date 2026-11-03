@@ -116,6 +116,14 @@ pub struct Cli {
     )]
     pub stdin: bool,
 
+    /// Never start the terminal UI; print events to stdout instead (automatic when stdout or
+    /// stdin is not a terminal, and with --json, --script or --stdin)
+    #[arg(
+        long, env = "KIRBY_CSMS_NO_TUI", action = ArgAction::SetTrue,
+        value_parser = BoolishValueParser::new()
+    )]
+    pub no_tui: bool,
+
     /// Run this TOML script against the connecting stations, print the report and exit
     #[arg(long, env = "KIRBY_CSMS_SCRIPT", value_name = "FILE", value_parser = non_empty_path)]
     pub script: Option<PathBuf>,
@@ -141,6 +149,16 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// Whether the terminal UI should be tried: only for an interactive run.
+    pub fn wants_tui(&self, stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+        !self.no_tui
+            && !self.json
+            && !self.stdin
+            && self.script.is_none()
+            && stdin_is_terminal
+            && stdout_is_terminal
+    }
+
     /// The engine configuration (TLS is added by the caller).
     pub fn csms_config(&self) -> CsmsConfig {
         let mut config = CsmsConfig::new(self.listen);
@@ -197,6 +215,20 @@ fn non_empty_path(value: &str) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_ui_only_for_interactive_runs() {
+        let cli = |args: &[&str]| {
+            Cli::parse_from(std::iter::once("kirby-csms").chain(args.iter().copied()))
+        };
+        assert!(cli(&[]).wants_tui(true, true));
+        assert!(!cli(&[]).wants_tui(false, true));
+        assert!(!cli(&[]).wants_tui(true, false));
+        assert!(!cli(&["--no-tui"]).wants_tui(true, true));
+        assert!(!cli(&["--json"]).wants_tui(true, true));
+        assert!(!cli(&["--stdin"]).wants_tui(true, true));
+        assert!(!cli(&["--script", "s.toml"]).wants_tui(true, true));
+    }
 
     #[test]
     fn policies() {

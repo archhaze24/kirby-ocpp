@@ -1,0 +1,218 @@
+//! Terminal UI for kirby-csms (ratatui + crossterm): observe many stations.
+//!
+//! The UI receives a [`CsmsHandle`] and reads the engine through `stations()`, `station()`,
+//! `state()`, `history()` and `subscribe()`. The model ([`app`]) is pure: [`app::update`]
+//! turns a [`app::Msg`] into [`app::Effect`]s and the run loop executes them. The terminal is
+//! restored on every exit path (RAII guard + panic hook from `kirby-ocpp-tui`).
+//!
+//! Step D1 is read-only: no commands or forms yet. [`app::Mode`] is where they will go.
+
+#![allow(
+    clippy::too_many_lines,
+    clippy::many_single_char_names,
+    reason = "draw functions are long flat lists; ratatui code uses `f`, `w`, `h`"
+)]
+
+pub mod app;
+mod keys;
+pub mod ui;
+
+use std::future::Future;
+use std::io;
+use std::time::Duration;
+
+use chrono::Utc;
+use crossterm::event::{Event as TermEvent, EventStream};
+use futures_util::{Stream, StreamExt};
+use kirby_csms_core::CsmsHandle;
+use kirby_ocpp_tui::clipboard;
+use kirby_ocpp_tui::shutdown_signal;
+use kirby_ocpp_tui::terminal::TerminalGuard;
+use ratatui::Terminal;
+use ratatui::backend::Backend;
+use thiserror::Error;
+use tokio::sync::broadcast::error::RecvError;
+
+use crate::app::{App, Effect, Msg, update};
+
+/// UI tuning knobs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TuiOptions {
+    /// Minimum time between redraws (drawing only happens when something changed).
+    pub tick_rate: Duration,
+}
+
+impl Default for TuiOptions {
+    fn default() -> Self {
+        Self {
+            tick_rate: Duration::from_millis(33),
+        }
+    }
+}
+
+/// Why the UI ended abnormally.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum TuiError {
+    /// The terminal could not be set up or drawn to.
+    #[error("terminal error: {0}")]
+    Terminal(#[from] io::Error),
+}
+
+/// The terminal taken over by the UI (raw mode, alternate screen). Dropping it restores the
+/// terminal. Entering is separate from running so that a caller can fall back to a headless
+/// mode when the terminal cannot be set up.
+#[derive(Debug)]
+pub struct Session {
+    guard: TerminalGuard,
+}
+
+impl Session {
+    pub fn enter() -> Result<Self, TuiError> {
+        Ok(Self {
+            guard: TerminalGuard::enter()?,
+        })
+    }
+
+    /// Runs the UI until the user quits. Does not shut the server down; the caller does.
+    pub async fn run(mut self, handle: CsmsHandle, options: TuiOptions) -> Result<(), TuiError> {
+        let keys = EventStream::new();
+        drive(
+            self.guard.terminal(),
+            &handle,
+            &options,
+            keys,
+            shutdown_signal(),
+            |_| {},
+        )
+        .await
+    }
+}
+
+/// Enters the terminal and runs the UI until the user quits.
+pub async fn run(handle: CsmsHandle, options: TuiOptions) -> Result<(), TuiError> {
+    Session::enter()?.run(handle, options).await
+}
+
+/// Reads the whole registry: infos and the state of every station.
+fn resync_msg(handle: &CsmsHandle) -> Msg {
+    let infos = handle.stations();
+    let states = infos
+        .iter()
+        .map(|i| (i.id.clone(), handle.state(&i.id).map(Box::new)))
+        .collect();
+    Msg::Resynced { infos, states }
+}
+
+/// Performs one effect; the messages it produces are fed back into [`update`] at once.
+async fn execute(effect: Effect, handle: &CsmsHandle) -> Vec<Msg> {
+    match effect {
+        Effect::Load(id) => vec![Msg::Loaded {
+            history: handle.history(&id).unwrap_or_default(),
+            info: handle.station(&id).map(Box::new),
+            state: handle.state(&id).map(Box::new),
+            id,
+        }],
+        Effect::Refresh { states, info } => vec![Msg::Refreshed {
+            states: states
+                .into_iter()
+                .map(|id| {
+                    let state = handle.state(&id).map(Box::new);
+                    (id, state)
+                })
+                .collect(),
+            info: info.map(|id| {
+                let info = handle.station(&id).map(Box::new);
+                (id, info)
+            }),
+        }],
+        Effect::Resync => vec![resync_msg(handle)],
+        Effect::Copy { text, what } => {
+            let (level, text) =
+                clipboard::copy_with_fallback(&text, &what, &mut io::stdout()).await;
+            vec![Msg::Notice(level, text)]
+        }
+    }
+}
+
+/// The run loop over any terminal backend and key stream. `observe` sees the model after every
+/// message (tests use it to decide when to quit).
+pub(crate) async fn drive<B, S>(
+    terminal: &mut Terminal<B>,
+    handle: &CsmsHandle,
+    options: &TuiOptions,
+    mut keys: S,
+    signal: impl Future<Output = ()>,
+    mut observe: impl FnMut(&App),
+) -> Result<(), TuiError>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+    S: Stream<Item = io::Result<TermEvent>> + Unpin,
+{
+    // Subscribe before reading the registry: nothing happens in between that we would miss.
+    let mut events = handle.subscribe();
+    let mut events_open = true;
+    let mut app = App::new(handle.url(), Utc::now());
+    if let Ok(size) = terminal.size() {
+        app.size = (size.width, size.height);
+    }
+    let mut tick = tokio::time::interval(options.tick_rate);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    tokio::pin!(signal);
+
+    let mut queue = vec![resync_msg(handle)];
+    while !app.quit {
+        let msg = if let Some(msg) = queue.pop() {
+            msg
+        } else {
+            tokio::select! {
+                ev = keys.next() => match ev {
+                    Some(Ok(TermEvent::Key(k))) => Msg::Key(k),
+                    Some(Ok(TermEvent::Paste(s))) => Msg::Paste(s),
+                    Some(Ok(TermEvent::Resize(w, h))) => Msg::Resize(w, h),
+                    Some(Ok(_)) => continue,
+                    Some(Err(e)) => return Err(e.into()),
+                    None => break,
+                },
+                ev = events.recv(), if events_open => match ev {
+                    Ok(event) => Msg::Event(event),
+                    Err(RecvError::Lagged(n)) => Msg::Lagged(n),
+                    Err(RecvError::Closed) => {
+                        events_open = false;
+                        Msg::Closed
+                    }
+                },
+                _ = tick.tick() => Msg::Tick(Utc::now()),
+                () = &mut signal => Msg::Signal,
+            }
+        };
+        let is_tick = matches!(msg, Msg::Tick(_));
+        for effect in update(&mut app, msg) {
+            queue.extend(execute(effect, handle).await);
+        }
+        observe(&app);
+        if is_tick && app.dirty {
+            draw(terminal, &mut app)?;
+        }
+    }
+    if app.dirty {
+        draw(terminal, &mut app)?;
+    }
+    Ok(())
+}
+
+fn draw<B>(terminal: &mut Terminal<B>, app: &mut App) -> Result<(), TuiError>
+where
+    B: Backend,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
+    terminal
+        .draw(|f| ui::draw(f, app))
+        .map_err(io::Error::other)?;
+    app.dirty = false;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests;

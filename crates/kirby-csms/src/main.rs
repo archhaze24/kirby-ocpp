@@ -1,5 +1,5 @@
 //! `kirby-csms`: terminal OCPP 1.6J central system for charge point firmware development and
-//! load tests. Headless for now; see the `TUI` seam in `main`.
+//! load tests. A terminal UI on an interactive terminal, headless otherwise.
 
 mod cli;
 mod headless;
@@ -62,12 +62,34 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The terminal UI is for interactive runs only. The `listening` line goes to stderr before
+    // the alternate screen opens, so it is still in the scrollback after the UI ends.
+    let session = if cli.wants_tui(
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal(),
+    ) {
+        eprintln!("listening on {}", handle.url());
+        match kirby_csms_tui::Session::enter() {
+            Ok(session) => Some(session),
+            Err(error) => {
+                eprintln!("note: terminal UI unavailable ({error}); running headless");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    if session.is_some() {
+        // The screen belongs to the UI; `--log-file` still gets every event.
+        out.set_stdout(false);
+    }
     // Subscribe first, print `listening`, then start printing events: that line always comes
     // first and nothing is missed.
     let sink_events = handle.subscribe();
     let script_events = script.is_some().then(|| handle.subscribe());
     headless::announce(&out, &handle);
-    let sink = Sink::spawn(&handle, sink_events, out.clone());
+    let sink = (session.is_none() || cli.log_file.is_some())
+        .then(|| Sink::spawn(&handle, sink_events, out.clone()));
 
     // Stdin commands: on request, or by default when stdin is a pipe or a file and no script
     // is running. Never on a terminal by default (nobody types JSON lines unasked).
@@ -76,16 +98,27 @@ async fn main() -> ExitCode {
         stdin_cmd::spawn(handle.clone(), out.clone());
     }
 
-    // TUI: step D picks a terminal UI here (stdout is a terminal, no --script, no --json) and
-    // falls back to the headless serving below.
-    let code = if let (Some(script), Some(events)) = (&script, script_events) {
+    let code = if let Some(session) = session {
+        match session
+            .run(handle.clone(), kirby_csms_tui::TuiOptions::default())
+            .await
+        {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("error: {error}");
+                ExitCode::FAILURE
+            }
+        }
+    } else if let (Some(script), Some(events)) = (&script, script_events) {
         run_script(&cli, script, &handle, events, &out).await
     } else {
         let _ = shutdown_signal().await;
         ExitCode::SUCCESS
     };
     handle.shutdown().await;
-    sink.finish().await;
+    if let Some(sink) = sink {
+        sink.finish().await;
+    }
     code
 }
 

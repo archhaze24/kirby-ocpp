@@ -215,7 +215,7 @@ In scenarios: `action = "set_rule"` with `rule = "Reset=reject*2"`, and `action 
 
 ## kirby-csms
 
-`kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware developers and load tests. It accepts any number of stations on `ws(s)://HOST:PORT/<any prefix>/<station id>` (the station id is the last path segment), answers their CALLs with canned replies, prints everything that happens and sends commands to stations. It is headless for now (no TUI yet).
+`kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware developers and load tests. It accepts any number of stations on `ws(s)://HOST:PORT/<any prefix>/<station id>` (the station id is the last path segment), answers their CALLs with canned replies, prints everything that happens and sends commands to stations. On an interactive terminal it opens a terminal UI to observe stations (read-only for now: commands come from stdin JSON lines or scripts); otherwise it runs headless.
 
 ```
 kirby-csms --listen 0.0.0.0:9000
@@ -245,6 +245,25 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | `--licenses` | | | print third-party notices |
 
 Command line beats environment beats default; booleans are strict (`true/false/yes/no/y/n/on/off/1/0`).
+
+### Terminal UI
+
+With a terminal on both stdin and stdout, and none of `--no-tui`, `--json`, `--script`, `--stdin`, `kirby-csms` opens a terminal UI (`--no-tui` or `KIRBY_CSMS_NO_TUI=1` keeps it headless). The `listening on ...` line goes to stderr before the screen opens; if the terminal cannot be set up, the server runs headless and says so. `--log-file` still receives every event. Quitting the UI (`q`, Ctrl-C) shuts the server down.
+
+Left: the stations (dot: green connected, dim disconnected, yellow replaced by a newer connection; vendor model; `txN` active transactions), header with the listen address, connected/total stations and frame counters. Right: details of the selected station (boot info, remote address, subprotocol, connectors, transactions with energy and power, last heartbeat, firmware/diagnostics status, counters) above the frame log of that station, with CALL/RESULT correlation and round-trip times.
+
+| Key | Action |
+| --- | --- |
+| `Up` `Down` `j` `k`, `PgUp` `PgDn`, `Home` `End` | move in the focused pane |
+| `Left` `Right` `Tab` `Shift-Tab` | focus the station list / the log |
+| `/` | filter stations by id (fuzzy); in the log pane: search the log |
+| `Esc` | clear the log search, then the station filter |
+| `a` | log of the selected station / merged live log of all stations |
+| `Enter` (log) | frame detail with pretty JSON and its request or answer (`c` copies) |
+| `y` `Y` | copy the row / all visible rows (clipboard tool, else OSC 52) |
+| `f` `s` `p` `G` | log filter (all, calls, errors, from stations), search, pause/follow, newest |
+| `?` | help |
+| `q`, `Ctrl-C` | quit |
 
 ### Commands on stdin
 

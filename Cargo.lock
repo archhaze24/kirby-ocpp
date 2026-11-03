@@ -1161,6 +1161,7 @@ dependencies = [
  "chrono",
  "clap",
  "kirby-csms-core",
+ "kirby-csms-tui",
  "kirby-ocpp-core",
  "rcgen",
  "serde",
@@ -1186,6 +1187,24 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+]
+
+[[package]]
+name = "kirby-csms-tui"
+version = "0.4.0-dev"
+dependencies = [
+ "chrono",
+ "crossterm",
+ "futures-util",
+ "kirby-csms-core",
+ "kirby-ocpp-core",
+ "kirby-ocpp-tui",
+ "nucleo-matcher",
+ "ratatui",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
