@@ -70,6 +70,8 @@ pub(crate) enum TimerKey {
     ReservationExpiry(ConnectorId),
     /// Next simulated diagnostics/firmware step.
     Maintenance,
+    /// Next simulated `GetLog` upload status.
+    LogUpload,
     /// A hard `Reset` waits for in-flight CALLs, then reconnects.
     HardReset,
 }
@@ -175,6 +177,10 @@ pub(crate) struct StationActor {
     pub(super) hard_reset_deadline: Option<tokio::time::Instant>,
     /// Simulated diagnostics/firmware steps still to report.
     pub(super) maintenance: VecDeque<(Duration, super::maintenance::Step)>,
+    /// Simulated `GetLog` upload statuses still to report (own queue: a log upload runs next to
+    /// a firmware update), with the request id they belong to.
+    pub(super) log_upload: VecDeque<(Duration, crate::ocpp::messages::UploadLogStatus)>,
+    pub(super) log_request_id: Option<i32>,
     pub(super) timers: TimerWheel<TimerKey>,
     pub(super) internal_tx: mpsc::UnboundedSender<Internal>,
     internal_rx: mpsc::UnboundedReceiver<Internal>,
@@ -265,6 +271,8 @@ impl StationActor {
             reset_retries: None,
             hard_reset_deadline: None,
             maintenance: VecDeque::new(),
+            log_upload: VecDeque::new(),
+            log_request_id: None,
             timers: TimerWheel::new(),
             internal_tx,
             internal_rx,
@@ -358,6 +366,7 @@ impl StationActor {
             TimerKey::MeterAligned => self.on_meter_aligned(),
             TimerKey::ReservationExpiry(id) => self.on_reservation_timer(id),
             TimerKey::Maintenance => self.on_maintenance_timer(),
+            TimerKey::LogUpload => self.on_log_timer(),
             TimerKey::HardReset => self.on_hard_reset_timer(),
         }
     }

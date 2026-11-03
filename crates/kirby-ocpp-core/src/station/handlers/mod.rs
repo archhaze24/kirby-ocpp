@@ -46,7 +46,8 @@ use crate::ocpp::messages::{
     SetChargingProfile, TriggerMessage, UnlockConnector, UpdateFirmware,
 };
 use crate::ocpp::messages::{
-    CertificateSigned, DeleteCertificate, GetInstalledCertificateIds, InstallCertificate,
+    CertificateSigned, DeleteCertificate, ExtendedTriggerMessage, GetInstalledCertificateIds,
+    GetLog, InstallCertificate,
 };
 use crate::ocpp::responder::{ReplyHandle, Responder};
 use crate::station::event::LogLevel;
@@ -125,6 +126,12 @@ impl StationActor {
             GetDiagnostics::NAME => {
                 self.invoke::<GetDiagnostics>(payload, reply, maintenance::get_diagnostics);
             }
+            GetLog::NAME => self.invoke::<GetLog>(payload, reply, maintenance::get_log),
+            ExtendedTriggerMessage::NAME => self.invoke::<ExtendedTriggerMessage>(
+                payload,
+                reply,
+                trigger::extended_trigger_message,
+            ),
             UpdateFirmware::NAME => {
                 self.invoke::<UpdateFirmware>(payload, reply, maintenance::update_firmware);
             }

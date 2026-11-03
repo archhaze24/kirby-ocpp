@@ -18,9 +18,11 @@
 
 use crate::ids::ConnectorId;
 use crate::ocpp::messages::{
-    DiagnosticsStatusNotification, DiagnosticsStatusNotificationRequest,
-    FirmwareStatusNotification, FirmwareStatusNotificationRequest, MeterValues, MeterValuesRequest,
-    TriggerMessage, TriggerMessageRequest, TriggerMessageResponse, TriggerMessageStatus,
+    DiagnosticsStatusNotification, DiagnosticsStatusNotificationRequest, ExtendedMessageTrigger,
+    ExtendedTriggerMessage, ExtendedTriggerMessageRequest, ExtendedTriggerMessageResponse,
+    FirmwareStatusNotification, FirmwareStatusNotificationRequest, LogStatusNotification,
+    LogStatusNotificationRequest, MeterValues, MeterValuesRequest, TriggerMessage,
+    TriggerMessageRequest, TriggerMessageResponse, TriggerMessageStatus, UploadLogStatus,
 };
 use crate::ocpp::responder::Responder;
 use crate::ocpp::types::{MessageTrigger, ReadingContext, RegistrationStatus};
@@ -48,7 +50,26 @@ pub(super) fn trigger_message(
 }
 
 fn decide(actor: &StationActor, request: &TriggerMessageRequest) -> TriggerMessageStatus {
-    if request.requested_message != MessageTrigger::BootNotification
+    decide_for(
+        actor,
+        request.requested_message == MessageTrigger::BootNotification,
+        matches!(
+            request.requested_message,
+            MessageTrigger::StatusNotification | MessageTrigger::MeterValues
+        ),
+        request.connector_id,
+    )
+}
+
+/// Shared rules: only `BootNotification` may be triggered before registration (`Accepted` or
+/// `Pending`); connector specific messages refuse an unknown `connectorId`.
+fn decide_for(
+    actor: &StationActor,
+    is_boot: bool,
+    connector_specific: bool,
+    connector: Option<ConnectorId>,
+) -> TriggerMessageStatus {
+    if !is_boot
         && !matches!(
             actor.state.registration,
             Some(RegistrationStatus::Accepted | RegistrationStatus::Pending)
@@ -56,15 +77,73 @@ fn decide(actor: &StationActor, request: &TriggerMessageRequest) -> TriggerMessa
     {
         return TriggerMessageStatus::Rejected;
     }
-    if matches!(
-        request.requested_message,
-        MessageTrigger::StatusNotification | MessageTrigger::MeterValues
-    ) && let Some(id) = request.connector_id
+    if connector_specific
+        && let Some(id) = connector
         && actor.find_connector(id).is_none()
     {
         return TriggerMessageStatus::Rejected;
     }
     TriggerMessageStatus::Accepted
+}
+
+/// `ExtendedTriggerMessage` (Security Whitepaper): the 1.6 `TriggerMessage` rules, plus
+/// `LogStatusNotification` (reports `Uploading` with the request id while a `GetLog` runs, else
+/// `Idle`) and `SignChargePointCertificate` (starts the `SignCertificate` flow). Like
+/// `FirmwareStatusNotification`, the reported status is the current one.
+pub(super) fn extended_trigger_message(
+    actor: &mut StationActor,
+    responder: Responder<ExtendedTriggerMessage>,
+    request: ExtendedTriggerMessageRequest,
+) {
+    use ExtendedMessageTrigger as E;
+    let message = request.requested_message;
+    let common = match message {
+        E::BootNotification => Some(MessageTrigger::BootNotification),
+        E::FirmwareStatusNotification => Some(MessageTrigger::FirmwareStatusNotification),
+        E::Heartbeat => Some(MessageTrigger::Heartbeat),
+        E::MeterValues => Some(MessageTrigger::MeterValues),
+        E::StatusNotification => Some(MessageTrigger::StatusNotification),
+        E::LogStatusNotification | E::SignChargePointCertificate => None,
+    };
+    let status = decide_for(
+        actor,
+        message == E::BootNotification,
+        matches!(message, E::StatusNotification | E::MeterValues),
+        request.connector_id,
+    );
+    actor.respond(responder, ExtendedTriggerMessageResponse { status });
+    actor.log(
+        LogLevel::Info,
+        format!("ExtendedTriggerMessage {message} -> {status}"),
+    );
+    if status != TriggerMessageStatus::Accepted {
+        return;
+    }
+    match common {
+        Some(trigger) => start(actor, trigger, request.connector_id),
+        None if message == E::LogStatusNotification => {
+            let status = if actor.log_upload.is_empty() {
+                UploadLogStatus::Idle
+            } else {
+                UploadLogStatus::Uploading
+            };
+            let request_id = if status == UploadLogStatus::Idle {
+                None
+            } else {
+                actor.log_request_id
+            };
+            actor.call::<LogStatusNotification>(
+                Origin::Triggered,
+                &LogStatusNotificationRequest { status, request_id },
+                |_, _| {},
+            );
+        }
+        None => {
+            // The command result is not needed: the flow logs its own outcome.
+            let (reply, _) = tokio::sync::oneshot::channel();
+            actor.request_certificate(reply);
+        }
+    }
 }
 
 /// Starts the triggered message (after the reply was queued).

@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ocpp::messages::UploadLogStatus;
 use crate::ocpp::types::{DiagnosticsStatus, FirmwareStatus};
 
 /// Result the emulator should simulate for the next `GetDiagnostics`.
@@ -92,6 +93,38 @@ pub fn plan_diagnostics(
         attempt.len(),
         retry_interval,
     )
+}
+
+/// The status reports of a simulated `GetLog` upload: the diagnostics plan (same outcome knob,
+/// same retries) with the `LogStatusNotification` spelling.
+pub fn plan_log(
+    outcome: DiagnosticsOutcome,
+    retries: u32,
+    retry_interval: Duration,
+) -> Vec<(Duration, UploadLogStatus)> {
+    plan_diagnostics(outcome, retries, retry_interval)
+        .into_iter()
+        .filter_map(|(delay, step)| match step {
+            Step::Diagnostics(DiagnosticsStatus::Uploading) => {
+                Some((delay, UploadLogStatus::Uploading))
+            }
+            Step::Diagnostics(DiagnosticsStatus::Uploaded) => {
+                Some((delay, UploadLogStatus::Uploaded))
+            }
+            Step::Diagnostics(DiagnosticsStatus::UploadFailed) => {
+                Some((delay, UploadLogStatus::UploadFailure))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether `location` is an upload target the emulator accepts: an absolute URL with a host and
+/// one of the schemes ftp, ftps, http, https, sftp.
+pub fn valid_log_location(location: &str) -> bool {
+    url::Url::parse(location).is_ok_and(|url| {
+        matches!(url.scheme(), "ftp" | "ftps" | "http" | "https" | "sftp") && url.host().is_some()
+    })
 }
 
 /// The status reports of a simulated firmware update (see [`plan_diagnostics`] for retries).
@@ -183,6 +216,42 @@ mod tests {
         );
         let none = plan_diagnostics(DiagnosticsOutcome::UploadFailure, 0, Duration::ZERO);
         assert_eq!(none.len(), 2);
+    }
+
+    #[test]
+    fn log_plan_maps_the_diagnostics_plan() {
+        let plan = plan_log(DiagnosticsOutcome::Success, 3, Duration::ZERO);
+        let steps: Vec<_> = plan.iter().map(|(_, s)| *s).collect();
+        assert_eq!(
+            steps,
+            [UploadLogStatus::Uploading, UploadLogStatus::Uploaded]
+        );
+        let failing = plan_log(DiagnosticsOutcome::UploadFailure, 1, Duration::ZERO);
+        assert_eq!(failing.len(), 4);
+        assert_eq!(failing[3].1, UploadLogStatus::UploadFailure);
+    }
+
+    #[test]
+    fn log_locations() {
+        for ok in [
+            "ftp://h/p",
+            "sftp://u@h/p",
+            "https://h/x",
+            "http://h:8080/",
+            "ftps://h",
+        ] {
+            assert!(valid_log_location(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "file:///etc/x",
+            "example.com/logs",
+            "ws://h/",
+            "https://",
+            "mailto:a@b",
+        ] {
+            assert!(!valid_log_location(bad), "{bad}");
+        }
     }
 
     #[test]
