@@ -4,9 +4,11 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kirby_ocpp_tui::app::{Detail, NoticeLevel};
 use kirby_ocpp_tui::text::TextInput;
 
+use crate::actions::{self, ResultsList};
 use crate::app::{
     App, Effect, Focus, Input, InputTarget, LogView, Mode, filter_label, next_filter,
 };
+use crate::form::{Form, FormEvent};
 
 /// Rows a page key moves.
 const PAGE: isize = 10;
@@ -28,15 +30,34 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
             }
         }
         Mode::Detail(detail) => detail_mode(app, detail, key, fx),
+        Mode::Palette(p) => {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            actions::palette_key(app, p, key.code, ctrl, fx);
+        }
+        Mode::Form(form) => form_mode(app, *form, key, fx),
+        Mode::Confirm(c) => match key.code {
+            KeyCode::Char('y' | 'Y') => app.confirmed(c.action, fx),
+            _ => app.notify(NoticeLevel::Info, "cancelled"),
+        },
+        Mode::Results(list) => results_mode(app, list, key),
     }
 }
 
-/// Pasted text goes into an open input; elsewhere it is ignored.
+/// Pasted text goes into an open input, form or palette; elsewhere it is ignored.
 pub fn paste(app: &mut App, text: &str, fx: &mut Vec<Effect>) {
-    if let Mode::Input(input) = &mut app.mode {
-        input.text.insert_str(&text.replace(['\n', '\r'], " "));
-        let (target, value) = (input.target, input.text.text().to_owned());
-        apply_input(app, target, &value, fx);
+    let one_line = text.replace(['\n', '\r'], " ");
+    match &mut app.mode {
+        Mode::Input(input) => {
+            input.text.insert_str(&one_line);
+            let (target, value) = (input.target, input.text.text().to_owned());
+            apply_input(app, target, &value, fx);
+        }
+        Mode::Form(form) => form.paste(&one_line),
+        Mode::Palette(p) => {
+            p.query.insert_str(&one_line);
+            p.refresh();
+        }
+        _ => {}
     }
 }
 
@@ -50,6 +71,7 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
     match key.code {
         KeyCode::Char('q') => app.quit = true,
         KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char(':') => app.open_palette(),
         KeyCode::Char('/') => open_input(app, input_target_for_focus(app.focus)),
         KeyCode::Char('s') if app.focus == Focus::Log => open_input(app, InputTarget::LogSearch),
         KeyCode::Tab | KeyCode::Right => app.focus = Focus::Log,
@@ -94,6 +116,11 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         }
         KeyCode::Char('y') => copy_row(app, fx),
         KeyCode::Char('Y') => copy_visible(app, fx),
+        KeyCode::Char(c) => {
+            if let Some(id) = actions::by_key(c) {
+                app.run_action(id, fx);
+            }
+        }
         KeyCode::Esc => {
             if !app.log().search.is_empty() {
                 app.log_mut().search.clear();
@@ -217,6 +244,43 @@ fn detail_mode(app: &mut App, mut d: Detail, key: KeyEvent, fx: &mut Vec<Effect>
     app.mode = Mode::Detail(d);
 }
 
+fn form_mode(app: &mut App, mut form: Form, key: KeyEvent, fx: &mut Vec<Effect>) {
+    match form.handle_key(key) {
+        FormEvent::None => app.mode = Mode::Form(Box::new(form)),
+        FormEvent::Cancel => {}
+        FormEvent::Submit => match form.submit() {
+            Some(submitted) => {
+                let station = form.station.clone();
+                app.submitted(&station, submitted, fx);
+            }
+            None => app.mode = Mode::Form(Box::new(form)),
+        },
+    }
+}
+
+fn results_mode(app: &mut App, mut list: ResultsList, key: KeyEvent) {
+    let count = actions::results_of(app, &list.station).count();
+    let max = count.saturating_sub(1);
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q' | 'r') => return,
+        KeyCode::Up | KeyCode::Char('k') => list.selected = list.selected.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => list.selected = (list.selected + 1).min(max),
+        KeyCode::Home | KeyCode::Char('g') => list.selected = 0,
+        KeyCode::End | KeyCode::Char('G') => list.selected = max,
+        KeyCode::Enter => {
+            let detail = actions::results_of(app, &list.station)
+                .nth(list.selected)
+                .map(actions::ResultRecord::detail);
+            if let Some(detail) = detail {
+                app.mode = Mode::Detail(detail);
+            }
+            return;
+        }
+        _ => {}
+    }
+    app.mode = Mode::Results(list);
+}
+
 /// The key reference shown by `?`.
 pub const HELP: &[&str] = &[
     "Up Down j k             move in the focused pane",
@@ -225,8 +289,18 @@ pub const HELP: &[&str] = &[
     "/                       filter stations by id (log pane: search the log)",
     "Esc                     clear the log search, then the station filter",
     "a                       log of the selected station <-> all stations",
+    ": (colon)               command palette: every action below, fuzzy search",
     "?                       this help",
     "q or Ctrl-C             quit the UI (the server keeps its own lifecycle)",
+    "",
+    "Actions on the selected station (a form opens; Enter sends, Esc cancels, Tab next field,",
+    "     Left/Right or a letter picks an option); answers show up in the status line:",
+    "     t remote start   x remote stop   R reset (asks)   c change config   g get config",
+    "     T trigger message   u unlock   A availability   C clear cache   P charging profile",
+    "     D data transfer   w raw call (any action, JSON payload)   r last results (Enter opens)",
+    "     F forget a disconnected station (asks)   n copy station id",
+    "Scripted behaviour for ALL stations: m response rule, i inject fault (call_error, silence,",
+    "     close, invalid_payload), M clear every rule and fault; remove one rule from the palette",
     "",
     "Log pane: Enter detail (scroll, c copies), y copy row, Y copy visible rows,",
     "     f filter (all, calls, errors, from stations), s search, p pause/follow,",

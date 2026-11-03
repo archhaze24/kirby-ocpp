@@ -56,11 +56,11 @@ pub(crate) fn app_with(ids: &[&str]) -> (App, Vec<Effect>) {
     (app, fx)
 }
 
-fn press(app: &mut App, code: KeyCode) -> Vec<Effect> {
+pub(crate) fn press(app: &mut App, code: KeyCode) -> Vec<Effect> {
     update(app, Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)))
 }
 
-fn type_text(app: &mut App, text: &str) {
+pub(crate) fn type_text(app: &mut App, text: &str) {
     for c in text.chars() {
         press(app, KeyCode::Char(c));
     }

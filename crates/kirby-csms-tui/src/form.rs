@@ -1,0 +1,1052 @@
+//! Modal forms with typed fields and live validation, one per action on a station or on the
+//! server's scripted behaviour. The key handling follows the emulator's forms; the field set
+//! is its own (the emulator's `Form` is tied to its station actions).
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use kirby_csms_core::CHARGE_POINT_ACTIONS;
+use kirby_ocpp_core::ids::IdTag;
+use kirby_ocpp_core::ocpp::messages::ChargingProfile;
+use kirby_ocpp_core::ocpp::messages::registry::ACTIONS;
+use kirby_ocpp_core::ocpp::types::{AvailabilityType, MessageTrigger, ResetType};
+use kirby_ocpp_tui::forms::{PROFILE_TEMPLATE, schemas};
+use kirby_ocpp_tui::text::TextInput;
+use serde_json::Value;
+
+use crate::command::Command;
+
+/// Longest configuration key the schema allows.
+const KEY_MAX: usize = 50;
+/// Most occurrences one injected fault may cover.
+const TIMES_MAX: usize = 1_000_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+    Text,
+    OptionalText,
+    IdTag,
+    /// A connector number from `min`; may be left empty when `optional`.
+    Connector {
+        min: u32,
+        optional: bool,
+    },
+    /// A count of at least 1.
+    Times,
+    /// A JSON object.
+    Json,
+    /// A JSON object checked against the request schema of the action in field 0.
+    RawJson,
+    /// A `csChargingProfiles` object checked as part of `SetChargingProfile` (connector in
+    /// field 0).
+    ProfileJson,
+    /// A JSON object, checked only while the fault kind in field 1 is `invalid_payload`.
+    FaultJson,
+    /// Optional configuration keys separated by commas or spaces.
+    KeyList,
+    /// One of `options` (Left/Right, or the first letter).
+    Select,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    pub label: &'static str,
+    pub kind: FieldKind,
+    pub input: TextInput,
+    pub options: Vec<String>,
+    pub option: usize,
+    pub error: Option<String>,
+}
+
+impl Field {
+    fn new(label: &'static str, kind: FieldKind, value: &str) -> Self {
+        Self {
+            label,
+            kind,
+            input: TextInput::new(value),
+            options: Vec::new(),
+            option: 0,
+            error: None,
+        }
+    }
+
+    fn select(label: &'static str, options: Vec<String>) -> Self {
+        Self {
+            options,
+            ..Self::new(label, FieldKind::Select, "")
+        }
+    }
+
+    pub fn is_text(&self) -> bool {
+        self.kind != FieldKind::Select
+    }
+
+    pub fn chosen(&self) -> Option<&str> {
+        self.options.get(self.option).map(String::as_str)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormKind {
+    RemoteStart,
+    RemoteStop,
+    Reset,
+    ChangeConfiguration,
+    GetConfiguration,
+    Trigger,
+    Unlock,
+    Availability,
+    SetProfile,
+    DataTransfer,
+    Raw,
+    Rule,
+    Fault,
+    RemoveRule,
+}
+
+/// How an injected fault answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultKind {
+    CallError,
+    Silence,
+    Close,
+    InvalidPayload,
+}
+
+impl FaultKind {
+    pub const ALL: [Self; 4] = [
+        Self::CallError,
+        Self::Silence,
+        Self::Close,
+        Self::InvalidPayload,
+    ];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::CallError => "call_error",
+            Self::Silence => "silence",
+            Self::Close => "close",
+            Self::InvalidPayload => "invalid_payload",
+        }
+    }
+}
+
+/// What a valid form produced.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Submitted {
+    Send(Command),
+    Rule {
+        action: String,
+        payload: Value,
+    },
+    Fault {
+        action: String,
+        kind: FaultKind,
+        times: usize,
+        payload: Value,
+    },
+    RemoveRule(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FormEvent {
+    None,
+    Cancel,
+    Submit,
+}
+
+/// A transaction a `RemoteStopTransaction` can target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopChoice {
+    pub id: i32,
+    pub connector: u32,
+    pub id_tag: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Form {
+    pub kind: FormKind,
+    pub title: String,
+    /// The station the form acts on (empty for server-wide forms).
+    pub station: String,
+    pub fields: Vec<Field>,
+    pub focus: usize,
+    /// A problem with the whole form (the request violates its schema).
+    pub error: Option<String>,
+    /// Transaction ids behind the options of a `RemoteStop` form.
+    tx_ids: Vec<i32>,
+}
+
+fn names<I, S>(items: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    items.into_iter().map(|s| s.as_ref().to_owned()).collect()
+}
+
+/// The actions a central system may send (19, `DataTransfer` included).
+pub fn csms_actions() -> Vec<String> {
+    ACTIONS
+        .iter()
+        .filter(|a| a.direction.central_system_may_send())
+        .map(|a| a.name.to_owned())
+        .collect()
+}
+
+impl Form {
+    fn build(kind: FormKind, title: &str, station: &str, fields: Vec<Field>) -> Self {
+        let mut form = Self {
+            kind,
+            title: title.to_owned(),
+            station: station.to_owned(),
+            fields,
+            focus: 0,
+            error: None,
+            tx_ids: Vec::new(),
+        };
+        form.validate_all();
+        form.error = None;
+        form
+    }
+
+    pub fn remote_start(station: &str) -> Self {
+        Self::build(
+            FormKind::RemoteStart,
+            "RemoteStartTransaction",
+            station,
+            vec![
+                Field::new("idTag", FieldKind::IdTag, ""),
+                Field::new(
+                    "connector (optional)",
+                    FieldKind::Connector {
+                        min: 1,
+                        optional: true,
+                    },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    /// `choices` are the station's active transactions; the first is preselected.
+    pub fn remote_stop(station: &str, choices: &[StopChoice]) -> Self {
+        let options = choices
+            .iter()
+            .map(|c| {
+                format!(
+                    "{} (connector {}, idTag {})",
+                    c.id,
+                    c.connector,
+                    kirby_ocpp_tui::text::sanitize(&c.id_tag)
+                )
+            })
+            .collect();
+        let mut form = Self::build(
+            FormKind::RemoteStop,
+            "RemoteStopTransaction",
+            station,
+            vec![Field::select("transaction", options)],
+        );
+        form.tx_ids = choices.iter().map(|c| c.id).collect();
+        form
+    }
+
+    pub fn reset(station: &str) -> Self {
+        let mut kind = Field::select("type", names(ResetType::ALL.iter().map(|t| t.as_str())));
+        // The safer one is preselected whatever the order of the specification.
+        kind.option = kind.options.iter().position(|o| o == "Soft").unwrap_or(0);
+        Self::build(FormKind::Reset, "Reset", station, vec![kind])
+    }
+
+    pub fn change_configuration(station: &str) -> Self {
+        Self::build(
+            FormKind::ChangeConfiguration,
+            "ChangeConfiguration",
+            station,
+            vec![
+                Field::new("key", FieldKind::Text, ""),
+                Field::new("value", FieldKind::OptionalText, ""),
+            ],
+        )
+    }
+
+    pub fn get_configuration(station: &str) -> Self {
+        Self::build(
+            FormKind::GetConfiguration,
+            "GetConfiguration",
+            station,
+            vec![Field::new(
+                "keys (optional, empty = all)",
+                FieldKind::KeyList,
+                "",
+            )],
+        )
+    }
+
+    pub fn trigger(station: &str) -> Self {
+        Self::build(
+            FormKind::Trigger,
+            "TriggerMessage",
+            station,
+            vec![
+                Field::select(
+                    "message",
+                    names(MessageTrigger::ALL.iter().map(|t| t.as_str())),
+                ),
+                Field::new(
+                    "connector (optional)",
+                    FieldKind::Connector {
+                        min: 1,
+                        optional: true,
+                    },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    pub fn unlock(station: &str, connector: Option<u32>) -> Self {
+        Self::build(
+            FormKind::Unlock,
+            "UnlockConnector",
+            station,
+            vec![Field::new(
+                "connector",
+                FieldKind::Connector {
+                    min: 1,
+                    optional: false,
+                },
+                &connector.unwrap_or(1).to_string(),
+            )],
+        )
+    }
+
+    pub fn availability(station: &str) -> Self {
+        Self::build(
+            FormKind::Availability,
+            "ChangeAvailability",
+            station,
+            vec![
+                Field::new(
+                    "connector (0 = station)",
+                    FieldKind::Connector {
+                        min: 0,
+                        optional: false,
+                    },
+                    "0",
+                ),
+                Field::select(
+                    "type",
+                    names(AvailabilityType::ALL.iter().map(|t| t.as_str())),
+                ),
+            ],
+        )
+    }
+
+    pub fn set_profile(station: &str) -> Self {
+        Self::build(
+            FormKind::SetProfile,
+            "SetChargingProfile",
+            station,
+            vec![
+                Field::new(
+                    "connector (0 = station)",
+                    FieldKind::Connector {
+                        min: 0,
+                        optional: false,
+                    },
+                    "0",
+                ),
+                Field::new(
+                    "csChargingProfiles (JSON)",
+                    FieldKind::ProfileJson,
+                    PROFILE_TEMPLATE,
+                ),
+            ],
+        )
+    }
+
+    pub fn data_transfer(station: &str) -> Self {
+        Self::build(
+            FormKind::DataTransfer,
+            "DataTransfer",
+            station,
+            vec![
+                Field::new("vendorId", FieldKind::Text, ""),
+                Field::new("messageId (optional)", FieldKind::OptionalText, ""),
+                Field::new("data (optional)", FieldKind::OptionalText, ""),
+            ],
+        )
+    }
+
+    pub fn raw(station: &str, initial_action: Option<&str>) -> Self {
+        let mut action = Field::select("action", csms_actions());
+        if let Some(i) = initial_action.and_then(|a| action.options.iter().position(|o| o == a)) {
+            action.option = i;
+        }
+        Self::build(
+            FormKind::Raw,
+            "Raw CALL",
+            station,
+            vec![
+                action,
+                Field::new("payload (JSON)", FieldKind::RawJson, "{}"),
+            ],
+        )
+    }
+
+    pub fn rule() -> Self {
+        Self::build(
+            FormKind::Rule,
+            "Response rule (answers every station)",
+            "",
+            vec![
+                Field::select("action", names(CHARGE_POINT_ACTIONS)),
+                Field::new(
+                    "CALLRESULT payload (JSON)",
+                    FieldKind::Json,
+                    r#"{"status":"Rejected"}"#,
+                ),
+            ],
+        )
+    }
+
+    pub fn fault() -> Self {
+        Self::build(
+            FormKind::Fault,
+            "Inject fault (all stations)",
+            "",
+            vec![
+                Field::select("action", names(CHARGE_POINT_ACTIONS)),
+                Field::select("kind", names(FaultKind::ALL.iter().map(|k| k.name()))),
+                Field::new("times", FieldKind::Times, "1"),
+                Field::new("payload (invalid_payload only)", FieldKind::FaultJson, "{}"),
+            ],
+        )
+    }
+
+    /// `actions` are the ones that have a rule.
+    pub fn remove_rule(actions: &[String]) -> Self {
+        Self::build(
+            FormKind::RemoveRule,
+            "Remove response rule",
+            "",
+            vec![Field::select("action", actions.to_vec())],
+        )
+    }
+
+    pub fn paste(&mut self, text: &str) {
+        let i = self.focus;
+        if let Some(f) = self.fields.get_mut(i)
+            && f.is_text()
+        {
+            f.input.insert_str(text);
+            self.touched(i);
+        }
+    }
+
+    fn touched(&mut self, i: usize) {
+        self.validate_field(i);
+        self.after_edit();
+        self.error = None;
+    }
+
+    pub fn handle_key(&mut self, key: KeyEvent) -> FormEvent {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let n = self.fields.len().max(1);
+        match key.code {
+            KeyCode::Esc => return FormEvent::Cancel,
+            KeyCode::Enter => return FormEvent::Submit,
+            KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % n,
+            KeyCode::BackTab | KeyCode::Up => self.focus = (self.focus + n - 1) % n,
+            code => {
+                let i = self.focus;
+                let Some(f) = self.fields.get_mut(i) else {
+                    return FormEvent::None;
+                };
+                match (f.kind, code) {
+                    (FieldKind::Select, KeyCode::Left) => step(&mut f.option, f.options.len(), -1),
+                    (FieldKind::Select, KeyCode::Right) => step(&mut f.option, f.options.len(), 1),
+                    (FieldKind::Select, KeyCode::Char(c)) if !ctrl => {
+                        let lc = c.to_ascii_lowercase();
+                        let len = f.options.len();
+                        if let Some(next) = (1..=len).map(|d| (f.option + d) % len).find(|&k| {
+                            f.options.get(k).is_some_and(|o| {
+                                o.chars()
+                                    .next()
+                                    .is_some_and(|c| c.to_ascii_lowercase() == lc)
+                            })
+                        }) {
+                            f.option = next;
+                        }
+                    }
+                    (FieldKind::Select, _) => {}
+                    (_, KeyCode::Left) => f.input.left(),
+                    (_, KeyCode::Right) => f.input.right(),
+                    (_, KeyCode::Home) => f.input.home(),
+                    (_, KeyCode::End) => f.input.end(),
+                    (_, KeyCode::Backspace) => f.input.backspace(),
+                    (_, KeyCode::Delete) => f.input.delete(),
+                    (_, KeyCode::Char('a')) if ctrl => f.input.home(),
+                    (_, KeyCode::Char('e')) if ctrl => f.input.end(),
+                    (_, KeyCode::Char('u')) if ctrl => f.input = TextInput::default(),
+                    (_, KeyCode::Char(c))
+                        if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
+                    {
+                        f.input.insert_char(c);
+                    }
+                    _ => {}
+                }
+                self.touched(i);
+            }
+        }
+        FormEvent::None
+    }
+
+    /// The field whose check depends on another one.
+    fn dependent(&self) -> Option<usize> {
+        match self.kind {
+            FormKind::Raw | FormKind::SetProfile => Some(1),
+            FormKind::Fault => Some(3),
+            _ => None,
+        }
+    }
+
+    fn after_edit(&mut self) {
+        if let Some(i) = self.dependent() {
+            self.validate_field(i);
+        }
+    }
+
+    pub fn validate_all(&mut self) -> bool {
+        for i in 0..self.fields.len() {
+            self.validate_field(i);
+        }
+        self.fields.iter().all(|f| f.error.is_none())
+    }
+
+    fn text(&self, i: usize) -> String {
+        self.fields
+            .get(i)
+            .map(|f| f.input.text().trim().to_owned())
+            .unwrap_or_default()
+    }
+
+    fn validate_field(&mut self, i: usize) {
+        let first = self.fields.first();
+        let action = first.and_then(|f| f.chosen()).map(str::to_owned);
+        let connector_text = self.text(0);
+        let fault_kind = self
+            .fields
+            .get(1)
+            .and_then(|f| f.chosen())
+            .map(str::to_owned);
+        let Some(f) = self.fields.get_mut(i) else {
+            return;
+        };
+        let text = f.input.text().trim().to_owned();
+        f.error = match f.kind {
+            FieldKind::Text => text.is_empty().then(|| "required".to_owned()),
+            FieldKind::OptionalText | FieldKind::Select => None,
+            FieldKind::IdTag => {
+                if text.is_empty() {
+                    Some("idTag is required".to_owned())
+                } else {
+                    IdTag::new(text).err().map(|e| e.to_string())
+                }
+            }
+            FieldKind::Connector { min, optional } => {
+                if text.is_empty() && optional {
+                    None
+                } else {
+                    match text.parse::<u32>() {
+                        Ok(n) if n >= min => None,
+                        _ => Some(format!("connector must be a whole number, {min} or more")),
+                    }
+                }
+            }
+            FieldKind::Times => match text.parse::<usize>() {
+                Ok(n) if (1..=TIMES_MAX).contains(&n) => None,
+                _ => Some(format!("a number from 1 to {TIMES_MAX}")),
+            },
+            FieldKind::Json => json_object(f.input.text()).err(),
+            FieldKind::RawJson => {
+                validate_request(f.input.text(), action.as_deref().unwrap_or_default())
+            }
+            FieldKind::ProfileJson => validate_profile(f.input.text(), &connector_text),
+            FieldKind::FaultJson => {
+                if fault_kind.as_deref() == Some(FaultKind::InvalidPayload.name()) {
+                    json_object(f.input.text()).err()
+                } else {
+                    None
+                }
+            }
+            FieldKind::KeyList => validate_keys(&text),
+        };
+    }
+
+    /// Validates and converts the form. On failure the errors are set on the fields (or on
+    /// the form for a schema violation of the whole request).
+    pub fn submit(&mut self) -> Option<Submitted> {
+        self.error = None;
+        if !self.validate_all() {
+            if let Some(i) = self.fields.iter().position(|f| f.error.is_some()) {
+                self.focus = i;
+            }
+            return None;
+        }
+        let opt = |s: String| Some(s).filter(|s| !s.is_empty());
+        let chosen = |i: usize| {
+            self.fields
+                .get(i)
+                .and_then(|f| f.chosen())
+                .map(str::to_owned)
+        };
+        let number = |i: usize| self.text(i).parse::<u32>().ok();
+        let submitted = match self.kind {
+            FormKind::RemoteStart => Submitted::Send(Command::RemoteStart {
+                id_tag: self.text(0),
+                connector: number(1),
+            }),
+            FormKind::RemoteStop => {
+                let at = self.fields.first()?.option;
+                Submitted::Send(Command::RemoteStop {
+                    transaction_id: *self.tx_ids.get(at)?,
+                })
+            }
+            FormKind::Reset => Submitted::Send(Command::Reset(chosen(0)?.parse().ok()?)),
+            FormKind::ChangeConfiguration => Submitted::Send(Command::ChangeConfiguration {
+                key: self.text(0),
+                value: self.text(1),
+            }),
+            FormKind::GetConfiguration => Submitted::Send(Command::GetConfiguration {
+                keys: split_keys(&self.text(0)),
+            }),
+            FormKind::Trigger => Submitted::Send(Command::TriggerMessage {
+                message: chosen(0)?.parse().ok()?,
+                connector: number(1),
+            }),
+            FormKind::Unlock => Submitted::Send(Command::UnlockConnector {
+                connector: number(0)?,
+            }),
+            FormKind::Availability => Submitted::Send(Command::ChangeAvailability {
+                connector: number(0)?,
+                kind: chosen(1)?.parse().ok()?,
+            }),
+            FormKind::SetProfile => Submitted::Send(Command::SetChargingProfile {
+                connector: number(0)?,
+                profile: Box::new(
+                    serde_json::from_str::<ChargingProfile>(self.fields.get(1)?.input.text())
+                        .ok()?,
+                ),
+            }),
+            FormKind::DataTransfer => Submitted::Send(Command::DataTransfer {
+                vendor_id: self.text(0),
+                message_id: opt(self.text(1)),
+                data: opt(self.text(2)),
+            }),
+            FormKind::Raw => Submitted::Send(Command::Raw {
+                action: chosen(0)?,
+                payload: serde_json::from_str(self.fields.get(1)?.input.text()).ok()?,
+            }),
+            FormKind::Rule => Submitted::Rule {
+                action: chosen(0)?,
+                payload: serde_json::from_str(self.fields.get(1)?.input.text()).ok()?,
+            },
+            FormKind::Fault => {
+                let kind = FaultKind::ALL
+                    .iter()
+                    .copied()
+                    .find(|k| Some(k.name()) == chosen(1).as_deref())?;
+                let payload = if kind == FaultKind::InvalidPayload {
+                    serde_json::from_str(self.fields.get(3)?.input.text()).ok()?
+                } else {
+                    Value::Null
+                };
+                Submitted::Fault {
+                    action: chosen(0)?,
+                    kind,
+                    times: self.text(2).parse().ok()?,
+                    payload,
+                }
+            }
+            FormKind::RemoveRule => Submitted::RemoveRule(chosen(0)?),
+        };
+        if let Submitted::Send(command) = &submitted
+            && !matches!(command, Command::Raw { .. })
+            && let Err(e) = schemas().validate_request(command.action(), &command.payload())
+        {
+            self.error = Some(e.to_string());
+            return None;
+        }
+        Some(submitted)
+    }
+}
+
+fn step(i: &mut usize, n: usize, d: isize) {
+    if n > 0 {
+        *i = (*i + n).wrapping_add_signed(d) % n;
+    }
+}
+
+fn split_keys(text: &str) -> Vec<String> {
+    text.split([',', ' '])
+        .filter(|k| !k.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn validate_keys(text: &str) -> Option<String> {
+    split_keys(text)
+        .iter()
+        .find(|k| k.chars().count() > KEY_MAX)
+        .map(|k| format!("a key is at most {KEY_MAX} characters: {}", truncate_key(k)))
+}
+
+fn truncate_key(k: &str) -> String {
+    kirby_ocpp_tui::text::truncate(&kirby_ocpp_tui::text::sanitize(k), 20)
+}
+
+fn json_object(text: &str) -> Result<Value, String> {
+    let value: Value = serde_json::from_str(text).map_err(|e| format!("invalid JSON: {e}"))?;
+    if value.is_object() {
+        Ok(value)
+    } else {
+        Err("must be a JSON object".to_owned())
+    }
+}
+
+/// `None` when `text` is a JSON object that satisfies the request schema of `action`.
+fn validate_request(text: &str, action: &str) -> Option<String> {
+    let value = match json_object(text) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    schemas()
+        .validate_request(action, &value)
+        .err()
+        .map(|e| e.to_string())
+}
+
+/// `None` when `text` is a `csChargingProfiles` object that fits `SetChargingProfile` (with
+/// `connector`) and the typed profile.
+fn validate_profile(text: &str, connector: &str) -> Option<String> {
+    let value = match json_object(text) {
+        Ok(v) => v,
+        Err(e) => return Some(e),
+    };
+    let connector_id: u32 = connector.parse().unwrap_or(0);
+    let request = serde_json::json!({"connectorId": connector_id, "csChargingProfiles": value});
+    if let Err(e) = schemas().validate_request("SetChargingProfile", &request) {
+        return Some(e.to_string());
+    }
+    serde_json::from_value::<ChargingProfile>(value)
+        .err()
+        .map(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::KeyEventKind;
+
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new_with_kind(code, KeyModifiers::NONE, KeyEventKind::Press)
+    }
+
+    fn type_text(form: &mut Form, s: &str) {
+        for c in s.chars() {
+            form.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn clear(form: &mut Form) {
+        form.handle_key(KeyEvent::new_with_kind(
+            KeyCode::Char('u'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Press,
+        ));
+    }
+
+    #[test]
+    fn remote_start_requires_a_short_id_tag_and_a_valid_connector() {
+        let mut f = Form::remote_start("CP-1");
+        assert!(f.submit().is_none());
+        assert_eq!(f.fields[0].error.as_deref(), Some("idTag is required"));
+        type_text(&mut f, &"x".repeat(21));
+        assert!(f.fields[0].error.as_ref().is_some_and(|e| e.contains("21")));
+        clear(&mut f);
+        type_text(&mut f, "ABC");
+        f.handle_key(key(KeyCode::Tab));
+        type_text(&mut f, "zero");
+        assert!(f.fields[1].error.is_some());
+        assert!(f.submit().is_none());
+        assert_eq!(f.focus, 1);
+        clear(&mut f);
+        type_text(&mut f, "2");
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::RemoteStart {
+                id_tag: "ABC".into(),
+                connector: Some(2)
+            }))
+        );
+        clear(&mut f);
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::RemoteStart {
+                id_tag: "ABC".into(),
+                connector: None
+            })),
+            "the connector is optional"
+        );
+    }
+
+    #[test]
+    fn remote_stop_maps_the_option_to_a_transaction_id() {
+        let choices = [
+            StopChoice {
+                id: 7,
+                connector: 1,
+                id_tag: "A".into(),
+            },
+            StopChoice {
+                id: 9,
+                connector: 2,
+                id_tag: "B".into(),
+            },
+        ];
+        let mut f = Form::remote_stop("CP-1", &choices);
+        assert_eq!(f.fields[0].options.len(), 2);
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::RemoteStop { transaction_id: 7 })),
+            "the first one is preselected"
+        );
+        f.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::RemoteStop { transaction_id: 9 }))
+        );
+    }
+
+    #[test]
+    fn reset_trigger_and_availability_pick_from_lists() {
+        let mut f = Form::reset("CP-1");
+        f.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::Reset(ResetType::Hard)))
+        );
+        let mut f = Form::trigger("CP-1");
+        f.handle_key(key(KeyCode::Char('h')));
+        assert_eq!(f.fields[0].chosen(), Some("Heartbeat"));
+        assert!(matches!(
+            f.submit(),
+            Some(Submitted::Send(Command::TriggerMessage {
+                message: MessageTrigger::Heartbeat,
+                connector: None
+            }))
+        ));
+        let mut f = Form::availability("CP-1");
+        f.handle_key(key(KeyCode::Tab));
+        f.handle_key(key(KeyCode::Char('i')));
+        assert!(matches!(
+            f.submit(),
+            Some(Submitted::Send(Command::ChangeAvailability {
+                connector: 0,
+                kind: AvailabilityType::Inoperative
+            }))
+        ));
+    }
+
+    #[test]
+    fn change_configuration_needs_a_key_and_checks_the_schema() {
+        let mut f = Form::change_configuration("CP-1");
+        assert!(f.submit().is_none());
+        assert_eq!(f.fields[0].error.as_deref(), Some("required"));
+        type_text(&mut f, &"k".repeat(51));
+        assert!(f.submit().is_none(), "the schema caps the key at 50");
+        assert!(f.error.is_some(), "{:?}", f.error);
+        clear(&mut f);
+        type_text(&mut f, "HeartbeatInterval");
+        f.handle_key(key(KeyCode::Tab));
+        type_text(&mut f, "60");
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::ChangeConfiguration {
+                key: "HeartbeatInterval".into(),
+                value: "60".into()
+            }))
+        );
+    }
+
+    #[test]
+    fn get_configuration_splits_keys_and_limits_their_length() {
+        let mut f = Form::get_configuration("CP-1");
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::GetConfiguration { keys: vec![] }))
+        );
+        type_text(&mut f, "A, B  C");
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::GetConfiguration {
+                keys: vec!["A".into(), "B".into(), "C".into()]
+            }))
+        );
+        type_text(&mut f, &format!(",{}", "z".repeat(51)));
+        assert!(f.fields[0].error.is_some());
+        assert!(f.submit().is_none());
+    }
+
+    #[test]
+    fn unlock_and_data_transfer_validate_their_fields() {
+        let mut f = Form::unlock("CP-1", Some(2));
+        assert!(matches!(
+            f.submit(),
+            Some(Submitted::Send(Command::UnlockConnector { connector: 2 }))
+        ));
+        clear(&mut f);
+        type_text(&mut f, "0");
+        assert!(f.submit().is_none(), "connector 0 cannot be unlocked");
+        let mut f = Form::data_transfer("CP-1");
+        assert!(f.submit().is_none());
+        type_text(&mut f, "Acme");
+        assert!(matches!(
+            f.submit(),
+            Some(Submitted::Send(Command::DataTransfer {
+                message_id: None,
+                data: None,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn profile_json_is_validated_inline_against_the_schema() {
+        let mut f = Form::set_profile("CP-1");
+        assert_eq!(f.fields[1].error, None, "the template is valid");
+        f.focus = 1;
+        f.handle_key(key(KeyCode::End));
+        f.handle_key(key(KeyCode::Backspace));
+        assert!(
+            f.fields[1]
+                .error
+                .as_ref()
+                .is_some_and(|e| e.contains("invalid JSON"))
+        );
+        assert!(f.submit().is_none());
+        assert_eq!(f.focus, 1);
+        f.handle_key(key(KeyCode::Char('}')));
+        assert_eq!(f.fields[1].error, None);
+        // an unknown purpose violates the schema
+        f.fields[1].input =
+            TextInput::new(PROFILE_TEMPLATE.replace("ChargePointMaxProfile", "Bogus"));
+        f.handle_key(key(KeyCode::End));
+        assert!(f.fields[1].error.is_some());
+        f.fields[1].input = TextInput::new(PROFILE_TEMPLATE);
+        f.handle_key(key(KeyCode::End));
+        assert!(matches!(
+            f.submit(),
+            Some(Submitted::Send(Command::SetChargingProfile {
+                connector: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn raw_payload_is_checked_against_the_chosen_action() {
+        let mut f = Form::raw("CP-1", Some("Reset"));
+        assert_eq!(f.fields[0].options.len(), 19);
+        assert!(f.fields[1].error.is_some(), "{{}} lacks the type");
+        f.focus = 1;
+        clear(&mut f);
+        type_text(&mut f, r#"{"type":"Soft"}"#);
+        assert_eq!(f.fields[1].error, None);
+        assert!(matches!(
+            f.submit(),
+            Some(Submitted::Send(Command::Raw { ref action, .. })) if action == "Reset"
+        ));
+        // switching to another action re-validates the same payload
+        f.focus = 0;
+        f.handle_key(key(KeyCode::Char('c'))); // CancelReservation
+        assert_ne!(f.fields[0].chosen(), Some("Reset"));
+        assert!(f.fields[1].error.is_some());
+        f.focus = 1;
+        clear(&mut f);
+        type_text(&mut f, "[1]");
+        assert_eq!(f.fields[1].error.as_deref(), Some("must be a JSON object"));
+    }
+
+    #[test]
+    fn rule_form_needs_a_json_object() {
+        let mut f = Form::rule();
+        assert!(matches!(f.submit(), Some(Submitted::Rule { .. })));
+        f.focus = 1;
+        f.handle_key(key(KeyCode::End));
+        f.handle_key(key(KeyCode::Backspace));
+        assert!(f.fields[1].error.is_some());
+        assert!(f.submit().is_none());
+    }
+
+    #[test]
+    fn fault_payload_matters_only_for_invalid_payload() {
+        let mut f = Form::fault();
+        f.focus = 3;
+        clear(&mut f);
+        type_text(&mut f, "nope");
+        assert_eq!(f.fields[3].error, None, "ignored for call_error");
+        assert!(matches!(
+            f.submit(),
+            Some(Submitted::Fault {
+                kind: FaultKind::CallError,
+                times: 1,
+                ..
+            })
+        ));
+        f.focus = 1;
+        f.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(f.fields[1].chosen(), Some("invalid_payload"));
+        assert!(f.fields[3].error.is_some(), "re-validated with the kind");
+        assert!(f.submit().is_none());
+        f.focus = 2;
+        clear(&mut f);
+        type_text(&mut f, "0");
+        assert!(f.fields[2].error.is_some());
+        clear(&mut f);
+        type_text(&mut f, "3");
+        f.focus = 3;
+        clear(&mut f);
+        type_text(&mut f, r#"{"x":1}"#);
+        let Some(Submitted::Fault {
+            kind: FaultKind::InvalidPayload,
+            times: 3,
+            payload,
+            ..
+        }) = f.submit()
+        else {
+            panic!("expected an invalid_payload fault");
+        };
+        assert_eq!(payload, serde_json::json!({"x": 1}));
+    }
+
+    #[test]
+    fn remove_rule_picks_from_active_rules_and_escape_cancels() {
+        let mut f = Form::remove_rule(&["Authorize".into(), "Heartbeat".into()]);
+        f.handle_key(key(KeyCode::Right));
+        assert_eq!(f.submit(), Some(Submitted::RemoveRule("Heartbeat".into())));
+        assert_eq!(f.handle_key(key(KeyCode::Esc)), FormEvent::Cancel);
+        assert_eq!(f.handle_key(key(KeyCode::Enter)), FormEvent::Submit);
+    }
+
+    #[test]
+    fn paste_is_validated_like_typing() {
+        let mut f = Form::remote_start("CP-1");
+        f.paste(&"é".repeat(20));
+        assert_eq!(f.fields[0].error, None);
+        f.paste("x");
+        assert!(f.fields[0].error.is_some());
+    }
+}

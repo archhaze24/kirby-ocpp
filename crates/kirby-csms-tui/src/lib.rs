@@ -5,7 +5,9 @@
 //! turns a [`app::Msg`] into [`app::Effect`]s and the run loop executes them. The terminal is
 //! restored on every exit path (RAII guard + panic hook from `kirby-ocpp-tui`).
 //!
-//! Step D1 is read-only: no commands or forms yet. [`app::Mode`] is where they will go.
+//! Commands ([`command::Command`], opened from forms and the palette) run as background tasks:
+//! the model emits [`app::Effect::Send`], [`execute`] spawns the call and its answer returns
+//! as [`app::Msg::CommandDone`], so a slow station never blocks the UI.
 
 #![allow(
     clippy::too_many_lines,
@@ -13,7 +15,10 @@
     reason = "draw functions are long flat lists; ratatui code uses `f`, `w`, `h`"
 )]
 
+mod actions;
 pub mod app;
+pub mod command;
+pub mod form;
 mod keys;
 pub mod ui;
 
@@ -25,6 +30,7 @@ use chrono::Utc;
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures_util::{Stream, StreamExt};
 use kirby_csms_core::CsmsHandle;
+use kirby_csms_core::{Fault, Reply};
 use kirby_ocpp_tui::clipboard;
 use kirby_ocpp_tui::shutdown_signal;
 use kirby_ocpp_tui::terminal::TerminalGuard;
@@ -32,8 +38,12 @@ use ratatui::Terminal;
 use ratatui::backend::Backend;
 use thiserror::Error;
 use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
+use crate::actions::Rules;
 use crate::app::{App, Effect, Msg, update};
+use crate::form::FaultKind;
 
 /// UI tuning knobs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,9 +114,98 @@ fn resync_msg(handle: &CsmsHandle) -> Msg {
     Msg::Resynced { infos, states }
 }
 
-/// Performs one effect; the messages it produces are fed back into [`update`] at once.
-async fn execute(effect: Effect, handle: &CsmsHandle) -> Vec<Msg> {
+/// Where effects that take time run, and where their answers arrive.
+#[derive(Debug)]
+pub(crate) struct Exec {
+    tx: mpsc::UnboundedSender<Msg>,
+    tasks: JoinSet<()>,
+}
+
+impl Exec {
+    pub(crate) fn new() -> (Self, mpsc::UnboundedReceiver<Msg>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (
+            Self {
+                tx,
+                tasks: JoinSet::new(),
+            },
+            rx,
+        )
+    }
+
+    /// Forgets the tasks that have finished.
+    fn reap(&mut self) {
+        while self.tasks.try_join_next().is_some() {}
+    }
+}
+
+fn rules_msg(handle: &CsmsHandle) -> Msg {
+    Msg::Rules(Rules {
+        actions: handle.responder_actions(),
+        faults: handle.faults_remaining(),
+    })
+}
+
+fn fault_for(action: &str, kind: FaultKind, times: usize, payload: serde_json::Value) -> Fault {
+    match kind {
+        FaultKind::CallError => Fault::call_error(action),
+        FaultKind::Silence => Fault::silence(action),
+        FaultKind::Close => Fault::close(action),
+        FaultKind::InvalidPayload => Fault::invalid_payload(action, payload),
+    }
+    .times(times)
+}
+
+/// Performs one effect; the messages it produces are fed back into [`update`] at once. A
+/// command is only spawned here; its answer arrives later through the [`Exec`] channel.
+async fn execute(effect: Effect, handle: &CsmsHandle, exec: &mut Exec) -> Vec<Msg> {
     match effect {
+        Effect::Send { station, command } => {
+            let (handle, tx) = (handle.clone(), exec.tx.clone());
+            exec.tasks.spawn(async move {
+                let outcome = command::run(&handle, &station, &command).await;
+                let _ = tx.send(Msg::CommandDone {
+                    station,
+                    command,
+                    outcome,
+                });
+            });
+            vec![]
+        }
+        Effect::Respond { action, payload } => {
+            let reply = Reply::Result(payload);
+            handle.respond(&action, move |_| reply.clone());
+            vec![rules_msg(handle)]
+        }
+        Effect::Inject {
+            action,
+            kind,
+            times,
+            payload,
+        } => {
+            handle.inject(fault_for(&action, kind, times, payload));
+            vec![rules_msg(handle)]
+        }
+        Effect::RemoveRule(action) => {
+            handle.clear_responder(&action);
+            vec![rules_msg(handle)]
+        }
+        Effect::ClearRules => {
+            handle.clear_faults();
+            for action in handle.responder_actions() {
+                handle.clear_responder(&action);
+            }
+            vec![rules_msg(handle)]
+        }
+        Effect::ReadRules => vec![rules_msg(handle)],
+        Effect::Forget(id) => {
+            let text = if handle.forget(&id) {
+                format!("forgot {}", kirby_ocpp_tui::text::sanitize(&id))
+            } else {
+                "station already gone".to_owned()
+            };
+            vec![Msg::Notice(kirby_ocpp_tui::app::NoticeLevel::Success, text)]
+        }
         Effect::Load(id) => vec![Msg::Loaded {
             history: handle.history(&id).unwrap_or_default(),
             info: handle.station(&id).map(Box::new),
@@ -161,6 +260,7 @@ where
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tokio::pin!(signal);
 
+    let (mut exec, mut done) = Exec::new();
     let mut queue = vec![resync_msg(handle)];
     while !app.quit {
         let msg = if let Some(msg) = queue.pop() {
@@ -183,13 +283,17 @@ where
                         Msg::Closed
                     }
                 },
-                _ = tick.tick() => Msg::Tick(Utc::now()),
+                Some(msg) = done.recv() => msg,
+                _ = tick.tick() => {
+                    exec.reap();
+                    Msg::Tick(Utc::now())
+                }
                 () = &mut signal => Msg::Signal,
             }
         };
         let is_tick = matches!(msg, Msg::Tick(_));
         for effect in update(&mut app, msg) {
-            queue.extend(execute(effect, handle).await);
+            queue.extend(execute(effect, handle, &mut exec).await);
         }
         observe(&app);
         if is_tick && app.dirty {
@@ -214,5 +318,7 @@ where
     Ok(())
 }
 
+#[cfg(test)]
+mod command_tests;
 #[cfg(test)]
 mod tests;

@@ -1,5 +1,6 @@
 //! Drawing. `draw` is a pure function of the [`App`]; it never mutates it.
 
+mod overlays;
 mod panes;
 
 use kirby_ocpp_tui::app::NoticeLevel;
@@ -97,6 +98,24 @@ fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
             dim(),
         ),
     ];
+    if app.pending > 0 {
+        spans.push(Span::raw(" "));
+        spans.push(chip(&format!("{} pending", app.pending), Color::Yellow));
+    }
+    if !app.rules.is_empty() {
+        let actions = if app.rules.actions.is_empty() {
+            String::new()
+        } else {
+            format!(" rules: {}", app.rules.actions.join(","))
+        };
+        spans.push(Span::styled(
+            truncate(
+                &format!(" faults {}{}", app.rules.faults, sanitize(&actions)),
+                w.saturating_sub(40).max(10),
+            ),
+            Style::new().fg(Color::Magenta),
+        ));
+    }
     if app.stopped {
         spans.push(Span::raw(" "));
         spans.push(chip("server stopped", Color::Red));
@@ -137,6 +156,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 ("↑↓", "move"),
                 ("←→", "pane"),
                 ("/", "filter"),
+                (":", "actions"),
                 ("a", "all stations"),
                 ("?", "help"),
                 ("q", "quit"),
@@ -146,6 +166,15 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         Mode::Input(_) => vec![("Enter", "keep"), ("Esc", "clear")],
         Mode::Help => vec![("Esc", "close")],
         Mode::Detail(_) => vec![("Esc", "close"), ("↑↓", "scroll"), ("c", "copy")],
+        Mode::Palette(_) => vec![("Enter", "run"), ("↑↓", "choose"), ("Esc", "close")],
+        Mode::Form(_) => vec![
+            ("Enter", "send"),
+            ("Tab", "next field"),
+            ("←→", "option"),
+            ("Esc", "cancel"),
+        ],
+        Mode::Confirm(_) => vec![("y", "yes"), ("any other key", "cancel")],
+        Mode::Results(_) => vec![("Enter", "open"), ("↑↓", "choose"), ("Esc", "close")],
     }
 }
 
@@ -214,6 +243,10 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
                 .collect();
             f.render_widget(Paragraph::new(lines), inner);
         }
+        Mode::Palette(p) => overlays::palette(f, app, p, area),
+        Mode::Form(form) => overlays::form(f, form, area),
+        Mode::Confirm(c) => overlays::confirm(f, c, area),
+        Mode::Results(list) => overlays::results(f, app, list, area),
     }
 }
 

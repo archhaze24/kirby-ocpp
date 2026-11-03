@@ -42,7 +42,7 @@ fn render(app: &App, w: u16, h: u16) -> String {
     screen(terminal.backend())
 }
 
-fn state() -> StationState {
+pub(crate) fn state() -> StationState {
     let mut s = StationState::default();
     s.boot = Some(BootInfo {
         vendor: "Acme".into(),
@@ -90,7 +90,7 @@ fn state() -> StationState {
     s
 }
 
-fn loaded() -> App {
+pub(crate) fn loaded() -> App {
     let (mut app, _) = app_with(&["CP-1", "CP-2"]);
     update(
         &mut app,
@@ -289,4 +289,191 @@ fn a_thousand_stations_render_only_the_visible_rows() {
     app.set_station_filter("0777", &mut fx);
     let s = render(&app, 120, 30);
     assert!(s.contains("ST-0777") && s.contains("1/1000"), "{s}");
+}
+
+// ---- commands -------------------------------------------------------------------------------
+
+mod commands {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serde_json::json;
+
+    use super::*;
+    use crate::actions::Rules;
+    use crate::command::{CmdOutcome, Command};
+    use crate::tests::{press, type_text};
+
+    fn open(app: &mut App, key: char) {
+        update(
+            app,
+            Msg::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
+        );
+    }
+
+    #[test]
+    fn palette_lists_actions_with_keys_and_reasons() {
+        let (mut app, _) = app_with(&[]);
+        open(&mut app, ':');
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("Actions"), "{screen}");
+        assert!(screen.contains("t  Remote start transaction (no station selected)"));
+        assert!(screen.contains("Response rule"));
+        assert!(!screen.contains("Response rule ("), "rules need no station");
+        type_text(&mut app, "reset");
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains(": reset"), "{screen}");
+        assert!(screen.contains("Reset"));
+
+        let mut app = loaded();
+        open(&mut app, ':');
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("t  Remote start transaction"), "{screen}");
+        assert!(!screen.contains("Remote start transaction ("), "{screen}");
+        assert!(screen.contains("Forget station (station is connected)"));
+    }
+
+    #[test]
+    fn form_shows_its_fields_and_the_inline_error() {
+        let mut app = loaded();
+        open(&mut app, 't');
+        press(&mut app, KeyCode::Enter);
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("RemoteStartTransaction"), "{screen}");
+        assert!(screen.contains("idTag"));
+        assert!(screen.contains("connector (optional)"));
+        assert!(screen.contains("idTag is required"), "{screen}");
+        assert!(screen.contains("Enter send"), "{screen}");
+
+        let mut app = loaded();
+        open(&mut app, 'P');
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("csChargingProfiles (JSON)"), "{screen}");
+        assert!(screen.contains("chargingSchedulePeriod"), "{screen}");
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::End);
+        press(&mut app, KeyCode::Backspace);
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("invalid JSON"), "{screen}");
+
+        let mut app = loaded();
+        open(&mut app, 'R');
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("◀ Soft ▶"), "{screen}");
+    }
+
+    #[test]
+    fn confirm_and_results_overlays() {
+        let mut app = loaded();
+        open(&mut app, 'R');
+        press(&mut app, KeyCode::Enter);
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("Confirm"), "{screen}");
+        assert!(
+            screen.contains("Send Reset (Soft) to CP-1?  [y/N]"),
+            "{screen}"
+        );
+
+        let mut app = loaded();
+        for outcome in [
+            CmdOutcome {
+                result: Ok(json!({"status": "Accepted"})),
+            },
+            CmdOutcome {
+                result: Err(crate::command::CmdError(
+                    "CALLERROR InternalError: boom".into(),
+                )),
+            },
+        ] {
+            update(
+                &mut app,
+                Msg::CommandDone {
+                    station: "CP-1".into(),
+                    command: Command::ClearCache,
+                    outcome,
+                },
+            );
+        }
+        open(&mut app, 'r');
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("Results of CP-1"), "{screen}");
+        assert!(
+            screen.contains("ClearCache: CALLERROR InternalError: boom"),
+            "{screen}"
+        );
+        assert!(screen.contains("ClearCache: Accepted"), "{screen}");
+        press(&mut app, KeyCode::Enter);
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("--- request ---"), "{screen}");
+        assert!(screen.contains("--- error ---"), "{screen}");
+    }
+
+    #[test]
+    fn header_shows_pending_commands_and_active_rules() {
+        let mut app = loaded();
+        assert!(!render(&app, 120, 30).contains("pending"));
+        app.pending = 3;
+        app.rules = Rules {
+            actions: vec!["Authorize".into(), "Heartbeat".into()],
+            faults: 2,
+        };
+        let screen = render(&app, 120, 30);
+        assert!(screen.contains("3 pending"), "{screen}");
+        assert!(
+            screen.contains("faults 2 rules: Authorize,Heartbeat"),
+            "{screen}"
+        );
+        // many rules never overflow a narrow header
+        app.rules.actions = (0..40).map(|i| format!("Action{i}")).collect();
+        let _ = render(&app, 40, 12);
+    }
+
+    #[test]
+    fn help_lists_the_action_keys() {
+        let mut app = loaded();
+        open(&mut app, '?');
+        let screen = render(&app, 100, 50);
+        assert!(screen.contains("command palette"), "{screen}");
+        assert!(screen.contains("t remote start"), "{screen}");
+        assert!(screen.contains("m response rule"), "{screen}");
+    }
+
+    #[test]
+    fn overlays_survive_every_terminal_size() {
+        let mut makers: Vec<Box<dyn Fn() -> App>> = Vec::new();
+        for key in [
+            't', 'x', 'R', 'c', 'g', 'T', 'u', 'A', 'P', 'D', 'w', 'm', 'i', ':', 'F', 'M', 'r',
+            '?',
+        ] {
+            makers.push(Box::new(move || {
+                let mut app = loaded();
+                app.rules = Rules {
+                    actions: vec!["Authorize".into()],
+                    faults: 1,
+                };
+                update(
+                    &mut app,
+                    Msg::CommandDone {
+                        station: "CP-1".into(),
+                        command: Command::ClearCache,
+                        outcome: CmdOutcome {
+                            result: Ok(json!({"status": "Accepted"})),
+                        },
+                    },
+                );
+                open(&mut app, key);
+                if key == 'R' {
+                    press(&mut app, KeyCode::Enter);
+                }
+                if key == 't' {
+                    press(&mut app, KeyCode::Enter);
+                }
+                app
+            }));
+        }
+        for make in &makers {
+            let app = make();
+            for (w, h) in [(24, 8), (30, 9), (40, 12), (60, 16), (80, 24), (200, 60)] {
+                let _ = render(&app, w, h);
+            }
+        }
+    }
 }

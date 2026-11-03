@@ -15,6 +15,9 @@ use kirby_ocpp_tui::text::TextInput;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 
+use crate::actions::{Palette, ResultRecord, ResultsList, Rules};
+use crate::command::{CmdOutcome, Command};
+use crate::form::{FaultKind, Form};
 use crate::keys;
 
 /// Redraw ticks a notice stays visible (about three seconds at 30 fps).
@@ -61,13 +64,32 @@ pub struct Input {
     pub text: TextInput,
 }
 
-/// Exactly one mode owns the keyboard at a time. Step D2 adds forms and confirmations here.
+/// What a confirmed dialog does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfirmAction {
+    Send { station: String, command: Command },
+    Forget(String),
+    ClearRules,
+}
+
+/// A yes/no question; `y` confirms, any other key cancels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Confirm {
+    pub message: String,
+    pub action: ConfirmAction,
+}
+
+/// Exactly one mode owns the keyboard at a time.
 #[derive(Debug)]
 pub enum Mode {
     Normal,
     Input(Input),
     Help,
     Detail(Detail),
+    Palette(Palette),
+    Form(Box<Form>),
+    Confirm(Confirm),
+    Results(ResultsList),
 }
 
 /// A transient message for the status line.
@@ -218,6 +240,12 @@ pub struct App {
     pub stopped: bool,
     dirty_states: BTreeSet<String>,
     info_dirty: bool,
+    /// Commands sent and not answered yet.
+    pub pending: usize,
+    /// The last answers per station, newest first.
+    pub results: HashMap<String, VecDeque<ResultRecord>>,
+    /// Response rules and faults the engine has active.
+    pub rules: Rules,
 }
 
 /// Input to [`update`].
@@ -253,6 +281,14 @@ pub enum Msg {
         info: Option<(String, Option<Box<StationInfo>>)>,
     },
     Notice(NoticeLevel, String),
+    /// A command finished, from [`Effect::Send`].
+    CommandDone {
+        station: String,
+        command: Command,
+        outcome: CmdOutcome,
+    },
+    /// The active rules and faults, from [`Effect::ReadRules`] and after a change.
+    Rules(Rules),
 }
 
 /// What the run loop must do after an [`update`].
@@ -271,6 +307,30 @@ pub enum Effect {
         text: String,
         what: String,
     },
+    /// Send a command to a station in the background; the answer comes back as
+    /// [`Msg::CommandDone`].
+    Send {
+        station: String,
+        command: Command,
+    },
+    /// Answer every `action` CALL with `payload` as a CALLRESULT.
+    Respond {
+        action: String,
+        payload: serde_json::Value,
+    },
+    /// Fault the next `times` occurrences of `action`.
+    Inject {
+        action: String,
+        kind: FaultKind,
+        times: usize,
+        payload: serde_json::Value,
+    },
+    RemoveRule(String),
+    /// Drop every response rule and pending fault.
+    ClearRules,
+    /// Read the active rules and faults.
+    ReadRules,
+    Forget(String),
 }
 
 impl App {
@@ -303,6 +363,9 @@ impl App {
             stopped: false,
             dirty_states: BTreeSet::new(),
             info_dirty: false,
+            pending: 0,
+            results: HashMap::new(),
+            rules: Rules::default(),
         }
     }
 
@@ -450,7 +513,7 @@ impl App {
         self.dedupe.clear();
     }
 
-    fn summary_mut(&mut self, id: &str) -> Option<&mut Summary> {
+    pub(crate) fn summary_mut(&mut self, id: &str) -> Option<&mut Summary> {
         let i = self
             .stations
             .binary_search_by(|s| s.id.as_str().cmp(id))
@@ -480,6 +543,7 @@ impl App {
         let was_selected = self.selected.as_deref() == Some(id);
         let row = self.cursor();
         self.stations.remove(pos);
+        self.forget_results(id);
         self.refilter();
         self.dirty_states.remove(id);
         if was_selected {
@@ -733,6 +797,12 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
         }
         Msg::Notice(level, text) => app.notify(level, text),
+        Msg::CommandDone {
+            station,
+            command,
+            outcome,
+        } => app.command_done(&station, &command, &outcome),
+        Msg::Rules(rules) => app.rules = rules,
     }
     fx
 }
@@ -740,6 +810,10 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
 fn tick(app: &mut App, now: DateTime<Utc>, fx: &mut Vec<Effect>) {
     if now.timestamp() != app.now.timestamp() {
         app.dirty = true;
+        // Faults are used up by traffic, so watch them while any is active.
+        if !app.rules.is_empty() {
+            fx.push(Effect::ReadRules);
+        }
     }
     app.now = now;
     if let Some(n) = &mut app.notice {

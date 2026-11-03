@@ -215,7 +215,7 @@ In scenarios: `action = "set_rule"` with `rule = "Reset=reject*2"`, and `action 
 
 ## kirby-csms
 
-`kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware developers and load tests. It accepts any number of stations on `ws(s)://HOST:PORT/<any prefix>/<station id>` (the station id is the last path segment), answers their CALLs with canned replies, prints everything that happens and sends commands to stations. On an interactive terminal it opens a terminal UI to observe stations (read-only for now: commands come from stdin JSON lines or scripts); otherwise it runs headless.
+`kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware developers and load tests. It accepts any number of stations on `ws(s)://HOST:PORT/<any prefix>/<station id>` (the station id is the last path segment), answers their CALLs with canned replies, prints everything that happens and sends commands to stations. On an interactive terminal it opens a terminal UI to observe stations and send them commands; otherwise it runs headless (commands then come from stdin JSON lines or scripts).
 
 ```
 kirby-csms --listen 0.0.0.0:9000
@@ -262,8 +262,31 @@ Left: the stations (dot: green connected, dim disconnected, yellow replaced by a
 | `Enter` (log) | frame detail with pretty JSON and its request or answer (`c` copies) |
 | `y` `Y` | copy the row / all visible rows (clipboard tool, else OSC 52) |
 | `f` `s` `p` `G` | log filter (all, calls, errors, from stations), search, pause/follow, newest |
+| `:` | command palette: fuzzy search over every action below; unavailable ones are dimmed with the reason |
 | `?` | help |
 | `q`, `Ctrl-C` | quit |
+
+Actions on the selected station open a form (`Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels). Fields are checked as you type, and the request is checked against the OCPP 1.6J schema before anything is sent; errors show under the field. Commands run in the background (several can be in flight, the header shows `N pending`); the answer appears in the status line (`Reset (Soft) on CP-1: Accepted`, or the CALLERROR code and text, or a timeout) and is kept in a history of the last 20 results per station. Answers that carry content (GetConfiguration as a readable key list with `(readonly)` marks and unknown keys, raw calls, DataTransfer with data) open in a popup (`c` copies).
+
+| Key | Action |
+| --- | --- |
+| `t` | RemoteStartTransaction (idTag, optional connector) |
+| `x` | RemoteStopTransaction (pick one of the active transactions) |
+| `R` | Reset, soft or hard (asks first) |
+| `c` `g` | ChangeConfiguration / GetConfiguration (keys optional) |
+| `T` | TriggerMessage (message, optional connector) |
+| `u` `A` `C` | UnlockConnector / ChangeAvailability / ClearCache |
+| `P` | SetChargingProfile (connector and profile JSON, validated against the schema) |
+| `D` | DataTransfer |
+| `w` | raw call: any of the 19 central system actions with a JSON payload checked against its request schema |
+| `r` | the last results of the selected station (`Enter` opens one) |
+| `m` | response rule: answer every station's CALLs of one action with a fixed payload |
+| `i` | inject a fault for the next N occurrences of an action: `call_error`, `silence`, `close`, `invalid_payload` |
+| `M` | clear every response rule and pending fault (asks first); one rule can be removed from the palette |
+| `F` | forget a disconnected station and its state (asks first) |
+| `n` | copy the station id |
+
+Rules and faults apply to all stations, not only the selected one; while any is active the header shows the pending fault count and the rule actions.
 
 ### Commands on stdin
 
