@@ -20,13 +20,12 @@ pub mod forms;
 mod keys;
 pub mod logview;
 pub mod palette;
-mod terminal;
+pub mod terminal;
 #[cfg(test)]
 mod tests_support;
 pub mod text;
 pub mod ui;
 
-use std::io::Write;
 use std::time::Duration;
 
 use crossterm::event::{Event as TermEvent, EventStream};
@@ -63,7 +62,8 @@ pub enum TuiError {
     Terminal(#[from] std::io::Error),
 }
 
-async fn shutdown_signal() {
+/// Resolves on SIGINT or SIGTERM (Ctrl-C only on non-Unix).
+pub async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -295,31 +295,9 @@ async fn execute(effect: Effect, ctx: &mut Ctx, guard: &mut terminal::TerminalGu
         }
         Effect::CancelScenario => ctx.cancel.cancel(),
         Effect::Copy { text, what } => {
-            let ext = tokio::time::timeout(
-                Duration::from_millis(500),
-                tokio::task::spawn_blocking({
-                    let text = text.clone();
-                    move || clipboard::copy_external(&text)
-                }),
-            )
-            .await;
-            let notice = if let Ok(Ok(Some(tool))) = ext {
-                (NoticeLevel::Success, format!("copied {what} ({tool})"))
-            } else if let Some(seq) = clipboard::osc52(&text) {
-                let out = guard.terminal().backend_mut();
-                let _ = out.write_all(seq.as_bytes());
-                let _ = out.flush();
-                (
-                    NoticeLevel::Success,
-                    format!("copied {what} (OSC 52, needs terminal support)"),
-                )
-            } else {
-                (
-                    NoticeLevel::Error,
-                    format!("{what} is too large to copy; use export"),
-                )
-            };
-            ctx.out.send(Msg::Notice(notice.0, notice.1));
+            let (level, text) =
+                clipboard::copy_with_fallback(&text, &what, guard.terminal().backend_mut()).await;
+            ctx.out.send(Msg::Notice(level, text));
         }
         Effect::WriteFile { path, contents } => {
             let notice = match write_private(&path, contents).await {
