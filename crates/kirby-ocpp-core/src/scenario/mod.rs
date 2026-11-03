@@ -4,6 +4,7 @@
 //! [`ScenarioRunner`]. Scenario files are TOML (see [`builtin`] for examples for the format).
 
 pub mod builtin;
+mod junit;
 mod model;
 mod runner;
 
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
 
+pub use self::junit::{JunitSuite, junit_xml};
 pub use self::model::{Action, Condition, DEFAULT_TIMEOUT_MS, Expect, Scenario, Step};
 pub use self::runner::{
     ScenarioProgress, ScenarioReport, ScenarioRunner, StepReport, StepStatus, run_scenario,
