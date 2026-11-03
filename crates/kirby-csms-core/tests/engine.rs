@@ -448,6 +448,22 @@ async fn call_times_out_and_the_next_call_still_goes_out() {
 }
 
 #[tokio::test]
+async fn rules_can_be_listed_and_cleared() {
+    let csms = start(|_| {}).await;
+    assert_eq!(csms.responder_actions(), Vec::<String>::new());
+    csms.respond("Heartbeat", |_| Reply::Silence);
+    csms.respond("Authorize", |_| Reply::Silence);
+    csms.inject(Fault::close("Heartbeat").times(3));
+    assert_eq!(csms.responder_actions(), ["Authorize", "Heartbeat"]);
+    assert_eq!(csms.faults_remaining(), 3);
+    csms.clear_faults();
+    csms.clear_responder("Authorize");
+    assert_eq!(csms.faults_remaining(), 0);
+    assert_eq!(csms.responder_actions(), ["Heartbeat"]);
+    csms.shutdown().await;
+}
+
+#[tokio::test]
 async fn faults_responders_and_protocol_errors() {
     let csms = start(|_| {}).await;
     csms.inject(Fault::call_error("Heartbeat"));

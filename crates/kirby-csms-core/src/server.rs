@@ -308,6 +308,18 @@ impl CsmsHandle {
             .sum()
     }
 
+    /// Actions that currently have a responder, sorted.
+    pub fn responder_actions(&self) -> Vec<String> {
+        let mut actions: Vec<String> = self.inner.lock().responders.keys().cloned().collect();
+        actions.sort();
+        actions
+    }
+
+    /// Drops every scripted fault that has not triggered yet.
+    pub fn clear_faults(&self) {
+        self.inner.lock().faults.clear();
+    }
+
     /// Stops accepting, closes every connection (close frame 1001) and waits for the
     /// sessions to end (at most a couple of seconds). Calling it again is a no-op.
     pub async fn shutdown(&self) {

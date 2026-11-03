@@ -48,13 +48,19 @@ pub fn haystack(a: &ActionDef) -> String {
 }
 
 pub fn rank(catalog: &[ActionDef], query: &str) -> Vec<usize> {
+    rank_by(catalog, query, haystack)
+}
+
+/// Fuzzy ranking over any catalogue: indices of the items matching `query`, best first
+/// (all of them, in order, for an empty query). `haystack` gives the text an item is matched on.
+pub fn rank_by<T>(items: &[T], query: &str, haystack: impl Fn(&T) -> String) -> Vec<usize> {
     if query.trim().is_empty() {
-        return (0..catalog.len()).collect();
+        return (0..items.len()).collect();
     }
     let mut matcher = Matcher::new(Config::DEFAULT);
     let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
     let mut buf = Vec::new();
-    let mut scored: Vec<(u32, usize)> = catalog
+    let mut scored: Vec<(u32, usize)> = items
         .iter()
         .enumerate()
         .filter_map(|(i, a)| {
