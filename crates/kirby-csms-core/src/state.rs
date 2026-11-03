@@ -151,8 +151,10 @@ impl StationState {
         match action {
             "BootNotification" => self.on_boot(request, response, now),
             "Heartbeat" => {
+                // Recorded silently: a heartbeat is no state change worth an event (the
+                // frame event already tells subscribers), and they come constantly.
                 self.last_heartbeat_at = Some(now);
-                Some(())
+                None
             }
             "StatusNotification" => self.on_status(request, now),
             "StartTransaction" => self.on_start(request, response),

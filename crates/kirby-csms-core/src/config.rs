@@ -29,6 +29,15 @@ pub struct CsmsConfig {
     /// Capacity of the event broadcast channel. A subscriber that falls further behind gets
     /// `RecvError::Lagged` and loses events. Default 4096.
     pub event_buffer: usize,
+    /// Longest time one frame write may take. A peer that stops reading is dropped when it
+    /// expires. Default 10 seconds.
+    pub write_timeout: Duration,
+    /// Largest WebSocket message (and frame) accepted from a station, bytes; a station that
+    /// sends more is disconnected. Default 1 MiB.
+    pub max_message_size: usize,
+    /// Most distinct station ids in the registry. A connection with a new id beyond it is
+    /// refused with HTTP 503; known ids may still reconnect. Default 100 000.
+    pub max_stations: usize,
     /// `Some` serves `wss://` with this rustls configuration; `None` serves plain `ws://`.
     /// Build one from PEM files' contents with [`crate::server_config_from_pem`].
     pub tls: Option<Arc<ServerConfig>>,
@@ -55,6 +64,9 @@ impl Default for CsmsConfig {
             history_cap: 1000,
             transaction_history_cap: 100,
             event_buffer: 4096,
+            write_timeout: Duration::from_secs(10),
+            max_message_size: 1024 * 1024,
+            max_stations: 100_000,
             tls: None,
         }
     }
@@ -71,6 +83,9 @@ impl fmt::Debug for CsmsConfig {
             .field("history_cap", &self.history_cap)
             .field("transaction_history_cap", &self.transaction_history_cap)
             .field("event_buffer", &self.event_buffer)
+            .field("write_timeout", &self.write_timeout)
+            .field("max_message_size", &self.max_message_size)
+            .field("max_stations", &self.max_stations)
             .field("tls", &self.tls.is_some())
             .finish()
     }

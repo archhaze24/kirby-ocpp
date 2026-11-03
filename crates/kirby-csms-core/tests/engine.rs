@@ -661,3 +661,229 @@ async fn shutdown_closes_everything_promptly() {
             .is_err()
     );
 }
+
+// ---- hardening ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn huge_timeout_does_not_panic() {
+    let csms = start(|_| {}).await;
+    let mut raw = raw_connect(&csms, "/CP-BIG").await;
+    let call = tokio::spawn({
+        let csms = csms.clone();
+        async move {
+            csms.call_timeout("CP-BIG", "Reset", json!({}), Duration::MAX)
+                .await
+        }
+    });
+    let Frame::Call { id, .. } = raw_recv(&mut raw).await else {
+        panic!("expected a CALL");
+    };
+    raw_send(
+        &mut raw,
+        &Frame::call_result(id, json!({})).to_json_string(),
+    )
+    .await;
+    assert!(matches!(
+        call.await.unwrap().unwrap(),
+        Frame::CallResult { .. }
+    ));
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn panicking_responder_ends_the_session() {
+    let csms = start(|_| {}).await;
+    csms.respond("Authorize", |_| panic!("responder bug"));
+    let mut raw = raw_connect(&csms, "/CP-PANIC").await;
+    raw_send(&mut raw, r#"[2,"a1","Authorize",{"idTag":"X"}]"#).await;
+    raw_expect_closed(&mut raw).await;
+    let info = timeout(STEP, async {
+        loop {
+            match csms.station("CP-PANIC") {
+                Some(info) if !info.connected => return info,
+                _ => tokio::task::yield_now().await,
+            }
+        }
+    })
+    .await
+    .expect("session ended in the registry");
+    assert!(info.disconnected_at.is_some());
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn oversize_message_closes_the_connection() {
+    let csms = start(|c| c.max_message_size = 1024).await;
+    let mut raw = raw_connect(&csms, "/CP-FAT").await;
+    let pad = "x".repeat(4096);
+    raw_send(
+        &mut raw,
+        &json!([2, "f1", "Authorize", {"idTag": pad}]).to_string(),
+    )
+    .await;
+    raw_expect_closed(&mut raw).await;
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn unknown_actions_share_one_bucket() {
+    let csms = start(|_| {}).await;
+    let mut raw = raw_connect(&csms, "/CP-MANY").await;
+    for n in 0..80 {
+        raw_send(
+            &mut raw,
+            &json!([2, format!("m{n}"), format!("Act{n}"), {}]).to_string(),
+        )
+        .await;
+    }
+    for _ in 0..80 {
+        raw_recv(&mut raw).await;
+    }
+    let info = csms.station("CP-MANY").unwrap();
+    assert_eq!(info.received_calls, 80);
+    assert!(info.received_by_action.len() <= 65, "{info:?}");
+    assert_eq!(info.received_by_action.get("other"), Some(&16));
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn station_limit_refuses_new_ids_only() {
+    let csms = start(|c| c.max_stations = 1).await;
+    let first = raw_connect(&csms, "/CP-A").await;
+    let mut request = format!("{}/CP-B", csms.url())
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert("Sec-WebSocket-Protocol", "ocpp1.6".parse().unwrap());
+    match tokio_tungstenite::connect_async(request).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            assert_eq!(response.status().as_u16(), 503);
+        }
+        other => panic!("expected a 503 refusal, got {other:?}"),
+    }
+    // The known id can reconnect (and replaces the old socket).
+    let _again = raw_connect(&csms, "/CP-A").await;
+    drop(first);
+    assert_eq!(csms.stations().len(), 1);
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn heartbeat_updates_state_without_an_event() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    let mut raw = raw_connect(&csms, "/CP-HB").await;
+    raw_send(&mut raw, r#"[2,"h1","Heartbeat",{}]"#).await;
+    raw_recv(&mut raw).await;
+    // A later status change arrives; no StateChanged may precede it from the heartbeat.
+    raw_send(
+        &mut raw,
+        r#"[2,"s1","StatusNotification",{"connectorId":1,"errorCode":"NoError","status":"Available"}]"#,
+    )
+    .await;
+    raw_recv(&mut raw).await;
+    let mut changed = 0;
+    wait_event(&mut events, "status state change", |e| {
+        if matches!(e, CsmsEvent::StateChanged { .. }) {
+            changed += 1;
+            return true;
+        }
+        false
+    })
+    .await;
+    assert_eq!(changed, 1);
+    assert!(csms.state("CP-HB").unwrap().last_heartbeat_at.is_some());
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn dropped_call_frees_the_in_flight_slot() {
+    let csms = start(|_| {}).await;
+    let mut raw = raw_connect(&csms, "/CP-DROP").await;
+    let first = tokio::spawn({
+        let csms = csms.clone();
+        async move { csms.call("CP-DROP", "Reset", json!({"type": "Soft"})).await }
+    });
+    let Frame::Call { .. } = raw_recv(&mut raw).await else {
+        panic!("expected a CALL");
+    };
+    first.abort();
+    let _ = first.await;
+    // The default timeout is 30 s, longer than STEP: this only passes if the slot was freed.
+    let next = tokio::spawn({
+        let csms = csms.clone();
+        async move { csms.call("CP-DROP", "GetConfiguration", json!({})).await }
+    });
+    let Frame::Call { id, action, .. } = raw_recv(&mut raw).await else {
+        panic!("expected a CALL");
+    };
+    assert_eq!(action, "GetConfiguration");
+    raw_send(
+        &mut raw,
+        &Frame::call_result(id, json!({})).to_json_string(),
+    )
+    .await;
+    next.await.unwrap().unwrap();
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn stalled_reader_is_dropped_after_the_write_timeout() {
+    let csms = start(|c| c.write_timeout = Duration::from_millis(300)).await;
+    // The client never reads, so the socket buffers fill up and the write stalls.
+    let _raw = raw_connect(&csms, "/CP-STALL").await;
+    let payload = json!({"data": "x".repeat(64 * 1024 * 1024)});
+    let result = timeout(STEP, csms.call("CP-STALL", "DataTransfer", payload))
+        .await
+        .expect("call ends instead of hanging");
+    assert!(matches!(result, Err(CsmsError::ConnectionClosed { .. })));
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replaced_session_cannot_write_into_the_record() {
+    let csms = start(|_| {}).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    csms.respond("BootNotification", {
+        let entered = Arc::clone(&entered);
+        move |_| {
+            entered.notify_one();
+            // block_in_place hands the worker's queue (accept loop!) to another thread.
+            tokio::task::block_in_place(|| {
+                let _ = release_rx.lock().unwrap().recv();
+            });
+            Reply::Result(json!({
+                "status": "Accepted",
+                "currentTime": "2026-01-01T00:00:00Z",
+                "interval": 60
+            }))
+        }
+    });
+    let mut old = raw_connect(&csms, "/CP-STALE").await;
+    raw_send(
+        &mut old,
+        r#"[2,"b1","BootNotification",{"chargePointVendor":"V","chargePointModel":"M"}]"#,
+    )
+    .await;
+    timeout(STEP, entered.notified())
+        .await
+        .expect("responder entered");
+    let mut events = csms.subscribe();
+    let _new = raw_connect(&csms, "/CP-STALE").await;
+    wait_event(&mut events, "replacement", connected("CP-STALE")).await;
+    release_tx.send(()).unwrap();
+    raw_expect_closed(&mut old).await;
+    let state = csms.state("CP-STALE").unwrap();
+    assert!(state.boot.is_none(), "stale session wrote state: {state:?}");
+    let history = csms.history("CP-STALE").unwrap();
+    assert!(
+        history
+            .iter()
+            .all(|e| e.direction == kirby_csms_core::Direction::In),
+        "stale session wrote an outbound frame"
+    );
+    csms.shutdown().await;
+}

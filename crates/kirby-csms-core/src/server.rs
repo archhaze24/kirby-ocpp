@@ -18,9 +18,9 @@ use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue, StatusCode};
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::{WebSocketStream, accept_hdr_async};
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, WebSocketConfig};
+use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
 use crate::config::CsmsConfig;
 use crate::defaults::{default_reply, is_charge_point_action};
@@ -37,6 +37,12 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// Time one close frame may take to be written.
 const CLOSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Longest timeout of a CALL; larger ones are clamped (keeps the deadline arithmetic safe).
+const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+/// Most distinct actions counted per station; further ones are counted as `other`.
+const MAX_ACTION_KEYS: usize = 64;
+/// Bucket of `received_by_action` for actions beyond [`MAX_ACTION_KEYS`].
+const OTHER_ACTION: &str = "other";
 /// Longest text kept in a [`CsmsEvent::Malformed`] event.
 const MALFORMED_TEXT_CHARS: usize = 512;
 /// Close code for injected closes (internal error), as in the test mock.
@@ -233,6 +239,7 @@ impl CsmsHandle {
         payload: Value,
         timeout: Duration,
     ) -> Result<Frame, CsmsError> {
+        let timeout = timeout.min(MAX_CALL_TIMEOUT);
         let (reply, receiver) = oneshot::channel();
         {
             let state = self.inner.lock();
@@ -404,6 +411,12 @@ impl Inner {
         let _ = self.events.send(event);
     }
 
+    /// Whether a connection for `id` would exceed [`CsmsConfig::max_stations`].
+    fn station_limit_reached(&self, id: &str) -> bool {
+        let state = self.lock();
+        state.stations.len() >= self.config.max_stations && !state.stations.contains_key(id)
+    }
+
     fn next_message_id(&self) -> String {
         format!(
             "csms-{}",
@@ -484,17 +497,23 @@ impl Inner {
         });
     }
 
-    fn record_frame(&self, station: &str, direction: Direction, frame: &Frame) {
+    fn record_frame(&self, station: &str, session_id: u64, direction: Direction, frame: &Frame) {
         let mut state = self.lock();
         let Some(rec) = state.stations.get_mut(station) else {
             return;
         };
+        if rec.session.as_ref().map(|s| s.id) != Some(session_id) {
+            return; // A session that was replaced or forgotten must not write into the record.
+        }
         if let (Direction::In, Frame::Call { action, .. }) = (direction, frame) {
             rec.info.received_calls += 1;
-            *rec.info
-                .received_by_action
-                .entry(action.clone())
-                .or_insert(0) += 1;
+            let by_action = &mut rec.info.received_by_action;
+            let key = if by_action.contains_key(action) || by_action.len() < MAX_ACTION_KEYS {
+                action.as_str()
+            } else {
+                OTHER_ACTION
+            };
+            *by_action.entry(key.to_owned()).or_insert(0) += 1;
         }
         let cap = self.config.history_cap;
         if cap > 0 {
@@ -517,7 +536,7 @@ impl Inner {
     }
 
     /// Folds an answered inbound CALL into the station's state.
-    fn track(&self, station: &str, action: &str, request: &Value, reply: &Reply) {
+    fn track(&self, station: &str, session_id: u64, action: &str, request: &Value, reply: &Reply) {
         let Reply::Result(response) = reply else {
             return;
         };
@@ -525,6 +544,9 @@ impl Inner {
         let Some(rec) = state.stations.get_mut(station) else {
             return;
         };
+        if rec.session.as_ref().map(|s| s.id) != Some(session_id) {
+            return;
+        }
         let cap = self.config.transaction_history_cap;
         if rec.state.apply(action, request, response, Utc::now(), cap) {
             self.emit(CsmsEvent::StateChanged {
@@ -628,6 +650,10 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut target: Option<(String, Option<String>)> = None;
+    let limit = inner.config.max_message_size;
+    let ws_config = WebSocketConfig::default()
+        .max_message_size(Some(limit))
+        .max_frame_size(Some(limit));
     // `ErrorResponse` (the refusal) is large, but its type is fixed by tungstenite's `Callback`.
     #[allow(clippy::result_large_err)]
     let callback = |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
@@ -638,6 +664,9 @@ where
             .subprotocol
             .select(&offered_protocols(request))
             .map_err(refusal)?;
+        if inner.station_limit_reached(&id) {
+            return Err(unavailable("too many stations"));
+        }
         if let Some(name) = &chosen {
             let value = HeaderValue::from_str(name)
                 .map_err(|_| refusal("invalid subprotocol name in configuration"))?;
@@ -646,7 +675,11 @@ where
         target = Some((id, chosen));
         Ok(response)
     };
-    let Ok(Ok(socket)) = timeout(HANDSHAKE_TIMEOUT, accept_hdr_async(stream, callback)).await
+    let Ok(Ok(socket)) = timeout(
+        HANDSHAKE_TIMEOUT,
+        accept_hdr_async_with_config(stream, callback, Some(ws_config)),
+    )
+    .await
     else {
         return;
     };
@@ -658,15 +691,37 @@ where
     let Some(session_id) = inner.register(&station, peer, subprotocol, cmd_tx) else {
         return;
     };
+    // Ends the session in the registry even if the user's responder panics below.
+    let mut guard = EndGuard {
+        inner: Arc::clone(&inner),
+        station: station.clone(),
+        link_id: session_id,
+        reason: DisconnectReason::Closed,
+    };
     let mut session = Session {
         inner: Arc::clone(&inner),
+        link_id: session_id,
         station,
         socket,
         queue: VecDeque::new(),
         in_flight: None,
     };
-    let reason = session.run(cmd_rx).await;
-    inner.session_ended(&session.station, session_id, reason);
+    guard.reason = session.run(cmd_rx).await;
+}
+
+/// Reports the end of a session when dropped, also while unwinding from a panic.
+struct EndGuard {
+    inner: Arc<Inner>,
+    station: String,
+    link_id: u64,
+    reason: DisconnectReason,
+}
+
+impl Drop for EndGuard {
+    fn drop(&mut self) {
+        self.inner
+            .session_ended(&self.station, self.link_id, self.reason);
+    }
 }
 
 struct InFlight {
@@ -679,6 +734,7 @@ struct InFlight {
 
 struct Session<S> {
     inner: Arc<Inner>,
+    link_id: u64,
     station: String,
     socket: WebSocketStream<S>,
     queue: VecDeque<QueuedCall>,
@@ -719,6 +775,16 @@ where
                     }
                     None => Some(DisconnectReason::Closed),
                 },
+                // The caller dropped its `call()` future: free the slot, a late reply is ignored.
+                () = async {
+                    match self.in_flight.as_mut() {
+                        Some(flight) => flight.reply.closed().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    self.in_flight = None;
+                    None
+                }
                 () = async {
                     match deadline {
                         Some(at) => tokio::time::sleep_until(at).await,
@@ -752,7 +818,9 @@ where
                 id,
                 action: call.action,
                 timeout: call.timeout,
-                deadline: Instant::now() + call.timeout,
+                deadline: Instant::now()
+                    .checked_add(call.timeout)
+                    .unwrap_or_else(|| Instant::now() + MAX_CALL_TIMEOUT),
                 reply: call.reply,
             });
         }
@@ -785,7 +853,7 @@ where
             }
         };
         self.inner
-            .record_frame(&self.station, Direction::In, &frame);
+            .record_frame(&self.station, self.link_id, Direction::In, &frame);
         match frame {
             Frame::Call {
                 id,
@@ -793,7 +861,8 @@ where
                 payload,
             } => {
                 let reply = self.inner.decide(&action, &payload);
-                self.inner.track(&self.station, &action, &payload, &reply);
+                self.inner
+                    .track(&self.station, self.link_id, &action, &payload, &reply);
                 match reply {
                     Reply::Result(payload) => self.send(&Frame::call_result(id, payload)).await,
                     Reply::Error(code, description) => {
@@ -824,14 +893,12 @@ where
     /// Records and writes a frame. `Some` means the socket is gone.
     async fn send(&mut self, frame: &Frame) -> Option<DisconnectReason> {
         self.inner
-            .record_frame(&self.station, Direction::Out, frame);
-        match self
-            .socket
-            .send(Message::text(frame.to_json_string()))
-            .await
-        {
-            Ok(()) => None,
-            Err(_) => Some(DisconnectReason::Closed),
+            .record_frame(&self.station, self.link_id, Direction::Out, frame);
+        let write = self.socket.send(Message::text(frame.to_json_string()));
+        match timeout(self.inner.config.write_timeout, write).await {
+            Ok(Ok(())) => None,
+            // Failed, or the peer stopped reading for too long.
+            Ok(Err(_)) | Err(_) => Some(DisconnectReason::Closed),
         }
     }
 
@@ -867,6 +934,13 @@ fn offered_protocols(request: &Request) -> Vec<String> {
         .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+/// An HTTP 503 refusal.
+fn unavailable(reason: &str) -> ErrorResponse {
+    let mut response = ErrorResponse::new(Some(reason.to_owned()));
+    *response.status_mut() = StatusCode::SERVICE_UNAVAILABLE;
+    response
 }
 
 /// An HTTP 400 refusal.
