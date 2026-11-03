@@ -131,7 +131,7 @@ fn browser(app: &mut App, mut b: Browser, key: KeyEvent, fx: &mut Vec<Effect>) {
         }
         KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => b.switch_page(1),
         KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => b.switch_page(-1),
-        KeyCode::Char(d @ '1'..='3') => {
+        KeyCode::Char(d @ '1'..='4') => {
             while b.page.index() != usize::from(d as u8 - b'1') {
                 b.switch_page(1);
             }

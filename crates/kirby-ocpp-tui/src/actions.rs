@@ -69,6 +69,9 @@ pub enum ActionId {
     BrowseConfig,
     BrowseLocalList,
     BrowseProfiles,
+    BrowseCertificates,
+    RequestCertificate,
+    SecurityEvent,
     PlugToggle,
     CycleStatus,
     SetStatus,
@@ -206,6 +209,27 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             'P',
             "Charging profiles...",
             "Browse installed charging profiles; install one from JSON, delete one or clear all.",
+        ),
+        def(
+            A::BrowseCertificates,
+            T::Station,
+            'Y',
+            "Certificates...",
+            "Browse the installed certificates (read-only): roots, manufacturer roots and the station certificate.",
+        ),
+        def(
+            A::RequestCertificate,
+            T::Station,
+            'C',
+            "Request certificate",
+            "Create a key pair and a CSR and send SignCertificate (Security Whitepaper); the CSMS answers with CertificateSigned later.",
+        ),
+        def(
+            A::SecurityEvent,
+            T::Station,
+            'S',
+            "Security event...",
+            "Report a security event (SecurityEventNotification): pick a type and an optional techInfo.",
         ),
         def(
             A::PlugToggle,
@@ -431,6 +455,7 @@ pub fn disabled_reason(id: ActionId, cx: &Context<'_>) -> Option<String> {
         A::Boot
         | A::Heartbeat
         | A::DataTransfer
+        | A::RequestCertificate
         | A::VendorPing
         | A::RawCall
         | A::DiagStatus

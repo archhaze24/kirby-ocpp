@@ -35,6 +35,7 @@ pub fn draw(f: &mut Frame<'_>, app: &App, b: &Browser, area: Rect) {
                 Page::Config => snap.config.len(),
                 Page::LocalList => snap.local_list.total,
                 Page::Profiles => snap.charging_profiles.len(),
+                Page::Certificates => snap.certificates.len(),
             };
             let on = *p == b.page;
             let style = if on {
@@ -135,6 +136,7 @@ fn all_count(b: &Browser, app: &App) -> usize {
         Page::Config => app.snapshot.config.len(),
         Page::LocalList => app.snapshot.local_list.entries.len(),
         Page::Profiles => app.snapshot.charging_profiles.len(),
+        Page::Certificates => app.snapshot.certificates.len(),
     }
 }
 
@@ -158,6 +160,16 @@ fn summary(b: &Browser, app: &App) -> String {
             format!("version {}, {} entries{shown}", l.version, l.total)
         }
         Page::Profiles => format!("{} installed", snap.charging_profiles.len()),
+        Page::Certificates => format!(
+            "SecurityProfile {}, {} certificate(s){}",
+            snap.security_profile,
+            snap.certificates.len(),
+            if snap.certificate_request_pending {
+                ", a certificate request is pending"
+            } else {
+                ""
+            }
+        ),
     }
 }
 
@@ -190,6 +202,21 @@ fn selected_detail(b: &Browser, app: &App) -> Vec<String> {
                         .map_or_else(|| "never".to_owned(), |d| d.to_rfc3339()),
                     e.parent_id_tag.as_deref().unwrap_or("-")
                 )]
+            })
+            .unwrap_or_default(),
+        Page::Certificates => snap
+            .certificates
+            .get(row.index)
+            .map(|c| {
+                vec![
+                    format!("{}: {}", c.kind, c.subject),
+                    format!(
+                        "serial {}, expires {}, SHA-256 key hash {}",
+                        c.serial_number,
+                        c.not_after.to_rfc3339(),
+                        c.hash.issuer_key_hash
+                    ),
+                ]
             })
             .unwrap_or_default(),
         Page::Profiles => snap

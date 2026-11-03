@@ -672,3 +672,84 @@ async fn extended_trigger_message_makes_the_station_ask_for_a_certificate() {
     .await;
     csms.shutdown().await;
 }
+
+// ---- profile 3 end to end through the station --------------------------------------------
+
+/// The station gets its client certificate through the real `SignCertificate` /
+/// `CertificateSigned` flow on a TLS server without client authentication, switches to
+/// `SecurityProfile` 3 and is then accepted by a profile 3 server (same address) that only
+/// admits certificates of the client CA whose Common Name is the station id.
+#[tokio::test]
+async fn station_obtains_its_certificate_and_connects_with_profile_three() {
+    let pki = Pki::new();
+    let id = "CP-E2E";
+
+    // Step 1: server-authenticated TLS (profile 0), no client certificate needed.
+    let first = start(|c| c.tls = Some(tls_config(&pki.server_ca, None))).await;
+    let addr = first.local_addr();
+    let mut events = first.subscribe();
+    let tls = TlsConfig {
+        ca_file: Some(write(pki.dir.path(), "ca.pem", &pki.server_ca.pem)),
+        ..TlsConfig::default()
+    };
+    let cp = Cp::spawn(&first, id, tls, None, None).await;
+    cp.handle.connect().await.unwrap();
+    cp.wait_accepted().await;
+    // Not every CSMS reply is scripted by default: the engine answers SignCertificate itself.
+    cp.handle.send(Command::RequestCertificate).await.unwrap();
+    let csr = wait_state(&first, &mut events, id, |s| s.certificate_request.is_some())
+        .await
+        .certificate_request
+        .unwrap()
+        .csr;
+
+    // Step 2: the "CA" signs the CSR; the leaf keeps the CSR's subject (CN = station id).
+    let leaf = rcgen::CertificateSigningRequestParams::from_pem(&csr)
+        .unwrap()
+        .signed_by(&pki.client_ca.issuer)
+        .unwrap();
+    let chain = format!("{}\n{}", leaf.pem(), pki.client_ca.pem);
+    let signed = first.certificate_signed(id, chain).await.unwrap();
+    assert_eq!(format!("{:?}", signed.status), "Accepted");
+
+    // Step 3: raise the profile (needs wss:// and the stored certificate) and move to a
+    // profile 3 server at the same address.
+    cp.handle
+        .send(Command::SetConfiguration {
+            key: "SecurityProfile".to_owned(),
+            value: "3".to_owned(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(cp.handle.snapshot().security_profile, 3);
+    first.shutdown().await;
+    // Wait until the station noticed the loss, or `connect` could race with the old socket.
+    let mut link = cp.handle.watch_snapshot();
+    timeout(
+        STEP,
+        link.wait_for(|s| s.connection == kirby_ocpp_core::ws::ConnectionState::Disconnected),
+    )
+    .await
+    .expect("station sees the disconnect")
+    .expect("station alive");
+    let mut tries = 0;
+    let second = loop {
+        let tls = tls_config(&pki.server_ca, Some(&pki.client_ca));
+        let mut config = CsmsConfig::new(addr);
+        config.security.profile = SecurityProfile::MutualTls;
+        config.tls = Some(tls);
+        match CsmsServer::start(config).await {
+            Ok(handle) => break handle,
+            Err(_) if tries < 50 => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!("cannot rebind {addr}: {error}"),
+        }
+    };
+    let mut events = second.subscribe();
+    cp.handle.connect().await.unwrap();
+    cp.wait_accepted().await;
+    wait_connected(&mut events, id).await;
+    second.shutdown().await;
+}

@@ -376,6 +376,14 @@ fn to_command(action: &Action) -> Option<Command> {
             message_id,
             data,
         },
+        Action::RequestCertificate {} => Command::RequestCertificate,
+        Action::SecurityEvent {
+            event_type,
+            tech_info,
+        } => Command::SendSecurityEvent {
+            event_type,
+            tech_info,
+        },
         Action::SetRule { rule } => Command::SetResponseRule { rule: rule.clone() },
         Action::ClearRules { call } => Command::ClearResponseRules {
             action: call.clone(),

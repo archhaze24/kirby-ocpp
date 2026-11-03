@@ -157,6 +157,44 @@ fn station_lines(app: &App) -> Vec<Line<'static>> {
             format!("{} (next: {:?})", s.firmware_status, s.firmware_outcome),
         ),
         kv(
+            "security",
+            format!(
+                "profile {}, {} cert(s)",
+                s.security_profile,
+                s.certificates.len()
+            ),
+        ),
+        kv(
+            "sec. events",
+            format!(
+                "{} queued{}",
+                s.pending_security_events,
+                if s.certificate_request_pending {
+                    ", CSR pending"
+                } else {
+                    ""
+                }
+            ),
+        ),
+        kv(
+            "log upload",
+            format!(
+                "{}{}",
+                s.log_status,
+                s.log_request_id
+                    .map_or_else(String::new, |id| format!(" (request {id})"))
+            ),
+        ),
+        kv(
+            "signed firmware",
+            format!(
+                "{}{}",
+                s.signed_firmware_status,
+                s.signed_firmware_request_id
+                    .map_or_else(String::new, |id| format!(" (request {id})"))
+            ),
+        ),
+        kv(
             "queued",
             format!("{} offline message(s)", s.pending_offline_messages),
         ),

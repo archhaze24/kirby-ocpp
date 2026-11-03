@@ -760,3 +760,52 @@ fn browser_keys_do_not_leak_to_the_station_tab() {
     let Mode::Browser(b) = &a.mode else { panic!() };
     assert!(!b.filtering && b.filter.is_empty());
 }
+
+// ---- security (Security Whitepaper) ---------------------------------------
+
+#[test]
+fn request_certificate_needs_a_connection_then_sends_the_command() {
+    let mut a = app();
+    assert!(press(&mut a, "C").is_empty());
+    connected(&mut a);
+    let fx = press(&mut a, "C");
+    assert!(matches!(sent(&fx)[..], [Command::RequestCertificate]));
+}
+
+#[test]
+fn security_event_form_sends_the_picked_type_and_tech_info() {
+    let mut a = app();
+    press(&mut a, "S");
+    assert!(matches!(&a.mode, Mode::Form(f) if f.kind == FormKind::SecurityEvent));
+    // The select starts at the first type; `T` jumps to the first type starting with it.
+    press(&mut a, "T");
+    code(&mut a, KeyCode::Tab);
+    press(&mut a, "lid opened");
+    let fx = code(&mut a, KeyCode::Enter);
+    assert!(matches!(
+        sent(&fx)[..],
+        [Command::SendSecurityEvent { event_type, tech_info: Some(info) }]
+            if event_type.starts_with('T') && info == "lid opened"
+    ));
+    // Without techInfo the field is None.
+    press(&mut a, "S");
+    let fx = code(&mut a, KeyCode::Enter);
+    assert!(matches!(
+        sent(&fx)[..],
+        [Command::SendSecurityEvent {
+            tech_info: None,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn certificates_browser_opens_on_y_and_the_fourth_page() {
+    let mut a = app();
+    press(&mut a, "Y");
+    assert!(matches!(&a.mode, Mode::Browser(b) if b.page == crate::browser::Page::Certificates));
+    press(&mut a, "1");
+    assert!(matches!(&a.mode, Mode::Browser(b) if b.page == crate::browser::Page::Config));
+    press(&mut a, "4");
+    assert!(matches!(&a.mode, Mode::Browser(b) if b.page == crate::browser::Page::Certificates));
+}

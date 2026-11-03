@@ -311,6 +311,15 @@ impl App {
             ActionId::RulesClear => send(fx, Command::ClearResponseRules { action: None }),
             ActionId::BrowseConfig => self.mode = Mode::Browser(Browser::new(Page::Config)),
             ActionId::BrowseLocalList => self.mode = Mode::Browser(Browser::new(Page::LocalList)),
+            ActionId::RequestCertificate => fx.push(Effect::Send {
+                label: "request certificate".to_owned(),
+                command: Command::RequestCertificate,
+                show_response: true,
+            }),
+            ActionId::SecurityEvent => self.mode = Mode::Form(Form::security_event()),
+            ActionId::BrowseCertificates => {
+                self.mode = Mode::Browser(Browser::new(Page::Certificates));
+            }
             ActionId::BrowseProfiles => self.mode = Mode::Browser(Browser::new(Page::Profiles)),
             ActionId::PlugToggle => {
                 if snap_conn.is_some_and(|s| s.ev_connected) {
@@ -494,6 +503,17 @@ impl App {
                     show_response: true,
                 });
             }
+            Submitted::SecurityEvent {
+                event_type,
+                tech_info,
+            } => send(
+                fx,
+                Command::SendSecurityEvent {
+                    event_type,
+                    tech_info,
+                },
+                false,
+            ),
             Submitted::Rule(rule) => {
                 let label = format!("rule {rule}");
                 fx.push(Effect::Send {

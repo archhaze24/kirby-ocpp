@@ -354,3 +354,66 @@ fn browser_survives_tiny_terminals_and_empty_data() {
     keys(&mut a, "L");
     assert!(render(&a, 100, 20).contains("(nothing here yet)"));
 }
+
+fn with_certificates(a: &mut App) {
+    use kirby_ocpp_core::ocpp::messages::{CertificateHashData, HashAlgorithm};
+    use kirby_ocpp_core::station::certificates::CertificateSummary;
+    a.snapshot.security_profile = 2;
+    a.snapshot.certificate_request_pending = true;
+    a.snapshot.pending_security_events = 3;
+    a.snapshot.log_request_id = Some(41);
+    a.snapshot.signed_firmware_request_id = Some(42);
+    a.snapshot.certificates = vec![CertificateSummary {
+        kind: "CentralSystemRootCertificate".into(),
+        subject: "CN=Test Root".into(),
+        serial_number: "ab12".into(),
+        not_after: chrono::Utc.with_ymd_and_hms(2031, 5, 6, 0, 0, 0).unwrap(),
+        hash: CertificateHashData {
+            hash_algorithm: HashAlgorithm::Sha256,
+            issuer_name_hash: "n".into(),
+            issuer_key_hash: "k".into(),
+            serial_number: "ab12".into(),
+        },
+    }];
+}
+
+#[test]
+fn station_pane_shows_the_security_state() {
+    let mut a = app();
+    with_certificates(&mut a);
+    let text = render(&a, 130, 40);
+    assert!(text.contains("profile 2, 1 cert(s)"), "{text}");
+    assert!(text.contains("3 queued, CSR pending"), "{text}");
+    assert!(
+        text.contains("(request 41)") && text.contains("(request 42)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn certificates_page_lists_the_store() {
+    let mut a = app();
+    with_certificates(&mut a);
+    keys(&mut a, "Y");
+    let text = render(&a, 120, 40);
+    assert!(text.contains("4 Certificates (1)"), "{text}");
+    assert!(text.contains("CentralSystemRootCertificate"), "{text}");
+    assert!(
+        text.contains("CN=Test Root") && text.contains("2031-05-06"),
+        "{text}"
+    );
+}
+
+#[test]
+fn security_views_survive_narrow_terminals() {
+    for (w, h) in [(20u16, 8u16), (40, 12), (60, 20), (80, 24)] {
+        let mut a = app();
+        with_certificates(&mut a);
+        let _ = render(&a, w, h);
+        keys(&mut a, "Y");
+        let _ = render(&a, w, h);
+        key(&mut a, KeyCode::Esc);
+        keys(&mut a, "S");
+        let _ = render(&a, w, h);
+    }
+}

@@ -287,3 +287,46 @@ call = "Reset"
         .unwrap();
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn security_steps_send_a_certificate_request_and_an_event() {
+    let rig = booted_rig().await;
+    rig.csms.respond("SignCertificate", |_| {
+        kirby_ocpp_testkit::Reply::Result(serde_json::json!({"status": "Accepted"}))
+    });
+    rig.csms.respond("SecurityEventNotification", |_| {
+        kirby_ocpp_testkit::Reply::Result(serde_json::json!({}))
+    });
+    let s = scenario(
+        r#"
+[[steps]]
+action = "request_certificate"
+[[steps]]
+action = "security_event"
+event_type = "TamperDetectionActivated"
+tech_info = "lid opened"
+"#,
+    );
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    assert!(report.passed, "{report:#?}");
+    let csr = rig
+        .csms
+        .wait_for_call("SignCertificate", station_support::STEP)
+        .await
+        .unwrap();
+    assert!(
+        csr["csr"]
+            .as_str()
+            .is_some_and(|c| c.contains("CERTIFICATE REQUEST"))
+    );
+    rig.csms
+        .wait_for_call_after(
+            0,
+            "SecurityEventNotification",
+            |p| p["type"] == "TamperDetectionActivated" && p["techInfo"] == "lid opened",
+            station_support::STEP,
+        )
+        .await
+        .unwrap();
+    rig.shutdown().await;
+}

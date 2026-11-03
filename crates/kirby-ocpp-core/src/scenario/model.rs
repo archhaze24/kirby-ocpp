@@ -9,6 +9,7 @@ use super::ScenarioError;
 use crate::ids::{ConnectorId, IdTag};
 use crate::ocpp::types::{ChargePointErrorCode, ConnectorStatus, RegistrationStatus, StopReason};
 use crate::station::response_rules::canonical_action;
+use crate::station::security::canonical_event_type;
 use crate::station::{Direction, ResponseRule, Snapshot, TransactionState};
 use crate::ws::ConnectionState;
 
@@ -165,6 +166,15 @@ pub enum Action {
         #[serde(with = "rule_text")]
         rule: ResponseRule,
     },
+    /// Create a key pair and a CSR and send `SignCertificate` (Security Whitepaper).
+    RequestCertificate {},
+    /// Report a security event (`SecurityEventNotification`); `event_type` is one of the
+    /// whitepaper's event names (case-insensitive), e.g. `TamperDetectionActivated`.
+    SecurityEvent {
+        event_type: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tech_info: Option<String>,
+    },
     /// Remove the response rules of the command `call`, or all of them when omitted.
     ClearRules {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -259,6 +269,8 @@ impl Action {
             Self::DataTransfer { .. } => "data_transfer",
             Self::SetRule { .. } => "set_rule",
             Self::ClearRules { .. } => "clear_rules",
+            Self::RequestCertificate {} => "request_certificate",
+            Self::SecurityEvent { .. } => "security_event",
         }
     }
 }
@@ -355,6 +367,11 @@ impl Scenario {
                     if call.is_empty() =>
                 {
                     return bad("`call` must not be empty");
+                }
+                Action::SecurityEvent { event_type, .. }
+                    if canonical_event_type(event_type).is_none() =>
+                {
+                    return bad(&format!("unknown security event type `{event_type}`"));
                 }
                 Action::ClearRules { call: Some(call) } => {
                     if let Err(error) = canonical_action(call) {
@@ -609,6 +626,23 @@ call = "Heartbeat"
             let e = err(&format!("{HEAD}[[steps]]\n{step}\n"));
             assert!(e.contains("step 1"), "{e}");
         }
+    }
+
+    #[test]
+    fn security_steps_parse_and_validate_event_types() {
+        let s = Scenario::from_toml(&format!(
+            "{HEAD}[[steps]]\naction = \"request_certificate\"\n[[steps]]\naction = \"security_event\"\nevent_type = \"tamperdetectionactivated\"\ntech_info = \"lid\"\n"
+        ))
+        .unwrap();
+        assert!(matches!(s.steps[0].action, Action::RequestCertificate {}));
+        assert!(matches!(
+            &s.steps[1].action,
+            Action::SecurityEvent { tech_info: Some(t), .. } if t == "lid"
+        ));
+        let e = err(&format!(
+            "{HEAD}[[steps]]\naction = \"security_event\"\nevent_type = \"Nope\"\n"
+        ));
+        assert!(e.contains("step 1") && e.contains("Nope"), "{e}");
     }
 
     #[test]

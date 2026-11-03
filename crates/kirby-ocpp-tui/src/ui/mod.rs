@@ -302,6 +302,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                         ("c", "clear"),
                     ]
                 }
+                crate::browser::Page::Certificates => Vec::new(),
                 crate::browser::Page::Profiles => vec![
                     ("i", "install"),
                     ("e", "edit"),

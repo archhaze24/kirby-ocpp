@@ -14,6 +14,7 @@ use kirby_ocpp_core::ocpp::types::{
 };
 use kirby_ocpp_core::station::config_registry::{ConfigRegistry, ConfigSnapshot};
 use kirby_ocpp_core::station::response_rules::canonical_action;
+use kirby_ocpp_core::station::security::SECURITY_EVENT_TYPES;
 use kirby_ocpp_core::station::{
     ConfigItem, DiagnosticsOutcome, FirmwareOutcome, LocalListEntry, ProfileSummary, ResponseRule,
     Snapshot,
@@ -107,6 +108,7 @@ pub enum FormKind {
     ConfigValue,
     LocalEntry,
     Profile,
+    SecurityEvent,
 }
 
 /// What a valid form produced.
@@ -136,6 +138,10 @@ pub enum Submitted {
     Rule(ResponseRule),
     /// `Action=off`: remove the rule of this (canonical) action.
     RuleOff(String),
+    SecurityEvent {
+        event_type: String,
+        tech_info: Option<String>,
+    },
     Search(String),
     Export(String),
     LoadScenario(String),
@@ -230,6 +236,26 @@ impl Form {
                 Field::new("vendorId", FieldKind::Text, vendor),
                 Field::new("messageId (optional)", FieldKind::OptionalText, ""),
                 Field::new("data (optional)", FieldKind::OptionalText, ""),
+            ],
+            1,
+        )
+    }
+
+    pub fn security_event() -> Self {
+        let options = SECURITY_EVENT_TYPES
+            .iter()
+            .map(|t| (*t).to_owned())
+            .collect();
+        Self::build(
+            FormKind::SecurityEvent,
+            "Security event",
+            vec![
+                Field::new("event type", FieldKind::Select, "").with_options(options),
+                Field::new(
+                    "techInfo (optional, at most 255 characters)",
+                    FieldKind::OptionalText,
+                    "",
+                ),
             ],
             1,
         )
@@ -600,6 +626,10 @@ impl Form {
                         .map(|d| d.with_timezone(&chrono::Utc)),
                     parent_id_tag: opt(3).and_then(|t| IdTag::new(t).ok()),
                 },
+            },
+            FormKind::SecurityEvent => Submitted::SecurityEvent {
+                event_type: self.fields[0].options.get(self.fields[0].option)?.clone(),
+                tech_info: opt(1),
             },
             FormKind::Profile => Submitted::Profile {
                 connector: ConnectorId::new(text(0).parse().ok()?),

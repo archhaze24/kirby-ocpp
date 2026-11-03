@@ -13,16 +13,23 @@ pub enum Page {
     Config,
     LocalList,
     Profiles,
+    Certificates,
 }
 
 impl Page {
-    pub const ALL: [Self; 3] = [Self::Config, Self::LocalList, Self::Profiles];
+    pub const ALL: [Self; 4] = [
+        Self::Config,
+        Self::LocalList,
+        Self::Profiles,
+        Self::Certificates,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Self::Config => "Config keys",
             Self::LocalList => "Local auth list",
             Self::Profiles => "Charging profiles",
+            Self::Certificates => "Certificates",
         }
     }
 
@@ -52,7 +59,7 @@ pub struct Browser {
     /// Typed characters go to the filter.
     pub filtering: bool,
     /// Selected row per page (an index into the *filtered* rows).
-    pub sel: [usize; 3],
+    pub sel: [usize; 4],
 }
 
 impl Browser {
@@ -61,7 +68,7 @@ impl Browser {
             page,
             filter: TextInput::default(),
             filtering: false,
-            sel: [0; 3],
+            sel: [0; 4],
         }
     }
 
@@ -156,6 +163,21 @@ fn all_rows(page: Page, snap: &Snapshot) -> Vec<Row> {
                     e.parent_id_tag
                         .as_deref()
                         .map_or_else(|| "-".to_owned(), sanitize),
+                ),
+                dim: false,
+            })
+            .collect(),
+        Page::Certificates => snap
+            .certificates
+            .iter()
+            .enumerate()
+            .map(|(index, c)| Row {
+                index,
+                text: format!(
+                    "{:<28} {}  expires {}",
+                    sanitize(&c.kind),
+                    sanitize(&c.subject),
+                    c.not_after.format("%Y-%m-%d")
                 ),
                 dim: false,
             })
