@@ -7,6 +7,10 @@ use serde_json::{Value, json};
 use crate::fault::Reply;
 
 /// The OCPP 1.6 actions a charge point may send to a central system.
+///
+/// The Security Whitepaper actions (`SignCertificate`, `LogStatusNotification`,
+/// `SecurityEventNotification`, `SignedFirmwareStatusNotification`) are deliberately not
+/// listed: the engine has no behaviour for them yet, so it answers `NotSupported` (step S3).
 pub const CHARGE_POINT_ACTIONS: &[&str] = &[
     "Authorize",
     "BootNotification",

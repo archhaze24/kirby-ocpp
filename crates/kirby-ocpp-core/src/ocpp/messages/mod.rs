@@ -1,6 +1,6 @@
 //! Typed request/response payloads, one marker type per OCPP 1.6 action.
 //!
-//! All 28 actions are here, grouped by profile (the conventions are described in
+//! All 28 OCPP 1.6 actions plus the 11 Security Whitepaper extensions are here, grouped by profile (the conventions are described in
 //! [`crate::ocpp::action`]):
 //!
 //! | module | actions |
@@ -12,6 +12,7 @@
 //! | `reservation` | `ReserveNow`, `CancelReservation` |
 //! | `smart_charging` | `SetChargingProfile`, `ClearChargingProfile`, `GetCompositeSchedule` |
 //! | `remote_trigger` | `TriggerMessage` |
+//! | `security` | `SignCertificate`, `CertificateSigned`, `InstallCertificate`, `DeleteCertificate`, `GetInstalledCertificateIds`, `GetLog`, `LogStatusNotification`, `SecurityEventNotification`, `ExtendedTriggerMessage`, `SignedUpdateFirmware`, `SignedFirmwareStatusNotification` |
 //!
 //! Shared sub-structures (`IdTagInfo`, `MeterValue`, `ChargingProfile`, ...) live in
 //! `common`; the [`registry`] lists every action with its direction.
@@ -62,6 +63,7 @@ mod local_auth_list;
 pub mod registry;
 mod remote_trigger;
 mod reservation;
+mod security;
 mod smart_charging;
 
 pub use common::{
@@ -102,6 +104,24 @@ pub use remote_trigger::{
 pub use reservation::{
     CancelReservation, CancelReservationRequest, CancelReservationResponse,
     CancelReservationStatus, ReservationStatus, ReserveNow, ReserveNowRequest, ReserveNowResponse,
+};
+pub use security::{
+    CertificateHashData, CertificateSigned, CertificateSignedRequest, CertificateSignedResponse,
+    CertificateSignedStatus, CertificateUse, DeleteCertificate, DeleteCertificateRequest,
+    DeleteCertificateResponse, DeleteCertificateStatus, ExtendedMessageTrigger,
+    ExtendedTriggerMessage, ExtendedTriggerMessageRequest, ExtendedTriggerMessageResponse,
+    GenericStatus, GetInstalledCertificateIds, GetInstalledCertificateIdsRequest,
+    GetInstalledCertificateIdsResponse, GetInstalledCertificateStatus, GetLog, GetLogRequest,
+    GetLogResponse, HashAlgorithm, InstallCertificate, InstallCertificateRequest,
+    InstallCertificateResponse, InstallCertificateStatus, LogParameters, LogStatus,
+    LogStatusNotification, LogStatusNotificationRequest, LogStatusNotificationResponse, LogType,
+    MAX_CERTIFICATE_CHAIN_LEN, MAX_CERTIFICATE_LEN, MAX_FIRMWARE_SIGNATURE_LEN, MAX_LOCATION_LEN,
+    MAX_SECURITY_EVENT_TECH_INFO_LEN, MAX_SECURITY_EVENT_TYPE_LEN, SecurityEventNotification,
+    SecurityEventNotificationRequest, SecurityEventNotificationResponse, SignCertificate,
+    SignCertificateRequest, SignCertificateResponse, SignedFirmware, SignedFirmwareStatus,
+    SignedFirmwareStatusNotification, SignedFirmwareStatusNotificationRequest,
+    SignedFirmwareStatusNotificationResponse, SignedUpdateFirmware, SignedUpdateFirmwareRequest,
+    SignedUpdateFirmwareResponse, UpdateFirmwareStatus, UploadLogStatus,
 };
 pub use smart_charging::{
     ChargingProfileStatus, ClearChargingProfile, ClearChargingProfileRequest,

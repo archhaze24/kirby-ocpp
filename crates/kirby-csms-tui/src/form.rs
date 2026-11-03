@@ -183,7 +183,9 @@ where
     items.into_iter().map(|s| s.as_ref().to_owned()).collect()
 }
 
-/// The actions a central system may send (19, `DataTransfer` included).
+/// The actions a central system may send (`DataTransfer` included). That includes the 7
+/// Security Whitepaper actions, which are reachable here through the raw CALL form only; they
+/// get typed forms with the CSMS security step.
 pub fn csms_actions() -> Vec<String> {
     ACTIONS
         .iter()
@@ -959,7 +961,7 @@ mod tests {
     #[test]
     fn raw_payload_is_checked_against_the_chosen_action() {
         let mut f = Form::raw("CP-1", Some("Reset"));
-        assert_eq!(f.fields[0].options.len(), 19);
+        assert_eq!(f.fields[0].options.len(), 26);
         assert!(f.fields[1].error.is_some(), "{{}} lacks the type");
         f.focus = 1;
         clear(&mut f);

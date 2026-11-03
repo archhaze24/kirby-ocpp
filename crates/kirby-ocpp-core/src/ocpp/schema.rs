@@ -1,6 +1,6 @@
 //! JSON-schema validation of OCPP payloads.
 //!
-//! The bundled OCPP 1.6J schemas (draft-04, 28 actions x request/response) are
+//! The bundled OCPP 1.6J schemas (28 core actions + 11 Security Whitepaper actions, x request/response; the core ones are draft-04, the security ones draft-06 but only use keywords draft-04 shares) are
 //! the source of truth for payload validity. Validation applies to **both
 //! directions**: requests we send, requests we receive, responses we receive and
 //! the replies we send ourselves.
@@ -8,7 +8,7 @@
 //! The schemas live in `crates/kirby-ocpp-core/schemas/` and are embedded with
 //! `include_str!` (no runtime file lookup). [`SchemaRegistry::new`] compiles each
 //! of them once with the `jsonschema` crate forced to Draft 4. Before compiling,
-//! the root `$schema` and `id` keys are removed (as the TS validator does): the
+//! the root `$schema`, `id` and `$id` keys are removed (as the TS validator does): the
 //! official files carry `"id": "urn:OCPP:1.6:..."`, which Draft 4 would treat as
 //! the base URI of the document. Only the **root** keys are stripped, so a
 //! property that is literally named `id` (`ClearChargingProfile`) is untouched.
@@ -254,6 +254,18 @@ const EMBEDDED: &[(&str, &str, &str)] = embedded_schemas![
     "TriggerMessage",
     "UnlockConnector",
     "UpdateFirmware",
+    // Security Whitepaper edition 3 (see schemas/README.md).
+    "CertificateSigned",
+    "DeleteCertificate",
+    "ExtendedTriggerMessage",
+    "GetInstalledCertificateIds",
+    "GetLog",
+    "InstallCertificate",
+    "LogStatusNotification",
+    "SecurityEventNotification",
+    "SignCertificate",
+    "SignedFirmwareStatusNotification",
+    "SignedUpdateFirmware",
 ];
 
 #[derive(Debug)]
@@ -293,6 +305,7 @@ fn compile(
     if let Some(root) = schema.as_object_mut() {
         root.remove("$schema");
         root.remove("id");
+        root.remove("$id");
     }
     jsonschema::draft4::options()
         .should_validate_formats(true)
@@ -318,12 +331,12 @@ impl SchemaRegistry {
         Ok(Self { actions })
     }
 
-    /// `true` if `action` is one of the 28 OCPP 1.6J actions.
+    /// `true` if `action` is one of the 39 known actions (28 core + 11 security extensions).
     pub fn knows_action(&self, action: &str) -> bool {
         self.actions.contains_key(action)
     }
 
-    /// The 28 action names, in alphabetical order.
+    /// The 39 action names: the 28 core ones in alphabetical order, then the 11 security ones.
     pub fn action_names(&self) -> impl Iterator<Item = &'static str> {
         EMBEDDED.iter().map(|&(name, _, _)| name)
     }
@@ -477,9 +490,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_knows_exactly_the_28_actions() {
+    fn registry_knows_exactly_the_39_actions() {
         let registry = registry();
-        assert_eq!(registry.action_names().count(), 28);
+        assert_eq!(registry.action_names().count(), 39);
         for name in registry.action_names() {
             assert!(registry.knows_action(name), "{name}");
             for kind in [PayloadKind::Request, PayloadKind::Response] {

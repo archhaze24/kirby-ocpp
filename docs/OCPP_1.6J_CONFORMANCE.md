@@ -1,6 +1,6 @@
 # OCPP 1.6J conformance notes
 
-Coverage of `kirby-ocpp` against OCPP 1.6J. All 28 actions have schemas bundled in `crates/kirby-ocpp-core/schemas` (official Open Charge Alliance files, unmodified). The station is an emulator for testing a CSMS, not a certified charge point; it is not OCA-certified and deliberately simulates hardware (no real metering, firmware or file transfer).
+Coverage of `kirby-ocpp` against OCPP 1.6J. All 28 actions have schemas bundled in `crates/kirby-ocpp-core/schemas` (official Open Charge Alliance files, unmodified); the 11 actions of the OCPP 1.6 Security Whitepaper (edition 3) have typed messages and bundled schemas too (see Known limits). The station is an emulator for testing a CSMS, not a certified charge point; it is not OCA-certified and deliberately simulates hardware (no real metering, firmware or file transfer).
 
 Legend: **full** = implemented as specified for emulator purposes; **partial** = implemented for common cases, see notes; **simulated** = the state machine and messages are real, the underlying action (upload, download, power flow) is not.
 
@@ -74,7 +74,8 @@ Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`,
 
 ## Known limits
 
-- No Security Whitepaper extensions, no OCPP 2.x, no JSON-over-SOAP; one WebSocket connection, subprotocol `ocpp1.6` by default.
+- Security Whitepaper (edition 3) extensions: wire layer only. The 11 messages (`SignCertificate`, `CertificateSigned`, `InstallCertificate`, `DeleteCertificate`, `GetInstalledCertificateIds`, `GetLog`, `LogStatusNotification`, `SecurityEventNotification`, `ExtendedTriggerMessage`, `SignedUpdateFirmware`, `SignedFirmwareStatusNotification`) have typed structs and bundled schemas and are schema-validated, but there is no behaviour yet: the station answers the 7 CSMS-initiated ones with CALLERROR `NotSupported`, the emulator's CSMS side does not act on the 4 charge-point-initiated ones, and the security profiles are limited to what the ws layer already does (TLS, mTLS, Basic Auth). Behaviour is planned.
+- No OCPP 2.x, no JSON-over-SOAP; one WebSocket connection, subprotocol `ocpp1.6` by default.
 - Meter, power, SoC and temperature values are simulated.
 - Diagnostics and firmware flows emit the right status sequences but transfer nothing.
 - The simulated meter is deterministic: temperature and SoC are decorative functions of the energy.

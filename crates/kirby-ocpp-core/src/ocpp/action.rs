@@ -5,11 +5,12 @@
 //! `HeartbeatResponse` and a handler for an incoming `Reset` gets a
 //! `Responder<Reset>` that only accepts a `ResetResponse`.
 //!
-//! # How the 28 message structs are defined (`ocpp/messages/`)
+//! # How the message structs are defined (`ocpp/messages/`)
 //!
 //! OCPP 1.6 has 28 distinct actions: 10 initiated by the charge point, 19 by
-//! the central system, and `DataTransfer` which goes both ways (the list with
-//! directions is `messages::registry::ACTIONS`). The `messages` module groups
+//! the central system, and `DataTransfer` which goes both ways; the Security
+//! Whitepaper adds 11 more (4 + 7). The list with directions is
+//! `messages::registry::ACTIONS`. The `messages` module groups
 //! them by profile; for each action `Foo` it defines:
 //!
 //! * `pub struct FooRequest { .. }` and `pub struct FooResponse { .. }`,

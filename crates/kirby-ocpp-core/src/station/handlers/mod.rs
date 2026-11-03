@@ -131,11 +131,20 @@ impl StationActor {
             }
             Reset::NAME => self.invoke::<Reset>(payload, reply, remote::reset),
             other => {
-                self.log(LogLevel::Warn, format!("{other} is not an inbound action"));
-                let _ = reply.reject(
-                    ErrorCode::NotImplemented,
-                    format!("{other} is not implemented"),
-                );
+                // Security Whitepaper actions (GetLog, InstallCertificate, ...) pass the schema
+                // check but have no behaviour yet: refuse them with exactly one CALLERROR.
+                let (code, text) = if crate::ocpp::messages::registry::find(other)
+                    .is_some_and(|info| info.direction.central_system_may_send())
+                {
+                    (ErrorCode::NotSupported, format!("{other} is not supported"))
+                } else {
+                    (
+                        ErrorCode::NotImplemented,
+                        format!("{other} is not implemented"),
+                    )
+                };
+                self.log(LogLevel::Warn, format!("{other} is not handled: {text}"));
+                let _ = reply.reject(code, text);
             }
         }
     }

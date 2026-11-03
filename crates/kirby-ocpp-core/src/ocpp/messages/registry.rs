@@ -1,4 +1,4 @@
-//! The list of all 28 OCPP 1.6J actions with the direction they travel in.
+//! The list of all 39 OCPP 1.6J actions (28 core + 11 Security Whitepaper) with the direction they travel in.
 //!
 //! The table-driven tests at the bottom tie everything together: every listed
 //! action has both bundled schemas, a representative request and response built
@@ -47,31 +47,46 @@ const fn info(name: &'static str, direction: ActionDirection) -> ActionInfo {
     ActionInfo { name, direction }
 }
 
-/// All 28 actions, in alphabetical order: 10 charge point initiated (incl.
-/// `DataTransfer`), 19 central system initiated (incl. `DataTransfer`).
-pub const ACTIONS: [ActionInfo; 28] = [
+/// All 39 actions, in alphabetical order: 14 charge point initiated (incl.
+/// `DataTransfer`), 26 central system initiated (incl. `DataTransfer`). The 11 Security
+/// Whitepaper extensions are `SignCertificate`, `LogStatusNotification`,
+/// `SecurityEventNotification`, `SignedFirmwareStatusNotification` (charge point) and
+/// `CertificateSigned`, `DeleteCertificate`, `ExtendedTriggerMessage`,
+/// `GetInstalledCertificateIds`, `GetLog`, `InstallCertificate`, `SignedUpdateFirmware` (CSMS).
+pub const ACTIONS: [ActionInfo; 39] = [
     info("Authorize", CP),
     info("BootNotification", CP),
     info("CancelReservation", CS),
+    info("CertificateSigned", CS),
     info("ChangeAvailability", CS),
     info("ChangeConfiguration", CS),
     info("ClearCache", CS),
     info("ClearChargingProfile", CS),
     info("DataTransfer", ActionDirection::Both),
+    info("DeleteCertificate", CS),
     info("DiagnosticsStatusNotification", CP),
+    info("ExtendedTriggerMessage", CS),
     info("FirmwareStatusNotification", CP),
     info("GetCompositeSchedule", CS),
     info("GetConfiguration", CS),
     info("GetDiagnostics", CS),
+    info("GetInstalledCertificateIds", CS),
     info("GetLocalListVersion", CS),
+    info("GetLog", CS),
     info("Heartbeat", CP),
+    info("InstallCertificate", CS),
+    info("LogStatusNotification", CP),
     info("MeterValues", CP),
     info("RemoteStartTransaction", CS),
     info("RemoteStopTransaction", CS),
     info("ReserveNow", CS),
     info("Reset", CS),
+    info("SecurityEventNotification", CP),
     info("SendLocalList", CS),
     info("SetChargingProfile", CS),
+    info("SignCertificate", CP),
+    info("SignedFirmwareStatusNotification", CP),
+    info("SignedUpdateFirmware", CS),
     info("StartTransaction", CP),
     info("StatusNotification", CP),
     info("StopTransaction", CP),
@@ -527,9 +542,124 @@ mod tests {
             &UpdateFirmwareResponse {},
         );
 
+        // Security Whitepaper extensions.
+        let hash = || CertificateHashData {
+            hash_algorithm: HashAlgorithm::Sha256,
+            issuer_name_hash: "ab12".into(),
+            issuer_key_hash: "cd34".into(),
+            serial_number: "01ff".into(),
+        };
+        c.out::<SignCertificate>(
+            &SignCertificateRequest {
+                csr: "-----BEGIN CERTIFICATE REQUEST-----".into(),
+            },
+            &SignCertificateResponse {
+                status: GenericStatus::Accepted,
+            },
+        );
+        c.out::<LogStatusNotification>(
+            &LogStatusNotificationRequest {
+                status: UploadLogStatus::Uploading,
+                request_id: Some(5),
+            },
+            &LogStatusNotificationResponse {},
+        );
+        c.out::<SecurityEventNotification>(
+            &SecurityEventNotificationRequest {
+                event_type: "FirmwareUpdated".into(),
+                timestamp: at(41),
+                tech_info: Some("v2".into()),
+            },
+            &SecurityEventNotificationResponse {},
+        );
+        c.out::<SignedFirmwareStatusNotification>(
+            &SignedFirmwareStatusNotificationRequest {
+                status: SignedFirmwareStatus::InstallRebooting,
+                request_id: Some(6),
+            },
+            &SignedFirmwareStatusNotificationResponse {},
+        );
+        c.inb::<CertificateSigned>(
+            &CertificateSignedRequest {
+                certificate_chain: "-----BEGIN CERTIFICATE-----".into(),
+            },
+            &CertificateSignedResponse {
+                status: CertificateSignedStatus::Rejected,
+            },
+        );
+        c.inb::<DeleteCertificate>(
+            &DeleteCertificateRequest {
+                certificate_hash_data: hash(),
+            },
+            &DeleteCertificateResponse {
+                status: DeleteCertificateStatus::NotFound,
+            },
+        );
+        c.inb::<ExtendedTriggerMessage>(
+            &ExtendedTriggerMessageRequest {
+                requested_message: ExtendedMessageTrigger::SignChargePointCertificate,
+                connector_id: Some(connector(1)),
+            },
+            &ExtendedTriggerMessageResponse {
+                status: TriggerMessageStatus::NotImplemented,
+            },
+        );
+        c.inb::<GetInstalledCertificateIds>(
+            &GetInstalledCertificateIdsRequest {
+                certificate_type: CertificateUse::ManufacturerRootCertificate,
+            },
+            &GetInstalledCertificateIdsResponse {
+                status: GetInstalledCertificateStatus::Accepted,
+                certificate_hash_data: Some(vec![hash()]),
+            },
+        );
+        c.inb::<GetLog>(
+            &GetLogRequest {
+                log_type: LogType::SecurityLog,
+                request_id: 7,
+                retries: Some(2),
+                retry_interval: Some(30),
+                log: LogParameters {
+                    remote_location: "https://example.com/logs".into(),
+                    oldest_timestamp: Some(at(42)),
+                    latest_timestamp: Some(at(43)),
+                },
+            },
+            &GetLogResponse {
+                status: LogStatus::AcceptedCanceled,
+                filename: Some("security.log".into()),
+            },
+        );
+        c.inb::<InstallCertificate>(
+            &InstallCertificateRequest {
+                certificate_type: CertificateUse::CentralSystemRootCertificate,
+                certificate: "-----BEGIN CERTIFICATE-----".into(),
+            },
+            &InstallCertificateResponse {
+                status: InstallCertificateStatus::Failed,
+            },
+        );
+        c.inb::<SignedUpdateFirmware>(
+            &SignedUpdateFirmwareRequest {
+                retries: Some(1),
+                retry_interval: Some(10),
+                request_id: 8,
+                firmware: SignedFirmware {
+                    location: "https://example.com/fw.bin".into(),
+                    retrieve_date_time: at(44),
+                    install_date_time: Some(at(45)),
+                    signing_certificate: "-----BEGIN CERTIFICATE-----".into(),
+                    signature: "c2ln".into(),
+                },
+            },
+            &SignedUpdateFirmwareResponse {
+                status: UpdateFirmwareStatus::RevokedCertificate,
+            },
+        );
+
         // The list, the schemas, the checked actions and the direction impls agree.
         let listed: BTreeSet<&str> = ACTIONS.iter().map(|a| a.name).collect();
-        assert_eq!(listed.len(), 28, "duplicate names in ACTIONS");
+        assert_eq!(listed.len(), 39, "duplicate names in ACTIONS");
         assert_eq!(c.seen, listed, "every listed action has a sample");
         let schemas = c.schemas.as_ref().unwrap();
         let schema_names: BTreeSet<&str> = schemas.action_names().collect();
@@ -555,8 +685,8 @@ mod tests {
                 action.name
             );
         }
-        assert_eq!(c.outbound.len(), 10);
-        assert_eq!(c.inbound.len(), 19);
+        assert_eq!(c.outbound.len(), 14);
+        assert_eq!(c.inbound.len(), 26);
         assert!(ACTIONS.windows(2).all(|w| w[0].name < w[1].name), "sorted");
     }
 

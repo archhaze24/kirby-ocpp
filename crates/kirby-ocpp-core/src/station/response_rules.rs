@@ -36,6 +36,9 @@ use crate::ocpp::messages::{
 };
 
 /// The inbound actions a rule can target.
+///
+/// The 7 Security Whitepaper CSMS actions are not listed: the station has no handler for them
+/// yet (it answers CALLERROR `NotSupported`), so a rule would have nothing to change.
 pub const INBOUND_ACTIONS: [&str; 19] = [
     CancelReservation::NAME,
     ChangeAvailability::NAME,
