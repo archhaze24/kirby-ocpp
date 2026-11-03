@@ -7,6 +7,10 @@
 //! * Inbound CALLs get the canned answers of the test mock ([`default_reply`]), unless a
 //!   [`Fault`] or a responder ([`CsmsHandle::respond`]) applies. Actions a charge point may
 //!   not send get a `NotSupported` CALLERROR.
+//! * [`CsmsHandle::state`] is the per-station protocol read model ([`StationState`]: boot info,
+//!   connector statuses, transactions with meter readings); [`CsmsEvent::StateChanged`] tells
+//!   when it changed. [`CsmsHandle::call_typed`] and the command helpers (`reset`,
+//!   `remote_start_transaction`, ...) send typed, schema-checked commands.
 //! * [`CsmsHandle::subscribe`] streams [`CsmsEvent`]s; [`CsmsHandle::stations`] and
 //!   [`CsmsHandle::history`] are the read model.
 //!
@@ -39,7 +43,9 @@ mod event;
 mod fault;
 mod policy;
 mod server;
+mod state;
 mod tls;
+mod typed;
 
 pub use config::CsmsConfig;
 pub use defaults::{CHARGE_POINT_ACTIONS, default_reply, is_charge_point_action};
@@ -49,4 +55,8 @@ pub use fault::{Fault, Reply, Responder};
 pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 pub use policy::{SubprotocolPolicy, TransactionIdAllocator, TransactionIds};
 pub use server::{CsmsHandle, CsmsServer, station_id_from_path};
+pub use state::{
+    BootInfo, ConnectorState, MAX_ACTIVE_TRANSACTIONS, MAX_CONNECTORS, Reported, StationState,
+    TransactionRecord, TransactionStatus,
+};
 pub use tls::server_config_from_pem;

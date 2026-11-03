@@ -575,6 +575,7 @@ async fn events_arrive_in_order_connected_frames_disconnected() {
     );
     let frames: Vec<_> = collected[1..collected.len() - 1]
         .iter()
+        .filter(|event| !matches!(event, CsmsEvent::StateChanged { .. }))
         .map(|event| match event {
             CsmsEvent::Frame {
                 station,

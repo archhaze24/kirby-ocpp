@@ -28,6 +28,7 @@ use crate::error::CsmsError;
 use crate::event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
 use crate::fault::{Fault, Reply, Responder};
 use crate::policy::TransactionIdAllocator;
+use crate::state::StationState;
 
 const SEC_WEBSOCKET_PROTOCOL: HeaderName = HeaderName::from_static("sec-websocket-protocol");
 /// Time a new socket gets for the TLS and WebSocket handshakes.
@@ -177,6 +178,18 @@ impl CsmsHandle {
             .map(|rec| rec.history.iter().cloned().collect())
     }
 
+    /// The protocol state of a station (see [`StationState`]); it survives disconnects and
+    /// reconnects and is dropped by [`CsmsHandle::forget`]. A change is announced by
+    /// [`CsmsEvent::StateChanged`]; there is no per-station watch channel, which keeps a
+    /// thousand idle stations cheap.
+    pub fn state(&self, id: &str) -> Option<StationState> {
+        self.inner
+            .lock()
+            .stations
+            .get(id)
+            .map(|rec| rec.state.clone())
+    }
+
     /// Removes a station from the registry, closing its connection if it has one.
     /// Returns whether the station existed.
     pub fn forget(&self, id: &str) -> bool {
@@ -243,13 +256,20 @@ impl CsmsHandle {
                 }))
                 .map_err(|_| not_connected())?;
         }
-        match receiver.await {
+        let result = match receiver.await {
             Ok(result) => result,
             Err(_) => Err(CsmsError::ConnectionClosed {
                 station: station.to_owned(),
                 action: action.to_owned(),
             }),
+        };
+        if matches!(
+            result,
+            Ok(Frame::CallError { .. }) | Err(CsmsError::Timeout { .. })
+        ) {
+            self.inner.note_failed_call(station);
         }
+        result
     }
 
     /// Overrides the default answer for `action` for all stations. Faults still take
@@ -340,6 +360,7 @@ struct State {
 struct StationRec {
     info: StationInfo,
     history: VecDeque<FrameEntry>,
+    state: StationState,
     session: Option<SessionLink>,
 }
 
@@ -408,6 +429,7 @@ impl Inner {
                     received_by_action: BTreeMap::new(),
                 },
                 history: VecDeque::new(),
+                state: StationState::default(),
                 session: None,
             });
         if let Some(old) = rec.session.take() {
@@ -478,6 +500,33 @@ impl Inner {
                 station: station.to_owned(),
                 direction,
                 frame: frame.clone(),
+            });
+        }
+    }
+
+    /// Folds an answered inbound CALL into the station's state.
+    fn track(&self, station: &str, action: &str, request: &Value, reply: &Reply) {
+        let Reply::Result(response) = reply else {
+            return;
+        };
+        let mut state = self.lock();
+        let Some(rec) = state.stations.get_mut(station) else {
+            return;
+        };
+        let cap = self.config.transaction_history_cap;
+        if rec.state.apply(action, request, response, Utc::now(), cap) {
+            self.emit(CsmsEvent::StateChanged {
+                station: station.to_owned(),
+            });
+        }
+    }
+
+    fn note_failed_call(&self, station: &str) {
+        let mut state = self.lock();
+        if let Some(rec) = state.stations.get_mut(station) {
+            rec.state.failed_calls += 1;
+            self.emit(CsmsEvent::StateChanged {
+                station: station.to_owned(),
             });
         }
     }
@@ -730,17 +779,21 @@ where
                 id,
                 action,
                 payload,
-            } => match self.inner.decide(&action, &payload) {
-                Reply::Result(payload) => self.send(&Frame::call_result(id, payload)).await,
-                Reply::Error(code, description) => {
-                    self.send(&Frame::call_error(id, code, description)).await
+            } => {
+                let reply = self.inner.decide(&action, &payload);
+                self.inner.track(&self.station, &action, &payload, &reply);
+                match reply {
+                    Reply::Result(payload) => self.send(&Frame::call_result(id, payload)).await,
+                    Reply::Error(code, description) => {
+                        self.send(&Frame::call_error(id, code, description)).await
+                    }
+                    Reply::Silence => None,
+                    Reply::Close => {
+                        self.close(CLOSE_CODE_ERROR, "injected close").await;
+                        Some(DisconnectReason::Injected)
+                    }
                 }
-                Reply::Silence => None,
-                Reply::Close => {
-                    self.close(CLOSE_CODE_ERROR, "injected close").await;
-                    Some(DisconnectReason::Injected)
-                }
-            },
+            }
             Frame::CallResult { .. } | Frame::CallError { .. } => {
                 if self
                     .in_flight

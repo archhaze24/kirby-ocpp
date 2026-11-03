@@ -1163,6 +1163,7 @@ dependencies = [
  "kirby-ocpp-core",
  "percent-encoding",
  "rustls",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

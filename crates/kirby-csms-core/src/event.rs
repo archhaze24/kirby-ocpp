@@ -58,6 +58,10 @@ pub enum CsmsEvent {
     Malformed { station: String, text: String },
     /// A station was removed from the registry.
     Forgotten { station: String },
+    /// The station's [`crate::StationState`] changed: after an inbound CALL was tracked
+    /// (before its reply is written), or when a CSMS call to it failed. Read the new state
+    /// with [`crate::CsmsHandle::state`].
+    StateChanged { station: String },
 }
 
 /// What the registry knows about one station.

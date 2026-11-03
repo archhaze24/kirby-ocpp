@@ -23,6 +23,9 @@ pub struct CsmsConfig {
     pub call_timeout: Duration,
     /// Frames kept per station (oldest dropped first). `0` keeps none. Default 1000.
     pub history_cap: usize,
+    /// Stopped transactions kept in each station's [`crate::StationState`] (oldest dropped
+    /// first). `0` keeps none; active transactions are always kept. Default 100.
+    pub transaction_history_cap: usize,
     /// Capacity of the event broadcast channel. A subscriber that falls further behind gets
     /// `RecvError::Lagged` and loses events. Default 4096.
     pub event_buffer: usize,
@@ -50,6 +53,7 @@ impl Default for CsmsConfig {
             transaction_ids: TransactionIds::default(),
             call_timeout: Duration::from_secs(30),
             history_cap: 1000,
+            transaction_history_cap: 100,
             event_buffer: 4096,
             tls: None,
         }
@@ -65,6 +69,7 @@ impl fmt::Debug for CsmsConfig {
             .field("transaction_ids", &self.transaction_ids)
             .field("call_timeout", &self.call_timeout)
             .field("history_cap", &self.history_cap)
+            .field("transaction_history_cap", &self.transaction_history_cap)
             .field("event_buffer", &self.event_buffer)
             .field("tls", &self.tls.is_some())
             .finish()

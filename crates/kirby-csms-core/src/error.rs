@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use kirby_ocpp_core::ocpp::ErrorCode;
+
 /// Errors from the CSMS engine.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -26,4 +28,24 @@ pub enum CsmsError {
     /// The connection closed (or was replaced) before the station answered.
     #[error("connection to {station} closed before a reply to {action} arrived")]
     ConnectionClosed { station: String, action: String },
+    /// The station answered with a CALLERROR (typed calls only; [`crate::CsmsHandle::call`]
+    /// returns the raw frame).
+    #[error("station {station} answered {action} with CALLERROR {code}: {description}")]
+    CallError {
+        station: String,
+        action: String,
+        code: ErrorCode,
+        description: String,
+    },
+    /// A typed request could not be serialised or violates the OCPP 1.6J schema; nothing
+    /// was sent.
+    #[error("invalid {action} request: {reason}")]
+    InvalidRequest { action: String, reason: String },
+    /// A CALLRESULT did not match the schema or the typed response of its action.
+    #[error("invalid {action} response from {station}: {reason}")]
+    InvalidResponse {
+        station: String,
+        action: String,
+        reason: String,
+    },
 }
