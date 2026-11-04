@@ -289,6 +289,12 @@ impl Cli {
 
     /// Checks the combination of the security flags (the engine checks TLS itself).
     pub fn validate_security(&self) -> Result<(), String> {
+        if self.ping_interval != 0 && self.ping_interval < self.pong_timeout {
+            return Err(format!(
+                "--ping-interval {} must not be less than --pong-timeout {} (or 0 to disable)",
+                self.ping_interval, self.pong_timeout
+            ));
+        }
         let profile = self.security_profile;
         let tls = self.tls_cert.is_some();
         if profile >= 2 && !tls {
@@ -498,6 +504,9 @@ mod tests {
                 .validate_security()
         };
         assert!(check(&[]).is_ok());
+        assert!(check(&["--ping-interval", "5", "--pong-timeout", "10"]).is_err());
+        assert!(check(&["--ping-interval", "10", "--pong-timeout", "10"]).is_ok());
+        assert!(check(&["--ping-interval", "0", "--pong-timeout", "10"]).is_ok());
         assert!(check(&["--security-profile", "1", "--auth-key", "A=k"]).is_ok());
         assert!(check(&["--security-profile", "1"]).is_err());
         assert!(check(&["--auth-key", "A=k"]).is_err());

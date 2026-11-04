@@ -452,6 +452,7 @@ fn new_engine_flags_are_validated() {
         &["--validate-inbound", "maybe"][..],
         &["--ping-interval", "x"],
         &["--pong-timeout", "0"],
+        &["--ping-interval", "5", "--pong-timeout", "10"],
     ] {
         let (code, _, stderr) = run_to_end(args);
         assert_eq!(code, 2, "{args:?}: {stderr}");

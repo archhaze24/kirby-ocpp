@@ -526,3 +526,84 @@ async fn profile_one_sends_basic_auth_with_the_authorization_key_and_401_is_repo
     station.shutdown().await.unwrap();
     join.await.unwrap();
 }
+
+#[tokio::test]
+async fn timed_out_sign_certificate_does_not_restore_a_stale_key_over_a_newer_request() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut rig = Rig::with(kirby_ocpp_testkit::CsmsOptions::default(), |c| {
+        c.with_call_timeout_ms(300)
+    })
+    .await;
+    ok_event_reply(&rig);
+    let (root, issuer) = ca("Test CA");
+    let second_chain: Arc<Mutex<Option<String>>> = Arc::default();
+    let calls = Arc::new(AtomicUsize::new(0));
+    {
+        let second_chain = Arc::clone(&second_chain);
+        rig.csms.respond("SignCertificate", move |payload| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Reply::Silence;
+            }
+            let csr = payload["csr"].as_str().unwrap().to_owned();
+            *second_chain.lock().unwrap() = Some(sign(&csr, &issuer, &root));
+            Reply::Result(json!({"status": "Accepted"}))
+        });
+    }
+    rig.connect_booted().await;
+    // Two overlapping requests: the first one times out while the second is queued.
+    let first = rig.station.send(Command::RequestCertificate);
+    let second = rig.station.send(Command::RequestCertificate);
+    let (first, second) = tokio::join!(first, second);
+    assert!(first.is_err(), "{first:?}");
+    assert!(second.is_ok(), "{second:?}");
+    let signed = second_chain
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("second CSR signed");
+    let reply = rig
+        .csms_call("CertificateSigned", json!({"certificateChain": signed}))
+        .await;
+    assert_eq!(reply["status"], "Accepted");
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn repeated_security_events_are_all_reported_and_control_characters_are_stripped() {
+    let mut rig = rig().await;
+    for _ in 0..2 {
+        rig.send(Command::SendSecurityEvent {
+            event_type: "FailedToAuthenticateAtCentralSystem".into(),
+            tech_info: Some("HTTP\n401\u{1b}[31m".into()),
+        })
+        .await;
+    }
+    assert_eq!(rig.station.snapshot().pending_security_events, 2);
+    rig.connect_booted().await;
+    let is_event = |p: &serde_json::Value| p["type"] == "FailedToAuthenticateAtCentralSystem";
+    rig.csms
+        .wait_for_call_after(0, "SecurityEventNotification", is_event, STEP)
+        .await
+        .expect("first event delivered");
+    let first = rig
+        .csms
+        .calls_since(0)
+        .iter()
+        .position(|call| call.action == "SecurityEventNotification" && is_event(&call.payload))
+        .expect("first event recorded");
+    rig.csms
+        .wait_for_call_after(first + 1, "SecurityEventNotification", is_event, STEP)
+        .await
+        .expect("second event delivered");
+    let mut calls = rig.calls("SecurityEventNotification", 0);
+    calls.retain(is_event);
+    let sent: Vec<_> = calls
+        .iter()
+        .filter(|p| p["type"] == "FailedToAuthenticateAtCentralSystem")
+        .collect();
+    assert_eq!(sent.len(), 2, "{calls:?}");
+    for call in sent {
+        assert_eq!(call["techInfo"], "HTTP 401 [31m");
+    }
+    rig.shutdown().await;
+}

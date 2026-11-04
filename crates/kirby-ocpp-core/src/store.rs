@@ -250,10 +250,20 @@ impl StationStore {
     pub fn load_secrets(&self) -> Result<StationSecrets, StoreError> {
         let path = self.secrets_path();
         match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| StoreError::Io {
-                path,
-                source: io::Error::new(io::ErrorKind::InvalidData, e.to_string()),
-            }),
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(secrets) => Ok(secrets),
+                Err(e) => {
+                    // Keep the broken file: the next save would overwrite it.
+                    let backup = move_aside(&path)?;
+                    Err(StoreError::Io {
+                        path,
+                        source: io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("{e}; the file was moved to {}", backup.display()),
+                        ),
+                    })
+                }
+            },
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(StationSecrets::default()),
             Err(source) => Err(StoreError::Io { path, source }),
         }
@@ -303,21 +313,7 @@ impl StationStore {
     }
 
     fn quarantine(&self, reason: String) -> Result<LoadOutcome, StoreError> {
-        let mut backup = self.path.clone().into_os_string();
-        backup.push(".bak");
-        let backup = PathBuf::from(backup);
-        // `rename` does not replace an existing file on Windows.
-        match fs::remove_file(&backup) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(source) => {
-                return Err(StoreError::Io {
-                    path: backup,
-                    source,
-                });
-            }
-        }
-        fs::rename(&self.path, &backup).map_err(|e| self.io_error(e))?;
+        let backup = move_aside(&self.path)?;
         Ok(LoadOutcome::Quarantined { backup, reason })
     }
 
@@ -327,6 +323,34 @@ impl StationStore {
             source,
         }
     }
+}
+
+/// Moves `path` to `<path>.bak` (replacing an older one) and makes the backup private.
+fn move_aside(path: &Path) -> Result<PathBuf, StoreError> {
+    let mut backup = path.to_path_buf().into_os_string();
+    backup.push(".bak");
+    let backup = PathBuf::from(backup);
+    // `rename` does not replace an existing file on Windows.
+    match fs::remove_file(&backup) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(StoreError::Io {
+                path: backup,
+                source,
+            });
+        }
+    }
+    fs::rename(path, &backup).map_err(|source| StoreError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&backup, fs::Permissions::from_mode(0o600));
+    }
+    Ok(backup)
 }
 
 /// Whether a directory `fsync` failed only because the filesystem does not support it.
@@ -612,6 +636,30 @@ mod tests {
         let id = "a".repeat(MAX_ESCAPED_LEN);
         assert_eq!(file_name(&id), format!("{id}.station.json"));
         assert!(file_name(&format!("{id}a")).contains('~'));
+    }
+
+    #[test]
+    fn corrupt_secrets_file_is_moved_aside_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        fs::write(store.secrets_path(), b"{ torn").unwrap();
+        let error = store.load_secrets().unwrap_err().to_string();
+        assert!(error.contains(".bak"), "{error}");
+        let mut backup = store.secrets_path().into_os_string();
+        backup.push(".bak");
+        assert_eq!(fs::read(&backup).unwrap(), b"{ torn");
+        assert!(!store.secrets_path().exists());
+        // An older backup is replaced.
+        fs::write(store.secrets_path(), b"{ torn2").unwrap();
+        assert!(store.load_secrets().is_err());
+        assert_eq!(fs::read(&backup).unwrap(), b"{ torn2");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&backup).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        assert!(store.load_secrets().unwrap().is_empty());
     }
 
     #[cfg(unix)]

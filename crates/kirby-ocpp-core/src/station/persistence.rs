@@ -344,11 +344,12 @@ impl StationActor {
             std::mem::take(&mut self.persistence.secrets_dirty).then(|| self.secrets.clone());
         let internal = self.internal_tx.clone();
         self.persistence.in_flight = Some(tokio::task::spawn_blocking(move || {
-            let mut result = store.save(&data);
+            // Secrets first: a crash in between leaves a key without its chain, not the reverse.
+            let mut result = Ok(());
             if let Some(secrets) = secrets {
-                let saved = store.save_secrets(&secrets);
-                result = result.and(saved);
+                result = store.save_secrets(&secrets);
             }
+            let result = result.and_then(|()| store.save(&data));
             let _ = internal.send(Internal::Saved(result));
         }));
     }
@@ -392,12 +393,11 @@ impl StationActor {
         let data = self.build_persisted();
         let secrets_changed = std::mem::take(&mut self.persistence.secrets_dirty);
         let secrets = (secrets_changed || had_in_flight).then(|| self.secrets.clone());
-        let write = move || {
-            let result = store.save(&data);
-            match secrets {
-                Some(secrets) => result.and(store.save_secrets(&secrets)),
-                None => result,
-            }
+        let write = move || match secrets {
+            Some(secrets) => store
+                .save_secrets(&secrets)
+                .and_then(|()| store.save(&data)),
+            None => store.save(&data),
         };
         match tokio::task::spawn_blocking(write).await {
             Ok(Ok(())) => {}

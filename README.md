@@ -234,7 +234,7 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | `--tls-cert FILE`, `--tls-key FILE` | `TLS_CERT`, `TLS_KEY` | none | PEM, both or none, serves `wss://` |
 | `--tls-client-ca FILE` | `TLS_CLIENT_CA` | none | CA certificate(s) (PEM) clients must be signed by (mutual TLS); needs `--tls-cert` |
 | `--security-profile 0..3` | `SECURITY_PROFILE` | 0 | Security Whitepaper profile, see below |
-| `--auth-key ID=KEY` | `AUTH_KEY` (`ID=KEY;ID=KEY`) | none | Basic Auth key of one station (repeatable) |
+| `--auth-key ID=KEY` | `AUTH_KEY` (`ID=KEY;ID=KEY`) | none | Basic Auth key of one station (repeatable); the key is visible in `ps` and shell history, so prefer `KIRBY_CSMS_AUTH_KEY` or `--auth-keys-file` (keep it `0600`) |
 | `--auth-keys-file FILE` | `AUTH_KEYS_FILE` | none | lines `ID=KEY` (`#` comments); keep it private, its permissions are not checked |
 | `--default-auth-key KEY` | `DEFAULT_AUTH_KEY` | none | key for stations without an entry |
 | `--subprotocol POLICY` | `SUBPROTOCOL` | `require:ocpp1.6` | `require:NAME`, `select:NAME`, `omit`, `reject` |
@@ -244,7 +244,7 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | `--show-secrets` | `SHOW_SECRETS` | off | keep `AuthorizationKey` values in recorded frames (history, `--json`, `--log-file`, script matching); by default they are replaced by `***` |
 | `--validate-inbound BOOL` | `VALIDATE_INBOUND` | true | check every inbound CALL against the OCPP 1.6J schema; an invalid payload gets a CALLERROR (`OccurenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormationViolation`) instead of the canned reply and is not tracked. A scripted fault on the same action still wins; unknown actions are not checked |
 | `--ping-interval SECONDS` | `PING_INTERVAL` | 30 | WebSocket ping to each station after this much silence, `0` disables the watchdog |
-| `--pong-timeout SECONDS` | `PONG_TIMEOUT` | 10 | a station that sends nothing this long after a ping is dropped (disconnect reason `ping_timeout`) |
+| `--pong-timeout SECONDS` | `PONG_TIMEOUT` | 10 | a station that sends nothing this long after a ping is dropped (disconnect reason `ping_timeout`); a non-zero `--ping-interval` below this is a usage error (exit 2) |
 | `--transaction-history-cap N` | `TRANSACTION_HISTORY_CAP` | 100 | stopped transactions kept per station |
 | `--call-timeout SECONDS` | `CALL_TIMEOUT` | 30 | wait for a station's answer to a command |
 | `--json` | `JSON` | off | JSON lines instead of text |

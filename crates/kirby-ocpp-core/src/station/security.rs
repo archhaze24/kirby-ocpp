@@ -48,17 +48,27 @@ pub struct PendingSecurityEvent {
 }
 
 impl PendingSecurityEvent {
-    /// A new event; `tech_info` is cut to the schema limit.
+    /// A new event; `tech_info` is cleaned of control characters and cut to the schema limit.
     pub fn new(event_type: &str, timestamp: DateTime<Utc>, tech_info: Option<&str>) -> Self {
         debug_assert!(event_type.len() <= MAX_SECURITY_EVENT_TYPE_LEN);
         Self {
             event_type: event_type.to_owned(),
             timestamp,
-            tech_info: tech_info
-                .filter(|t| !t.is_empty())
-                .map(|t| t.chars().take(MAX_SECURITY_EVENT_TECH_INFO_LEN).collect()),
+            tech_info: tech_info.filter(|t| !t.is_empty()).map(|t| {
+                strip_control(t)
+                    .chars()
+                    .take(MAX_SECURITY_EVENT_TECH_INFO_LEN)
+                    .collect()
+            }),
         }
     }
+}
+
+/// Replaces control characters (server-controlled text may carry newlines or escape codes).
+pub fn strip_control(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 /// Appends `event`, dropping the oldest entries beyond [`MAX_QUEUED_EVENTS`].

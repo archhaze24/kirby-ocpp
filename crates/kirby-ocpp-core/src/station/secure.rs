@@ -45,14 +45,8 @@ impl StationActor {
                     .map_or_else(String::new, |t| format!(": {t}"))
             ),
         );
-        let duplicate = self
-            .security_events
-            .iter()
-            .any(|e| e.event_type == event.event_type && e.tech_info == event.tech_info);
-        if !duplicate {
-            push_bounded(&mut self.security_events, event);
-            self.mark_dirty();
-        }
+        push_bounded(&mut self.security_events, event);
+        self.mark_dirty();
         self.flush_security_events();
     }
 
@@ -129,7 +123,7 @@ impl StationActor {
             let _ = reply.send(Err(StationError::NotConnected));
             return;
         }
-        let previous = self.secrets.pending_key_pem.replace(key);
+        let previous = self.secrets.pending_key_pem.replace(key.clone());
         self.mark_secrets_dirty();
         self.call::<SignCertificate>(
             Origin::Station,
@@ -144,8 +138,7 @@ impl StationActor {
                                     .to_owned(),
                             );
                         } else {
-                            actor.secrets.pending_key_pem = previous;
-                            actor.mark_secrets_dirty();
+                            actor.restore_pending_key(&key, previous);
                             actor.log(
                                 LogLevel::Warn,
                                 "SignCertificate was rejected by the CSMS".to_owned(),
@@ -155,14 +148,22 @@ impl StationActor {
                         Ok(Outcome::Response { payload })
                     }
                     Err(error) => {
-                        actor.secrets.pending_key_pem = previous;
-                        actor.mark_secrets_dirty();
+                        actor.restore_pending_key(&key, previous);
                         Err(call_failure(error))
                     }
                 };
                 let _ = reply.send(answer);
             },
         );
+    }
+
+    /// Puts `previous` back after a failed `SignCertificate`, unless a newer request has replaced
+    /// the key in the meantime (`key` is what the failed request stored).
+    fn restore_pending_key(&mut self, key: &str, previous: Option<String>) {
+        if self.secrets.pending_key_pem.as_deref() == Some(key) {
+            self.secrets.pending_key_pem = previous;
+            self.mark_secrets_dirty();
+        }
     }
 
     /// Whether a TLS client identity is available (CLI files or the stored certificate).

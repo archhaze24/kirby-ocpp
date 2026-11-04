@@ -152,7 +152,13 @@ impl StationActor {
                 self.send_boot(None);
             }
             Err(error) => {
-                self.log(LogLevel::Error, format!("connection failed: {error}"));
+                self.log(
+                    LogLevel::Error,
+                    format!(
+                        "connection failed: {}",
+                        super::security::strip_control(&error.to_string())
+                    ),
+                );
                 self.report_connect_failure(&error);
                 self.state.connection = ConnectionState::Disconnected;
                 self.schedule_reconnect();
