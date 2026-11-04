@@ -7,14 +7,19 @@ use std::fmt::Write as _;
 use chrono::{DateTime, SecondsFormat, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kirby_csms_core::CHARGE_POINT_ACTIONS;
-use kirby_ocpp_core::ids::IdTag;
+use kirby_ocpp_core::ids::{ConnectorId, IdTag, ReservationId};
 use kirby_ocpp_core::ocpp::messages::registry::ACTIONS;
 use kirby_ocpp_core::ocpp::messages::{
-    CertificateHashData, CertificateUse, ChargingProfile, ExtendedMessageTrigger, GetLogRequest,
-    HashAlgorithm, LogParameters, LogType, MAX_CERTIFICATE_CHAIN_LEN, MAX_CERTIFICATE_LEN,
-    SignedFirmware, SignedUpdateFirmwareRequest,
+    AuthorizationData, CertificateHashData, CertificateUse, ChargingProfile,
+    ClearChargingProfileRequest, ExtendedMessageTrigger, GetDiagnosticsRequest, GetLogRequest,
+    HashAlgorithm, IdTagInfo, LogParameters, LogType, MAX_CERTIFICATE_CHAIN_LEN,
+    MAX_CERTIFICATE_LEN, ReserveNowRequest, SendLocalListRequest, SignedFirmware,
+    SignedUpdateFirmwareRequest, UpdateFirmwareRequest,
 };
-use kirby_ocpp_core::ocpp::types::{AvailabilityType, MessageTrigger, ResetType};
+use kirby_ocpp_core::ocpp::types::{
+    AuthorizationStatus, AvailabilityType, ChargingProfilePurposeType, ChargingRateUnitType,
+    MessageTrigger, ResetType, UpdateType,
+};
 use kirby_ocpp_tui::forms::{PROFILE_TEMPLATE, schemas};
 use kirby_ocpp_tui::text::TextInput;
 use serde_json::Value;
@@ -25,12 +30,22 @@ use crate::command::Command;
 const KEY_MAX: usize = 50;
 /// Most occurrences one injected fault may cover.
 const TIMES_MAX: usize = 1_000_000;
+/// Most entries a `SendLocalList` form may carry.
+const AUTH_LIST_MAX: usize = 100;
+/// The "leave it out" choice of an optional select.
+const ANY: &str = "(any)";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldKind {
     Text,
     OptionalText,
     IdTag,
+    /// An `idTag` that may be left empty.
+    OptionalIdTag,
+    /// A local authorization list: comma separated `idTag[:status]` items (status defaults to
+    /// Accepted; `idTag:-` has no `idTagInfo`, which deletes the entry in a differential
+    /// update), at most [`AUTH_LIST_MAX`] items; may be left empty.
+    AuthList,
     /// A connector number from `min`; may be left empty when `optional`.
     Connector {
         min: u32,
@@ -123,6 +138,12 @@ pub enum FormKind {
     ExtendedTrigger,
     SignedFirmware,
     CertificateSigned,
+    ClearChargingProfile,
+    GetCompositeSchedule,
+    ReserveNow,
+    UpdateFirmware,
+    GetDiagnostics,
+    SendLocalList,
     Raw,
     Rule,
     Fault,
@@ -582,6 +603,166 @@ impl Form {
         )
     }
 
+    pub fn clear_charging_profile(station: &str) -> Self {
+        let mut purposes = vec![ANY.to_owned()];
+        purposes.extend(names(
+            ChargingProfilePurposeType::ALL.iter().map(|t| t.as_str()),
+        ));
+        Self::build(
+            FormKind::ClearChargingProfile,
+            "ClearChargingProfile",
+            station,
+            vec![
+                Field::new("id (optional)", FieldKind::Count { optional: true }, ""),
+                Field::new(
+                    "connector (optional, 0 = station)",
+                    FieldKind::Connector {
+                        min: 0,
+                        optional: true,
+                    },
+                    "",
+                ),
+                Field::select("chargingProfilePurpose", purposes),
+                Field::new(
+                    "stackLevel (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    pub fn get_composite_schedule(station: &str) -> Self {
+        let mut units = vec![ANY.to_owned()];
+        units.extend(names(ChargingRateUnitType::ALL.iter().map(|t| t.as_str())));
+        Self::build(
+            FormKind::GetCompositeSchedule,
+            "GetCompositeSchedule",
+            station,
+            vec![
+                Field::new(
+                    "connector (0 = station)",
+                    FieldKind::Connector {
+                        min: 0,
+                        optional: false,
+                    },
+                    "1",
+                ),
+                Field::new("duration s", FieldKind::Count { optional: false }, "3600"),
+                Field::select("chargingRateUnit", units),
+            ],
+        )
+    }
+
+    /// `reservation_id` is the suggested id; the reservation expires an hour after `now`.
+    pub fn reserve_now(station: &str, reservation_id: i32, now: DateTime<Utc>) -> Self {
+        Self::build(
+            FormKind::ReserveNow,
+            "ReserveNow",
+            station,
+            vec![
+                Field::new(
+                    "connector (0 = any)",
+                    FieldKind::Connector {
+                        min: 0,
+                        optional: false,
+                    },
+                    "1",
+                ),
+                Field::new(
+                    "expiryDate",
+                    FieldKind::Timestamp { optional: false },
+                    &(now + chrono::Duration::hours(1)).to_rfc3339_opts(SecondsFormat::Secs, true),
+                ),
+                Field::new("idTag", FieldKind::IdTag, ""),
+                Field::new("parentIdTag (optional)", FieldKind::OptionalIdTag, ""),
+                Field::new(
+                    "reservationId",
+                    FieldKind::Count { optional: false },
+                    &reservation_id.to_string(),
+                ),
+            ],
+        )
+    }
+
+    /// The retrieve time defaults to `now`.
+    pub fn update_firmware(station: &str, now: DateTime<Utc>) -> Self {
+        Self::build(
+            FormKind::UpdateFirmware,
+            "UpdateFirmware",
+            station,
+            vec![
+                Field::new("location (firmware URL)", FieldKind::Text, ""),
+                Field::new(
+                    "retrieveDate",
+                    FieldKind::Timestamp { optional: false },
+                    &now.to_rfc3339_opts(SecondsFormat::Secs, true),
+                ),
+                Field::new(
+                    "retries (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "retryInterval s (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    pub fn get_diagnostics(station: &str) -> Self {
+        Self::build(
+            FormKind::GetDiagnostics,
+            "GetDiagnostics",
+            station,
+            vec![
+                Field::new("location (upload URL)", FieldKind::Text, ""),
+                Field::new(
+                    "retries (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "retryInterval s (optional)",
+                    FieldKind::Count { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "startTime (optional)",
+                    FieldKind::Timestamp { optional: true },
+                    "",
+                ),
+                Field::new(
+                    "stopTime (optional)",
+                    FieldKind::Timestamp { optional: true },
+                    "",
+                ),
+            ],
+        )
+    }
+
+    pub fn send_local_list(station: &str) -> Self {
+        Self::build(
+            FormKind::SendLocalList,
+            "SendLocalList",
+            station,
+            vec![
+                Field::select(
+                    "updateType",
+                    names(UpdateType::ALL.iter().map(|t| t.as_str())),
+                ),
+                Field::new("listVersion", FieldKind::Count { optional: false }, "1"),
+                Field::new(
+                    "entries: idTag[:status], comma separated (:- deletes)",
+                    FieldKind::AuthList,
+                    "",
+                ),
+            ],
+        )
+    }
+
     pub fn raw(station: &str, initial_action: Option<&str>) -> Self {
         let mut action = Field::select("action", csms_actions());
         if let Some(i) = initial_action.and_then(|a| action.options.iter().position(|o| o == a)) {
@@ -766,6 +947,14 @@ impl Form {
                     IdTag::new(text).err().map(|e| e.to_string())
                 }
             }
+            FieldKind::OptionalIdTag => {
+                if text.is_empty() {
+                    None
+                } else {
+                    IdTag::new(text).err().map(|e| e.to_string())
+                }
+            }
+            FieldKind::AuthList => parse_auth_list(&text).err(),
             FieldKind::Connector { min, optional } => {
                 if text.is_empty() && optional {
                     None
@@ -929,6 +1118,55 @@ impl Form {
             FormKind::CertificateSigned => Submitted::Send(Command::CertificateSigned {
                 chain: self.pem(0)?,
             }),
+            FormKind::ClearChargingProfile => {
+                Submitted::Send(Command::ClearChargingProfile(ClearChargingProfileRequest {
+                    id: count(0),
+                    connector_id: number(1).map(ConnectorId::new),
+                    charging_profile_purpose: chosen(2)
+                        .filter(|p| p != ANY)
+                        .and_then(|p| p.parse().ok()),
+                    stack_level: count(3),
+                }))
+            }
+            FormKind::GetCompositeSchedule => Submitted::Send(Command::GetCompositeSchedule {
+                connector: number(0)?,
+                duration: count(1)?,
+                unit: chosen(2).filter(|u| u != ANY).and_then(|u| u.parse().ok()),
+            }),
+            FormKind::ReserveNow => {
+                Submitted::Send(Command::ReserveNow(Box::new(ReserveNowRequest {
+                    connector_id: ConnectorId::new(number(0)?),
+                    expiry_date: time(1)?,
+                    id_tag: IdTag::new(self.text(2)).ok()?,
+                    parent_id_tag: opt(self.text(3)).and_then(|t| IdTag::new(t).ok()),
+                    reservation_id: ReservationId::new(count(4)?),
+                })))
+            }
+            FormKind::UpdateFirmware => {
+                Submitted::Send(Command::UpdateFirmware(Box::new(UpdateFirmwareRequest {
+                    location: self.text(0),
+                    retrieve_date: time(1)?,
+                    retries: count(2),
+                    retry_interval: count(3),
+                })))
+            }
+            FormKind::GetDiagnostics => {
+                Submitted::Send(Command::GetDiagnostics(Box::new(GetDiagnosticsRequest {
+                    location: self.text(0),
+                    retries: count(1),
+                    retry_interval: count(2),
+                    start_time: time(3),
+                    stop_time: time(4),
+                })))
+            }
+            FormKind::SendLocalList => {
+                let entries = parse_auth_list(&self.text(2)).ok()?;
+                Submitted::Send(Command::SendLocalList(Box::new(SendLocalListRequest {
+                    list_version: count(1)?,
+                    local_authorization_list: (!entries.is_empty()).then_some(entries),
+                    update_type: chosen(0)?.parse().ok()?,
+                })))
+            }
             FormKind::Raw => Submitted::Send(Command::Raw {
                 action: chosen(0)?,
                 payload: serde_json::from_str(self.fields.get(1)?.input.text()).ok()?,
@@ -1013,6 +1251,48 @@ fn step(i: &mut usize, n: usize, d: isize) {
     if n > 0 {
         *i = (*i + n).wrapping_add_signed(d) % n;
     }
+}
+
+/// Parses `idTag[:status]` items separated by commas. A missing status means Accepted, `-`
+/// leaves out the `idTagInfo` (a differential update deletes such an entry).
+fn parse_auth_list(text: &str) -> Result<Vec<AuthorizationData>, String> {
+    let mut out = Vec::new();
+    for item in text.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+        if out.len() >= AUTH_LIST_MAX {
+            return Err(format!("at most {AUTH_LIST_MAX} entries"));
+        }
+        let (tag, status) = item
+            .split_once(':')
+            .map_or((item, ""), |(t, s)| (t, s.trim()));
+        let tag = tag.trim();
+        let shown = truncate_key(item);
+        if tag.is_empty() {
+            return Err(format!("empty idTag in \"{shown}\""));
+        }
+        let id_tag = IdTag::new(tag).map_err(|e| format!("{e}: {shown}"))?;
+        let id_tag_info = if status == "-" {
+            None
+        } else if status.is_empty() {
+            Some(IdTagInfo::with_status(AuthorizationStatus::Accepted))
+        } else {
+            let found = AuthorizationStatus::ALL
+                .iter()
+                .find(|s| s.as_str().eq_ignore_ascii_case(status))
+                .ok_or_else(|| {
+                    let all: Vec<_> = AuthorizationStatus::ALL
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect();
+                    format!("unknown status in \"{shown}\"; use {}", all.join(", "))
+                })?;
+            Some(IdTagInfo::with_status(*found))
+        };
+        out.push(AuthorizationData {
+            id_tag,
+            id_tag_info,
+        });
+    }
+    Ok(out)
 }
 
 fn split_keys(text: &str) -> Vec<String> {

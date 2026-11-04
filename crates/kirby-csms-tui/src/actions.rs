@@ -43,6 +43,12 @@ pub enum ActionId {
     ExtendedTrigger,
     SignedFirmware,
     CertificateSigned,
+    ClearChargingProfile,
+    GetCompositeSchedule,
+    ReserveNow,
+    UpdateFirmware,
+    GetDiagnostics,
+    SendLocalList,
     SecurityEvents,
     Raw,
     Rule,
@@ -186,6 +192,42 @@ pub const CATALOG: &[ActionDef] = &[
         "Certificate signed (security)",
         "CertificateSigned: hand the station its certificate chain (PEM)",
         Some('X'),
+    ),
+    def(
+        ActionId::ClearChargingProfile,
+        "Clear charging profile",
+        "ClearChargingProfile by id, connector, purpose or stack level",
+        Some('K'),
+    ),
+    def(
+        ActionId::GetCompositeSchedule,
+        "Get composite schedule",
+        "GetCompositeSchedule: the schedule in force, the answer opens in a popup",
+        Some('H'),
+    ),
+    def(
+        ActionId::ReserveNow,
+        "Reserve now",
+        "ReserveNow: reserve a connector for an idTag",
+        Some('V'),
+    ),
+    def(
+        ActionId::UpdateFirmware,
+        "Update firmware",
+        "UpdateFirmware: download from a URL at a given time",
+        Some('U'),
+    ),
+    def(
+        ActionId::GetDiagnostics,
+        "Get diagnostics",
+        "GetDiagnostics: ask the station to upload its diagnostics file",
+        Some('O'),
+    ),
+    def(
+        ActionId::SendLocalList,
+        "Send local list",
+        "SendLocalList: full or differential local authorization list",
+        Some('B'),
     ),
     def(
         ActionId::SecurityEvents,
@@ -513,6 +555,12 @@ impl App {
             | ActionId::ExtendedTrigger
             | ActionId::SignedFirmware
             | ActionId::CertificateSigned
+            | ActionId::ClearChargingProfile
+            | ActionId::GetCompositeSchedule
+            | ActionId::ReserveNow
+            | ActionId::UpdateFirmware
+            | ActionId::GetDiagnostics
+            | ActionId::SendLocalList
             | ActionId::Raw => (!connected).then(|| "station is disconnected".to_owned()),
             ActionId::RemoteStop => {
                 if !connected {
@@ -610,6 +658,23 @@ impl App {
             ActionId::CertificateSigned => {
                 self.mode = Mode::Form(Box::new(Form::certificate_signed(st)));
             }
+            ActionId::ClearChargingProfile => {
+                self.mode = Mode::Form(Box::new(Form::clear_charging_profile(st)));
+            }
+            ActionId::GetCompositeSchedule => {
+                self.mode = Mode::Form(Box::new(Form::get_composite_schedule(st)));
+            }
+            ActionId::ReserveNow => {
+                let reservation_id = self.take_request_id();
+                self.mode = Mode::Form(Box::new(Form::reserve_now(st, reservation_id, self.now)));
+            }
+            ActionId::UpdateFirmware => {
+                self.mode = Mode::Form(Box::new(Form::update_firmware(st, self.now)));
+            }
+            ActionId::GetDiagnostics => {
+                self.mode = Mode::Form(Box::new(Form::get_diagnostics(st)));
+            }
+            ActionId::SendLocalList => self.mode = Mode::Form(Box::new(Form::send_local_list(st))),
             ActionId::SecurityEvents => {
                 if let Some(state) = &self.state {
                     self.mode = Mode::Detail(security_events_detail(&station, state));

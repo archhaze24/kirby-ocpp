@@ -4,10 +4,13 @@
 use kirby_csms_core::{CsmsError, CsmsHandle, Frame};
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::ocpp::messages::{
-    CertificateHashData, CertificateUse, ChargingProfile, ExtendedMessageTrigger, GetLogRequest,
-    SignedUpdateFirmwareRequest,
+    CertificateHashData, CertificateUse, ChargingProfile, ClearChargingProfileRequest,
+    ExtendedMessageTrigger, GetDiagnosticsRequest, GetLogRequest, ReserveNowRequest,
+    SendLocalListRequest, SignedUpdateFirmwareRequest, UpdateFirmwareRequest,
 };
-use kirby_ocpp_core::ocpp::types::{AvailabilityType, MessageTrigger, ResetType};
+use kirby_ocpp_core::ocpp::types::{
+    AvailabilityType, ChargingRateUnitType, MessageTrigger, ResetType,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -65,6 +68,16 @@ pub enum Command {
     CertificateSigned {
         chain: String,
     },
+    ClearChargingProfile(ClearChargingProfileRequest),
+    GetCompositeSchedule {
+        connector: u32,
+        duration: i32,
+        unit: Option<ChargingRateUnitType>,
+    },
+    ReserveNow(Box<ReserveNowRequest>),
+    UpdateFirmware(Box<UpdateFirmwareRequest>),
+    GetDiagnostics(Box<GetDiagnosticsRequest>),
+    SendLocalList(Box<SendLocalListRequest>),
     /// Any action with a free-form payload, sent as is.
     Raw {
         action: String,
@@ -94,6 +107,12 @@ impl Command {
             Self::ExtendedTriggerMessage { .. } => "ExtendedTriggerMessage",
             Self::SignedUpdateFirmware(_) => "SignedUpdateFirmware",
             Self::CertificateSigned { .. } => "CertificateSigned",
+            Self::ClearChargingProfile(_) => "ClearChargingProfile",
+            Self::GetCompositeSchedule { .. } => "GetCompositeSchedule",
+            Self::ReserveNow(_) => "ReserveNow",
+            Self::UpdateFirmware(_) => "UpdateFirmware",
+            Self::GetDiagnostics(_) => "GetDiagnostics",
+            Self::SendLocalList(_) => "SendLocalList",
             Self::Raw { action, .. } => action,
         }
     }
@@ -163,6 +182,22 @@ impl Command {
             }
             Self::SignedUpdateFirmware(req) => json!(req),
             Self::CertificateSigned { chain } => json!({ "certificateChain": chain }),
+            Self::ClearChargingProfile(req) => json!(req),
+            Self::GetCompositeSchedule {
+                connector,
+                duration,
+                unit,
+            } => {
+                let mut v = json!({ "connectorId": connector, "duration": duration });
+                if let Some(u) = unit {
+                    v["chargingRateUnit"] = json!(u.as_str());
+                }
+                v
+            }
+            Self::ReserveNow(req) => json!(req),
+            Self::UpdateFirmware(req) => json!(req),
+            Self::GetDiagnostics(req) => json!(req),
+            Self::SendLocalList(req) => json!(req),
             Self::Raw { payload, .. } => payload.clone(),
         }
     }
@@ -187,6 +222,7 @@ impl Command {
     pub fn answer_is_content(&self, response: &Value) -> bool {
         match self {
             Self::GetConfiguration { .. }
+            | Self::GetCompositeSchedule { .. }
             | Self::GetInstalledCertificateIds(_)
             | Self::Raw { .. } => true,
             Self::DataTransfer { .. } => response.get("data").is_some(),
@@ -312,6 +348,28 @@ pub async fn run(handle: &CsmsHandle, station: &str, command: &Command) -> CmdOu
         ),
         Command::CertificateSigned { chain } => {
             finish(handle.certificate_signed(station, chain.clone()).await)
+        }
+        Command::ClearChargingProfile(req) => {
+            finish(handle.clear_charging_profile(station, req.clone()).await)
+        }
+        Command::GetCompositeSchedule {
+            connector,
+            duration,
+            unit,
+        } => finish(
+            handle
+                .get_composite_schedule(station, ConnectorId::new(*connector), *duration, *unit)
+                .await,
+        ),
+        Command::ReserveNow(req) => finish(handle.reserve_now(station, (**req).clone()).await),
+        Command::UpdateFirmware(req) => {
+            finish(handle.update_firmware(station, (**req).clone()).await)
+        }
+        Command::GetDiagnostics(req) => {
+            finish(handle.get_diagnostics(station, (**req).clone()).await)
+        }
+        Command::SendLocalList(req) => {
+            finish(handle.send_local_list(station, (**req).clone()).await)
         }
         Command::Raw { action, payload } => match handle
             .call(station, action, payload.clone())

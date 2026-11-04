@@ -379,7 +379,7 @@ impl App {
         }
     }
 
-    /// A fresh request id for `GetLog` / `SignedUpdateFirmware` forms.
+    /// A fresh request id for `GetLog`, `SignedUpdateFirmware` and `ReserveNow` forms.
     pub fn take_request_id(&mut self) -> i32 {
         let id = self.next_request_id;
         self.next_request_id = if id >= 1_000_000 { 1 } else { id + 1 };

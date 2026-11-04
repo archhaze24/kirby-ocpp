@@ -313,7 +313,7 @@ mod commands {
     fn palette_lists_actions_with_keys_and_reasons() {
         let (mut app, _) = app_with(&[]);
         open(&mut app, ':');
-        let screen = render(&app, 100, 30);
+        let screen = render(&app, 100, 40);
         assert!(screen.contains("Actions"), "{screen}");
         assert!(screen.contains("t  Remote start transaction (no station selected)"));
         assert!(screen.contains("Response rule"));
@@ -325,7 +325,7 @@ mod commands {
 
         let mut app = loaded();
         open(&mut app, ':');
-        let screen = render(&app, 100, 30);
+        let screen = render(&app, 100, 40);
         assert!(screen.contains("t  Remote start transaction"), "{screen}");
         assert!(!screen.contains("Remote start transaction ("), "{screen}");
         assert!(screen.contains("Forget station (station is connected)"));

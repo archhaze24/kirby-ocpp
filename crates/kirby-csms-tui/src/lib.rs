@@ -322,6 +322,8 @@ where
 #[cfg(test)]
 mod command_tests;
 #[cfg(test)]
+mod list_forms_tests;
+#[cfg(test)]
 mod security_tests;
 #[cfg(test)]
 mod tests;

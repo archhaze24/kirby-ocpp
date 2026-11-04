@@ -298,6 +298,10 @@ Connections refused by the security profile show as a status-line notice (at mos
 | `E` | ExtendedTriggerMessage (`SignChargePointCertificate` preselected) |
 | `S` `X` | SignedUpdateFirmware (URL, retrieve time, request id, signing certificate PEM, signature) / CertificateSigned (PEM chain) |
 | `e` | the last 100 security events the station reported (scrollable); the Station pane shows the last three, the last log and signed firmware status and a CSR marker |
+| `K` `H` | ClearChargingProfile (optional id, connector, purpose, stack level) / GetCompositeSchedule (connector, duration, optional rate unit; the answer opens in a popup) |
+| `V` | ReserveNow (connector, expiry, idTag, optional parentIdTag, reservation id) |
+| `U` `O` | UpdateFirmware (URL, retrieve time, optional retries) / GetDiagnostics (upload URL, optional retries and time range) |
+| `B` | SendLocalList (Differential or Full, list version, entries as comma separated `idTag[:status]`, status defaults to Accepted, `idTag:-` deletes in a differential update, at most 100 entries) |
 | `w` | raw call: any of the 26 central system actions with a JSON payload checked against its request schema |
 | `r` | the last results of the selected station (`Enter` opens one) |
 | `m` | response rule: answer every station's CALLs of one action with a fixed payload |
