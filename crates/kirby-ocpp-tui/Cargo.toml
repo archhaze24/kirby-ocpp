@@ -1,11 +1,15 @@
 [package]
 name = "kirby-ocpp-tui"
 description = "Terminal UI for the kirby-ocpp charge point emulator"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords = ["ocpp", "ev-charging", "emulator", "tui"]
+categories = ["command-line-utilities", "development-tools::testing"]
 
 [lib]
 name = "kirby_ocpp_tui"

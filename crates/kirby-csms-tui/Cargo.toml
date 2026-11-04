@@ -1,6 +1,7 @@
 [package]
 name = "kirby-csms-tui"
 description = "Terminal UI for the kirby-csms central system (observe many stations)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

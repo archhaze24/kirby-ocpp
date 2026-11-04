@@ -1,11 +1,15 @@
 [package]
 name = "kirby-ocpp-core"
 description = "OCPP 1.6J charge point emulator core: frames, station actor, connection layer (no UI)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+keywords = ["ocpp", "ev-charging", "emulator", "websocket"]
+categories = ["development-tools::testing", "network-programming"]
 
 [lib]
 name = "kirby_ocpp_core"

@@ -1,6 +1,7 @@
 [package]
 name = "kirby-csms-core"
 description = "OCPP 1.6J central system (CSMS) engine: multi-station WebSocket server, command queue, scripted replies (no UI)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
