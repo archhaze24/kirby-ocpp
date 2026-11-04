@@ -1,24 +1,15 @@
 # Third-Party Notices
 
-## OCPP 1.6J JSON schemas
+## OCPP 1.6J JSON schemas and Security Whitepaper schemas
 
-`kirby-csms` bundles the OCPP 1.6J JSON schemas (`crates/kirby-ocpp-core/schemas`) and embeds them in the binary for local protocol validation.
+`kirby-csms` bundles the JSON schemas of the OCPP 1.6J specification package (56 files, `crates/kirby-ocpp-core/schemas`) and of the OCPP 1.6 Security Whitepaper "Improved security for OCPP 1.6-J" (22 files: CertificateSigned, DeleteCertificate, ExtendedTriggerMessage, GetInstalledCertificateIds, GetLog, InstallCertificate, LogStatusNotification, SecurityEventNotification, SignCertificate, SignedFirmwareStatusNotification, SignedUpdateFirmware and their responses). They are embedded in the binary for local protocol validation.
 
-The schemas are sourced from the official Open Charge Alliance OCPP 1.6 download package:
+- Creator and copyright holder: Open Charge Alliance. Copyright (c) 2010-2025 Open Charge Alliance for the OCPP 1.6 specification package, copyright (c) 2022 and 2026 Open Charge Alliance for Security Whitepaper editions 3 and 4. All rights reserved by the Open Charge Alliance.
+- Licence: the Open Charge Alliance publishes these materials under the Creative Commons Attribution-NoDerivatives 4.0 International Public License (CC BY-ND 4.0): https://creativecommons.org/licenses/by-nd/4.0/legalcode
+- Source: the official downloads at https://openchargealliance.org/my-oca/ocpp/ ("OCPP 1.6 (all files & errata)", "OCPP 1.6 Security Whitepaper Edition 4" and the archived Edition 3). The bundled files are byte-for-byte identical to the schemas in those packages (the whitepaper schemas are identical in editions 3 and 4). They are included unmodified.
+- Disclaimer: the materials are provided as is, without warranties of any kind, as stated in section 5 of the CC BY-ND 4.0 licence. The Open Charge Alliance does not sponsor or endorse this project.
 
-- https://openchargealliance.org/my-oca/ocpp/
-
-The OCPP 1.6J specification package references Creative Commons Attribution-NoDerivatives 4.0 International:
-
-- https://creativecommons.org/licenses/by-nd/4.0/legalcode
-
-The bundled schemas are included, unmodified, for compatibility and conformance validation and are not owned by this project. The project license in `LICENSE` applies to this project's own source code, not to Open Charge Alliance materials. Open Charge Alliance does not sponsor or endorse this project.
-
-## OCPP 1.6 Security Whitepaper JSON schemas
-
-The 22 schema files of the OCPP 1.6 Security Whitepaper ("Improved security for OCPP 1.6-J", edition 3) messages (CertificateSigned, DeleteCertificate, ExtendedTriggerMessage, GetInstalledCertificateIds, GetLog, InstallCertificate, LogStatusNotification, SecurityEventNotification, SignCertificate, SignedFirmwareStatusNotification, SignedUpdateFirmware and their responses) are the official Open Charge Alliance files of whitepaper edition 3.2, bundled unmodified and embedded in the binary for local protocol validation. They were copied from a public mirror of the OCA package (`juherr/awesome-ev-charging`), not from the OCA download itself. They are not owned by this project, the same terms and the same disclaimer as for the OCPP 1.6J schemas above apply (Open Charge Alliance does not sponsor or endorse this project), and the OCA's own licence terms for the whitepaper take precedence:
-
-- https://openchargealliance.org/my-oca/ocpp/
+The project licence in `LICENSE` applies to this project's own source code, not to Open Charge Alliance materials.
 
 ## Rust dependencies
 
