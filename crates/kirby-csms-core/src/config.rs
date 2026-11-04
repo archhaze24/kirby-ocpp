@@ -134,6 +134,12 @@ impl SecurityPolicy {
             .get(station)
             .or(self.default_key.as_ref())
             .map(String::as_str)
+            .filter(|key| !key.is_empty())
+    }
+
+    /// Whether any configured key is empty (refused by [`crate::CsmsServer::start`]).
+    pub(crate) fn has_empty_key(&self) -> bool {
+        self.default_key.as_deref() == Some("") || self.keys.values().any(String::is_empty)
     }
 }
 

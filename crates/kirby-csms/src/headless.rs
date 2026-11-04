@@ -288,7 +288,10 @@ impl Printer {
                         "type": "auth_failed", "ts": stamp, "station": station,
                         "remote_addr": remote_addr.to_string(), "reason": reason
                     }),
-                    &format!("{clock} {who} refused ({reason}) from {remote_addr}"),
+                    &format!(
+                        "{clock} {who} refused ({}) from {remote_addr}",
+                        sanitize(reason)
+                    ),
                 );
             }
         }

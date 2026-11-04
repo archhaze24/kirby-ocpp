@@ -71,6 +71,9 @@ async fn main() -> ExitCode {
             Err(error) => return usage_error(&error),
         }
     }
+    if let Err(error) = cli.require_keys(&config) {
+        return usage_error(&error);
+    }
     if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key)
         && let Err(error) = load_tls(&mut config, cert, key, cli.tls_client_ca.as_deref())
     {

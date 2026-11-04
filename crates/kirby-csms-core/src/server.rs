@@ -112,6 +112,11 @@ impl CsmsServer {
                 config.security.profile.number()
             )));
         }
+        if config.security.has_empty_key() {
+            return Err(CsmsError::Config(
+                "security keys must not be empty".to_owned(),
+            ));
+        }
         let listener = TcpListener::bind(config.listen)
             .await
             .map_err(CsmsError::Bind)?;
@@ -635,7 +640,10 @@ impl Inner {
             && schemas.knows_action(action)
             && let Err(violation) = schemas.validate_request(action, payload)
         {
-            return Reply::Error(violation.error_code(), violation.errors.join("; "));
+            return Reply::Error(
+                violation.error_code(),
+                truncate_chars(&violation.errors.join("; "), MAX_ERROR_DESCRIPTION),
+            );
         }
         if let Some(responder) = state.responders.get(action).cloned() {
             // Run outside the lock: the closure may call back into the handle.
@@ -735,7 +743,7 @@ where
     #[allow(clippy::result_large_err)]
     let callback = |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
         let id = station_id_from_path(request.uri().path())
-            .ok_or_else(|| refusal("no charge point id in the URL path"))?;
+            .ok_or_else(|| refusal("no valid charge point id in the URL path"))?;
         if let Err(denied) = auth::check(&inner.config.security, request, &id, &identity) {
             inner.emit(CsmsEvent::AuthFailed {
                 station: Some(id),
@@ -1044,14 +1052,28 @@ where
 
 // ---- handshake helpers --------------------------------------------------------------
 
+/// Longest accepted station id, in bytes after percent-decoding.
+const MAX_STATION_ID_LEN: usize = 128;
+
 /// The station id of a URL path: the last non-empty segment, percent-decoded. `None` if
-/// there is none or it is not valid UTF-8 after decoding.
+/// there is none, it is not valid UTF-8 after decoding, it is longer than 128 bytes or it
+/// contains a control character.
 pub fn station_id_from_path(path: &str) -> Option<String> {
     let segment = path.rsplit('/').find(|segment| !segment.is_empty())?;
     let decoded = percent_encoding::percent_decode_str(segment)
         .decode_utf8()
         .ok()?;
-    (!decoded.is_empty()).then(|| decoded.into_owned())
+    (!decoded.is_empty()
+        && decoded.len() <= MAX_STATION_ID_LEN
+        && !decoded.chars().any(char::is_control))
+    .then(|| decoded.into_owned())
+}
+
+/// Longest CALLERROR description the engine generates, in characters.
+const MAX_ERROR_DESCRIPTION: usize = 255;
+
+fn truncate_chars(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
 }
 
 /// The subprotocols the client offered, from every `Sec-WebSocket-Protocol` header line.
@@ -1095,5 +1117,21 @@ mod tests {
         assert_eq!(station_id_from_path("/CP%20X"), Some("CP X".to_owned()));
         assert_eq!(station_id_from_path("/"), None);
         assert_eq!(station_id_from_path("/x/%FF"), None);
+    }
+
+    #[test]
+    fn station_id_rejects_long_and_control_characters() {
+        assert!(station_id_from_path(&format!("/{}", "a".repeat(128))).is_some());
+        assert_eq!(station_id_from_path(&format!("/{}", "a".repeat(129))), None);
+        assert_eq!(station_id_from_path("/CP%0A1"), None);
+        assert_eq!(station_id_from_path("/CP%001"), None);
+        assert_eq!(station_id_from_path("/CP%1B%5B1"), None);
+    }
+
+    #[test]
+    fn truncation_respects_char_boundaries() {
+        let text = "é".repeat(300);
+        assert_eq!(truncate_chars(&text, 255).chars().count(), 255);
+        assert_eq!(truncate_chars("short", 255), "short");
     }
 }

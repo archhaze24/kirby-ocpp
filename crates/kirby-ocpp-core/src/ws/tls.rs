@@ -65,6 +65,9 @@ pub(super) fn server_name(url: &Url, tls: &TlsConfig) -> Result<ServerName<'stat
         .map_err(|_| ConnectError::Tls(format!("invalid TLS server name `{name}`")))
 }
 
+/// The trust anchors: installed Central System roots (`extra_pem`) and the `ca_file`. Only when
+/// both are absent the system roots are used: once a Central System root is installed, a server
+/// certificate that chains only to a system root is refused. (Deliberate, not a bug.)
 async fn trust_roots(
     ca_file: Option<&Path>,
     extra_pem: &[String],

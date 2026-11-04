@@ -66,7 +66,14 @@ pub struct Cli {
     /// Basic Auth key of one station as ID=KEY (repeatable). The station sends the key as the
     /// password and its id as the user name. Environment KIRBY_CSMS_AUTH_KEY holds several
     /// entries separated by `;` (used only when no --auth-key is given)
-    #[arg(long = "auth-key", value_name = "ID=KEY", value_parser = parse_auth_key)]
+    ///
+    /// Parsed by `apply_env_auth_keys` rather than by clap, so that a rejected value is never
+    /// echoed in an error message.
+    #[arg(long = "auth-key", value_name = "ID=KEY", hide_env_values = true)]
+    auth_key_raw: Vec<String>,
+
+    /// The parsed `--auth-key` (or `KIRBY_CSMS_AUTH_KEY`) entries.
+    #[arg(skip)]
     pub auth_keys: Vec<(String, String)>,
 
     /// File with Basic Auth keys: lines `ID=KEY` (blank lines and `#` comments are skipped). Keep
@@ -245,13 +252,37 @@ impl Cli {
     }
 
     /// Takes the keys from `KIRBY_CSMS_AUTH_KEY` (`ID=KEY;ID=KEY`) unless `--auth-key` was given.
+    ///
+    /// Also parses the raw `--auth-key` values. Errors name the flag or variable, never the value.
     pub fn apply_env_auth_keys(&mut self, env: Option<&str>) -> Result<(), String> {
-        let Some(text) = env.filter(|_| self.auth_keys.is_empty()) else {
+        for raw in std::mem::take(&mut self.auth_key_raw) {
+            let pair = parse_auth_key(&raw).map_err(|e| format!("--auth-key: {e}"))?;
+            self.auth_keys.push(pair);
+        }
+        if !self.auth_keys.is_empty() {
+            return reject_duplicates(&self.auth_keys, "--auth-key");
+        }
+        let Some(text) = env else {
             return Ok(());
         };
         for part in text.split(';').filter(|part| !part.is_empty()) {
             let pair = parse_auth_key(part).map_err(|e| format!("KIRBY_CSMS_AUTH_KEY: {e}"))?;
             self.auth_keys.push(pair);
+        }
+        reject_duplicates(&self.auth_keys, "KIRBY_CSMS_AUTH_KEY")
+    }
+
+    /// With profile 1 or 2 some key must exist once every source is loaded.
+    pub fn require_keys(&self, config: &CsmsConfig) -> Result<(), String> {
+        let profile = self.security_profile;
+        if matches!(profile, 1 | 2)
+            && config.security.keys.is_empty()
+            && config.security.default_key.is_none()
+        {
+            return Err(format!(
+                "--security-profile {profile} has no authorization key: no ID=KEY entry in \
+                 --auth-key, --auth-keys-file or KIRBY_CSMS_AUTH_KEY, and no --default-auth-key"
+            ));
         }
         Ok(())
     }
@@ -272,6 +303,7 @@ impl Cli {
             return Err("--tls-client-ca is only used with --security-profile 3".to_owned());
         }
         let has_keys = !self.auth_keys.is_empty()
+            || !self.auth_key_raw.is_empty()
             || self.auth_keys_file.is_some()
             || self.default_auth_key.is_some();
         if matches!(profile, 1 | 2) && !has_keys {
@@ -296,15 +328,34 @@ fn parse_auth_key(value: &str) -> Result<(String, String), String> {
     }
 }
 
+/// Refuses the same station id twice in one source. Names the id (sanitised), never the key.
+fn reject_duplicates(keys: &[(String, String)], source: &str) -> Result<(), String> {
+    let mut seen = std::collections::HashSet::new();
+    match keys.iter().find(|(id, _)| !seen.insert(id.as_str())) {
+        Some((id, _)) => Err(format!(
+            "{source}: duplicate station id `{}`",
+            crate::headless::sanitize(id)
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Parses the contents of an `--auth-keys-file`. Errors name the line, never the key.
 pub fn parse_auth_keys_text(text: &str) -> Result<Vec<(String, String)>, String> {
-    let mut keys = Vec::new();
+    let mut keys: Vec<(String, String)> = Vec::new();
     for (number, line) in text.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
         let pair = parse_auth_key(line).map_err(|e| format!("line {}: {e}", number + 1))?;
+        if keys.iter().any(|(id, _)| *id == pair.0) {
+            return Err(format!(
+                "line {}: duplicate station id `{}`",
+                number + 1,
+                crate::headless::sanitize(&pair.0)
+            ));
+        }
         keys.push(pair);
     }
     Ok(keys)
@@ -408,6 +459,36 @@ mod tests {
         assert_eq!(cli.auth_keys, [("C".to_owned(), "3;4".to_owned())]);
         let mut cli = Cli::parse_from(["kirby-csms"]);
         assert!(cli.apply_env_auth_keys(Some("nokey")).is_err());
+    }
+
+    #[test]
+    fn bad_and_duplicate_keys_never_echo_the_key() {
+        let mut cli = Cli::parse_from(["kirby-csms", "--auth-key", "hunter2"]);
+        let error = cli.apply_env_auth_keys(None).unwrap_err();
+        assert!(
+            error.starts_with("--auth-key") && !error.contains("hunter2"),
+            "{error}"
+        );
+        let mut cli = Cli::parse_from(["kirby-csms", "--auth-key", "A=s1", "--auth-key", "A=s2"]);
+        let error = cli.apply_env_auth_keys(None).unwrap_err();
+        assert!(error.contains("`A`") && !error.contains("s1") && !error.contains("s2"));
+        let mut cli = Cli::parse_from(["kirby-csms"]);
+        assert!(cli.apply_env_auth_keys(Some("A=1;A=2")).is_err());
+        let error = parse_auth_keys_text("A=s1\nB=2\nA=s2").unwrap_err();
+        assert!(error.starts_with("line 3:") && error.contains("`A`") && !error.contains("s2"));
+        let error = parse_auth_keys_text("bad\u{1b}id=1\nbad\u{1b}id=2").unwrap_err();
+        assert!(!error.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn profile_one_needs_a_loaded_key() {
+        let cli = Cli::parse_from(["kirby-csms", "--security-profile", "1"]);
+        let mut config = cli.csms_config();
+        assert!(cli.require_keys(&config).is_err());
+        config.security.default_key = Some("k".to_owned());
+        assert!(cli.require_keys(&config).is_ok());
+        let cli = Cli::parse_from(["kirby-csms"]);
+        assert!(cli.require_keys(&cli.csms_config()).is_ok());
     }
 
     #[test]

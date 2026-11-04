@@ -147,6 +147,19 @@ async fn tls_station(
     Observed,
     tempfile::TempDir,
 ) {
+    tls_station_with(roots, false).await
+}
+
+/// As [`tls_station`]; with `ca_file` the station also trusts the mock CA via `--tls-ca`.
+async fn tls_station_with(
+    roots: impl FnOnce(&str) -> Vec<StoredRoot>,
+    ca_file: bool,
+) -> (
+    MockCsms,
+    kirby_ocpp_core::station::StationHandle,
+    Observed,
+    tempfile::TempDir,
+) {
     let csms = MockCsms::start(CsmsOptions {
         tls: Some(TlsOpts::default()),
         ..CsmsOptions::default()
@@ -159,6 +172,11 @@ async fn tls_station(
     let mut config = test_config(csms.url(), &dir);
     config.tls = TlsConfig {
         server_name: Some("localhost".to_owned()),
+        ca_file: ca_file.then(|| {
+            let path = dir.path().join("ca.pem");
+            std::fs::write(&path, &ca_pem).unwrap();
+            path
+        }),
         ..TlsConfig::default()
     };
     let mut state = PersistedStation::new(config.charge_point_id.clone());
@@ -224,6 +242,31 @@ async fn a_server_the_new_root_does_not_vouch_for_is_tried_with_the_fallback() {
     );
     // Connecting through the fallback proves nothing about the new root: both stay.
     assert_eq!(station.snapshot().certificates.len(), 2);
+    station.shutdown().await.unwrap();
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_fallback_stays_when_no_installed_root_was_in_the_trust_set() {
+    let old = root("Old root");
+    // Only the fallback is installed; the connection is verified through `ca_file` alone.
+    let (csms, station, mut observed, _dir) =
+        tls_station_with(|_| vec![stored(&old.pem, true)], true).await;
+    station.connect().await.unwrap();
+    wait_state(&station, "accepted", |s| {
+        s.registration == Some(RegistrationStatus::Accepted)
+    })
+    .await;
+    observed.drain();
+    assert!(
+        !observed
+            .logs
+            .iter()
+            .any(|l| l.contains("fallback root was removed")),
+        "{:#?}",
+        observed.logs
+    );
+    assert_eq!(station.snapshot().certificates.len(), 1);
     station.shutdown().await.unwrap();
     csms.shutdown().await;
 }

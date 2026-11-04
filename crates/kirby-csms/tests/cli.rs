@@ -528,6 +528,7 @@ fn bad_input_exits_2() {
         ],
         vec!["--security-profile", "1", "--default-auth-key", ""],
         vec!["--tls-client-ca", "ca.pem"],
+        vec!["--auth-key", "A=1", "--auth-key", "A=2"],
     ] {
         let (code, _, stderr) = run_to_end(&args);
         assert_eq!(code, 2, "{args:?}: {stderr}");
@@ -541,6 +542,34 @@ fn bad_input_exits_2() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn bad_auth_key_values_are_never_echoed_and_empty_sources_are_usage_errors() {
+    let (code, _, stderr) = run_to_end(&["--auth-key", "hunter2"]);
+    assert_eq!(code, 2);
+    assert!(!stderr.contains("hunter2"), "{stderr}");
+    let (code, _, stderr) = run_to_end(&["--security-profile", "1", "--auth-key", "hunter2"]);
+    assert_eq!(code, 2);
+    assert!(!stderr.contains("hunter2"), "{stderr}");
+    let (code, _, stderr) = run_to_end(&["--auth-key", "A=s3cret1", "--auth-key", "A=s3cret2"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("`A`") && !stderr.contains("s3cret"),
+        "{stderr}"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    for (name, text) in [
+        ("empty.txt", ""),
+        ("comments.txt", "# nothing\n\n"),
+        ("dup.txt", "A=s3cret1\nA=s3cret2\n"),
+    ] {
+        let file = write(dir.path(), name, text);
+        let (code, _, stderr) = run_to_end(&["--security-profile", "1", "--auth-keys-file", &file]);
+        assert_eq!(code, 2, "{name}: {stderr}");
+        assert!(!stderr.contains("s3cret"), "{stderr}");
+    }
 }
 
 /// A profile-1 station: id as user name, `key` as the AuthorizationKey. Does not wait for boot.
@@ -687,9 +716,15 @@ async fn human_output_neutralises_hostile_station_ids() {
         .unwrap_or_else(|| panic!("unexpected first line {first:?}"))
         .to_owned();
 
-    // ESC ] 0 ; x BEL, then a newline that would fake a second log line.
+    // ESC ] 0 ; x BEL, then a newline that would fake a second log line: refused at the
+    // handshake (control characters in the id), so it never reaches the output at all.
     let id = "evil\u{1b}]0;x\u{7}\nfake";
-    let _station = station(&addr, id, false).await;
+    let mut config = StationConfig::new(format!("ws://{addr}/ocpp")).with_charge_point_id(id);
+    config.persist = false;
+    config.reconnect.enabled = false;
+    let (hostile, _join) = Station::spawn(config, Arc::new(SystemClock));
+    hostile.connect().await.unwrap();
+    let _station = station(&addr, "CP-OK", false).await;
     let mut seen = Vec::new();
     loop {
         let line = lines.recv_timeout(WAIT).expect("station lines");
@@ -700,7 +735,8 @@ async fn human_output_neutralises_hostile_station_ids() {
     }
     let _ = child.kill();
     let _ = child.wait();
-    assert!(seen.iter().any(|l| l.contains("evil")), "{seen:#?}");
+    assert!(seen.iter().any(|l| l.contains("CP-OK")), "{seen:#?}");
+    assert!(!seen.iter().any(|l| l.contains("evil")), "{seen:#?}");
     for line in &seen {
         assert!(!line.chars().any(char::is_control), "{line:?}");
         assert!(!line.starts_with("fake"), "{line:?}");

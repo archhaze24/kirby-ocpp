@@ -266,9 +266,15 @@ impl StationActor {
     }
 
     /// A TLS connection was made: with the new Central System root the fallback is no longer
-    /// needed (`M05.FR.12`).
+    /// needed (`M05.FR.12`). Only a connection that could have been verified against the
+    /// installed Central System roots counts: with none installed (only `--tls-ca` or the
+    /// fallback in the trust set) the fallback stays.
     pub(super) fn on_tls_connected(&mut self) {
-        let via_new_root = !self.use_fallback_root;
+        let via_new_root = !self.use_fallback_root
+            && !self
+                .certs
+                .root_pems(CertificateUse::CentralSystemRootCertificate)
+                .is_empty();
         self.use_fallback_root = false;
         if via_new_root && self.certs.has_fallback() && self.certs.drop_fallback() {
             self.certs_dirty = true;

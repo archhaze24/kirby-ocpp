@@ -97,7 +97,9 @@ impl ParsedCert {
             issuer_raw: cert.issuer().as_raw().to_vec(),
             key_bits: cert.public_key().subject_public_key.data.to_vec(),
             spki_der: cert.public_key().raw.to_vec(),
-            self_signed: cert.subject().as_raw() == cert.issuer().as_raw(),
+            // Subject equal to issuer is not enough: the signature must verify with its own key.
+            self_signed: cert.subject().as_raw() == cert.issuer().as_raw()
+                && cert.verify_signature(None).is_ok(),
         })
     }
 
@@ -462,7 +464,8 @@ pub fn generate_csr(common_name: &str, organization: &str) -> Result<(String, St
 pub struct ChainRejected(pub String);
 
 /// Checks a `CertificateSigned` chain against the pending private key: it must parse, be within
-/// `max_size`, have a valid leaf, and the leaf's public key must be the pending key's.
+/// `max_size`, have a valid leaf, the leaf's public key must be the pending key's, and every
+/// certificate must be signed by the next one of the chain (no trust anchor or name checks).
 pub fn validate_signed_chain(
     chain_pem: &str,
     key_pem: &str,
@@ -483,6 +486,9 @@ pub fn validate_signed_chain(
     let key = KeyPair::from_pem(key_pem).map_err(|e| ChainRejected(format!("pending key: {e}")))?;
     if key.subject_public_key_info() != leaf.spki_der {
         return reject("the leaf certificate does not match the requested key");
+    }
+    if !chain.windows(2).all(|pair| pair[0].signed_by(&pair[1])) {
+        return reject("a certificate of the chain is not signed by the next one");
     }
     Ok(())
 }
@@ -644,6 +650,33 @@ mod tests {
         assert!(validate_signed_chain(&chain, &other_key, now, 10_000).is_err());
         assert!(validate_signed_chain(&chain, &key_pem, now, 10).is_err());
         assert!(validate_signed_chain("junk", &key_pem, now, 10_000).is_err());
+        // The next certificate did not sign the leaf.
+        let (_, _, other_ca) = root("Other CA", 30);
+        let broken = format!("{}\n{}", leaf.pem(), other_ca.pem());
+        assert!(validate_signed_chain(&broken, &key_pem, now, 10_000).is_err());
+        // A single-certificate chain has no link to check.
+        assert_eq!(
+            validate_signed_chain(leaf.pem().as_str(), &key_pem, now, 10_000),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_forged_self_signed_looking_root_is_rejected() {
+        let now = Utc::now();
+        let (real_params, real_key, _) = ca("Root A");
+        // Same subject and issuer name, but signed by another key.
+        let (_, _, genuine) = ca("Root A");
+        let forged = cross_signed("Root A", (&real_params, &real_key));
+        let mut store = CertificateStore::default();
+        assert_eq!(
+            store.install(CS, &forged, now, 8, false),
+            InstallCertificateStatus::Rejected
+        );
+        assert_eq!(
+            store.install(CS, &genuine.pem(), now, 8, false),
+            InstallCertificateStatus::Accepted
+        );
     }
 
     /// A CA (self-signed) and the pieces to sign others with.

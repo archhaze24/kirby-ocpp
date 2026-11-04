@@ -167,4 +167,16 @@ mod tests {
         assert!(!constant_time_eq(b"abc\0", b"abc"));
         assert!(constant_time_eq(b"", b""));
     }
+
+    #[test]
+    fn empty_key_is_not_configured() {
+        let policy = SecurityPolicy {
+            profile: SecurityProfile::BasicAuth,
+            keys: [("A".to_owned(), String::new())].into(),
+            default_key: Some(String::new()),
+        };
+        assert_eq!(policy.key_for("A"), None);
+        assert_eq!(policy.key_for("B"), None);
+        assert!(policy.has_empty_key());
+    }
 }

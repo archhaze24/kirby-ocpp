@@ -278,6 +278,38 @@ async fn misconfigured_profiles_do_not_start() {
 }
 
 #[tokio::test]
+async fn empty_keys_do_not_start() {
+    for tweak in [
+        (|c: &mut CsmsConfig| c.security.default_key = Some(String::new())) as fn(&mut _),
+        |c| {
+            c.security.keys.insert("CP-A".to_owned(), String::new());
+        },
+    ] {
+        let mut config = CsmsConfig::new("127.0.0.1:0".parse().unwrap());
+        config.security.profile = SecurityProfile::BasicAuth;
+        tweak(&mut config);
+        let error = CsmsServer::start(config).await.unwrap_err();
+        assert!(matches!(error, CsmsError::Config(_)), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn oversized_station_ids_are_refused_before_anything_is_recorded() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    let long = "a".repeat(129);
+    assert_eq!(raw_handshake(&csms, &long, None).await.unwrap_err().0, 400);
+    assert_eq!(
+        raw_handshake(&csms, "CP%0A1", None).await.unwrap_err().0,
+        400
+    );
+    assert_eq!(csms.stations().len(), 0);
+    assert!(events.try_recv().is_err());
+    assert!(raw_handshake(&csms, "CP-OK", None).await.is_ok());
+    csms.shutdown().await;
+}
+
+#[tokio::test]
 async fn profile_one_accepts_the_right_key_and_refuses_the_rest() {
     let csms = start(|c| basic_auth(c, SecurityProfile::BasicAuth)).await;
     let mut events = csms.subscribe();
