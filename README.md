@@ -64,6 +64,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--tls-server-name` | `OCPP_TLS_SERVER_NAME` | URL host | SNI / verification name override |
 | `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Skip certificate verification (testing only) |
 | `--show-secrets` | `OCPP_SHOW_SECRETS` | off | Show `AuthorizationKey` values in frame logs (TUI, `--json`, `--log-file`); by default they are replaced by `***` |
+| `--additional-root-certificate-check` | `OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK` | off | Value of the read-only `AdditionalRootCertificateCheck` key: a new Central System root installed with `InstallCertificate` must be signed by the installed one (the old one stays as a fallback until the first TLS connection with the new one) |
 | `--no-persist` | `KIRBY_OCPP_NO_PERSIST` | off | Do not load or save station state |
 | `--state-dir` | `KIRBY_OCPP_STATE_DIR` | `~/.kirby-ocpp/stations` | State directory (`%USERPROFILE%` on Windows) |
 | `--count` | `OCPP_COUNT` | `1` | Number of stations (fleet mode, 1-1000), see [Fleet mode](#fleet-mode) |

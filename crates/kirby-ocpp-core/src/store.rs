@@ -43,7 +43,9 @@ use crate::station::transaction::TransactionState;
 /// Version 3 added the install time of charging profiles (`StoredProfile::installed_at`).
 /// Version 4 added the certificate store and the queued security events (older files load with
 /// both empty; secrets live in a separate file, see [`StationSecrets`]).
-pub const STORE_VERSION: u32 = 4;
+/// Version 5 added the fallback flag of installed roots (`AdditionalRootCertificateCheck`;
+/// older files load with no fallback).
+pub const STORE_VERSION: u32 = 5;
 
 /// Everything that survives a restart.
 ///

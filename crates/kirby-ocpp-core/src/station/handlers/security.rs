@@ -21,12 +21,18 @@ pub(super) fn install_certificate(
 ) {
     let max = actor.registry.certificate_store_max_length();
     let now = actor.clock.now_utc();
-    let before = actor.certs.root_count();
-    let status = actor
-        .certs
-        .install(request.certificate_type, &request.certificate, now, max);
+    let check = actor.registry.additional_root_certificate_check();
+    let before = actor.certs.roots.clone();
+    let status = actor.certs.install(
+        request.certificate_type,
+        &request.certificate,
+        now,
+        max,
+        check,
+    );
     if status == InstallCertificateStatus::Accepted {
-        if actor.certs.root_count() != before {
+        if actor.certs.roots != before {
+            actor.use_fallback_root = false;
             actor.certs_dirty = true;
             actor.flush_now();
         }

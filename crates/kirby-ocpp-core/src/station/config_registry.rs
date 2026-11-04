@@ -480,6 +480,11 @@ impl ConfigRegistry {
         self.value(CPO_NAME).unwrap_or_default()
     }
 
+    /// `AdditionalRootCertificateCheck` (read-only; set at start).
+    pub fn additional_root_certificate_check(&self) -> bool {
+        self.value(ADDITIONAL_ROOT_CERTIFICATE_CHECK) == Some("true")
+    }
+
     pub fn certificate_store_max_length(&self) -> usize {
         usize::try_from(self.number(CERTIFICATE_STORE_MAX_LENGTH)).unwrap_or(usize::MAX)
     }
@@ -688,7 +693,10 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
 
     vec![
         writable(ALLOW_OFFLINE_TX_FOR_UNKNOWN_ID, Kind::Boolean, "true"),
-        read_only(ADDITIONAL_ROOT_CERTIFICATE_CHECK, "false"),
+        read_only(
+            ADDITIONAL_ROOT_CERTIFICATE_CHECK,
+            config.additional_root_certificate_check.to_string(),
+        ),
         writable(AUTHORIZATION_CACHE_ENABLED, Kind::Boolean, "true"),
         writable(AUTHORIZATION_KEY, Kind::Secret, ""),
         writable(AUTHORIZE_REMOTE_TX_REQUESTS, Kind::Boolean, "false"),

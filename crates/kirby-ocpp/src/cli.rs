@@ -247,6 +247,13 @@ pub struct Cli {
     )]
     pub show_secrets: bool,
 
+    /// Set the read-only AdditionalRootCertificateCheck key: a new Central System root must be signed by the installed one
+    #[arg(global = true,
+        long, env = "OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK", action = ArgAction::SetTrue,
+        value_parser = BoolishValueParser::new()
+    )]
+    pub additional_root_certificate_check: bool,
+
     /// Misbehave on purpose when the CSMS sends a command: ACTION=BEHAVIOR[*COUNT]. Repeatable
     #[arg(
         global = true,
@@ -391,6 +398,7 @@ impl Cli {
             phases: self.phases,
             response_rules: self.rule,
             show_secrets: self.show_secrets,
+            additional_root_certificate_check: self.additional_root_certificate_check,
         })
     }
 }

@@ -158,6 +158,9 @@ pub struct StationConfig {
     /// Record `AuthorizationKey` values in frame logs as they are (default `false`: they
     /// are replaced by `***` in `Event::Frame`; the wire is unaffected).
     pub show_secrets: bool,
+    /// Initial value of the read-only `AdditionalRootCertificateCheck` key (Security Whitepaper
+    /// `M05.FR.08` to `M05.FR.13`): a new Central System root must be signed by the installed one.
+    pub additional_root_certificate_check: bool,
 }
 
 impl Default for StationConfig {
@@ -184,6 +187,7 @@ impl Default for StationConfig {
             phases: defaults::PHASES,
             response_rules: Vec::new(),
             show_secrets: false,
+            additional_root_certificate_check: false,
         }
     }
 }

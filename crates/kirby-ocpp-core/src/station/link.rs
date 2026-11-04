@@ -144,6 +144,11 @@ impl StationActor {
                 self.link.events = Some(events);
                 self.state.connection = ConnectionState::Connected;
                 self.log(LogLevel::Success, "connected".to_owned());
+                if self.config.url.to_ascii_lowercase().starts_with("wss://")
+                    && !self.config.tls.skip_verify
+                {
+                    self.on_tls_connected();
+                }
                 self.send_boot(None);
             }
             Err(error) => {

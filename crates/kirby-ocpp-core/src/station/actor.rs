@@ -159,6 +159,8 @@ pub(crate) struct StationActor {
     pub(super) security_events: Vec<PendingSecurityEvent>,
     /// The certificate summaries of the snapshot are out of date.
     pub(super) certs_dirty: bool,
+    /// The next connection trusts the fallback Central System root (runtime only).
+    pub(super) use_fallback_root: bool,
     /// `StartupOfTheDevice` is sent once per process, after the first accepted boot.
     pub(super) startup_event_pending: bool,
     /// The local list changed since `Snapshot::local_list` was built.
@@ -268,6 +270,7 @@ impl StationActor {
             secrets: parts.secrets,
             security_events: parts.security_events,
             certs_dirty: false,
+            use_fallback_root: false,
             startup_event_pending: true,
             local_list_dirty,
             // Never reuse a key still present in the restored queue (the wall clock may jump back).

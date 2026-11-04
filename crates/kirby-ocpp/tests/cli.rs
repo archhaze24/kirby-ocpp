@@ -444,6 +444,19 @@ fn invalid_rules_are_usage_errors() {
 }
 
 #[test]
+fn additional_root_certificate_check_is_off_by_default_and_can_be_enabled() {
+    assert_eq!(config(URL, &[])["additional_root_certificate_check"], false);
+    assert_eq!(
+        config(&with_url(&["--additional-root-certificate-check"]), &[])["additional_root_certificate_check"],
+        true
+    );
+    assert_eq!(
+        config(URL, &[("OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK", "1")])["additional_root_certificate_check"],
+        true
+    );
+}
+
+#[test]
 fn show_secrets_is_off_by_default_and_can_be_enabled() {
     assert_eq!(config(URL, &[])["show_secrets"], false);
     assert_eq!(

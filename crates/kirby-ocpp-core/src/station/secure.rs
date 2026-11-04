@@ -235,13 +235,22 @@ impl StationActor {
                 key_pem: key,
             });
         }
-        config.tls.extra_roots_pem = self
-            .certs
-            .root_pems(CertificateUse::CentralSystemRootCertificate);
+        // M05.FR.13: after a refused server certificate the next attempt trusts the fallback root.
+        config.tls.extra_roots_pem = if self.use_fallback_root && self.certs.has_fallback() {
+            self.certs.fallback_pems()
+        } else {
+            self.certs
+                .root_pems(CertificateUse::CentralSystemRootCertificate)
+        };
     }
 
     /// Security events for a failed connection attempt.
     pub(super) fn report_connect_failure(&mut self, error: &ConnectError) {
+        if matches!(error, ConnectError::Tls(text) if text.contains("invalid peer certificate"))
+            && self.certs.has_fallback()
+        {
+            self.use_fallback_root = !self.use_fallback_root;
+        }
         match error {
             ConnectError::HttpStatus {
                 status: 401 | 403,
@@ -253,6 +262,22 @@ impl StationActor {
                 self.security_event("InvalidCentralSystemCertificate", Some(text));
             }
             _ => {}
+        }
+    }
+
+    /// A TLS connection was made: with the new Central System root the fallback is no longer
+    /// needed (`M05.FR.12`).
+    pub(super) fn on_tls_connected(&mut self) {
+        let via_new_root = !self.use_fallback_root;
+        self.use_fallback_root = false;
+        if via_new_root && self.certs.has_fallback() && self.certs.drop_fallback() {
+            self.certs_dirty = true;
+            self.flush_now();
+            self.log(
+                LogLevel::Info,
+                "connected with the new Central System root; the fallback root was removed"
+                    .to_owned(),
+            );
         }
     }
 
