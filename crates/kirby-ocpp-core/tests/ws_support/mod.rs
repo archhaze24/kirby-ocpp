@@ -226,6 +226,7 @@ pub fn options() -> ConnectOptions {
         ping_interval: None,
         call_timeout: Duration::from_secs(5),
         serialize_calls: true,
+        show_secrets: false,
     }
 }
 

@@ -44,6 +44,9 @@ pub struct CsmsConfig {
     pub tls: Option<Arc<ServerConfig>>,
     /// Who may connect. Default: everybody (profile 0). See [`SecurityPolicy`].
     pub security: SecurityPolicy,
+    /// Keep `AuthorizationKey` values in recorded frames (history, events). Default `false`:
+    /// they are replaced by `***`. The wire is unaffected.
+    pub show_secrets: bool,
 }
 
 /// OCPP 1.6 Security Whitepaper connection security profile of the server.
@@ -149,6 +152,7 @@ impl Default for CsmsConfig {
             max_stations: 100_000,
             tls: None,
             security: SecurityPolicy::default(),
+            show_secrets: false,
         }
     }
 }
@@ -169,6 +173,7 @@ impl fmt::Debug for CsmsConfig {
             .field("max_stations", &self.max_stations)
             .field("tls", &self.tls.is_some())
             .field("security", &self.security)
+            .field("show_secrets", &self.show_secrets)
             .finish()
     }
 }

@@ -112,6 +112,13 @@ pub struct Cli {
     )]
     pub history_cap: usize,
 
+    /// Show AuthorizationKey values in frame logs and history (by default they are replaced by ***)
+    #[arg(
+        long, env = "KIRBY_CSMS_SHOW_SECRETS", action = ArgAction::SetTrue,
+        value_parser = BoolishValueParser::new()
+    )]
+    pub show_secrets: bool,
+
     /// Stopped transactions kept per station (0 keeps none)
     #[arg(
         long,
@@ -197,6 +204,7 @@ impl Cli {
         config.transaction_ids = self.transaction_ids;
         config.heartbeat_interval = self.heartbeat_interval;
         config.history_cap = self.history_cap;
+        config.show_secrets = self.show_secrets;
         config.transaction_history_cap = self.transaction_history_cap;
         config.call_timeout = Duration::from_secs(self.call_timeout);
         config.security.profile =

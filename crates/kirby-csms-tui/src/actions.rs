@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 use crossterm::event::KeyCode;
-use kirby_csms_core::TransactionStatus;
+use kirby_csms_core::{Frame, TransactionStatus};
+use kirby_ocpp_core::ocpp::redact_secrets;
 use kirby_ocpp_tui::app::{Detail, NoticeLevel};
 use kirby_ocpp_tui::palette::rank_by;
 use kirby_ocpp_tui::text::{TextInput, sanitize, truncate};
@@ -726,7 +727,8 @@ impl App {
         self.pending = self.pending.saturating_sub(1);
         let label = command.label();
         let who = truncate(&sanitize(station), NOTICE_TEXT);
-        let request = pretty(&command.payload());
+        // The popup is a log of what was sent: never show an AuthorizationKey in it.
+        let request = pretty(&redacted_payload(command));
         let mut lines = vec![
             format!(
                 "{}  {}  {}",
@@ -854,4 +856,13 @@ pub fn palette_key(app: &mut App, mut p: Palette, code: KeyCode, ctrl: bool, fx:
 /// Rows of the results list: newest first.
 pub fn results_of<'a>(app: &'a App, station: &str) -> impl Iterator<Item = &'a ResultRecord> {
     app.results.get(station).into_iter().flatten()
+}
+
+/// The request payload with secrets replaced (see `kirby_ocpp_core::ocpp::redact_secrets`).
+fn redacted_payload(command: &Command) -> Value {
+    let frame = Frame::call("", command.action(), command.payload());
+    match redact_secrets(&frame) {
+        Frame::Call { payload, .. } => payload,
+        _ => Value::Null,
+    }
 }

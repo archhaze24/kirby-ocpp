@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
+use kirby_ocpp_core::ocpp::{ErrorCode, Frame, redact_secrets};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -537,6 +537,13 @@ impl Inner {
             };
             *by_action.entry(key.to_owned()).or_insert(0) += 1;
         }
+        let redacted;
+        let frame = if self.config.show_secrets {
+            frame
+        } else {
+            redacted = redact_secrets(frame);
+            &redacted
+        };
         let cap = self.config.history_cap;
         if cap > 0 {
             while rec.history.len() >= cap {

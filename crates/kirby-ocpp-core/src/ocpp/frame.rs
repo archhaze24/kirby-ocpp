@@ -412,6 +412,32 @@ impl FrameError {
     }
 }
 
+/// Marker that replaces a secret value in recorded frames.
+pub const REDACTED: &str = "***";
+
+/// Returns `frame` with the value of an `AuthorizationKey` `ChangeConfiguration` CALL
+/// replaced by [`REDACTED`]. Everything else is returned unchanged. Used only for the
+/// recorded copy of a frame (logs, history, UI); the wire bytes are never touched.
+///
+/// The key is matched case-insensitively, like the station's configuration registry.
+pub fn redact_secrets(frame: &Frame) -> Frame {
+    let mut copy = frame.clone();
+    if let Frame::Call {
+        action, payload, ..
+    } = &mut copy
+        && action == "ChangeConfiguration"
+        && let Some(object) = payload.as_object_mut()
+        && object
+            .get("key")
+            .and_then(Value::as_str)
+            .is_some_and(|key| key.eq_ignore_ascii_case("AuthorizationKey"))
+        && let Some(value) = object.get_mut("value")
+    {
+        *value = Value::from(REDACTED);
+    }
+    copy
+}
+
 /// Direction of a frame relative to this charge point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -449,6 +475,57 @@ mod tests {
         let via_serde: Frame =
             serde_json::from_str(&serde_json::to_string(frame).unwrap()).unwrap();
         assert_eq!(&via_serde, frame);
+    }
+
+    #[test]
+    fn redact_secrets_hides_only_the_authorization_key_value() {
+        let secret = Frame::call(
+            "1",
+            "ChangeConfiguration",
+            json!({"key": "AuthorizationKey", "value": "0123456789abcdef"}),
+        );
+        let redacted = redact_secrets(&secret);
+        assert_eq!(
+            redacted.to_value(),
+            json!([2, "1", "ChangeConfiguration", {"key": "AuthorizationKey", "value": "***"}])
+        );
+        // The original is untouched.
+        assert!(secret.to_json_string().contains("0123456789abcdef"));
+        let lower = Frame::call(
+            "2",
+            "ChangeConfiguration",
+            json!({"key": "authorizationkey", "value": "0123456789abcdef"}),
+        );
+        assert!(
+            !redact_secrets(&lower)
+                .to_json_string()
+                .contains("0123456789")
+        );
+
+        let others = [
+            Frame::call(
+                "3",
+                "ChangeConfiguration",
+                json!({"key": "HeartbeatInterval", "value": "10"}),
+            ),
+            Frame::call("4", "Heartbeat", json!({})),
+            Frame::call(
+                "5",
+                "DataTransfer",
+                json!({"key": "AuthorizationKey", "value": "x"}),
+            ),
+            Frame::call_result("6", json!({"key": "AuthorizationKey", "value": "x"})),
+            Frame::call(
+                "7",
+                "ChangeConfiguration",
+                json!({"key": "AuthorizationKey"}),
+            ),
+            Frame::call("8", "ChangeConfiguration", json!({"key": 5, "value": "x"})),
+            Frame::call("9", "ChangeConfiguration", json!({})),
+        ];
+        for frame in others {
+            assert_eq!(redact_secrets(&frame), frame);
+        }
     }
 
     #[test]

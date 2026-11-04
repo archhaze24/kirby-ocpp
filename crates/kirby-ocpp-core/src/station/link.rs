@@ -55,6 +55,7 @@ impl StationActor {
             ping_interval: self.config.ws_ping_interval(),
             call_timeout: self.config.call_timeout(),
             serialize_calls: true,
+            show_secrets: self.config.show_secrets,
         }
     }
 

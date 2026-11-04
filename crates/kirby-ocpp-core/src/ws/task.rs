@@ -28,7 +28,7 @@ use uuid::Uuid;
 
 use super::{ConnectOptions, ConnectionEvent, EVENT_CAPACITY, IncomingCall, schemas};
 use crate::error::CallError;
-use crate::ocpp::frame::{Direction, ErrorCode, Frame, FrameRecord};
+use crate::ocpp::frame::{Direction, ErrorCode, Frame, FrameRecord, redact_secrets};
 use crate::ocpp::responder::ReplyHandle;
 
 /// Close code reported when the connection ended without a close handshake.
@@ -101,6 +101,7 @@ where
     let (replies_tx, replies_rx) = mpsc::unbounded_channel();
     let task = Task {
         serialize: options.serialize_calls,
+        show_secrets: options.show_secrets,
         ping_interval: options.ping_interval,
         open: Arc::clone(&open),
         events: events_tx,
@@ -116,6 +117,7 @@ where
 
 struct Task {
     serialize: bool,
+    show_secrets: bool,
     ping_interval: Option<Duration>,
     open: Arc<AtomicBool>,
     events: mpsc::Sender<ConnectionEvent>,
@@ -249,9 +251,18 @@ impl Task {
             direction: Direction::Out,
             msg_id: Some(frame.id().to_owned()),
             action,
-            frame: frame.to_value(),
+            frame: self.recorded(&frame),
         };
         self.emit(ConnectionEvent::Frame(record)).await
+    }
+
+    /// The frame as it is recorded: secrets hidden unless `show_secrets`.
+    fn recorded(&self, frame: &Frame) -> Value {
+        if self.show_secrets {
+            frame.to_value()
+        } else {
+            redact_secrets(frame).to_value()
+        }
     }
 
     /// Writes our reply to a CSMS CALL, validated against the response schema.
@@ -341,7 +352,7 @@ impl Task {
             direction: Direction::In,
             msg_id: Some(frame.id().to_owned()),
             action,
-            frame: frame.to_value(),
+            frame: self.recorded(&frame),
         };
         self.emit(ConnectionEvent::Frame(record)).await?;
 

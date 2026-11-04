@@ -63,6 +63,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--tls-cert`, `--tls-key` | `OCPP_TLS_CERT_FILE`, `OCPP_TLS_KEY_FILE` | | Client certificate and key for mTLS (both or neither) |
 | `--tls-server-name` | `OCPP_TLS_SERVER_NAME` | URL host | SNI / verification name override |
 | `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Skip certificate verification (testing only) |
+| `--show-secrets` | `OCPP_SHOW_SECRETS` | off | Show `AuthorizationKey` values in frame logs (TUI, `--json`, `--log-file`); by default they are replaced by `***` |
 | `--no-persist` | `KIRBY_OCPP_NO_PERSIST` | off | Do not load or save station state |
 | `--state-dir` | `KIRBY_OCPP_STATE_DIR` | `~/.kirby-ocpp/stations` | State directory (`%USERPROFILE%` on Windows) |
 | `--count` | `OCPP_COUNT` | `1` | Number of stations (fleet mode, 1-1000), see [Fleet mode](#fleet-mode) |
@@ -239,6 +240,7 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | `--transaction-ids POLICY` | `TRANSACTION_IDS` | `fixed:123` | `fixed:ID` or `incrementing:FIRST` |
 | `--heartbeat-interval SECONDS` | `HEARTBEAT_INTERVAL` | 300 | interval in the BootNotification answer |
 | `--history-cap N` | `HISTORY_CAP` | 1000 | frames kept per station |
+| `--show-secrets` | `SHOW_SECRETS` | off | keep `AuthorizationKey` values in recorded frames (history, `--json`, `--log-file`, script matching); by default they are replaced by `***` |
 | `--transaction-history-cap N` | `TRANSACTION_HISTORY_CAP` | 100 | stopped transactions kept per station |
 | `--call-timeout SECONDS` | `CALL_TIMEOUT` | 30 | wait for a station's answer to a command |
 | `--json` | `JSON` | off | JSON lines instead of text |

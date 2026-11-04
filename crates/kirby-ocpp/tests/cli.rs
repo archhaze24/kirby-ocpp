@@ -23,6 +23,7 @@ const ENV_VARS: &[&str] = &[
     "OCPP_TLS_KEY_FILE",
     "OCPP_TLS_SERVER_NAME",
     "OCPP_TLS_SKIP_VERIFY",
+    "OCPP_SHOW_SECRETS",
     "KIRBY_OCPP_NO_PERSIST",
     "KIRBY_OCPP_STATE_DIR",
     "KIRBY_OCPP_RULES",
@@ -440,4 +441,21 @@ fn invalid_rules_are_usage_errors() {
         &[("KIRBY_OCPP_RULES", "Reset=explode")],
     );
     assert_eq!(output.status.code(), Some(2));
+}
+
+#[test]
+fn show_secrets_is_off_by_default_and_can_be_enabled() {
+    assert_eq!(config(URL, &[])["show_secrets"], false);
+    assert_eq!(
+        config(&with_url(&["--show-secrets"]), &[])["show_secrets"],
+        true
+    );
+    assert_eq!(
+        config(URL, &[("OCPP_SHOW_SECRETS", "yes")])["show_secrets"],
+        true
+    );
+    assert_eq!(
+        config(URL, &[("OCPP_SHOW_SECRETS", "0")])["show_secrets"],
+        false
+    );
 }

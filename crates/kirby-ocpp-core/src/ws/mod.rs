@@ -99,6 +99,9 @@ pub struct ConnectOptions {
     pub call_timeout: Duration,
     /// Serialize outbound CALLs (default `true`). `false` allows several in flight.
     pub serialize_calls: bool,
+    /// Record `AuthorizationKey` values in [`FrameRecord`]s as sent (default `false`:
+    /// they are replaced by `***`). The wire is never affected.
+    pub show_secrets: bool,
 }
 
 impl Default for ConnectOptions {
@@ -107,6 +110,7 @@ impl Default for ConnectOptions {
             ping_interval: Some(Duration::from_secs(30)),
             call_timeout: Duration::from_secs(30),
             serialize_calls: true,
+            show_secrets: false,
         }
     }
 }

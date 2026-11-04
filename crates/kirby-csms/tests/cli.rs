@@ -23,6 +23,7 @@ const ENV_VARS: &[&str] = &[
     "KIRBY_CSMS_TRANSACTION_IDS",
     "KIRBY_CSMS_HEARTBEAT_INTERVAL",
     "KIRBY_CSMS_HISTORY_CAP",
+    "KIRBY_CSMS_SHOW_SECRETS",
     "KIRBY_CSMS_TRANSACTION_HISTORY_CAP",
     "KIRBY_CSMS_CALL_TIMEOUT",
     "KIRBY_CSMS_JSON",
@@ -725,4 +726,37 @@ timeout_ms = 300
     assert!(status(2).contains("passed"), "{printed}");
     assert!(status(3).contains("ailed"), "{printed}");
     let _ = station.shutdown().await;
+}
+
+/// Sends `ChangeConfiguration(AuthorizationKey)` and returns the logged outbound CALL payload.
+async fn logged_key_change(args: &[&str]) -> Value {
+    let mut csms = Csms::start(args);
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    csms.wait(|v| v["type"] == "connected");
+    csms.send(
+        &json!({"station": "CP-1", "action": "ChangeConfiguration", "id": "k",
+            "payload": {"key": "AuthorizationKey", "value": "0123456789abcdef0123"}})
+        .to_string(),
+    );
+    // The answer is logged after the CALL that it answers, so both are in `seen` by now.
+    csms.wait(|v| v["type"] == "frame" && v["direction"] == "in" && v["id"] == "csms-1");
+    let frame = csms
+        .seen
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|v| {
+            v["type"] == "frame" && v["direction"] == "out" && v["action"] == "ChangeConfiguration"
+        })
+        .expect("the outbound CALL was logged");
+    let _ = station.shutdown().await;
+    frame["payload"].clone()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn authorization_key_is_redacted_in_frame_logs_unless_show_secrets() {
+    let hidden = logged_key_change(&[]).await;
+    assert_eq!(hidden["key"], "AuthorizationKey");
+    assert_eq!(hidden["value"], "***");
+    let shown = logged_key_change(&["--show-secrets"]).await;
+    assert_eq!(shown["value"], "0123456789abcdef0123");
 }

@@ -155,6 +155,9 @@ pub struct StationConfig {
     pub phases: u8,
     /// Response rules active from the start (see `station::response_rules`); runtime-only.
     pub response_rules: Vec<ResponseRule>,
+    /// Record `AuthorizationKey` values in frame logs as they are (default `false`: they
+    /// are replaced by `***` in `Event::Frame`; the wire is unaffected).
+    pub show_secrets: bool,
 }
 
 impl Default for StationConfig {
@@ -180,6 +183,7 @@ impl Default for StationConfig {
             voltage_v: defaults::VOLTAGE_V,
             phases: defaults::PHASES,
             response_rules: Vec::new(),
+            show_secrets: false,
         }
     }
 }

@@ -240,6 +240,13 @@ pub struct Cli {
     )]
     pub tls_skip_verify: bool,
 
+    /// Show AuthorizationKey values in frame logs (by default they are replaced by ***)
+    #[arg(global = true,
+        long, env = "OCPP_SHOW_SECRETS", action = ArgAction::SetTrue,
+        value_parser = BoolishValueParser::new()
+    )]
+    pub show_secrets: bool,
+
     /// Misbehave on purpose when the CSMS sends a command: ACTION=BEHAVIOR[*COUNT]. Repeatable
     #[arg(
         global = true,
@@ -383,6 +390,7 @@ impl Cli {
             voltage_v: self.voltage_v,
             phases: self.phases,
             response_rules: self.rule,
+            show_secrets: self.show_secrets,
         })
     }
 }
