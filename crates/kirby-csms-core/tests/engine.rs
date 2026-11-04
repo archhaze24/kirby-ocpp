@@ -831,13 +831,31 @@ async fn dropped_call_frees_the_in_flight_slot() {
 #[tokio::test]
 async fn stalled_reader_is_dropped_after_the_write_timeout() {
     let csms = start(|c| c.write_timeout = Duration::from_millis(300)).await;
-    // The client never reads, so the socket buffers fill up and the write stalls.
-    let _raw = raw_connect(&csms, "/CP-STALL").await;
-    let payload = json!({"data": "x".repeat(64 * 1024 * 1024)});
-    let result = timeout(STEP, csms.call("CP-STALL", "DataTransfer", payload))
-        .await
-        .expect("call ends instead of hanging");
-    assert!(matches!(result, Err(CsmsError::ConnectionClosed { .. })));
+    // Big replies to CALLs that the client never reads. One write may vanish into the
+    // kernel (Windows accepts a large non-blocking send whole), but a later one cannot.
+    csms.respond("DataTransfer", |_| {
+        Reply::Result(json!({"status": "Accepted", "data": "x".repeat(32 * 1024 * 1024)}))
+    });
+    let mut events = csms.subscribe();
+    let mut raw = raw_connect(&csms, "/CP-STALL").await;
+    wait_event(&mut events, "connect", connected("CP-STALL")).await;
+    for n in 0..4 {
+        let call = format!(r#"[2,"s{n}","DataTransfer",{{"vendorId":"V"}}]"#);
+        if raw.send(Message::text(call)).await.is_err() {
+            break;
+        }
+    }
+    let gone = wait_event(&mut events, "write timeout", |e| {
+        matches!(e, CsmsEvent::Disconnected { .. })
+    })
+    .await;
+    assert_eq!(
+        gone,
+        CsmsEvent::Disconnected {
+            station: "CP-STALL".into(),
+            reason: DisconnectReason::Closed
+        }
+    );
     csms.shutdown().await;
 }
 
