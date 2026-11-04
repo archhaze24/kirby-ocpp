@@ -34,6 +34,8 @@ pub enum DisconnectReason {
     Injected,
     /// The station was removed with [`crate::CsmsHandle::forget`].
     Forgotten,
+    /// The station answered no WebSocket ping within [`crate::CsmsConfig::pong_timeout`].
+    PingTimeout,
 }
 
 /// What happens on the server. Delivered through a `tokio::sync::broadcast` channel: a

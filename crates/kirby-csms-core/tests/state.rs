@@ -356,11 +356,11 @@ async fn stop_and_meter_values_of_unknown_transactions_are_harmless() {
     })
     .await;
     assert_eq!(state.transactions.len(), 0);
-    // Garbage that the engine still answers does not touch the state.
+    // Garbage is refused by the schema check and does not touch the state.
     raw_send(&mut socket, r#"[2,"g1","StatusNotification",{"bogus":1}]"#).await;
     assert!(matches!(
         raw_recv(&mut socket).await,
-        Frame::CallResult { .. }
+        Frame::CallError { .. }
     ));
     assert_eq!(csms.state("CP-S4").unwrap().connectors.len(), 0);
     csms.shutdown().await;

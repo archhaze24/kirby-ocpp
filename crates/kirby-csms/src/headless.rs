@@ -344,6 +344,7 @@ fn reason_name(reason: DisconnectReason) -> &'static str {
         DisconnectReason::Shutdown => "shutdown",
         DisconnectReason::Injected => "injected",
         DisconnectReason::Forgotten => "forgotten",
+        DisconnectReason::PingTimeout => "ping_timeout",
     }
 }
 

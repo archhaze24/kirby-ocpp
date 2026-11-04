@@ -119,6 +119,30 @@ pub struct Cli {
     )]
     pub show_secrets: bool,
 
+    /// Validate inbound CALL payloads against the OCPP 1.6J schemas and answer invalid ones with a
+    /// CALLERROR (true/false)
+    #[arg(
+        long, env = "KIRBY_CSMS_VALIDATE_INBOUND", value_name = "BOOL", default_value_t = true,
+        action = ArgAction::Set, value_parser = BoolishValueParser::new()
+    )]
+    pub validate_inbound: bool,
+
+    /// Send a WebSocket ping to every station this often, in seconds (0 disables the watchdog)
+    #[arg(
+        long,
+        env = "KIRBY_CSMS_PING_INTERVAL",
+        value_name = "SECONDS",
+        default_value_t = 30
+    )]
+    pub ping_interval: u32,
+
+    /// Drop a station that sends nothing this long after a ping, in seconds
+    #[arg(
+        long, env = "KIRBY_CSMS_PONG_TIMEOUT", value_name = "SECONDS",
+        default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    pub pong_timeout: u32,
+
     /// Stopped transactions kept per station (0 keeps none)
     #[arg(
         long,
@@ -205,6 +229,9 @@ impl Cli {
         config.heartbeat_interval = self.heartbeat_interval;
         config.history_cap = self.history_cap;
         config.show_secrets = self.show_secrets;
+        config.validate_inbound = self.validate_inbound;
+        config.ping_interval = Duration::from_secs(u64::from(self.ping_interval));
+        config.pong_timeout = Duration::from_secs(u64::from(self.pong_timeout));
         config.transaction_history_cap = self.transaction_history_cap;
         config.call_timeout = Duration::from_secs(self.call_timeout);
         config.security.profile =

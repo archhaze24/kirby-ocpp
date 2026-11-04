@@ -30,6 +30,7 @@ use crate::event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationIn
 use crate::fault::{Fault, Reply, Responder};
 use crate::policy::TransactionIdAllocator;
 use crate::state::StationState;
+use crate::typed::schemas;
 
 const SEC_WEBSOCKET_PROTOCOL: HeaderName = HeaderName::from_static("sec-websocket-protocol");
 /// Time a new socket gets for the TLS and WebSocket handshakes.
@@ -262,6 +263,7 @@ impl CsmsHandle {
         timeout: Duration,
     ) -> Result<Frame, CsmsError> {
         let timeout = timeout.min(MAX_CALL_TIMEOUT);
+        let tracked_request = (action == "GetInstalledCertificateIds").then(|| payload.clone());
         let (reply, receiver) = oneshot::channel();
         {
             let state = self.inner.lock();
@@ -292,6 +294,10 @@ impl CsmsHandle {
                 action: action.to_owned(),
             }),
         };
+        if let (Some(request), Ok(Frame::CallResult { payload, .. })) = (&tracked_request, &result)
+        {
+            self.inner.track_result(station, action, request, payload);
+        }
         if matches!(
             result,
             Ok(Frame::CallError { .. }) | Err(CsmsError::Timeout { .. })
@@ -594,8 +600,24 @@ impl Inner {
         }
     }
 
-    /// Decides the reply to a CALL: fault, then responder, then default; actions a charge
-    /// point may not send get `NotSupported`.
+    /// Folds the answer of a CSMS-originated CALL into the station's state.
+    fn track_result(&self, station: &str, action: &str, request: &Value, response: &Value) {
+        let mut state = self.lock();
+        let Some(rec) = state.stations.get_mut(station) else {
+            return;
+        };
+        if rec
+            .state
+            .apply_result(action, request, response, Utc::now())
+        {
+            self.emit(CsmsEvent::StateChanged {
+                station: station.to_owned(),
+            });
+        }
+    }
+
+    /// Decides the reply to a CALL: fault, then schema validation (`validate_inbound`), then
+    /// responder, then default; actions a charge point may not send get `NotSupported`.
     fn decide(&self, action: &str, payload: &Value) -> Reply {
         let mut state = self.lock();
         if let Some(fault) = state
@@ -607,6 +629,13 @@ impl Inner {
             let reply = fault.reply.clone();
             state.faults.retain(|fault| fault.remaining > 0);
             return reply;
+        }
+        if self.config.validate_inbound
+            && let Some(schemas) = schemas()
+            && schemas.knows_action(action)
+            && let Err(violation) = schemas.validate_request(action, payload)
+        {
+            return Reply::Error(violation.error_code(), violation.errors.join("; "));
         }
         if let Some(responder) = state.responders.get(action).cloned() {
             // Run outside the lock: the closure may call back into the handle.
@@ -761,6 +790,8 @@ where
         socket,
         queue: VecDeque::new(),
         in_flight: None,
+        last_seen: Instant::now(),
+        ping_sent: None,
     };
     guard.reason = session.run(cmd_rx).await;
 }
@@ -795,6 +826,10 @@ struct Session<S> {
     socket: WebSocketStream<S>,
     queue: VecDeque<QueuedCall>,
     in_flight: Option<InFlight>,
+    /// When the station last sent anything (a frame of any kind, a pong included).
+    last_seen: Instant,
+    /// When the outstanding watchdog ping was written; cleared by any inbound message.
+    ping_sent: Option<Instant>,
 }
 
 impl<S> Session<S>
@@ -810,16 +845,29 @@ where
                 return reason;
             }
             let deadline = self.in_flight.as_ref().map(|flight| flight.deadline);
+            let watchdog = self.watchdog_deadline();
             let ended = tokio::select! {
                 () = async { let _ = stop.wait_for(|stopped| *stopped).await; } => {
                     self.close(1001, "server shutting down").await;
                     Some(DisconnectReason::Shutdown)
                 }
-                inbound = self.socket.next() => match inbound {
-                    Some(Ok(Message::Text(text))) => self.on_text(text.as_str()).await,
-                    Some(Ok(Message::Close(_)) | Err(_)) | None => Some(DisconnectReason::Closed),
-                    Some(Ok(_)) => None,
-                },
+                inbound = self.socket.next() => {
+                    if matches!(inbound, Some(Ok(_))) {
+                        self.last_seen = Instant::now();
+                        self.ping_sent = None;
+                    }
+                    match inbound {
+                        Some(Ok(Message::Text(text))) => self.on_text(text.as_str()).await,
+                        Some(Ok(Message::Close(_)) | Err(_)) | None => Some(DisconnectReason::Closed),
+                        Some(Ok(_)) => None,
+                    }
+                }
+                () = async {
+                    match watchdog {
+                        Some(at) => tokio::time::sleep_until(at).await,
+                        None => std::future::pending().await,
+                    }
+                } => self.watchdog_fired().await,
                 command = commands.recv() => match command {
                     Some(SessionCmd::Call(call)) => {
                         self.queue.push_back(call);
@@ -854,6 +902,33 @@ where
             if let Some(reason) = ended {
                 return reason;
             }
+        }
+    }
+
+    /// When the watchdog next acts: send a ping after `ping_interval` of silence, or give up
+    /// `pong_timeout` after a ping. `None` if it is disabled.
+    fn watchdog_deadline(&self) -> Option<Instant> {
+        let config = &self.inner.config;
+        if config.ping_interval.is_zero() {
+            return None;
+        }
+        match self.ping_sent {
+            Some(sent) => sent.checked_add(config.pong_timeout),
+            None => self.last_seen.checked_add(config.ping_interval),
+        }
+    }
+
+    async fn watchdog_fired(&mut self) -> Option<DisconnectReason> {
+        if self.ping_sent.is_some() {
+            return Some(DisconnectReason::PingTimeout);
+        }
+        let write = self.socket.send(Message::Ping(Vec::new().into()));
+        match timeout(self.inner.config.write_timeout, write).await {
+            Ok(Ok(())) => {
+                self.ping_sent = Some(Instant::now());
+                None
+            }
+            Ok(Err(_)) | Err(_) => Some(DisconnectReason::Closed),
         }
     }
 

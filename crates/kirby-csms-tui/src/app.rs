@@ -751,6 +751,7 @@ fn reason_text(reason: DisconnectReason) -> &'static str {
         DisconnectReason::Shutdown => "server shutdown",
         DisconnectReason::Injected => "closed by an injected fault",
         DisconnectReason::Forgotten => "forgotten",
+        DisconnectReason::PingTimeout => "ping timeout",
     }
 }
 

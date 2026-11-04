@@ -47,6 +47,17 @@ pub struct CsmsConfig {
     /// Keep `AuthorizationKey` values in recorded frames (history, events). Default `false`:
     /// they are replaced by `***`. The wire is unaffected.
     pub show_secrets: bool,
+    /// Validate every inbound CALL against the embedded OCPP 1.6J schema; an invalid payload
+    /// is answered with a CALLERROR (the code the station uses for the same mistake) instead
+    /// of the canned or responder reply, and is not tracked. A [`crate::Fault`] on the same
+    /// action is applied first. Unknown actions are not validated. Default `true`.
+    pub validate_inbound: bool,
+    /// Interval of server WebSocket pings. `Duration::ZERO` disables the watchdog.
+    /// Default 30 seconds.
+    pub ping_interval: Duration,
+    /// A station that sends nothing (no pong, no frame) this long after a ping is dropped
+    /// with [`crate::DisconnectReason::PingTimeout`]. Default 10 seconds.
+    pub pong_timeout: Duration,
 }
 
 /// OCPP 1.6 Security Whitepaper connection security profile of the server.
@@ -153,6 +164,9 @@ impl Default for CsmsConfig {
             tls: None,
             security: SecurityPolicy::default(),
             show_secrets: false,
+            validate_inbound: true,
+            ping_interval: Duration::from_secs(30),
+            pong_timeout: Duration::from_secs(10),
         }
     }
 }
@@ -174,6 +188,9 @@ impl fmt::Debug for CsmsConfig {
             .field("tls", &self.tls.is_some())
             .field("security", &self.security)
             .field("show_secrets", &self.show_secrets)
+            .field("validate_inbound", &self.validate_inbound)
+            .field("ping_interval", &self.ping_interval)
+            .field("pong_timeout", &self.pong_timeout)
             .finish()
     }
 }

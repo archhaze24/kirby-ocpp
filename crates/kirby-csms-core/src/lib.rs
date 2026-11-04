@@ -4,6 +4,8 @@
 //!
 //! * Stations connect to `ws(s)://host:port/<any prefix>/<station id>`; see [`CsmsServer`]
 //!   for identity, replacement and outbound-call rules.
+//! * Inbound CALLs are checked against the OCPP 1.6J schemas ([`CsmsConfig::validate_inbound`]):
+//!   an invalid payload gets a CALLERROR (a [`Fault`] on the same action still wins).
 //! * Inbound CALLs get the canned answers of the test mock ([`default_reply`]), unless a
 //!   [`Fault`] or a responder ([`CsmsHandle::respond`]) applies. Actions a charge point may
 //!   not send get a `NotSupported` CALLERROR.
@@ -57,8 +59,9 @@ pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 pub use policy::{SubprotocolPolicy, TransactionIdAllocator, TransactionIds};
 pub use server::{CsmsHandle, CsmsServer, station_id_from_path};
 pub use state::{
-    BootInfo, CertificateRequest, ConnectorState, LogReport, MAX_ACTIVE_TRANSACTIONS,
-    MAX_CONNECTORS, MAX_SECURITY_EVENTS, Reported, SecurityEventRecord, SignedFirmwareReport,
-    StationState, TransactionRecord, TransactionStatus,
+    BootInfo, CertificateRequest, ConnectorState, InstalledCertificates, LogReport,
+    MAX_ACTIVE_TRANSACTIONS, MAX_CONNECTORS, MAX_INSTALLED_CERTIFICATES, MAX_SECURITY_EVENTS,
+    Reported, SecurityEventRecord, SignedFirmwareReport, StationState, TransactionRecord,
+    TransactionStatus,
 };
 pub use tls::{server_config_from_pem, server_config_with_client_ca};

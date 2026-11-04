@@ -267,6 +267,18 @@ fn security_lines(app: &App, s: &StationState) -> Vec<String> {
             age(app.now, r.received_at)
         ));
     }
+    for (kind, c) in &s.installed_certificates {
+        let count = if c.total > c.certificates.len() {
+            format!("{} of {}", c.certificates.len(), c.total)
+        } else {
+            c.total.to_string()
+        };
+        parts.push(format!(
+            "installed {kind}: {count} ({}, {} ago)",
+            c.status,
+            age(app.now, c.at)
+        ));
+    }
     let mut out = Vec::new();
     if !parts.is_empty() {
         out.push(parts.join("  "));

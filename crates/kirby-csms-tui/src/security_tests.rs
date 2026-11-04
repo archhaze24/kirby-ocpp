@@ -346,6 +346,22 @@ fn details_and_header_show_security_information() {
         csr: "x".to_owned(),
         received_at: at(0),
     });
+    st.installed_certificates.insert(
+        "CentralSystemRootCertificate".to_owned(),
+        kirby_csms_core::InstalledCertificates {
+            status: kirby_ocpp_core::ocpp::messages::GetInstalledCertificateStatus::Accepted,
+            certificates: (0..2)
+                .map(|n| kirby_ocpp_core::ocpp::messages::CertificateHashData {
+                    hash_algorithm: kirby_ocpp_core::ocpp::messages::HashAlgorithm::Sha256,
+                    issuer_name_hash: format!("{n}"),
+                    issuer_key_hash: "ab".to_owned(),
+                    serial_number: "01".to_owned(),
+                })
+                .collect(),
+            total: 2,
+            at: at(0),
+        },
+    );
     update(
         &mut app,
         Msg::Refreshed {
@@ -353,7 +369,11 @@ fn details_and_header_show_security_information() {
             info: None,
         },
     );
-    let text = render(&app, 160, 40);
+    let text = render(&app, 200, 40);
+    assert!(
+        text.contains("installed CentralSystemRootCertificate: 2"),
+        "{text}"
+    );
     assert!(text.contains("3 auth failures"), "{text}");
     assert!(text.contains("security profile 2"), "{text}");
     assert!(text.contains("security events 5"), "{text}");

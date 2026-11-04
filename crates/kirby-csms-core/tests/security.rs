@@ -723,7 +723,12 @@ async fn station_obtains_its_certificate_and_connects_with_profile_three() {
         .unwrap();
     assert_eq!(cp.handle.snapshot().security_profile, 3);
     first.shutdown().await;
-    // Wait until the station noticed the loss, or `connect` could race with the old socket.
+    // Wait until the old server has dropped the session and the station noticed the loss, or
+    // `connect` could race with the old socket.
+    wait_event(&mut events, |e| {
+        matches!(e, CsmsEvent::Disconnected { station, .. } if station == id).then_some(())
+    })
+    .await;
     let mut link = cp.handle.watch_snapshot();
     timeout(
         STEP,

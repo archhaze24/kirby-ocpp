@@ -38,7 +38,7 @@ use crate::server::CsmsHandle;
 
 /// Compiled once on first use (tens of milliseconds, done synchronously). `None` if a bundled
 /// schema failed to compile, which is a build bug; validation is then skipped.
-fn schemas() -> Option<&'static SchemaRegistry> {
+pub(crate) fn schemas() -> Option<&'static SchemaRegistry> {
     static SCHEMAS: OnceLock<Option<SchemaRegistry>> = OnceLock::new();
     SCHEMAS.get_or_init(|| SchemaRegistry::new().ok()).as_ref()
 }

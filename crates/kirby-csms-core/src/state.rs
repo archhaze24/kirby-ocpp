@@ -15,8 +15,10 @@ use std::collections::{BTreeMap, VecDeque};
 
 use chrono::{DateTime, Utc};
 use kirby_ocpp_core::ocpp::messages::{
-    BootNotificationRequest, BootNotificationResponse, DiagnosticsStatusNotificationRequest,
-    FirmwareStatusNotificationRequest, LogStatusNotificationRequest, MAX_CERTIFICATE_LEN,
+    BootNotificationRequest, BootNotificationResponse, CertificateHashData,
+    DiagnosticsStatusNotificationRequest, FirmwareStatusNotificationRequest,
+    GetInstalledCertificateIdsRequest, GetInstalledCertificateIdsResponse,
+    GetInstalledCertificateStatus, LogStatusNotificationRequest, MAX_CERTIFICATE_LEN,
     MAX_SECURITY_EVENT_TECH_INFO_LEN, MAX_SECURITY_EVENT_TYPE_LEN, MeterValuesRequest,
     SecurityEventNotificationRequest, SignCertificateRequest, SignedFirmwareStatus,
     SignedFirmwareStatusNotificationRequest, StartTransactionRequest, StartTransactionResponse,
@@ -36,6 +38,11 @@ pub const MAX_CONNECTORS: usize = 1024;
 pub const MAX_ACTIVE_TRANSACTIONS: usize = 256;
 /// Most security events kept per station (oldest dropped first).
 pub const MAX_SECURITY_EVENTS: usize = 100;
+/// Most certificate hashes kept per `GetInstalledCertificateIds` answer; further ones are cut.
+pub const MAX_INSTALLED_CERTIFICATES: usize = 64;
+/// Schema limits of `CertificateHashDataType` fields (hex characters).
+const MAX_HASH_LEN: usize = 128;
+const MAX_SERIAL_LEN: usize = 40;
 
 /// What the engine knows about one station's protocol state. See the module docs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -68,6 +75,22 @@ pub struct StationState {
     pub signed_firmware_status: Option<SignedFirmwareReport>,
     /// The CSR of the last `SignCertificate` we answered.
     pub certificate_request: Option<CertificateRequest>,
+    /// The last answered `GetInstalledCertificateIds` per `certificateType` (the request's
+    /// filter, as on the wire, e.g. `CentralSystemRootCertificate`).
+    pub installed_certificates: BTreeMap<String, InstalledCertificates>,
+}
+
+/// An answered `GetInstalledCertificateIds`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct InstalledCertificates {
+    /// The `status` the station answered.
+    pub status: GetInstalledCertificateStatus,
+    /// At most [`MAX_INSTALLED_CERTIFICATES`] entries; empty when the station sent none.
+    pub certificates: Vec<CertificateHashData>,
+    /// How many entries the station sent (more than `certificates` if they were cut).
+    pub total: usize,
+    /// Our clock.
+    pub at: DateTime<Utc>,
 }
 
 /// One `SecurityEventNotification`. Text fields are cut to the schema's length limits.
@@ -263,6 +286,58 @@ impl StationState {
             _ => None,
         }
         .is_some()
+    }
+
+    /// Folds the answer of a CSMS-originated CALL into the state. `response` is the
+    /// CALLRESULT payload. Returns whether the state changed.
+    pub(crate) fn apply_result(
+        &mut self,
+        action: &str,
+        request: &Value,
+        response: &Value,
+        now: DateTime<Utc>,
+    ) -> bool {
+        match action {
+            "GetInstalledCertificateIds" => self.on_installed_certificates(request, response, now),
+            _ => None,
+        }
+        .is_some()
+    }
+
+    fn on_installed_certificates(
+        &mut self,
+        request: &Value,
+        response: &Value,
+        now: DateTime<Utc>,
+    ) -> Option<()> {
+        let req = GetInstalledCertificateIdsRequest::deserialize(request).ok()?;
+        let res = GetInstalledCertificateIdsResponse::deserialize(response).ok()?;
+        let key = serde_json::to_value(req.certificate_type)
+            .ok()?
+            .as_str()?
+            .to_owned();
+        let sent = res.certificate_hash_data.unwrap_or_default();
+        let total = sent.len();
+        let certificates = sent
+            .into_iter()
+            .take(MAX_INSTALLED_CERTIFICATES)
+            .map(|mut hash| {
+                hash.issuer_name_hash = truncate(hash.issuer_name_hash, MAX_HASH_LEN);
+                hash.issuer_key_hash = truncate(hash.issuer_key_hash, MAX_HASH_LEN);
+                hash.serial_number = truncate(hash.serial_number, MAX_SERIAL_LEN);
+                hash
+            })
+            .collect();
+        self.installed_certificates.insert(
+            key,
+            InstalledCertificates {
+                status: res.status,
+                certificates,
+                total,
+                at: now,
+            },
+        );
+        Some(())
     }
 
     fn on_security_event(&mut self, request: &Value, now: DateTime<Utc>) -> Option<()> {

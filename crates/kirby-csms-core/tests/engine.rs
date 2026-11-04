@@ -905,3 +905,174 @@ async fn replaced_session_cannot_write_into_the_record() {
     );
     csms.shutdown().await;
 }
+
+// ---- inbound validation, ping watchdog, installed certificates -------------------------
+
+#[tokio::test]
+async fn invalid_inbound_calls_get_a_callerror_unless_validation_is_off() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    let mut raw = raw_connect(&csms, "/ocpp/CP-V").await;
+    wait_event(&mut events, "connect", connected("CP-V")).await;
+
+    // Missing required property: CALLERROR, recorded, not tracked.
+    raw_send(
+        &mut raw,
+        r#"[2,"b1","BootNotification",{"chargePointModel":"M"}]"#,
+    )
+    .await;
+    match raw_recv(&mut raw).await {
+        Frame::CallError { id, code, .. } => {
+            assert_eq!(id, "b1");
+            assert_eq!(code, ErrorCode::OccurenceConstraintViolation);
+        }
+        other => panic!("expected CALLERROR, got {other:?}"),
+    }
+    wait_event(&mut events, "CALLERROR frame", |e| {
+        matches!(
+            e,
+            CsmsEvent::Frame {
+                direction: Direction::Out,
+                frame: Frame::CallError { .. },
+                ..
+            }
+        )
+    })
+    .await;
+    assert!(csms.state("CP-V").is_some_and(|s| s.boot.is_none()));
+    assert_eq!(csms.history("CP-V").map_or(0, |h| h.len()), 2);
+
+    // Wrong type.
+    raw_send(&mut raw, r#"[2,"s1","StatusNotification",{"connectorId":"x","status":"Available","errorCode":"NoError"}]"#).await;
+    match raw_recv(&mut raw).await {
+        Frame::CallError { code, .. } => assert_eq!(code, ErrorCode::TypeConstraintViolation),
+        other => panic!("expected CALLERROR, got {other:?}"),
+    }
+
+    // A valid CALL still works.
+    raw_send(&mut raw, r#"[2,"h1","Heartbeat",{}]"#).await;
+    assert!(result_payload(raw_recv(&mut raw).await)["currentTime"].is_string());
+
+    // A scripted fault on the action wins over validation.
+    csms.inject(Fault::call_error("BootNotification"));
+    raw_send(&mut raw, r#"[2,"b2","BootNotification",{}]"#).await;
+    match raw_recv(&mut raw).await {
+        Frame::CallError { code, .. } => assert_eq!(code, ErrorCode::InternalError),
+        other => panic!("expected CALLERROR, got {other:?}"),
+    }
+    assert_eq!(csms.faults_remaining(), 0);
+    csms.shutdown().await;
+
+    let lax = start(|c| c.validate_inbound = false).await;
+    let mut raw = raw_connect(&lax, "/ocpp/CP-V").await;
+    raw_send(
+        &mut raw,
+        r#"[2,"b1","BootNotification",{"chargePointModel":"M"}]"#,
+    )
+    .await;
+    assert!(result_payload(raw_recv(&mut raw).await)["status"].is_string());
+    lax.shutdown().await;
+}
+
+#[tokio::test]
+async fn silent_station_is_dropped_by_the_ping_watchdog() {
+    let csms = start(|c| {
+        c.ping_interval = Duration::from_millis(60);
+        c.pong_timeout = Duration::from_millis(120);
+    })
+    .await;
+    let mut events = csms.subscribe();
+    // Never polled after the handshake: tungstenite answers pings only while it is read.
+    let _raw = raw_connect(&csms, "/ocpp/CP-W").await;
+    wait_event(&mut events, "connect", connected("CP-W")).await;
+    let gone = wait_event(&mut events, "ping timeout", |e| {
+        matches!(e, CsmsEvent::Disconnected { .. })
+    })
+    .await;
+    assert_eq!(
+        gone,
+        CsmsEvent::Disconnected {
+            station: "CP-W".to_owned(),
+            reason: DisconnectReason::PingTimeout
+        }
+    );
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn station_that_answers_pings_stays_connected() {
+    let csms = start(|c| {
+        c.ping_interval = Duration::from_millis(40);
+        c.pong_timeout = Duration::from_millis(2_000);
+    })
+    .await;
+    let mut events = csms.subscribe();
+    let mut raw = raw_connect(&csms, "/ocpp/CP-P").await;
+    wait_event(&mut events, "connect", connected("CP-P")).await;
+    // Reading answers each ping with a pong; see several of them.
+    let mut pings = 0;
+    while pings < 4 {
+        match timeout(STEP, raw.next()).await.expect("ping in time") {
+            Some(Ok(Message::Ping(_))) => pings += 1,
+            Some(Ok(_)) => {}
+            other => panic!("socket ended: {other:?}"),
+        }
+    }
+    assert!(
+        csms.stations()
+            .iter()
+            .any(|s| s.id == "CP-P" && s.connected)
+    );
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn installed_certificate_ids_are_tracked_and_capped() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    let mut raw = raw_connect(&csms, "/ocpp/CP-C").await;
+    wait_event(&mut events, "connect", connected("CP-C")).await;
+    let hash = |n: usize| {
+        json!({
+            "hashAlgorithm": "SHA256",
+            "issuerNameHash": format!("{n:x}"),
+            "issuerKeyHash": "ab",
+            "serialNumber": "01"
+        })
+    };
+    for (kind, count, expected) in [
+        ("CentralSystemRootCertificate", 2, 2),
+        ("ManufacturerRootCertificate", 70, 64),
+    ] {
+        let caller = csms.clone();
+        let task = tokio::spawn(async move {
+            caller
+                .call(
+                    "CP-C",
+                    "GetInstalledCertificateIds",
+                    json!({"certificateType": kind}),
+                )
+                .await
+        });
+        let Frame::Call { id, action, .. } = raw_recv(&mut raw).await else {
+            panic!("expected a CALL");
+        };
+        assert_eq!(action, "GetInstalledCertificateIds");
+        let hashes: Vec<Value> = (0..count).map(hash).collect();
+        raw_send(
+            &mut raw,
+            &json!([3, id, {"status": "Accepted", "certificateHashData": hashes}]).to_string(),
+        )
+        .await;
+        task.await.unwrap().unwrap();
+        wait_event(&mut events, "state change", |e| {
+            matches!(e, CsmsEvent::StateChanged { .. })
+        })
+        .await;
+        let state = csms.state("CP-C").unwrap();
+        let tracked = &state.installed_certificates[kind];
+        assert_eq!(tracked.certificates.len(), expected);
+        assert_eq!(tracked.total, count);
+    }
+    csms.shutdown().await;
+}

@@ -24,6 +24,9 @@ const ENV_VARS: &[&str] = &[
     "KIRBY_CSMS_HEARTBEAT_INTERVAL",
     "KIRBY_CSMS_HISTORY_CAP",
     "KIRBY_CSMS_SHOW_SECRETS",
+    "KIRBY_CSMS_VALIDATE_INBOUND",
+    "KIRBY_CSMS_PING_INTERVAL",
+    "KIRBY_CSMS_PONG_TIMEOUT",
     "KIRBY_CSMS_TRANSACTION_HISTORY_CAP",
     "KIRBY_CSMS_CALL_TIMEOUT",
     "KIRBY_CSMS_JSON",
@@ -414,7 +417,13 @@ ms = 1
     });
     let first = rx.recv_timeout(WAIT).unwrap();
     let addr = first.rsplit("ws://").next().unwrap().trim().to_owned();
-    let station = station(&addr, "CP-1", false).await;
+    // Do not wait for the station's own boot: the script finishes within milliseconds of the
+    // boot (the first step is the only one that waits) and the server shuts down, so the
+    // station may never see the boot reply.
+    let mut config = StationConfig::new(format!("ws://{addr}/ocpp")).with_charge_point_id("CP-1");
+    config.persist = false;
+    let (station, _join) = Station::spawn(config, Arc::new(SystemClock));
+    station.connect().await.unwrap();
     let mut all = vec![first];
     while let Ok(line) = rx.recv_timeout(WAIT) {
         all.push(line);
@@ -435,6 +444,18 @@ ms = 1
             .contains("<failure")
     );
     let _ = station.shutdown().await;
+}
+
+#[test]
+fn new_engine_flags_are_validated() {
+    for args in [
+        &["--validate-inbound", "maybe"][..],
+        &["--ping-interval", "x"],
+        &["--pong-timeout", "0"],
+    ] {
+        let (code, _, stderr) = run_to_end(args);
+        assert_eq!(code, 2, "{args:?}: {stderr}");
+    }
 }
 
 #[test]
