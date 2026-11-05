@@ -23,8 +23,8 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 | `-i, --id <ID>` | `OCPP_CHARGE_POINT_ID` | `CP-001` | Charge point id (non-empty); with `--count` above 1 it is the id template unless `--id-template` is given |
 | `--vendor <VENDOR>` | `OCPP_VENDOR` | `archhaze24` | BootNotification vendor (non-empty) |
 | `--model <MODEL>` | `OCPP_MODEL` | `KIRBY` | BootNotification model (non-empty) |
-| `--serial <SERIAL>` | `OCPP_SERIAL` | none | Serial number in BootNotification, at most 25 characters |
-| `--firmware-version <VERSION>` | `OCPP_FIRMWARE_VERSION` | none | Firmware version in BootNotification, at most 50 characters |
+| `--serial <SERIAL>` | `OCPP_SERIAL` | none | Serial number in BootNotification, BootNotification schema limit: 25 characters |
+| `--firmware-version <VERSION>` | `OCPP_FIRMWARE_VERSION` | none | Firmware version in BootNotification, BootNotification schema limit: 50 characters |
 | `-c, --connector <ID>` | | `1` | Initial connector id (at least 1) |
 | `--connectors <COUNT>` | | `1` | Number of connectors (at least 1; raised to `--connector` if smaller) |
 | `--heartbeat <SECONDS>` | | `30` | Fallback heartbeat interval (at least 1); the CSMS value from BootNotification wins |
@@ -41,8 +41,8 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 | --- | --- | --- | --- |
 | `--reconnect <BOOL>` | `OCPP_RECONNECT` | `true` | Reconnect automatically after an unexpected disconnect |
 | `--no-reconnect` | | | Turn reconnect off; wins over `--reconnect` and `OCPP_RECONNECT` |
-| `--reconnect-initial-ms <MILLISECONDS>` | `OCPP_RECONNECT_INITIAL_MS` | `1000` | Initial backoff (at least 1). `0` is not accepted (exit 2) unless `--reconnect-max-attempts` is set or reconnect is off |
-| `--reconnect-max-ms <MILLISECONDS>` | `OCPP_RECONNECT_MAX_MS` | `30000` | Maximum backoff (at least 1) |
+| `--reconnect-initial-ms <MILLISECONDS>` | `OCPP_RECONNECT_INITIAL_MS` | `1000` | Initial backoff. Exit 2 when reconnect is on, attempts are unlimited and the smaller of this and `--reconnect-max-ms` is `0` |
+| `--reconnect-max-ms <MILLISECONDS>` | `OCPP_RECONNECT_MAX_MS` | `30000` | Maximum backoff (see `--reconnect-initial-ms` for the `0` rule) |
 | `--reconnect-max-attempts <ATTEMPTS>` | `OCPP_RECONNECT_MAX_ATTEMPTS` | `0` | Maximum attempts; `0` is unlimited |
 
 ### TLS and secrets
