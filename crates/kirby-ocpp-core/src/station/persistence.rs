@@ -43,6 +43,10 @@ pub(super) const FLUSH_DELAY: Duration = Duration::from_millis(200);
 /// A state file cannot make the station allocate more connectors than this (corrupt file guard).
 const MAX_RESTORED_CONNECTORS: u32 = 4096;
 
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent write-scheduling flags"
+)]
 pub(super) struct Persistence {
     store: Option<StationStore>,
     loaded: Option<PersistedStation>,
@@ -53,6 +57,9 @@ pub(super) struct Persistence {
     loaded_secrets: Option<StationSecrets>,
     /// The secrets file has to be rewritten with the next write.
     pub(super) secrets_dirty: bool,
+    /// The secrets file exists but could not be read (permissions, newer format): never
+    /// overwrite it during this run.
+    secrets_locked: bool,
 }
 
 impl Persistence {
@@ -66,6 +73,7 @@ impl Persistence {
             queued: false,
             loaded_secrets: None,
             secrets_dirty: false,
+            secrets_locked: false,
         };
         if !config.persist {
             return this;
@@ -80,10 +88,24 @@ impl Persistence {
         let store = StationStore::new(&dir, &config.charge_point_id);
         match store.load_secrets() {
             Ok(secrets) => this.loaded_secrets = Some(secrets),
-            Err(error) => logs.push((
-                LogLevel::Warn,
-                format!("could not read the station secrets: {error}"),
-            )),
+            Err(error) => {
+                // A corrupt file was moved aside (reported as `InvalidData`), so writing is
+                // safe; anything else leaves the original in place and must not be replaced.
+                let moved_aside = matches!(
+                    &error,
+                    StoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::InvalidData
+                );
+                this.secrets_locked = !moved_aside;
+                let note = if moved_aside {
+                    ""
+                } else {
+                    "; secrets are not persisted during this run"
+                };
+                logs.push((
+                    LogLevel::Warn,
+                    format!("could not read the station secrets: {error}{note}"),
+                ));
+            }
         }
         match store.load() {
             Ok(LoadOutcome::Loaded(state)) => {
@@ -313,6 +335,12 @@ impl StationActor {
     }
 
     /// A secret (authorization key, private key) changed: write the secrets file soon.
+    /// Takes the "secrets changed" flag; always false while the secrets file is locked.
+    fn take_secrets_dirty(&mut self) -> bool {
+        let dirty = std::mem::take(&mut self.persistence.secrets_dirty);
+        dirty && !self.persistence.secrets_locked
+    }
+
     pub(super) fn mark_secrets_dirty(&mut self) {
         self.persistence.secrets_dirty = true;
         self.mark_dirty();
@@ -349,8 +377,7 @@ impl StationActor {
         }
         self.persistence.dirty = false;
         let data = self.build_persisted();
-        let secrets =
-            std::mem::take(&mut self.persistence.secrets_dirty).then(|| self.secrets.clone());
+        let secrets = self.take_secrets_dirty().then(|| self.secrets.clone());
         let internal = self.internal_tx.clone();
         self.persistence.in_flight = Some(tokio::task::spawn_blocking(move || {
             // Secrets first: a crash in between leaves a key without its chain, not the reverse.
@@ -400,8 +427,9 @@ impl StationActor {
             return;
         }
         let data = self.build_persisted();
-        let secrets_changed = std::mem::take(&mut self.persistence.secrets_dirty);
-        let secrets = (secrets_changed || had_in_flight).then(|| self.secrets.clone());
+        let secrets_changed = self.take_secrets_dirty();
+        let secrets = ((secrets_changed || had_in_flight) && !self.persistence.secrets_locked)
+            .then(|| self.secrets.clone());
         let write = move || match secrets {
             Some(secrets) => store
                 .save_secrets(&secrets)

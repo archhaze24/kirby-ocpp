@@ -439,3 +439,31 @@ async fn restored_stops_keep_their_time_and_meter_per_connector() {
     join.await.unwrap();
     csms.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_secrets_file_that_cannot_be_read_is_never_overwritten() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config(csms.url(), &dir);
+    // Written by a newer build: this one cannot read it and must leave it alone.
+    let secrets_path = StationStore::new(dir.path(), &config.charge_point_id).secrets_path();
+    let newer = r#"{"version": 9999, "authorization_key": "from-the-future"}"#;
+    fs::write(&secrets_path, newer).unwrap();
+
+    let (station, join) = Station::spawn(config, Arc::new(ManualClock::new(t0())));
+    station.connect().await.unwrap();
+    csms.wait_for_call_count_after(0, "StatusNotification", 1, |_| true, STEP)
+        .await
+        .unwrap();
+    let reply = payload(
+        &csms,
+        "ChangeConfiguration",
+        json!({"key": "AuthorizationKey", "value": "0123456789abcdef"}),
+    )
+    .await;
+    assert_eq!(reply["status"], "Accepted", "{reply}");
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+
+    assert_eq!(fs::read_to_string(&secrets_path).unwrap(), newer);
+}

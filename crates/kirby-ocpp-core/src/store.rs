@@ -258,8 +258,24 @@ impl StationStore {
     pub fn load_secrets(&self) -> Result<StationSecrets, StoreError> {
         let path = self.secrets_path();
         match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice(&bytes) {
-                Ok(secrets) => Ok(secrets),
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|value| {
+                    // A newer build wrote it: leave it untouched, like the state file.
+                    let found = value.get("version").and_then(Value::as_u64).unwrap_or(0);
+                    if found > u64::from(STORE_VERSION) {
+                        return Ok(Err(found));
+                    }
+                    serde_json::from_value(value)
+                        .map(Ok)
+                        .map_err(|e| e.to_string())
+                }) {
+                Ok(Ok(secrets)) => Ok(secrets),
+                Ok(Err(found)) => Err(StoreError::UnsupportedVersion {
+                    path,
+                    found,
+                    supported: STORE_VERSION,
+                }),
                 Err(e) => {
                     // Keep the broken file: the next save would overwrite it.
                     let backup = move_aside(&path)?;
@@ -668,6 +684,22 @@ mod tests {
             assert_eq!(mode & 0o777, 0o600);
         }
         assert!(store.load_secrets().unwrap().is_empty());
+    }
+
+    #[test]
+    fn secrets_file_of_a_newer_version_is_refused_and_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        let text = format!(
+            r#"{{"version": {}, "future_field": "kept"}}"#,
+            u64::from(STORE_VERSION) + 1
+        );
+        fs::write(store.secrets_path(), &text).unwrap();
+        assert!(matches!(
+            store.load_secrets(),
+            Err(StoreError::UnsupportedVersion { found, .. }) if found == u64::from(STORE_VERSION) + 1
+        ));
+        assert_eq!(fs::read_to_string(store.secrets_path()).unwrap(), text);
     }
 
     #[cfg(unix)]
