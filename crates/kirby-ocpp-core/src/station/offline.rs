@@ -81,6 +81,14 @@ impl OfflineQueue {
         self.entries.iter_mut().find(|e| e.tx_id == tx)
     }
 
+    /// The entry of transaction `tx` on `connector`. CSMS ids are not unique across
+    /// connectors (a CSMS may hand out the same id twice), so stops are matched per connector.
+    pub fn find_by_tx_on(&mut self, connector: ConnectorId, tx: TxId) -> Option<&mut OfflineTx> {
+        self.entries
+            .iter_mut()
+            .find(|e| e.tx_id == tx && e.connector == connector)
+    }
+
     pub fn remove(&mut self, key: u64) -> Option<OfflineTx> {
         let index = self.entries.iter().position(|e| e.key == key)?;
         Some(self.entries.remove(index))

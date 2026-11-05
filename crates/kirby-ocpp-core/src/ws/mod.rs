@@ -102,6 +102,10 @@ pub struct ConnectOptions {
     /// Record `AuthorizationKey` values in [`FrameRecord`]s as sent (default `false`:
     /// they are replaced by `***`). The wire is never affected.
     pub show_secrets: bool,
+    /// Longest time one write to the socket (a frame, a ping, a pong flush or the close
+    /// frame) may take. A peer that stops reading is treated as a lost connection when it
+    /// expires. Default 10 seconds.
+    pub write_timeout: Duration,
 }
 
 impl Default for ConnectOptions {
@@ -111,9 +115,13 @@ impl Default for ConnectOptions {
             call_timeout: Duration::from_secs(30),
             serialize_calls: true,
             show_secrets: false,
+            write_timeout: DEFAULT_WRITE_TIMEOUT,
         }
     }
 }
+
+/// Default of [`ConnectOptions::write_timeout`].
+pub const DEFAULT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Something that happened on the connection.
 #[derive(Debug)]

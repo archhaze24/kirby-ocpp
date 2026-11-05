@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use kirby_ocpp_core::ocpp::{ErrorCode, Frame, redact_secrets};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
@@ -45,6 +45,9 @@ const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_ACTION_KEYS: usize = 64;
 /// Bucket of `received_by_action` for actions beyond [`MAX_ACTION_KEYS`].
 const OTHER_ACTION: &str = "other";
+/// Longest action name kept as a key of `received_by_action`, in characters; longer names are
+/// counted under `other`.
+const MAX_ACTION_KEY_CHARS: usize = 64;
 /// Longest text kept in a [`CsmsEvent::Malformed`] event.
 const MALFORMED_TEXT_CHARS: usize = 512;
 /// Close code for injected closes (internal error), as in the test mock.
@@ -67,7 +70,20 @@ const CLOSE_CODE_ERROR: u16 = 1011;
 /// sent when the previous one was answered or timed out. The timeout counts from the moment
 /// a CALL is written, not from when it was queued; wrap the future in your own
 /// `tokio::time::timeout` to bound the queueing time too. Dropping the future of a call that
-/// was not sent yet cancels it.
+/// was not sent yet cancels it; dropping it after the CALL was written discards the answer but
+/// keeps the slot until the station answers or the timeout expires, so the next queued CALL
+/// is never written before the outstanding one is settled.
+///
+/// # Memory and the registry
+///
+/// Station records, their state and their frame history are never evicted by the server: a
+/// station id stays in the registry (up to [`CsmsConfig::max_stations`]) until
+/// [`CsmsHandle::forget`] removes it. Each record is bounded ([`CsmsConfig::history_cap`] frames
+/// and [`CsmsConfig::history_bytes_cap`] bytes of history, a bounded number of action
+/// counters), but a CSMS that accepts connections from untrusted networks should still call
+/// `forget` for stations it no longer wants. The default [`SecurityPolicy`] is unauthenticated
+/// (profile 0): anybody who can reach the listener may register stations; use a security
+/// profile or a firewall.
 ///
 /// # Example
 ///
@@ -209,7 +225,7 @@ impl CsmsHandle {
             .lock()
             .stations
             .get(id)
-            .map(|rec| rec.history.iter().cloned().collect())
+            .map(|rec| rec.history.iter().map(|item| item.entry.clone()).collect())
     }
 
     /// The protocol state of a station (see [`StationState`]); it survives disconnects and
@@ -411,9 +427,17 @@ struct State {
 
 struct StationRec {
     info: StationInfo,
-    history: VecDeque<FrameEntry>,
+    history: VecDeque<HistoryItem>,
+    /// Sum of `HistoryItem::bytes`.
+    history_bytes: usize,
     state: StationState,
     session: Option<SessionLink>,
+}
+
+struct HistoryItem {
+    entry: FrameEntry,
+    /// Size of the frame as JSON text.
+    bytes: usize,
 }
 
 struct SessionLink {
@@ -431,6 +455,11 @@ struct QueuedCall {
     payload: Value,
     timeout: Duration,
     reply: oneshot::Sender<Result<Frame, CsmsError>>,
+}
+
+enum RegisterError {
+    Shutdown,
+    TooManyStations,
 }
 
 impl Inner {
@@ -457,18 +486,23 @@ impl Inner {
         )
     }
 
-    /// Registers a new connection, replacing an older one with the same id. `None` if the
-    /// server is shutting down.
+    /// Registers a new connection, replacing an older one with the same id. Refused if the
+    /// server is shutting down or the station limit was reached in the meantime.
     fn register(
         &self,
         id: &str,
         peer: SocketAddr,
         subprotocol: Option<String>,
         tx: mpsc::UnboundedSender<SessionCmd>,
-    ) -> Option<u64> {
+    ) -> Result<u64, RegisterError> {
         let mut state = self.lock();
         if *self.shutdown.borrow() {
-            return None;
+            return Err(RegisterError::Shutdown);
+        }
+        // The handshake callback checked this too, but between the two the registry may have
+        // filled up (several handshakes can pass the check together).
+        if state.stations.len() >= self.config.max_stations && !state.stations.contains_key(id) {
+            return Err(RegisterError::TooManyStations);
         }
         state.next_session += 1;
         let session_id = state.next_session;
@@ -487,6 +521,7 @@ impl Inner {
                     received_by_action: BTreeMap::new(),
                 },
                 history: VecDeque::new(),
+                history_bytes: 0,
                 state: StationState::default(),
                 session: None,
             });
@@ -509,7 +544,7 @@ impl Inner {
         self.emit(CsmsEvent::Connected {
             station: id.to_owned(),
         });
-        Some(session_id)
+        Ok(session_id)
     }
 
     /// Marks a session as ended, unless it was replaced or forgotten already.
@@ -541,11 +576,14 @@ impl Inner {
         if let (Direction::In, Frame::Call { action, .. }) = (direction, frame) {
             rec.info.received_calls += 1;
             let by_action = &mut rec.info.received_by_action;
-            let key = if by_action.contains_key(action) || by_action.len() < MAX_ACTION_KEYS {
-                action.as_str()
-            } else {
-                OTHER_ACTION
-            };
+            let short =
+                action.chars().take(MAX_ACTION_KEY_CHARS + 1).count() <= MAX_ACTION_KEY_CHARS;
+            let key =
+                if short && (by_action.contains_key(action) || by_action.len() < MAX_ACTION_KEYS) {
+                    action.as_str()
+                } else {
+                    OTHER_ACTION
+                };
             *by_action.entry(key.to_owned()).or_insert(0) += 1;
         }
         let redacted;
@@ -557,14 +595,31 @@ impl Inner {
         };
         let cap = self.config.history_cap;
         if cap > 0 {
-            while rec.history.len() >= cap {
-                rec.history.pop_front();
+            let bytes_cap = self.config.history_bytes_cap;
+            let mut stored = frame.clone();
+            let mut bytes = stored.to_json_string().len();
+            if bytes > bytes_cap {
+                stored = truncated_frame(frame, bytes);
+                bytes = stored.to_json_string().len();
             }
-            rec.history.push_back(FrameEntry {
-                ts: Utc::now(),
-                direction,
-                frame: frame.clone(),
-            });
+            while rec.history.len() >= cap
+                || (rec.history_bytes.saturating_add(bytes) > bytes_cap && !rec.history.is_empty())
+            {
+                if let Some(old) = rec.history.pop_front() {
+                    rec.history_bytes = rec.history_bytes.saturating_sub(old.bytes);
+                }
+            }
+            if rec.history_bytes.saturating_add(bytes) <= bytes_cap {
+                rec.history_bytes += bytes;
+                rec.history.push_back(HistoryItem {
+                    entry: FrameEntry {
+                        ts: Utc::now(),
+                        direction,
+                        frame: stored,
+                    },
+                    bytes,
+                });
+            }
         }
         if self.events.receiver_count() > 0 {
             self.emit(CsmsEvent::Frame {
@@ -622,7 +677,8 @@ impl Inner {
     }
 
     /// Decides the reply to a CALL: fault, then schema validation (`validate_inbound`), then
-    /// responder, then default; actions a charge point may not send get `NotSupported`.
+    /// responder, then default; known actions a charge point may not send get `NotSupported`,
+    /// unknown ones `NotImplemented`.
     fn decide(&self, action: &str, payload: &Value) -> Reply {
         let mut state = self.lock();
         if let Some(fault) = state
@@ -651,10 +707,19 @@ impl Inner {
             return (*responder)(payload);
         }
         if !is_charge_point_action(action) {
-            return Reply::Error(
-                ErrorCode::NotSupported,
-                format!("action {action} is not supported"),
-            );
+            // OCPP-J: NotImplemented for a name nobody knows, NotSupported for a known action
+            // that a charge point may not send to a central system.
+            return if kirby_ocpp_core::ocpp::messages::registry::find(action).is_some() {
+                Reply::Error(
+                    ErrorCode::NotSupported,
+                    format!("action {} is not supported", sanitize_action(action)),
+                )
+            } else {
+                Reply::Error(
+                    ErrorCode::NotImplemented,
+                    format!("action {} is not implemented", sanitize_action(action)),
+                )
+            };
         }
         let transaction_id = (action == "StartTransaction").then(|| state.tx_ids.allocate());
         default_reply(
@@ -781,8 +846,19 @@ where
     };
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let Some(session_id) = inner.register(&station, peer, subprotocol, cmd_tx) else {
-        return;
+    let session_id = match inner.register(&station, peer, subprotocol, cmd_tx) {
+        Ok(session_id) => session_id,
+        Err(RegisterError::Shutdown) => return,
+        Err(RegisterError::TooManyStations) => {
+            // The upgrade is done, so there is no HTTP 503 any more: say it in the close frame.
+            let mut socket = socket;
+            let close = Message::Close(Some(CloseFrame {
+                code: CloseCode::Again,
+                reason: "too many stations".into(),
+            }));
+            let _ = timeout(CLOSE_WRITE_TIMEOUT, socket.send(close)).await;
+            return;
+        }
     };
     // Ends the session in the registry even if the user's responder panics below.
     let mut guard = EndGuard {
@@ -887,16 +963,9 @@ where
                     }
                     None => Some(DisconnectReason::Closed),
                 },
-                // The caller dropped its `call()` future: free the slot, a late reply is ignored.
-                () = async {
-                    match self.in_flight.as_mut() {
-                        Some(flight) => flight.reply.closed().await,
-                        None => std::future::pending().await,
-                    }
-                } => {
-                    self.in_flight = None;
-                    None
-                }
+                // A caller that dropped its `call()` future after the CALL was written does
+                // not free the slot: the next CALL waits for the answer or the deadline
+                // (one outstanding CALL). The late answer is discarded in `on_text`.
                 () = async {
                     match deadline {
                         Some(at) => tokio::time::sleep_until(at).await,
@@ -1047,6 +1116,35 @@ where
             reason: reason.to_owned().into(),
         }));
         let _ = timeout(CLOSE_WRITE_TIMEOUT, self.socket.send(close)).await;
+    }
+}
+
+/// The action name for a CALLERROR text: at most 64 characters, control characters replaced.
+fn sanitize_action(action: &str) -> String {
+    truncate_chars(action, MAX_ACTION_KEY_CHARS)
+        .chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
+/// Replaces the payload of a frame that is too big for the history by a small marker object
+/// (`{"truncated": true, "originalBytes": n}`); a CALLERROR keeps its code and a cut description.
+fn truncated_frame(frame: &Frame, original_bytes: usize) -> Frame {
+    let marker = json!({ "truncated": true, "originalBytes": original_bytes });
+    match frame {
+        Frame::Call { id, action, .. } => Frame::call(id.clone(), action.clone(), marker),
+        Frame::CallResult { id, .. } => Frame::call_result(id.clone(), marker),
+        Frame::CallError {
+            id,
+            code,
+            description,
+            ..
+        } => Frame::CallError {
+            id: id.clone(),
+            code: code.clone(),
+            description: truncate_chars(description, 128),
+            details: marker,
+        },
     }
 }
 

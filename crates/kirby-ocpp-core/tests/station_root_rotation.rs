@@ -117,7 +117,7 @@ async fn the_check_decides_which_roots_can_be_installed() {
     let roots = saved["certificates"]["roots"].as_array().unwrap();
     assert_eq!(roots.len(), 2);
     assert_eq!(roots.iter().filter(|r| r["fallback"] == true).count(), 1);
-    assert_eq!(saved["version"], 5);
+    assert_eq!(saved["version"], 6);
     rig.join.take().unwrap().await.unwrap();
     rig.csms.shutdown().await;
 }

@@ -314,3 +314,80 @@ async fn dropped_socket_is_reported_as_abnormal_closure() {
     assert_eq!(code, Some(1006));
     assert!(!by_us);
 }
+
+#[tokio::test]
+async fn a_peer_that_stops_reading_ends_the_connection_after_the_write_timeout() {
+    let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+    let options = ConnectOptions {
+        serialize_calls: false,
+        write_timeout: Duration::from_millis(300),
+        call_timeout: Duration::from_secs(60),
+        ..options()
+    };
+    let (connection, mut events) = connect(&server.url("/ocpp"), options).await;
+    // Held but never read: the kernel buffers fill up and writes block.
+    let _silent_peer = server.next_peer().await;
+    // Several big CALLs: one write may vanish into the kernel (Windows takes a big
+    // non-blocking send whole), but the later ones cannot.
+    let data = "x".repeat(8 * 1024 * 1024);
+    let mut calls = Vec::new();
+    for _ in 0..6 {
+        let connection = connection.clone();
+        let data = data.clone();
+        calls.push(tokio::spawn(async move {
+            connection
+                .call(
+                    "DataTransfer",
+                    json!({"vendorId": "V", "data": data}),
+                    Some(Duration::from_secs(60)),
+                )
+                .await
+        }));
+    }
+    let (code, reason, by_us) = next_closed(&mut events).await;
+    assert_eq!(code, Some(1006));
+    assert!(reason.contains("write timed out"), "{reason}");
+    assert!(by_us);
+    for call in calls {
+        assert!(matches!(call.await.unwrap(), Err(CallError::Closed { .. })));
+    }
+}
+
+#[tokio::test]
+async fn an_oversize_message_from_the_csms_closes_the_connection() {
+    let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+    let (_connection, mut events) = connect(&server.url("/ocpp"), options()).await;
+    let mut peer = server.next_peer().await;
+    // Under the limit: not valid OCPP-J, but the socket stays up.
+    peer.send_text(&"x".repeat(3 * 1024 * 1024)).await;
+    let warning = ws_support::next_event(&mut events, |event| match event {
+        kirby_ocpp_core::ws::ConnectionEvent::Frame(record) => Some(record.msg_id.is_none()),
+        _ => None,
+    })
+    .await;
+    assert!(warning);
+    // Over the limit: tungstenite refuses it and the connection ends.
+    let _ = peer
+        .ws
+        .send(Message::Text("y".repeat(5 * 1024 * 1024).into()))
+        .await;
+    let (code, _, by_us) = next_closed(&mut events).await;
+    assert_eq!(code, Some(1006));
+    assert!(!by_us);
+}
+
+#[tokio::test]
+async fn an_absurd_call_timeout_does_not_panic() {
+    let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+    let options = ConnectOptions {
+        call_timeout: Duration::MAX,
+        ..options()
+    };
+    let (connection, _events) = connect(&server.url("/ocpp"), options).await;
+    let mut peer = server.next_peer().await;
+    let call = tokio::spawn(async move { connection.call("Heartbeat", json!({}), None).await });
+    let frame = peer.recv_frame().await;
+    peer.reply(&frame, json!({"currentTime": "2026-01-01T00:00:00Z"}))
+        .await;
+    call.await.unwrap().unwrap();
+}

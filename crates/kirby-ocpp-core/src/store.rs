@@ -45,7 +45,9 @@ use crate::station::transaction::TransactionState;
 /// both empty; secrets live in a separate file, see [`StationSecrets`]).
 /// Version 5 added the fallback flag of installed roots (`AdditionalRootCertificateCheck`;
 /// older files load with no fallback).
-pub const STORE_VERSION: u32 = 5;
+/// Version 6 added the stop time and meter reading of a `Stopping` transaction (older files
+/// load without them and use the restore time).
+pub const STORE_VERSION: u32 = 6;
 
 /// Everything that survives a restart.
 ///

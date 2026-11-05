@@ -190,8 +190,14 @@ impl StationActor {
                 "the security profile cannot be lowered ({current} -> {new})"
             ));
         }
+        // A05.FR.01: setting the current profile again is Rejected for profiles 2 and 3
+        // (there is no AllowSecurityProfileDowngrade here); 0 and 1 stay a no-op.
         if new == current {
-            return Ok(());
+            return if new > 1 {
+                Err(format!("the security profile is already {current}"))
+            } else {
+                Ok(())
+            };
         }
         let secure_url = self.config.url.to_ascii_lowercase().starts_with("wss://");
         if new >= 2 && !secure_url {
@@ -297,9 +303,20 @@ impl StationActor {
         if key == AUTHORIZATION_KEY || key == SECURITY_PROFILE {
             self.log(
                 LogLevel::Info,
-                format!("{key} changed; it applies at the next connection"),
+                format!("{key} changed; reconnecting so the new parameters are used"),
             );
             self.security_event("ReconfigurationOfSecurityParameters", Some(key));
+            self.reconnect_for_new_security_parameters();
         }
+    }
+
+    /// A05.FR.06/07, A02.FR.08, A01: after a change of the security parameters the station
+    /// disconnects and reconnects. Modelled on the hard reset: it waits for the reply and the
+    /// CALLs in flight, then reconnects (the timer runs after the reply was queued).
+    pub(super) fn reconnect_for_new_security_parameters(&mut self) {
+        if self.link.conn.is_none() || self.hard_reset_deadline.is_some() {
+            return;
+        }
+        self.schedule_reconnect_after_reply();
     }
 }

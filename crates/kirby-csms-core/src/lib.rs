@@ -8,7 +8,7 @@
 //!   an invalid payload gets a CALLERROR (a [`Fault`] on the same action still wins).
 //! * Inbound CALLs get the canned answers of the test mock ([`default_reply`]), unless a
 //!   [`Fault`] or a responder ([`CsmsHandle::respond`]) applies. Actions a charge point may
-//!   not send get a `NotSupported` CALLERROR.
+//!   not send get a `NotSupported` CALLERROR (known action names) or `NotImplemented` (unknown names).
 //! * [`CsmsHandle::state`] is the per-station protocol read model ([`StationState`]: boot info,
 //!   connector statuses, transactions with meter readings); [`CsmsEvent::StateChanged`] tells
 //!   when it changed. [`CsmsHandle::call_typed`] and the command helpers (`reset`,

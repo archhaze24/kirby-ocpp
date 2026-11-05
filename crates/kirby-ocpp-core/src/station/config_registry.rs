@@ -192,7 +192,7 @@ impl Kind {
 }
 
 /// One configuration key with its current value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConfigEntry {
     /// Canonical key name.
     pub key: &'static str,
@@ -201,6 +201,19 @@ pub struct ConfigEntry {
     kind: Kind,
     /// For list keys: the read-only `*MaxLength` key that bounds the item count.
     max_items_key: Option<&'static str>,
+}
+
+impl std::fmt::Debug for ConfigEntry {
+    /// The value of a secret key (`AuthorizationKey`) is never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigEntry")
+            .field("key", &self.key)
+            .field("readonly", &self.readonly)
+            .field("value", &self.display_value())
+            .field("kind", &self.kind)
+            .field("max_items_key", &self.max_items_key)
+            .finish()
+    }
 }
 
 impl ConfigEntry {
@@ -415,6 +428,13 @@ impl ConfigRegistry {
 
     pub fn heartbeat_interval_secs(&self) -> u32 {
         self.number(HEARTBEAT_INTERVAL)
+    }
+
+    /// `WebSocketPingInterval`: the WebSocket ping period; `None` when `0` (pings off).
+    /// Read when a connection is opened, so a change applies from the next (re)connect.
+    pub fn web_socket_ping_interval(&self) -> Option<Duration> {
+        let secs = self.number(WEB_SOCKET_PING_INTERVAL);
+        (secs > 0).then(|| Duration::from_secs(u64::from(secs)))
     }
 
     /// Delivery attempts for transaction messages (at least 1: no retry).
@@ -681,7 +701,7 @@ fn default_measurands() -> String {
 /// All defaults, in the alphabetical order the TS registry uses.
 fn default_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntry> {
     let mut entries = first_half_entries(config, connectors);
-    entries.extend(second_half_entries(connectors));
+    entries.extend(second_half_entries(config, connectors));
     entries
 }
 
@@ -753,7 +773,7 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
     ]
 }
 
-fn second_half_entries(connectors: u32) -> Vec<ConfigEntry> {
+fn second_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntry> {
     let measurands = default_measurands();
     let measurand_max = Measurand::ALL.len().to_string();
 
@@ -819,7 +839,11 @@ fn second_half_entries(connectors: u32) -> Vec<ConfigEntry> {
             Kind::Boolean,
             "false",
         ),
-        writable(WEB_SOCKET_PING_INTERVAL, Kind::NonNegativeInt, "0"),
+        writable(
+            WEB_SOCKET_PING_INTERVAL,
+            Kind::NonNegativeInt,
+            config.ws_ping_interval_secs.to_string(),
+        ),
     ]
 }
 
@@ -833,6 +857,28 @@ mod tests {
 
     fn keys_of(report: &ConfigurationReport<'_>) -> Vec<&'static str> {
         report.configuration_key.iter().map(|e| e.key).collect()
+    }
+
+    #[test]
+    fn web_socket_ping_interval_follows_the_station_config_and_can_be_changed() {
+        let mut config = StationConfig::new("ws://localhost:9000/ocpp");
+        config.ws_ping_interval_secs = 45;
+        let mut registry = ConfigRegistry::new(&config);
+        assert_eq!(registry.value("WebSocketPingInterval"), Some("45"));
+        assert_eq!(
+            registry.web_socket_ping_interval(),
+            Some(Duration::from_secs(45))
+        );
+        assert_eq!(
+            registry.change("WebSocketPingInterval", "0"),
+            ConfigurationStatus::Accepted
+        );
+        assert_eq!(registry.web_socket_ping_interval(), None);
+        config.ws_ping_interval_secs = 0;
+        assert_eq!(
+            ConfigRegistry::new(&config).web_socket_ping_interval(),
+            None
+        );
     }
 
     #[test]
@@ -1174,6 +1220,8 @@ mod tests {
         let entry = registry.get("AuthorizationKey").unwrap();
         assert!(entry.secret());
         assert_eq!(entry.display_value(), "********");
+        let printed = format!("{registry:?} {entry:?}");
+        assert!(!printed.contains("0123456789abcdef"), "Debug leaks the key");
         for key in [
             "CertificateStoreMaxLength",
             "AdditionalRootCertificateCheck",

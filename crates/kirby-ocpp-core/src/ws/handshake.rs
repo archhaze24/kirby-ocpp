@@ -16,7 +16,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role};
+use tokio_tungstenite::tungstenite::protocol::{CloseFrame, Role, WebSocketConfig};
 use url::Url;
 use uuid::Uuid;
 
@@ -66,7 +66,8 @@ where
         ));
     }
 
-    let mut ws = WebSocketStream::from_raw_socket(stream, Role::Client, None).await;
+    let mut ws =
+        WebSocketStream::from_raw_socket(stream, Role::Client, Some(websocket_config())).await;
     if head.header("sec-websocket-protocol") != Some(subprotocol) {
         let close = CloseFrame {
             code: CloseCode::Protocol,
@@ -78,6 +79,16 @@ where
         });
     }
     Ok(ws)
+}
+
+/// Largest WebSocket message and frame accepted from the CSMS, in bytes. A peer that sends
+/// more is disconnected (tungstenite's defaults would take 64 MiB messages).
+pub const MAX_INBOUND_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+
+fn websocket_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(MAX_INBOUND_MESSAGE_BYTES))
+        .max_frame_size(Some(MAX_INBOUND_MESSAGE_BYTES))
 }
 
 fn handshake_error(message: impl Into<String>) -> ConnectError {

@@ -102,6 +102,7 @@ where
     let task = Task {
         serialize: options.serialize_calls,
         show_secrets: options.show_secrets,
+        write_timeout: options.write_timeout,
         ping_interval: options.ping_interval,
         open: Arc::clone(&open),
         events: events_tx,
@@ -118,6 +119,7 @@ where
 struct Task {
     serialize: bool,
     show_secrets: bool,
+    write_timeout: Duration,
     ping_interval: Option<Duration>,
     open: Arc<AtomicBool>,
     events: mpsc::Sender<ConnectionEvent>,
@@ -230,7 +232,7 @@ impl Task {
                 Pending {
                     action,
                     timeout,
-                    deadline: Instant::now() + timeout,
+                    deadline: deadline_after(timeout),
                     reply,
                 },
             );
@@ -243,9 +245,8 @@ impl Task {
     where
         W: Sink<Message, Error = WsError> + Unpin,
     {
-        sink.send(Message::Text(frame.to_json_string().into()))
-            .await
-            .map_err(|error| abort(&error))?;
+        self.send_message(sink, Message::Text(frame.to_json_string().into()))
+            .await?;
         let record = FrameRecord {
             ts: Utc::now(),
             direction: Direction::Out,
@@ -307,7 +308,10 @@ impl Task {
                 }
             },
             // tungstenite queued the pong; the flush writes it out.
-            Message::Ping(_) => sink.flush().await.map_err(|error| abort(&error)),
+            Message::Ping(_) => match timeout(self.write_timeout, sink.flush()).await {
+                Ok(flushed) => flushed.map_err(|error| abort(&error)),
+                Err(_) => Err(write_timed_out()),
+            },
             Message::Pong(_) => {
                 self.awaiting_pong = false;
                 Ok(())
@@ -506,9 +510,19 @@ impl Task {
             });
         }
         self.awaiting_pong = true;
-        sink.send(Message::Ping(Bytes::new()))
-            .await
-            .map_err(|error| abort(&error))
+        self.send_message(sink, Message::Ping(Bytes::new())).await
+    }
+
+    /// Writes one message; a peer that stops reading ends the connection after
+    /// `write_timeout` instead of blocking the task (and with it every deadline) forever.
+    async fn send_message<W>(&self, sink: &mut W, message: Message) -> Flow
+    where
+        W: Sink<Message, Error = WsError> + Unpin,
+    {
+        match timeout(self.write_timeout, sink.send(message)).await {
+            Ok(sent) => sent.map_err(|error| abort(&error)),
+            Err(_) => Err(write_timed_out()),
+        }
     }
 
     async fn emit(&self, event: ConnectionEvent) -> Flow {
@@ -550,11 +564,11 @@ impl Task {
 
         let (code, reason, by_us) = match stop {
             Stop::Requested => {
-                let (code, reason) = close_handshake(sink, stream).await;
+                let (code, reason) = close_handshake(sink, stream, self.write_timeout).await;
                 (code, reason, true)
             }
             Stop::Peer(frame) => {
-                let _ = timeout(CLOSE_TIMEOUT, sink.flush()).await;
+                let _ = timeout(CLOSE_TIMEOUT.min(self.write_timeout), sink.flush()).await;
                 let (code, reason) = frame_code_and_reason(frame);
                 (code, reason, false)
             }
@@ -580,6 +594,23 @@ impl Task {
     }
 }
 
+/// The longest delay used when a timeout does not fit into the clock (about 100 years of
+/// deadline arithmetic would overflow `Instant`).
+const FAR_FUTURE: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// `now + timeout`, clamped instead of panicking for absurd timeouts.
+fn deadline_after(timeout: Duration) -> Instant {
+    let now = Instant::now();
+    now.checked_add(timeout).unwrap_or(now + FAR_FUTURE)
+}
+
+fn write_timed_out() -> Stop {
+    Stop::Abort {
+        reason: "WebSocket write timed out (the peer stopped reading)".to_owned(),
+        by_us: true,
+    }
+}
+
 fn abort(error: &WsError) -> Stop {
     Stop::Abort {
         reason: error.to_string(),
@@ -595,7 +626,11 @@ fn frame_code_and_reason(frame: Option<CloseFrame>) -> (Option<u16>, String) {
 }
 
 /// Sends a Close frame (normal closure) and waits, bounded, for the peer's reply.
-async fn close_handshake<W, R>(sink: &mut W, stream: &mut R) -> (Option<u16>, String)
+async fn close_handshake<W, R>(
+    sink: &mut W,
+    stream: &mut R,
+    write_timeout: Duration,
+) -> (Option<u16>, String)
 where
     W: Sink<Message, Error = WsError> + Unpin,
     R: Stream<Item = Result<Message, WsError>> + Unpin,
@@ -604,7 +639,12 @@ where
         code: CloseCode::Normal,
         reason: "".into(),
     };
-    if sink.send(Message::Close(Some(close))).await.is_err() {
+    let sent = timeout(
+        CLOSE_TIMEOUT.min(write_timeout),
+        sink.send(Message::Close(Some(close))),
+    )
+    .await;
+    if !matches!(sent, Ok(Ok(()))) {
         return (
             Some(ABNORMAL_CLOSE),
             "cannot send the close frame".to_owned(),

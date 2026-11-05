@@ -506,8 +506,13 @@ async fn faults_responders_and_protocol_errors() {
     assert_eq!(started["transactionId"], 123);
     assert_eq!(started["idTagInfo"]["status"], "Blocked");
 
-    // Unknown action: NotSupported.
+    // Unknown action: NotImplemented. A known action a charge point may not send: NotSupported.
     raw_send(&mut raw, r#"[2,"u1","Teleport",{}]"#).await;
+    match raw_recv(&mut raw).await {
+        Frame::CallError { code, .. } => assert_eq!(code, ErrorCode::NotImplemented),
+        other => panic!("expected CALLERROR, got {other:?}"),
+    }
+    raw_send(&mut raw, r#"[2,"u2","Reset",{"type":"Soft"}]"#).await;
     match raw_recv(&mut raw).await {
         Frame::CallError { code, .. } => assert_eq!(code, ErrorCode::NotSupported),
         other => panic!("expected CALLERROR, got {other:?}"),
@@ -798,23 +803,35 @@ async fn heartbeat_updates_state_without_an_event() {
 }
 
 #[tokio::test]
-async fn dropped_call_frees_the_in_flight_slot() {
+async fn dropped_call_keeps_the_in_flight_slot_until_the_answer() {
     let csms = start(|_| {}).await;
     let mut raw = raw_connect(&csms, "/CP-DROP").await;
     let first = tokio::spawn({
         let csms = csms.clone();
         async move { csms.call("CP-DROP", "Reset", json!({"type": "Soft"})).await }
     });
-    let Frame::Call { .. } = raw_recv(&mut raw).await else {
+    let Frame::Call { id: first_id, .. } = raw_recv(&mut raw).await else {
         panic!("expected a CALL");
     };
     first.abort();
     let _ = first.await;
-    // The default timeout is 30 s, longer than STEP: this only passes if the slot was freed.
     let next = tokio::spawn({
         let csms = csms.clone();
         async move { csms.call("CP-DROP", "GetConfiguration", json!({})).await }
     });
+    // One outstanding CALL: the second must not be written before the first is settled.
+    // (A negative check needs a window; a late failure here cannot be a false alarm.)
+    assert!(
+        timeout(Duration::from_millis(300), raw.next())
+            .await
+            .is_err(),
+        "the next CALL was sent before the station answered"
+    );
+    raw_send(
+        &mut raw,
+        &Frame::call_result(first_id, json!({"status": "Accepted"})).to_json_string(),
+    )
+    .await;
     let Frame::Call { id, action, .. } = raw_recv(&mut raw).await else {
         panic!("expected a CALL");
     };
@@ -825,6 +842,121 @@ async fn dropped_call_frees_the_in_flight_slot() {
     )
     .await;
     next.await.unwrap().unwrap();
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn dropped_call_frees_the_slot_at_its_deadline() {
+    let csms = start(|c| c.call_timeout = Duration::from_millis(300)).await;
+    let mut raw = raw_connect(&csms, "/CP-DEADLINE").await;
+    let first = tokio::spawn({
+        let csms = csms.clone();
+        async move {
+            csms.call("CP-DEADLINE", "Reset", json!({"type": "Soft"}))
+                .await
+        }
+    });
+    let Frame::Call { .. } = raw_recv(&mut raw).await else {
+        panic!("expected a CALL");
+    };
+    first.abort();
+    let _ = first.await;
+    let next = tokio::spawn({
+        let csms = csms.clone();
+        async move {
+            csms.call("CP-DEADLINE", "GetConfiguration", json!({}))
+                .await
+        }
+    });
+    let Frame::Call { action, .. } = raw_recv(&mut raw).await else {
+        panic!("expected a CALL");
+    };
+    assert_eq!(action, "GetConfiguration");
+    next.abort();
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn history_is_capped_in_bytes_and_huge_frames_are_truncated() {
+    let csms = start(|c| c.history_bytes_cap = 2000).await;
+    let mut raw = raw_connect(&csms, "/CP-BYTES").await;
+    for n in 0..20 {
+        let call = json!([2, format!("d{n}"), "DataTransfer",
+            {"vendorId": "V", "data": "x".repeat(300)}]);
+        raw_send(&mut raw, &call.to_string()).await;
+        raw_recv(&mut raw).await;
+    }
+    // A frame far above the cap is kept as a marker, not in full.
+    let huge = json!([2, "huge", "DataTransfer", {"vendorId": "V", "data": "y".repeat(100_000)}]);
+    raw_send(&mut raw, &huge.to_string()).await;
+    raw_recv(&mut raw).await;
+    let history = csms.history("CP-BYTES").unwrap();
+    let total: usize = history.iter().map(|e| e.frame.to_json_string().len()).sum();
+    assert!(total <= 2000, "history holds {total} bytes");
+    assert!(
+        history.len() >= 2 && history.len() < 40,
+        "{}",
+        history.len()
+    );
+    let marked = history
+        .iter()
+        .find_map(|e| match &e.frame {
+            Frame::Call { id, payload, .. } if id.as_str() == "huge" => Some(payload.clone()),
+            _ => None,
+        })
+        .expect("the huge CALL is in the history");
+    assert_eq!(marked["truncated"], true);
+    assert!(marked["originalBytes"].as_u64().unwrap() > 100_000);
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn long_action_names_are_counted_as_other() {
+    let csms = start(|_| {}).await;
+    let mut raw = raw_connect(&csms, "/CP-LONG").await;
+    let long = "A".repeat(10_000);
+    raw_send(&mut raw, &json!([2, "l1", long, {}]).to_string()).await;
+    raw_recv(&mut raw).await;
+    raw_send(&mut raw, &json!([2, "l2", "Heartbeat", {}]).to_string()).await;
+    raw_recv(&mut raw).await;
+    let info = csms.station("CP-LONG").unwrap();
+    assert_eq!(info.received_by_action.get("other"), Some(&1));
+    assert_eq!(info.received_by_action.get("Heartbeat"), Some(&1));
+    assert!(
+        info.received_by_action
+            .keys()
+            .all(|k| k.chars().count() <= 64)
+    );
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_handshakes_cannot_exceed_the_station_limit() {
+    let csms = start(|c| c.max_stations = 2).await;
+    let mut tasks = Vec::new();
+    for n in 0..16 {
+        let url = csms.url().clone();
+        tasks.push(tokio::spawn(async move {
+            let mut request = format!("{url}/CP-RACE-{n}").into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", "ocpp1.6".parse().unwrap());
+            tokio_tungstenite::connect_async(request).await.ok()
+        }));
+    }
+    let mut sockets = Vec::new();
+    for task in tasks {
+        sockets.push(task.await.unwrap());
+    }
+    // Wait until every attempt has been settled by the server (kept or closed).
+    for socket in sockets.iter_mut().flatten() {
+        let _ = timeout(Duration::from_millis(500), socket.0.next()).await;
+    }
+    assert!(
+        csms.stations().len() <= 2,
+        "{} stations",
+        csms.stations().len()
+    );
     csms.shutdown().await;
 }
 

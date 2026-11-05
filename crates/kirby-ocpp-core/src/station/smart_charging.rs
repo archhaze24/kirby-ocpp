@@ -68,6 +68,12 @@ use crate::ocpp::types::{
 pub const DAY_SECONDS: i64 = 86_400;
 /// Seconds in a week (weekly recurrence period).
 pub const WEEK_SECONDS: i64 = 604_800;
+/// Longest window a composite schedule covers; a longer `duration` is clamped to it (the
+/// answer carries the clamped `duration`).
+pub const MAX_COMPOSITE_DURATION_S: i32 = 604_800;
+/// Most periods in a composite schedule; the tail beyond it is cut and the answer's
+/// `duration` ends where the first cut period would have started.
+pub const MAX_COMPOSITE_PERIODS: usize = 1000;
 
 /// Structural problem of a `ChargingProfile`, independent of the station's limits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -330,11 +336,12 @@ pub fn composite_schedule(
         return Err(CompositeError::NonPositiveDuration);
     }
 
+    let duration_s = req.duration_s.min(MAX_COMPOSITE_DURATION_S);
     let start = truncate_to_second(req.now);
     let unit = req
         .unit
         .unwrap_or_else(|| default_unit(entries, req, start));
-    let window_end = start + TimeDelta::seconds(i64::from(req.duration_s));
+    let window_end = start + TimeDelta::seconds(i64::from(duration_s));
 
     // Profiles of this unit that can affect the connector: its own and connector 0's.
     let usable: Vec<(&StoredProfile, DateTime<Utc>)> = entries
@@ -353,7 +360,7 @@ pub fn composite_schedule(
     }
 
     // Every whole second where the state may change, relative to `start`.
-    let duration_ms = i64::from(req.duration_s) * 1000;
+    let window_ms = i64::from(duration_s) * 1000;
     let mut offsets: Vec<i64> = vec![0];
     for &(entry, base) in &usable {
         for instant in change_instants(&entry.profile, base, start, window_end) {
@@ -363,7 +370,7 @@ pub fn composite_schedule(
             offsets.push(ms.div_euclid(1000) + 1);
         }
     }
-    offsets.retain(|offset| *offset >= 0 && *offset * 1000 < duration_ms);
+    offsets.retain(|offset| *offset >= 0 && *offset * 1000 < window_ms);
     offsets.sort_unstable();
     offsets.dedup();
 
@@ -409,11 +416,19 @@ pub fn composite_schedule(
         });
     }
 
+    let mut duration_s = duration_s;
+    if periods.len() > MAX_COMPOSITE_PERIODS {
+        if let Some(first_cut) = periods.get(MAX_COMPOSITE_PERIODS) {
+            duration_s = first_cut.start_period.min(duration_s);
+        }
+        periods.truncate(MAX_COMPOSITE_PERIODS);
+    }
+
     Ok(CompositeSchedule {
         connector_id: req.connector,
         schedule_start: start,
         charging_schedule: ChargingSchedule {
-            duration: Some(req.duration_s),
+            duration: Some(duration_s),
             start_schedule: Some(start),
             charging_rate_unit: unit,
             charging_schedule_period: periods,
@@ -933,6 +948,64 @@ mod tests {
             schedule.charging_schedule.duration,
             Some(2 * 24 * 60 * 60 + 20)
         );
+    }
+
+    #[test]
+    fn a_huge_duration_is_clamped_to_seven_days() {
+        let mut store = ChargingProfileStore::new();
+        for id in 0..10 {
+            accepted(
+                &mut store,
+                1,
+                recurring(
+                    20 + id,
+                    3,
+                    ChargingProfilePurposeType::TxDefaultProfile,
+                    RecurrencyKindType::Daily,
+                    t0(),
+                    vec![period(0, 17.0), period(43_200, 12.0)],
+                ),
+            );
+        }
+        let schedule = composite(&mut store, &request(1, i32::MAX));
+        let periods = &schedule.charging_schedule.charging_schedule_period;
+        assert_eq!(
+            schedule.charging_schedule.duration,
+            Some(MAX_COMPOSITE_DURATION_S)
+        );
+        assert!(periods.len() <= 2 * 7 + 1, "{} periods", periods.len());
+        assert!(
+            periods
+                .iter()
+                .all(|p| p.start_period < MAX_COMPOSITE_DURATION_S)
+        );
+    }
+
+    #[test]
+    fn the_number_of_periods_is_capped_and_the_duration_follows() {
+        let mut store = ChargingProfileStore::new();
+        // 2000 alternating limits per day: ~14 000 changes in a week.
+        let periods: Vec<_> = (0..2000)
+            .map(|i| period(i * 40, if i % 2 == 0 { 16.0 } else { 8.0 }))
+            .collect();
+        accepted(
+            &mut store,
+            1,
+            recurring(
+                30,
+                3,
+                ChargingProfilePurposeType::TxDefaultProfile,
+                RecurrencyKindType::Daily,
+                t0(),
+                periods,
+            ),
+        );
+        let schedule = composite(&mut store, &request(1, i32::MAX));
+        let out = &schedule.charging_schedule.charging_schedule_period;
+        assert_eq!(out.len(), MAX_COMPOSITE_PERIODS);
+        let duration = schedule.charging_schedule.duration.unwrap();
+        assert!(duration > out.last().unwrap().start_period);
+        assert!(duration < MAX_COMPOSITE_DURATION_S);
     }
 
     #[test]

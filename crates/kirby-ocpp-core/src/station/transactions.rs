@@ -525,6 +525,8 @@ impl StationActor {
                 tx_id: tx,
                 id_tag: stop_tag,
                 reason,
+                stopped_at: Some(now),
+                meter_stop_wh: Some(meter_wh),
             });
         }
         self.status_changed(id);
@@ -562,7 +564,7 @@ impl StationActor {
         meter_start_wh: u64,
         info: StopInfo,
     ) {
-        if let Some(entry) = self.queue.find_by_tx(tx) {
+        if let Some(entry) = self.queue.find_by_tx_on(id, tx) {
             entry.stop = Some(info);
             return;
         }

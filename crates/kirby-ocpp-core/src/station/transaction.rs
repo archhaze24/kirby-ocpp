@@ -73,6 +73,12 @@ pub struct StoppingTransaction {
     pub tx_id: TxId,
     pub id_tag: Option<IdTag>,
     pub reason: StopReason,
+    /// When the stop was requested. Absent in state files older than version 6.
+    #[serde(default)]
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// Meter reading at the stop. Absent in state files older than version 6.
+    #[serde(default)]
+    pub meter_stop_wh: Option<u64>,
 }
 
 impl TransactionState {
@@ -190,6 +196,8 @@ mod tests {
             tx_id: TxId::Csms(9),
             id_tag: None,
             reason: StopReason::Local,
+            stopped_at: None,
+            meter_stop_wh: None,
         });
         assert!(pending.blocks_new_transaction() && stopping.blocks_new_transaction());
         assert_eq!(pending.tx_id(), Some(TxId::Local(1)));
@@ -206,11 +214,24 @@ mod tests {
             tx_id: TxId::Csms(3),
             id_tag: Some(tag()),
             reason: StopReason::Remote,
+            stopped_at: Some(DateTime::<Utc>::UNIX_EPOCH),
+            meter_stop_wh: Some(5),
         });
         let json = serde_json::to_string(&stopping).unwrap();
         assert_eq!(
             serde_json::from_str::<TransactionState>(&json).unwrap(),
             stopping
         );
+    }
+
+    #[test]
+    fn a_stopping_record_from_before_version_6_still_loads() {
+        let old = r#"{"state":"stopping","tx_id":{"csms":3},"id_tag":null,"reason":"Local"}"#;
+        let json: serde_json::Value = serde_json::from_str(old).unwrap();
+        let parsed = serde_json::from_value::<TransactionState>(json);
+        let Ok(TransactionState::Stopping(stopping)) = parsed else {
+            panic!("did not load: {parsed:?}");
+        };
+        assert_eq!((stopping.stopped_at, stopping.meter_stop_wh), (None, None));
     }
 }

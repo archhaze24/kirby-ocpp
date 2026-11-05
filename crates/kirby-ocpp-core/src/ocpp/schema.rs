@@ -373,12 +373,21 @@ impl SchemaRegistry {
             PayloadKind::Request => &entry.request,
             PayloadKind::Response => &entry.response,
         };
+        // The validator's messages quote the offending value; that must never be a secret.
+        let secret = kind == PayloadKind::Request && carries_authorization_key(action, payload);
         let issues: Vec<SchemaIssue> = validator
             .iter_errors(payload)
             .map(|error| SchemaIssue {
                 instance_path: error.instance_path().to_string(),
                 keyword: SchemaKeyword::from_name(error.kind().keyword()),
-                message: error.to_string(),
+                message: if secret {
+                    format!(
+                        "violates `{}` (details hidden: the value is a secret)",
+                        error.kind().keyword()
+                    )
+                } else {
+                    error.to_string()
+                },
             })
             .collect();
         if issues.is_empty() {
@@ -387,6 +396,16 @@ impl SchemaRegistry {
             Err(SchemaViolation::from_issues(action, kind, issues))
         }
     }
+}
+
+/// `true` for a `ChangeConfiguration` payload that sets `AuthorizationKey` (matched
+/// case-insensitively, like the configuration registry).
+fn carries_authorization_key(action: &str, payload: &Value) -> bool {
+    action == "ChangeConfiguration"
+        && payload
+            .get("key")
+            .and_then(Value::as_str)
+            .is_some_and(|key| key.eq_ignore_ascii_case("AuthorizationKey"))
 }
 
 #[cfg(test)]
@@ -506,6 +525,31 @@ mod tests {
         assert!(!registry.knows_action("authorize"));
         assert!(!registry.knows_action("AuthorizeResponse"));
         assert!(!registry.knows_action(""));
+    }
+
+    #[test]
+    fn violations_of_an_authorization_key_never_echo_the_value() {
+        let registry = SchemaRegistry::new().unwrap();
+        let secret = "S3cr3t-".repeat(100);
+        for key in ["AuthorizationKey", "authorizationkey"] {
+            let violation = registry
+                .validate_request(
+                    "ChangeConfiguration",
+                    &json!({"key": key, "value": secret.clone()}),
+                )
+                .unwrap_err();
+            assert_ne!(violation.errors.len(), 0);
+            let shown = format!("{violation} {violation:?}");
+            assert!(!shown.contains("S3cr3t"), "{shown}");
+        }
+        // Other keys keep the normal messages.
+        let other = registry
+            .validate_request(
+                "ChangeConfiguration",
+                &json!({"key": "HeartbeatInterval", "value": "v".repeat(501)}),
+            )
+            .unwrap_err();
+        assert!(other.errors.join(" ").contains("vvvv"));
     }
 
     #[test]

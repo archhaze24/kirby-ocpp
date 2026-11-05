@@ -127,6 +127,7 @@ impl Persistence {
         state: &mut Snapshot,
         parts: &mut RestoredParts,
         logs: &mut Vec<(LogLevel, String)>,
+        restored_at: chrono::DateTime<chrono::Utc>,
     ) {
         if let Some(secrets) = self.loaded_secrets.take() {
             if let Some(key) = &secrets.authorization_key {
@@ -157,8 +158,16 @@ impl Persistence {
         }
         parts.registry.set_connector_count(count);
 
+        // Before format version 6 the key was stored but unused, so a saved value says
+        // nothing: the station configuration (`--ws-ping-interval`) stays in force.
+        let mut configuration = persisted.configuration;
+        if persisted.version < 6 {
+            configuration.retain(|key, _| {
+                !key.eq_ignore_ascii_case(crate::station::config_registry::WEB_SOCKET_PING_INTERVAL)
+            });
+        }
         let skipped = parts.registry.restore(&ConfigSnapshot {
-            values: persisted.configuration,
+            values: configuration,
         });
         if !skipped.is_empty() {
             logs.push((
@@ -216,6 +225,8 @@ impl Persistence {
             }
         }
         // A stop that was in flight when the station died is queued, not repeated blindly.
+        // Entries are matched per connector: CSMS transaction ids may repeat across
+        // connectors (a hard Reset stops them all, and a CSMS may reuse one id).
         for connector in &mut state.connectors {
             if let crate::station::transaction::TransactionState::Stopping(stopping) =
                 connector.transaction.clone()
@@ -223,26 +234,24 @@ impl Persistence {
                 connector.transaction = crate::station::transaction::TransactionState::Idle;
                 let stop = crate::station::offline::StopInfo {
                     id_tag: stopping.id_tag.clone(),
-                    meter_stop_wh: connector.meter_wh,
-                    timestamp: chrono::DateTime::UNIX_EPOCH,
+                    meter_stop_wh: stopping.meter_stop_wh.unwrap_or(connector.meter_wh),
+                    timestamp: stopping.stopped_at.unwrap_or(restored_at),
                     reason: stopping.reason,
                     transaction_data: Vec::new(),
                 };
-                if let Some(entry) = parts.queue.find_by_tx(stopping.tx_id) {
+                if let Some(entry) = parts.queue.find_by_tx_on(connector.id, stopping.tx_id) {
                     entry.stop = Some(stop);
                     continue;
                 }
+                let key = parts.queue.keys().into_iter().max().unwrap_or(0) + 1;
                 parts.queue.push(crate::station::offline::OfflineTx {
-                    key: match stopping.tx_id {
-                        crate::ids::TxId::Local(n) => n,
-                        crate::ids::TxId::Csms(n) => u64::try_from(n).unwrap_or(0),
-                    },
+                    key,
                     connector: connector.id,
                     tx_id: stopping.tx_id,
                     id_tag: stopping
                         .id_tag
                         .unwrap_or_else(|| crate::ids::IdTag::new("UNKNOWN").expect("valid tag")),
-                    started_at: chrono::DateTime::UNIX_EPOCH,
+                    started_at: stopping.stopped_at.unwrap_or(restored_at),
                     meter_start_wh: 0,
                     reservation_id: None,
                     start_pending: false,

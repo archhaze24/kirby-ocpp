@@ -233,7 +233,7 @@ impl StationActor {
             secrets: StationSecrets::default(),
             security_events: Vec::new(),
         };
-        persistence.restore(&mut state, &mut parts, &mut startup_logs);
+        persistence.restore(&mut state, &mut parts, &mut startup_logs, clock.now_utc());
         // Profiles saved before store version 3 have no install time: count it from now.
         parts.profiles.backfill_installed_at(clock.now_utc());
         state.heartbeat_interval_secs = parts.registry.heartbeat_interval_secs();

@@ -607,3 +607,42 @@ async fn repeated_security_events_are_all_reported_and_control_characters_are_st
     }
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn setting_the_current_profile_again_is_rejected_for_profiles_two_and_three() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config("wss://127.0.0.1:9/ocpp", &dir);
+    config.reconnect.enabled = false;
+    let (station, join) = Station::spawn(config, Arc::new(kirby_ocpp_core::ManualClock::new(t0())));
+    let set = |key: &str, value: &str| {
+        station.send(Command::SetConfiguration {
+            key: key.into(),
+            value: value.into(),
+        })
+    };
+    set("AuthorizationKey", "0123456789abcdef").await.unwrap();
+    set("SecurityProfile", "1").await.unwrap();
+    // 1 -> 1 stays accepted (A05.FR.01 only covers values above 1).
+    set("SecurityProfile", "1").await.unwrap();
+    set("SecurityProfile", "2").await.unwrap();
+    assert!(set("SecurityProfile", "2").await.is_err());
+    assert_eq!(station.snapshot().security_profile, 2);
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+}
+
+#[tokio::test]
+async fn new_security_parameters_make_the_station_reconnect() {
+    let mut rig = rig().await;
+    rig.connect_booted().await;
+    assert_eq!(rig.csms.connections(), 1);
+    rig.cfg("AuthorizationKey", "0123456789abcdef").await;
+    // The reply came first (cfg waited for it); then the station reconnects by itself.
+    rig.csms
+        .wait_for_connection_count(2, STEP)
+        .await
+        .expect("reconnect after AuthorizationKey");
+    rig.wait_registration(kirby_ocpp_core::ocpp::types::RegistrationStatus::Accepted)
+        .await;
+    rig.shutdown().await;
+}

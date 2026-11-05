@@ -16,6 +16,9 @@ use url::Url;
 use crate::ids::ConnectorId;
 use crate::station::response_rules::{ResponseRule, canonical_action};
 
+/// Upper bound of `call_timeout_ms`: 24 hours.
+pub const MAX_CALL_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
+
 /// Defaults shared with the TS CLI (`src/cli.ts`).
 pub mod defaults {
     pub const CHARGE_POINT_ID: &str = "CP-001";
@@ -201,6 +204,8 @@ pub enum ConfigError {
     Empty { field: &'static str },
     #[error("{field} must be greater than zero")]
     NotPositive { field: &'static str },
+    #[error("{field} must be at most {max}")]
+    TooLarge { field: &'static str, max: u64 },
     #[error("tls.cert_file and tls.key_file must be given together")]
     TlsCertKeyMismatch,
     #[error(
@@ -321,6 +326,12 @@ impl StationConfig {
                 return Err(ConfigError::NotPositive { field });
             }
         }
+        if self.call_timeout_ms > MAX_CALL_TIMEOUT_MS {
+            return Err(ConfigError::TooLarge {
+                field: "call_timeout_ms",
+                max: MAX_CALL_TIMEOUT_MS,
+            });
+        }
         if !(1..=3).contains(&self.phases) {
             return Err(ConfigError::InvalidPhases);
         }
@@ -357,14 +368,42 @@ impl StationConfig {
 /// Checks that `value` is an absolute `ws://` or `wss://` URL with a host.
 /// Used by [`StationConfig::validate`] and by CLI value parsers.
 pub fn validate_ws_url(value: &str) -> Result<(), String> {
-    let url = Url::parse(value).map_err(|e| format!("invalid URL `{value}`: {e}"))?;
+    let url = Url::parse(value).map_err(|e| format!("invalid URL `{}`: {e}", redact_url(value)))?;
+    // Error texts name the URL without credentials: it may carry `user:password@`.
+    let shown = redact_url(value);
     if !matches!(url.scheme(), "ws" | "wss") {
-        return Err(format!("`{value}` must use the ws:// or wss:// scheme"));
+        return Err(format!("`{shown}` must use the ws:// or wss:// scheme"));
     }
     if url.host_str().is_none_or(str::is_empty) {
-        return Err(format!("`{value}` has no host"));
+        return Err(format!("`{shown}` has no host"));
     }
     Ok(())
+}
+
+/// `value` without userinfo (user name and password) for messages. A string that does not
+/// parse loses everything before its last `@`, so a password never survives in an error text.
+fn redact_url(value: &str) -> String {
+    match Url::parse(value) {
+        Ok(parsed) if parsed.cannot_be_a_base() => redact_unparsable_url(value),
+        Ok(mut parsed) => {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+            parsed.to_string()
+        }
+        Err(_) => redact_unparsable_url(value),
+    }
+}
+
+fn redact_unparsable_url(value: &str) -> String {
+    let (scheme, rest) = value.split_once("://").unwrap_or(("", value));
+    // Everything up to the last `@` is dropped, even past a `/`: a malformed URL may hold a
+    // password with raw delimiters.
+    let rest = rest.rsplit_once('@').map_or(rest, |(_, after)| after);
+    if scheme.is_empty() {
+        rest.to_owned()
+    } else {
+        format!("{scheme}://{rest}")
+    }
 }
 
 #[cfg(test)]
@@ -389,6 +428,40 @@ mod tests {
         assert!(c.persist);
         assert!(c.reconnect.enabled);
         assert!(!c.tls.skip_verify);
+    }
+
+    #[test]
+    fn url_errors_never_show_the_password() {
+        for url in [
+            "ws://CP-1:s3cret@host:99999/x",
+            "ws://CP-1:s3cret@/x",
+            "http://CP-1:s3cret@host/x",
+            "ws://CP-1:s3/cret@host:99999/x",
+            "CP-1:s3cret@host",
+        ] {
+            let error = validate_ws_url(url).unwrap_err();
+            assert!(
+                !error.contains("s3cret") && !error.contains("cret"),
+                "{error}"
+            );
+            let config = StationConfig::new(url).validate().unwrap_err().to_string();
+            assert!(!config.contains("cret"), "{config}");
+        }
+    }
+
+    #[test]
+    fn call_timeout_has_an_upper_bound() {
+        assert_eq!(
+            valid().with_call_timeout_ms(MAX_CALL_TIMEOUT_MS).validate(),
+            Ok(())
+        );
+        assert_eq!(
+            valid().with_call_timeout_ms(u64::MAX).validate(),
+            Err(ConfigError::TooLarge {
+                field: "call_timeout_ms",
+                max: MAX_CALL_TIMEOUT_MS
+            })
+        );
     }
 
     #[test]

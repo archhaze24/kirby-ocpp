@@ -254,6 +254,8 @@ async fn a_stop_in_flight_at_a_crash_is_restored_as_a_queued_stop() {
             tx_id: TxId::Csms(7),
             id_tag: Some(IdTag::new("TAG1").unwrap()),
             reason: StopReason::Local,
+            stopped_at: None,
+            meter_stop_wh: None,
         }),
     });
     // Connector 2: an online start that was in flight at the crash (no queue entry).
@@ -355,4 +357,87 @@ async fn pending_availability_survives_a_restart_and_is_applied_when_the_transac
     station.shutdown().await.unwrap();
     join.await.unwrap();
     rig.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn restored_stops_keep_their_time_and_meter_per_connector() {
+    use chrono::{Duration, Utc};
+    use kirby_ocpp_core::ids::{IdTag, TxId};
+    use kirby_ocpp_core::ocpp::types::StopReason;
+    use kirby_ocpp_core::station::transaction::{StoppingTransaction, TransactionState};
+    use kirby_ocpp_core::store::{PersistedConnector, PersistedStation};
+
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config(csms.url(), &dir);
+    let store = StationStore::new(dir.path(), &config.charge_point_id);
+    let mut state = PersistedStation::new(config.charge_point_id.clone());
+    state.connector_count = 3;
+    let stop_one = t0() - Duration::hours(2);
+    let stop_two = t0() - Duration::hours(1);
+    // Same CSMS id on three connectors; the third is a legacy record without time and meter.
+    for (id, tx, at, meter) in [
+        (1, 7, Some(stop_one), Some(111)),
+        (2, 7, Some(stop_two), Some(222)),
+        (3, -5, None, None),
+    ] {
+        state.connectors.push(PersistedConnector {
+            id: ConnectorId::new(id),
+            status: ConnectorStatus::Finishing,
+            availability: AvailabilityType::Operative,
+            pending_availability: None,
+            ev_connected: true,
+            meter_wh: 999,
+            last_id_tag: None,
+            reservation: None,
+            transaction: TransactionState::Stopping(StoppingTransaction {
+                tx_id: TxId::Csms(tx),
+                id_tag: Some(IdTag::new("TAG1").unwrap()),
+                reason: StopReason::Local,
+                stopped_at: at,
+                meter_stop_wh: meter,
+            }),
+        });
+    }
+    store.save(&state).unwrap();
+
+    let (station, join) = Station::spawn(config, Arc::new(ManualClock::new(t0())));
+    assert_eq!(station.snapshot().pending_offline_messages, 3);
+    station.connect().await.unwrap();
+    csms.wait_for_call_count_after(0, "StopTransaction", 3, |_| true, STEP)
+        .await
+        .unwrap();
+    let stops: Vec<Value> = csms
+        .received()
+        .into_iter()
+        .filter(|r| r.action == "StopTransaction")
+        .map(|r| r.payload)
+        .collect();
+    let find =
+        |tx: i64| -> Vec<&Value> { stops.iter().filter(|p| p["transactionId"] == tx).collect() };
+    let seven = find(7);
+    assert_eq!(seven.len(), 2, "one stop per connector: {stops:?}");
+    let one = seven.iter().find(|p| p["meterStop"] == 111).unwrap();
+    let two = seven.iter().find(|p| p["meterStop"] == 222).unwrap();
+    assert_eq!(
+        one["timestamp"],
+        stop_one.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    assert_eq!(
+        two["timestamp"],
+        stop_two.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    let legacy = find(-5);
+    assert_eq!(legacy.len(), 1);
+    assert_eq!(legacy[0]["meterStop"], 999);
+    let stamp =
+        chrono::DateTime::parse_from_rfc3339(legacy[0]["timestamp"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        stamp.with_timezone(&Utc),
+        t0(),
+        "restore time, not the epoch"
+    );
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    csms.shutdown().await;
 }

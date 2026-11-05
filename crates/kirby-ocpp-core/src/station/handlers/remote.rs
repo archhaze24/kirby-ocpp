@@ -220,12 +220,17 @@ impl StationActor {
                     .timers
                     .set(TimerKey::BootRetry, Duration::from_millis(500)),
                 ResetType::Hard => {
-                    self.hard_reset_deadline = Some(tokio::time::Instant::now() + HARD_RESET_WAIT);
-                    self.timers.set(TimerKey::HardReset, HARD_RESET_FIRST_CHECK);
+                    self.schedule_reconnect_after_reply();
                 }
             }
         }
         self.flush_now();
+    }
+
+    /// Arms the reconnect that runs once the reply and the CALLs in flight are done.
+    pub(in crate::station) fn schedule_reconnect_after_reply(&mut self) {
+        self.hard_reset_deadline = Some(tokio::time::Instant::now() + HARD_RESET_WAIT);
+        self.timers.set(TimerKey::HardReset, HARD_RESET_FIRST_CHECK);
     }
 
     /// Reconnects once the CALLs in flight are done, or the wait ran out.
@@ -245,7 +250,7 @@ impl StationActor {
         self.hard_reset_deadline = None;
         self.log(
             LogLevel::Info,
-            "hard reset: reconnecting to the CSMS".to_owned(),
+            "reconnecting to the CSMS (hard reset or new security parameters)".to_owned(),
         );
         self.reconnect_for_hard_reset();
     }

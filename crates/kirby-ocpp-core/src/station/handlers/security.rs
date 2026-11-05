@@ -127,9 +127,9 @@ pub(super) fn certificate_signed(
             actor.flush_now();
             actor.log(
                 LogLevel::Success,
-                "CertificateSigned accepted; the new certificate is used from the next connection"
-                    .to_owned(),
+                "CertificateSigned accepted; reconnecting to use the new certificate".to_owned(),
             );
+            actor.reconnect_for_new_security_parameters();
             actor.respond(
                 responder,
                 CertificateSignedResponse {

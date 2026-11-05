@@ -52,10 +52,11 @@ const MIN_PERIOD: Duration = Duration::from_secs(1);
 impl StationActor {
     pub(super) fn connect_options(&self) -> ConnectOptions {
         ConnectOptions {
-            ping_interval: self.config.ws_ping_interval(),
+            ping_interval: self.registry.web_socket_ping_interval(),
             call_timeout: self.config.call_timeout(),
             serialize_calls: true,
             show_secrets: self.config.show_secrets,
+            write_timeout: crate::ws::DEFAULT_WRITE_TIMEOUT,
         }
     }
 
