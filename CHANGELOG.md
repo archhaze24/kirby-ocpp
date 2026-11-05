@@ -16,7 +16,7 @@ Whitepaper on both sides, and a much harder, faster, better tested code base.**
 
 ### 0.4.0 in numbers
 
-| | |
+| Metric | Since 0.3.0 |
 | --- | --- |
 | 🧾 Commits | **39** in four days (2 to 5 November 2026) |
 | ✏️ Lines of code | **+29,821 / −851** across 197 files; Rust grew from 43.0k to **70.6k** lines |
