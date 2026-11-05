@@ -80,6 +80,8 @@ pub(crate) enum TimerKey {
     HardReset,
     /// Queued transaction messages the CSMS failed to process are tried again.
     SyncRetry,
+    /// `CertSigningWaitMinimum` back-off: send `SignCertificate` again.
+    CertSigning,
 }
 
 /// What woke the actor loop.
@@ -165,6 +167,17 @@ pub(crate) struct StationActor {
     pub(super) certs_dirty: bool,
     /// The next connection trusts the fallback Central System root (runtime only).
     pub(super) use_fallback_root: bool,
+    /// Event types already reported for the current series of failed connection attempts; the
+    /// series ends with the next successful connection (runtime only).
+    pub(super) failure_series: std::collections::HashSet<&'static str>,
+    /// The next connection uses the previous client certificate (runtime only, `A02.FR.28`).
+    pub(super) use_previous_cert: bool,
+    /// Which stored client certificate the connection attempt in progress presents.
+    pub(super) connect_identity: super::secure::StoredIdentity,
+    /// The `SignCertificate` back-off series in progress.
+    pub(super) sign_series: Option<super::secure::SignSeries>,
+    /// Id of the latest `SignCertificate` series.
+    pub(super) next_sign_series: u64,
     /// `StartupOfTheDevice` is sent once per process, after the first accepted boot.
     pub(super) startup_event_pending: bool,
     /// The local list changed since `Snapshot::local_list` was built.
@@ -282,6 +295,11 @@ impl StationActor {
             security_events: parts.security_events,
             certs_dirty: false,
             use_fallback_root: false,
+            failure_series: std::collections::HashSet::new(),
+            use_previous_cert: false,
+            connect_identity: super::secure::StoredIdentity::None,
+            sign_series: None,
+            next_sign_series: 0,
             startup_event_pending: true,
             local_list_dirty,
             // Never reuse a key still present in the restored queue (the wall clock may jump back).
@@ -404,6 +422,7 @@ impl StationActor {
             TimerKey::SignedFirmware => self.on_signed_firmware_timer(),
             TimerKey::HardReset => self.on_hard_reset_timer(),
             TimerKey::SyncRetry => self.on_sync_retry_timer(),
+            TimerKey::CertSigning => self.on_cert_signing_timer(),
         }
     }
 

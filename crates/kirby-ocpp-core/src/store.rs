@@ -47,7 +47,9 @@ use crate::station::transaction::TransactionState;
 /// older files load with no fallback).
 /// Version 6 added the stop time and meter reading of a `Stopping` transaction (older files
 /// load without them and use the restore time).
-pub const STORE_VERSION: u32 = 6;
+/// Version 7 added the previous charge point certificate chain and its key (the old/new
+/// certificate alternation, `A02.FR.28`; older files load without them).
+pub const STORE_VERSION: u32 = 7;
 
 /// Everything that survives a restart.
 ///
@@ -119,6 +121,9 @@ pub struct StationSecrets {
     pub charge_point_key_pem: Option<String>,
     /// Private key (PEM) of a `SignCertificate` request that has not been answered yet.
     pub pending_key_pem: Option<String>,
+    /// Private key (PEM) of the previous charge point certificate, kept until the new one has
+    /// connected (added in version 7).
+    pub previous_charge_point_key_pem: Option<String>,
 }
 
 impl std::fmt::Debug for StationSecrets {
@@ -133,6 +138,7 @@ impl StationSecrets {
         self.authorization_key.is_none()
             && self.charge_point_key_pem.is_none()
             && self.pending_key_pem.is_none()
+            && self.previous_charge_point_key_pem.is_none()
     }
 }
 

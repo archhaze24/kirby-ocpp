@@ -50,6 +50,10 @@ pub struct CertificateStore {
     pub roots: Vec<StoredRoot>,
     /// The station's certificate chain, leaf first (public data only).
     pub charge_point_chain: Option<String>,
+    /// The chain that `charge_point_chain` replaced, kept (with its key in the secrets file)
+    /// until the new one has connected; see the old/new alternation (`A02.FR.28`). Added in
+    /// store version 7.
+    pub previous_charge_point_chain: Option<String>,
 }
 
 /// A certificate as shown to UIs.

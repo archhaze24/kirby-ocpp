@@ -119,9 +119,9 @@ pub(super) fn certificate_signed(
     };
     match outcome {
         Ok(key) => {
-            actor.certs.charge_point_chain = Some(request.certificate_chain.trim().to_owned());
-            actor.secrets.charge_point_key_pem = Some(key);
-            actor.secrets.pending_key_pem = None;
+            actor.adopt_signed_certificate(&request.certificate_chain, key);
+            actor
+                .stop_sign_series("CertificateSigned received; the SignCertificate back-off ended");
             actor.certs_dirty = true;
             actor.mark_secrets_dirty();
             actor.flush_now();
@@ -138,6 +138,9 @@ pub(super) fn certificate_signed(
             );
         }
         Err(reason) => {
+            actor.stop_sign_series(
+                "CertificateSigned was rejected; no SignCertificate repeat until requested (A02.FR.20)",
+            );
             actor.log(
                 LogLevel::Warn,
                 format!("CertificateSigned rejected: {reason}"),

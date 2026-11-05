@@ -113,7 +113,7 @@ impl StationActor {
             format!("connecting to {}", redact_url(&self.config.url)),
         );
         let mut config = self.config.clone();
-        self.apply_security_transport(&mut config);
+        self.connect_identity = self.apply_security_transport(&mut config);
         let options = self.connect_options();
         let internal = self.internal_tx.clone();
         self.link.connecting = Some(tokio::spawn(async move {
@@ -150,6 +150,7 @@ impl StationActor {
                 {
                     self.on_tls_connected();
                 }
+                self.on_connection_established();
                 self.send_boot(None);
             }
             Err(error) => {

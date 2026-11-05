@@ -4,6 +4,9 @@
 //!   certificates in that file **replace** the system roots, like Node's `ca` option.
 //! * `skip_verify` accepts any server certificate and name (testing only). Handshake
 //!   signatures are still verified through the crypto provider.
+//! * A wildcard server certificate (`*` in a SAN DNS name or in the subject Common Name) is
+//!   refused unless `allow_wildcard_certificates` is set (`AllowCentralSystemTLSWildcards`,
+//!   `A00.FR.308`/`A00.FR.510`). The refusal is a certificate error like any other.
 //! * `cert_file` + `key_file` give a client identity (mutual TLS).
 //! * `server_name` overrides the SNI value and the name the certificate is checked against.
 //!
@@ -13,11 +16,15 @@ use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
 
+use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::{WebPkiSupportedAlgorithms, verify_tls12_signature, verify_tls13_signature};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
+use rustls::{
+    CertificateError, ClientConfig, DigitallySignedStruct, OtherError, RootCertStore,
+    SignatureScheme,
+};
 use url::Url;
 
 use super::ConnectError;
@@ -37,9 +44,20 @@ pub(super) async fn client_config(tls: &TlsConfig) -> Result<Arc<ClientConfig>, 
                 algorithms: provider.signature_verification_algorithms,
             }))
     } else {
-        builder.with_root_certificates(
-            trust_roots(tls.ca_file.as_deref(), &tls.extra_roots_pem).await?,
-        )
+        let roots = trust_roots(tls.ca_file.as_deref(), &tls.extra_roots_pem).await?;
+        if tls.allow_wildcard_certificates {
+            builder.with_root_certificates(roots)
+        } else {
+            let inner =
+                WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
+                    .build()
+                    .map_err(|e| {
+                        ConnectError::Tls(format!("cannot build the certificate verifier: {e}"))
+                    })?;
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(Arc::new(NoWildcards { inner }))
+        }
     };
 
     let config = match client_identity(tls).await? {
@@ -144,6 +162,99 @@ fn file_error(path: &Path, reason: impl Into<String>) -> ConnectError {
     ConnectError::TlsFile {
         path: path.to_owned(),
         reason: reason.into(),
+    }
+}
+
+/// Text of the certificate error raised for a wildcard server certificate (the station tells it
+/// apart from other certificate errors by this text).
+pub(crate) const WILDCARD_REFUSED: &str = "wildcard Central System certificate refused";
+
+#[derive(Debug)]
+struct WildcardRefused(&'static str);
+
+impl fmt::Display for WildcardRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for WildcardRefused {}
+
+/// Whether the certificate names a wildcard (`*`) in a SAN DNS name or the subject Common Name.
+/// A certificate that cannot be parsed counts as one (fail closed).
+fn is_wildcard_certificate(der: &CertificateDer<'_>) -> bool {
+    use x509_parser::extensions::GeneralName;
+    use x509_parser::prelude::{FromDer, X509Certificate};
+    let Ok((_, cert)) = X509Certificate::from_der(der.as_ref()) else {
+        return true;
+    };
+    let in_common_name = cert
+        .subject()
+        .iter_common_name()
+        .any(|cn| cn.as_str().map_or(true, |text| text.contains('*')));
+    let in_san = cert
+        .subject_alternative_name()
+        .ok()
+        .flatten()
+        .is_some_and(|san| {
+            san.value
+                .general_names
+                .iter()
+                .any(|name| matches!(name, GeneralName::DNSName(dns) if dns.contains('*')))
+        });
+    in_common_name || in_san
+}
+
+/// The normal verifier, plus the refusal of wildcard server certificates.
+#[derive(Debug)]
+struct NoWildcards {
+    inner: Arc<WebPkiServerVerifier>,
+}
+
+impl ServerCertVerifier for NoWildcards {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &ServerName<'_>,
+        ocsp_response: &[u8],
+        now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        let verified = self.inner.verify_server_cert(
+            end_entity,
+            intermediates,
+            server_name,
+            ocsp_response,
+            now,
+        )?;
+        if is_wildcard_certificate(end_entity) {
+            return Err(rustls::Error::InvalidCertificate(CertificateError::Other(
+                OtherError(Arc::new(WildcardRefused(WILDCARD_REFUSED))),
+            )));
+        }
+        Ok(verified)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
     }
 }
 

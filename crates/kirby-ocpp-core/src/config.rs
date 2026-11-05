@@ -103,6 +103,11 @@ pub struct TlsConfig {
     /// station at connect time and used in addition to `ca_file` / the system roots.
     #[serde(skip)]
     pub extra_roots_pem: Vec<String>,
+    /// Accept a wildcard server certificate (`AllowCentralSystemTLSWildcards`); filled in by the
+    /// station at connect time. Without it a certificate with `*` in a subject alternative DNS
+    /// name or the Common Name is refused.
+    #[serde(skip)]
+    pub allow_wildcard_certificates: bool,
 }
 
 /// A client certificate chain and its private key as PEM text.

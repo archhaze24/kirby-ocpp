@@ -1,4 +1,4 @@
-//! Security events of the Security Whitepaper (edition 3): the event type list and the bounded
+//! Security events of the Security Whitepaper (edition 4): the event type list and the bounded
 //! queue of events that could not be sent yet (the station was offline). Pure data, no I/O.
 
 use chrono::{DateTime, Utc};
@@ -26,6 +26,9 @@ pub const SECURITY_EVENT_TYPES: &[&str] = &[
     "InvalidChargePointCertificate",
     "InvalidTLSVersion",
     "InvalidTLSCipherSuite",
+    "MaintenanceLoginAccepted",
+    "MaintenanceLoginFailed",
+    "DiscardedRenewedClientCertificate",
 ];
 
 /// Most events kept while offline; the oldest are dropped first.

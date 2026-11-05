@@ -646,3 +646,69 @@ async fn new_security_parameters_make_the_station_reconnect() {
         .await;
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn the_edition_four_event_types_can_be_sent() {
+    let mut rig = rig().await;
+    rig.connect_booted().await;
+    for name in [
+        "MaintenanceLoginAccepted",
+        "maintenanceloginfailed",
+        "DiscardedRenewedClientCertificate",
+    ] {
+        rig.send(Command::SendSecurityEvent {
+            event_type: name.into(),
+            tech_info: Some(r#"{"user": "ops", "origin": "touch screen"}"#.into()),
+        })
+        .await;
+    }
+    for name in [
+        "MaintenanceLoginAccepted",
+        "MaintenanceLoginFailed",
+        "DiscardedRenewedClientCertificate",
+    ] {
+        rig.csms
+            .wait_for_call_after(0, "SecurityEventNotification", |p| p["type"] == name, STEP)
+            .await
+            .unwrap_or_else(|_| panic!("{name} delivered"));
+    }
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn downgrade_from_three_to_two_needs_the_allow_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = test_config("wss://127.0.0.1:9/ocpp", &dir);
+    config.reconnect.enabled = false;
+    // Any path satisfies the "client identity available" check for profile 3.
+    config.tls.cert_file = Some(dir.path().join("client.pem"));
+    config.tls.key_file = Some(dir.path().join("client.key"));
+    let (station, join) = Station::spawn(config, Arc::new(kirby_ocpp_core::ManualClock::new(t0())));
+    let set = |key: &str, value: &str| {
+        station.send(Command::SetConfiguration {
+            key: key.into(),
+            value: value.into(),
+        })
+    };
+    assert!(
+        station
+            .snapshot()
+            .config
+            .iter()
+            .any(|c| c.key == "AllowSecurityProfileDowngrade" && c.value == "false" && !c.readonly)
+    );
+    set("AuthorizationKey", "0123456789abcdef").await.unwrap();
+    set("SecurityProfile", "3").await.unwrap();
+    assert!(set("SecurityProfile", "2").await.is_err(), "no allow key");
+    set("AllowSecurityProfileDowngrade", "true").await.unwrap();
+    // Never to 1 or 0, and the same profile again stays refused.
+    assert!(set("SecurityProfile", "1").await.is_err());
+    assert!(set("SecurityProfile", "0").await.is_err());
+    assert!(set("SecurityProfile", "3").await.is_err());
+    set("SecurityProfile", "2").await.unwrap();
+    assert_eq!(station.snapshot().security_profile, 2);
+    // From 2 only 1 and 0 are lower: still refused with the key set.
+    assert!(set("SecurityProfile", "1").await.is_err());
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+}

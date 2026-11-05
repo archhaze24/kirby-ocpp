@@ -46,6 +46,10 @@ pub const CERTIFICATE_STORE_MAX_LENGTH: &str = "CertificateStoreMaxLength";
 pub const ADDITIONAL_ROOT_CERTIFICATE_CHECK: &str = "AdditionalRootCertificateCheck";
 pub const CPO_NAME: &str = "CpoName";
 pub const SECURITY_PROFILE: &str = "SecurityProfile";
+pub const ALLOW_SECURITY_PROFILE_DOWNGRADE: &str = "AllowSecurityProfileDowngrade";
+pub const ALLOW_CENTRAL_SYSTEM_TLS_WILDCARDS: &str = "AllowCentralSystemTLSWildcards";
+pub const CERT_SIGNING_WAIT_MINIMUM: &str = "CertSigningWaitMinimum";
+pub const CERT_SIGNING_REPEAT_TIMES: &str = "CertSigningRepeatTimes";
 pub const CHARGE_POINT_MODEL: &str = "ChargePointModel";
 pub const CHARGE_POINT_SERIAL_NUMBER: &str = "ChargePointSerialNumber";
 pub const CHARGE_POINT_VENDOR: &str = "ChargePointVendor";
@@ -485,6 +489,26 @@ impl ConfigRegistry {
         u8::try_from(self.number(SECURITY_PROFILE)).unwrap_or(0)
     }
 
+    /// `AllowSecurityProfileDowngrade` (default `false`).
+    pub fn allow_security_profile_downgrade(&self) -> bool {
+        self.boolean(ALLOW_SECURITY_PROFILE_DOWNGRADE)
+    }
+
+    /// `AllowCentralSystemTLSWildcards` (default `false`).
+    pub fn allow_central_system_tls_wildcards(&self) -> bool {
+        self.boolean(ALLOW_CENTRAL_SYSTEM_TLS_WILDCARDS)
+    }
+
+    /// `CertSigningWaitMinimum` in seconds, at least 1.
+    pub fn cert_signing_wait_minimum_secs(&self) -> u64 {
+        u64::from(self.number(CERT_SIGNING_WAIT_MINIMUM)).max(1)
+    }
+
+    /// `CertSigningRepeatTimes`.
+    pub fn cert_signing_repeat_times(&self) -> u32 {
+        self.number(CERT_SIGNING_REPEAT_TIMES)
+    }
+
     /// The `AuthorizationKey` (Basic Auth password), if one is set.
     pub fn authorization_key(&self) -> Option<&str> {
         self.value(AUTHORIZATION_KEY).filter(|v| !v.is_empty())
@@ -712,7 +736,9 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
         .join(",");
 
     vec![
+        writable(ALLOW_CENTRAL_SYSTEM_TLS_WILDCARDS, Kind::Boolean, "false"),
         writable(ALLOW_OFFLINE_TX_FOR_UNKNOWN_ID, Kind::Boolean, "true"),
+        writable(ALLOW_SECURITY_PROFILE_DOWNGRADE, Kind::Boolean, "false"),
         read_only(
             ADDITIONAL_ROOT_CERTIFICATE_CHECK,
             config.additional_root_certificate_check.to_string(),
@@ -723,6 +749,8 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
         writable(BLINK_REPEAT, Kind::NonNegativeInt, "0"),
         read_only(CERTIFICATE_SIGNED_MAX_CHAIN_SIZE, "10000"),
         read_only(CERTIFICATE_STORE_MAX_LENGTH, "8"),
+        writable(CERT_SIGNING_REPEAT_TIMES, Kind::NonNegativeInt, "5"),
+        writable(CERT_SIGNING_WAIT_MINIMUM, Kind::NonNegativeInt, "20"),
         read_only(CHARGE_POINT_MODEL, config.model.clone()),
         read_only(CHARGE_POINT_SERIAL_NUMBER, config.charge_point_id.clone()),
         read_only(CHARGE_POINT_VENDOR, config.vendor.clone()),
@@ -894,7 +922,7 @@ mod tests {
     #[test]
     fn registry_has_every_advertised_key_once() {
         let registry = registry();
-        assert_eq!(registry.entries().len(), 52);
+        assert_eq!(registry.entries().len(), 56);
         let mut names: Vec<String> = registry
             .entries()
             .iter()
@@ -902,7 +930,7 @@ mod tests {
             .collect();
         names.sort();
         names.dedup();
-        assert_eq!(names.len(), 52, "duplicate key names");
+        assert_eq!(names.len(), 56, "duplicate key names");
     }
 
     #[test]
