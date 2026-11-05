@@ -2,10 +2,11 @@
 //! and reply handling of `ws::Connection` (ports the seven tests of
 //! `tests/ocpp-validation.test.mjs` plus the queue and timeout cases).
 
-mod ws_support;
-
 use std::time::Duration;
 
+use crate::ws_support::{
+    Negotiate, RawServer, connect, next_call, next_closed, next_event, next_warning, options,
+};
 use futures_util::SinkExt;
 use kirby_ocpp_core::error::CallError;
 use kirby_ocpp_core::ocpp::Direction;
@@ -13,9 +14,6 @@ use kirby_ocpp_core::ocpp::ErrorCode;
 use kirby_ocpp_core::ws::{ConnectOptions, ConnectionEvent, IncomingCall};
 use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
-use ws_support::{
-    Negotiate, RawServer, connect, next_call, next_closed, next_event, next_warning, options,
-};
 
 fn boot_payload() -> Value {
     json!({"chargePointVendor": "Kirby", "chargePointModel": "TUI-16"})

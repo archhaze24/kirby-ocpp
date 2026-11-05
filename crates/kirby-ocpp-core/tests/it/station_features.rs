@@ -2,11 +2,10 @@
 //! transactions and restoration of a running station (ports of the TS smoke scenarios
 //! availability-reset-persistence, smart-charging, maintenance, negative-csms).
 
-mod station_support;
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use crate::station_support::{Rig, STEP, t0, tag, test_config, wait_state};
 use chrono::Duration as Delta;
 use kirby_ocpp_core::ids::{ConnectorId, ReservationId, TxId};
 use kirby_ocpp_core::ocpp::ErrorCode;
@@ -18,7 +17,6 @@ use kirby_ocpp_core::station::{Command, FirmwareOutcome, Outcome, TransactionSta
 use kirby_ocpp_core::{ManualClock, Station};
 use kirby_ocpp_testkit::Reply;
 use serde_json::{Value, json};
-use station_support::{Rig, STEP, t0, tag, test_config, wait_state};
 
 const C1: ConnectorId = ConnectorId::new(1);
 const C2: ConnectorId = ConnectorId::new(2);

@@ -1,16 +1,14 @@
 //! Response rules: the station answers CSMS commands wrongly on purpose.
 
-mod station_support;
-
 use std::time::{Duration, Instant};
 
+use crate::station_support::{Rig, STEP, wait_state};
 use kirby_ocpp_core::ocpp::types::RegistrationStatus;
 use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 use kirby_ocpp_core::station::{Command, Direction, ResponseRule};
 use kirby_ocpp_core::{StationConfig, StationError};
 use kirby_ocpp_testkit::TestkitError;
 use serde_json::{Value, json};
-use station_support::{Rig, STEP, wait_state};
 
 fn rule(text: &str) -> ResponseRule {
     text.parse().expect("valid rule")

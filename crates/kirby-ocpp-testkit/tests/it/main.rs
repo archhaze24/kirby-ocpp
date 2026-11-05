@@ -1,0 +1,6 @@
+//! Single integration-test binary for the crate: one link step instead of one per file.
+//! Add a test file as `tests/it/<name>.rs` and declare it here.
+
+mod common;
+mod mock_csms;
+mod tls;

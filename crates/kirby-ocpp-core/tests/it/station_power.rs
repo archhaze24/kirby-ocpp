@@ -1,12 +1,10 @@
 //! The power model: charging profiles limit the simulated power and the energy follows it.
 
-mod station_support;
-
+use crate::station_support::{Rig, STEP, incrementing};
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::ocpp::types::Measurand;
 use kirby_ocpp_core::station::Command;
 use serde_json::{Value, json};
-use station_support::{Rig, STEP, incrementing};
 
 const C1: ConnectorId = ConnectorId::new(1);
 

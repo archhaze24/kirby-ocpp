@@ -1,11 +1,9 @@
 //! Timer-driven `MeterValues` must stay bounded when the CSMS never answers.
 
-mod station_support;
-
 use std::time::Duration;
 
+use crate::station_support::Rig;
 use kirby_ocpp_testkit::{CsmsOptions, Fault};
-use station_support::Rig;
 
 #[tokio::test]
 async fn a_silent_csms_cannot_make_samples_pile_up() {

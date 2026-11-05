@@ -1,14 +1,12 @@
 //! `wss://` matrix (ports the TLS cases of `tests/ocpp-websocket.test.mjs`) against the
 //! testkit's TLS mock CSMS, whose certificates are issued by a generated CA.
 
-mod ws_support;
-
 use std::path::{Path, PathBuf};
 
+use crate::ws_support::{connect_with_tls, options};
 use kirby_ocpp_core::config::TlsConfig;
 use kirby_ocpp_core::ws::{ConnectError, ConnectOptions, Connection};
 use kirby_ocpp_testkit::{CsmsOptions, MockCsms, TlsOpts};
-use ws_support::{connect_with_tls, options};
 
 /// Temporary directory for PEM files (under the test target dir, not `/tmp`).
 fn temp_dir() -> tempfile::TempDir {
@@ -71,7 +69,7 @@ async fn self_signed_server_is_accepted_when_verification_is_disabled() {
     };
     let (_connection, _events) = connect_with_tls(&charge_point_url(&csms), &tls, options()).await;
     let info = csms
-        .wait_for_connection(ws_support::STEP)
+        .wait_for_connection(crate::ws_support::STEP)
         .await
         .expect("connection recorded");
     assert_eq!(info.subprotocol.as_deref(), Some("ocpp1.6"));
@@ -112,7 +110,7 @@ async fn ca_file_with_server_name_override_is_accepted() {
     };
     let (connection, _events) = connect_with_tls(&charge_point_url(&csms), &tls, options()).await;
     assert!(connection.is_open());
-    csms.wait_for_connection(ws_support::STEP)
+    csms.wait_for_connection(crate::ws_support::STEP)
         .await
         .expect("connection recorded");
     csms.shutdown().await;
@@ -188,7 +186,7 @@ async fn mutual_tls_with_a_ca_issued_client_certificate_is_accepted() {
     };
     let (connection, _events) = connect_with_tls(&charge_point_url(&csms), &tls, options()).await;
     assert!(connection.is_open());
-    csms.wait_for_connection(ws_support::STEP)
+    csms.wait_for_connection(crate::ws_support::STEP)
         .await
         .expect("connection recorded");
     csms.shutdown().await;
@@ -212,7 +210,7 @@ async fn mutual_tls_without_a_client_certificate_is_rejected() {
         &tls,
         "ocpp1.6",
         ConnectOptions {
-            call_timeout: ws_support::STEP,
+            call_timeout: crate::ws_support::STEP,
             ..options()
         },
     )
@@ -328,7 +326,7 @@ async fn in_memory_identity_and_installed_roots_work_like_files() {
     };
     let (connection, _events) = connect_with_tls(&charge_point_url(&csms), &tls, options()).await;
     assert!(connection.is_open());
-    csms.wait_for_connection(ws_support::STEP)
+    csms.wait_for_connection(crate::ws_support::STEP)
         .await
         .expect("connection recorded");
     csms.shutdown().await;

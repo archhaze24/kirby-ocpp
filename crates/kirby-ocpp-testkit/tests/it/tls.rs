@@ -1,8 +1,6 @@
 //! `wss://` behaviour: handshake against the generated CA, and mTLS.
 
-mod common;
-
-use common::{STEP, cp_call, heartbeat, result_payload, tls_client_config, wait_closed};
+use crate::common::{STEP, cp_call, heartbeat, result_payload, tls_client_config, wait_closed};
 use kirby_ocpp_testkit::{CsmsOptions, MockCsms, TlsOpts};
 use rustls::RootCertStore;
 use serde_json::json;
@@ -24,7 +22,7 @@ async fn tls_handshake_with_generated_ca_roundtrip() {
     let ca_pem = std::fs::read_to_string(&ca_path).expect("read CA");
 
     let config = tls_client_config(&ca_pem, None);
-    let mut cp = common::connect_tls(csms.addr(), "/ocpp/CP-TLS", config)
+    let mut cp = crate::common::connect_tls(csms.addr(), "/ocpp/CP-TLS", config)
         .await
         .expect("TLS connect with CA trust");
     let beat = result_payload(cp_call(&mut cp, "hb", "Heartbeat", heartbeat()).await);
@@ -52,7 +50,8 @@ async fn tls_client_without_the_ca_is_rejected() {
         .expect("versions")
         .with_root_certificates(RootCertStore::empty())
         .with_no_client_auth();
-    let result = common::connect_tls(csms.addr(), "/ocpp/CP-X", std::sync::Arc::new(config)).await;
+    let result =
+        crate::common::connect_tls(csms.addr(), "/ocpp/CP-X", std::sync::Arc::new(config)).await;
     assert!(result.is_err(), "unverifiable server certificate must fail");
     assert_eq!(csms.connections(), 0, "failed TLS is never a connection");
 }
@@ -74,7 +73,7 @@ async fn mtls_rejects_a_client_without_certificate() {
         .to_owned();
 
     let no_identity = tls_client_config(&ca, None);
-    let result = common::connect_tls(csms.addr(), "/ocpp/CP-NOCERT", no_identity).await;
+    let result = crate::common::connect_tls(csms.addr(), "/ocpp/CP-NOCERT", no_identity).await;
     assert!(
         result.is_err(),
         "mTLS server must refuse a client without a certificate"
@@ -99,7 +98,7 @@ async fn mtls_accepts_a_client_with_a_ca_issued_certificate() {
         Some((material.client_cert_pem(), material.client_key_pem())),
     );
 
-    let mut cp = common::connect_tls(csms.addr(), "/ocpp/CP-MTLS", config)
+    let mut cp = crate::common::connect_tls(csms.addr(), "/ocpp/CP-MTLS", config)
         .await
         .expect("mTLS connect");
     let reply = result_payload(

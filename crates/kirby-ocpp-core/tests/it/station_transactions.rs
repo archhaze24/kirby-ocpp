@@ -2,11 +2,10 @@
 //! (ports of the TS smoke scenarios baseline/status-transactions/negative-csms and of
 //! `station-offline-transactions.test.mjs` / `station-reconnect.test.mjs`).
 
-mod station_support;
-
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::station_support::{Rig, STEP, incrementing, t0, tag, test_config, wait_state};
 use kirby_ocpp_core::StationError;
 use kirby_ocpp_core::ids::{ConnectorId, TxId};
 use kirby_ocpp_core::ocpp::types::{
@@ -15,7 +14,6 @@ use kirby_ocpp_core::ocpp::types::{
 use kirby_ocpp_core::station::{Command, Outcome, TransactionState};
 use kirby_ocpp_core::{ManualClock, Station};
 use kirby_ocpp_testkit::{CsmsOptions, Fault};
-use station_support::{Rig, STEP, incrementing, t0, tag, test_config, wait_state};
 
 const C1: ConnectorId = ConnectorId::new(1);
 

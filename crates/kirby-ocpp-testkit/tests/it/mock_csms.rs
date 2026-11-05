@@ -1,14 +1,12 @@
 //! Behaviour of the mock CSMS over plain `ws://`.
 
-mod common;
-
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-use common::{
+use crate::common::{
     STEP, connect_plain, cp_call, heartbeat, recv_frame, recv_text, result_payload, send_frame,
     wait_closed,
 };
+use chrono::{DateTime, Utc};
 use kirby_ocpp_testkit::{
     CsmsOptions, ErrorCode, Fault, Frame, MockCsms, Reply, SubprotocolPolicy, TestkitError,
     TransactionIds,
@@ -23,7 +21,7 @@ async fn start() -> MockCsms {
         .expect("start mock CSMS")
 }
 
-async fn connect_cp(csms: &MockCsms, id: &str) -> common::PlainSocket {
+async fn connect_cp(csms: &MockCsms, id: &str) -> crate::common::PlainSocket {
     let (socket, _) = connect_plain(&csms.charge_point_url(id), &["ocpp1.6"])
         .await
         .expect("connect charge point");
@@ -540,7 +538,7 @@ async fn connection_recording_and_charge_point_ids() {
 }
 
 /// Closes the client side of a socket and reports that the close went through.
-async fn wait_closed_after_drop(socket: &mut common::PlainSocket) -> bool {
+async fn wait_closed_after_drop(socket: &mut crate::common::PlainSocket) -> bool {
     let _ = socket.close(None).await;
     wait_closed(socket).await
 }

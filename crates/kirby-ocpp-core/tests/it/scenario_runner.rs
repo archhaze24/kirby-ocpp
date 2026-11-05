@@ -1,11 +1,9 @@
 //! Scenario runner against the mock CSMS.
 
-mod station_support;
-
+use crate::station_support::{Rig, incrementing};
 use kirby_ocpp_core::scenario::{
     CancelToken, Scenario, ScenarioError, ScenarioRunner, StepStatus, builtin, run_scenario,
 };
-use station_support::{Rig, incrementing};
 
 fn scenario(steps: &str) -> Scenario {
     Scenario::from_toml(&format!("name = \"t\"\n{steps}")).expect("valid scenario")
@@ -153,7 +151,7 @@ timeout_ms = 4000
     // `join!` polls the runner first, which subscribes to events before any step runs.
     let (report, ()) = tokio::join!(run_scenario(&rig.station, &s, &cancel, None), async {
         // The inbound CALL must come after the station's own Heartbeat (steps are ordered).
-        csms.wait_for_call("Heartbeat", station_support::STEP)
+        csms.wait_for_call("Heartbeat", crate::station_support::STEP)
             .await
             .unwrap();
         let _ = csms
@@ -311,7 +309,7 @@ tech_info = "lid opened"
     assert!(report.passed, "{report:#?}");
     let csr = rig
         .csms
-        .wait_for_call("SignCertificate", station_support::STEP)
+        .wait_for_call("SignCertificate", crate::station_support::STEP)
         .await
         .unwrap();
     assert!(
@@ -324,7 +322,7 @@ tech_info = "lid opened"
             0,
             "SecurityEventNotification",
             |p| p["type"] == "TamperDetectionActivated" && p["techInfo"] == "lid opened",
-            station_support::STEP,
+            crate::station_support::STEP,
         )
         .await
         .unwrap();

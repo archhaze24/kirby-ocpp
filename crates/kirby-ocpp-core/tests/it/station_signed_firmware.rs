@@ -1,14 +1,12 @@
 //! Security Whitepaper: `SignedUpdateFirmware` + `SignedFirmwareStatusNotification`.
 
-mod station_support;
-
+use crate::station_support::{Rig, STEP};
 use kirby_ocpp_core::Clock;
 use kirby_ocpp_core::ocpp::ErrorCode;
 use kirby_ocpp_core::station::{Command, FirmwareOutcome, ResponseRule};
 use kirby_ocpp_testkit::Reply;
 use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
 use serde_json::{Value, json};
-use station_support::{Rig, STEP};
 
 async fn booted() -> Rig {
     let mut rig = Rig::start().await;

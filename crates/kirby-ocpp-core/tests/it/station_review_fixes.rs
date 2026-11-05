@@ -2,10 +2,9 @@
 //! queues, sampling of suspended transactions, `StopTransactionOnInvalidId` semantics,
 //! availability after an abandoned start, RemoteStart with a parentIdTag from `Authorize`.
 
-mod station_support;
-
 use std::time::Duration;
 
+use crate::station_support::{Rig, STEP, incrementing, t0, tag, wait_state};
 use chrono::Duration as Delta;
 use kirby_ocpp_core::StationError;
 use kirby_ocpp_core::ids::{ConnectorId, TxId};
@@ -15,7 +14,6 @@ use kirby_ocpp_core::ocpp::types::{
 use kirby_ocpp_core::station::{Command, Outcome, TransactionState};
 use kirby_ocpp_testkit::{CsmsOptions, Fault};
 use serde_json::{Value, json};
-use station_support::{Rig, STEP, incrementing, t0, tag, wait_state};
 
 const C1: ConnectorId = ConnectorId::new(1);
 

@@ -1,14 +1,12 @@
 //! Security Whitepaper, maintenance half: `GetLog` + `LogStatusNotification` and
 //! `ExtendedTriggerMessage`.
 
-mod station_support;
-
+use crate::station_support::{Rig, STEP};
 use kirby_ocpp_core::ocpp::messages::UploadLogStatus;
 use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 use kirby_ocpp_core::station::{Command, DiagnosticsOutcome, ResponseRule};
 use kirby_ocpp_testkit::Reply;
 use serde_json::{Value, json};
-use station_support::{Rig, STEP};
 
 async fn booted() -> Rig {
     let mut rig = Rig::start().await;

@@ -1,11 +1,10 @@
 //! Boot flow, registration states, heartbeat, reconnect and shutdown of the station actor.
 
-mod station_support;
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
+use crate::station_support::{Observed, Rig, STEP, dead_url, wait_state};
 use kirby_ocpp_core::CallError;
 use kirby_ocpp_core::StationError;
 use kirby_ocpp_core::config::ReconnectConfig;
@@ -13,7 +12,6 @@ use kirby_ocpp_core::ocpp::types::RegistrationStatus;
 use kirby_ocpp_core::station::{Command, ConnectionState, Outcome};
 use kirby_ocpp_testkit::{CsmsOptions, Reply};
 use serde_json::json;
-use station_support::{Observed, Rig, STEP, dead_url, wait_state};
 
 const SHORT: Duration = Duration::from_millis(300);
 

@@ -1,10 +1,9 @@
 //! `AdditionalRootCertificateCheck` (Security Whitepaper `M05.FR.08` to `M05.FR.14`): the
 //! station-level behaviour of `InstallCertificate` and the fallback root over TLS.
 
-mod station_support;
-
 use std::sync::Arc;
 
+use crate::station_support::{Observed, Rig, t0, test_config, wait_state};
 use kirby_ocpp_core::config::TlsConfig;
 use kirby_ocpp_core::ocpp::types::RegistrationStatus;
 use kirby_ocpp_core::station::certificates::StoredRoot;
@@ -13,7 +12,6 @@ use kirby_ocpp_core::{ManualClock, Station};
 use kirby_ocpp_testkit::{CsmsOptions, MockCsms, Reply, TlsOpts};
 use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
 use serde_json::{Value, json};
-use station_support::{Observed, Rig, t0, test_config, wait_state};
 
 const KIND: &str = "CentralSystemRootCertificate";
 

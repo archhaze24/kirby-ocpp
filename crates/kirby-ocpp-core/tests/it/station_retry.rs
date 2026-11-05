@@ -2,13 +2,11 @@
 //! cancellation on disconnect. A CSMS-triggered `MeterValues` is the vehicle: it goes through
 //! the same outbound path as the periodic/transaction MeterValues.
 
-mod station_support;
-
 use std::time::Duration;
 
+use crate::station_support::{Rig, STEP};
 use kirby_ocpp_testkit::Fault;
 use serde_json::json;
-use station_support::{Rig, STEP};
 
 async fn configure(rig: &Rig, attempts: &str, interval: &str) {
     for (key, value) in [

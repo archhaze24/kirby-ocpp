@@ -1,17 +1,15 @@
 //! Security Whitepaper, certificate half: configuration keys, certificate store commands,
 //! `SignCertificate` / `CertificateSigned`, security events and the profile rules.
 
-mod station_support;
-
 use std::sync::{Arc, Mutex};
 
+use crate::station_support::{Rig, STEP, t0, test_config};
 use kirby_ocpp_core::Station;
 use kirby_ocpp_core::station::Command;
 use kirby_ocpp_testkit::Reply;
 use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
 use ring::digest;
 use serde_json::json;
-use station_support::{Rig, STEP, t0, test_config};
 
 fn ca(name: &str) -> (rcgen::Certificate, rcgen::Issuer<'static, KeyPair>) {
     let key = KeyPair::generate().unwrap();
@@ -443,7 +441,7 @@ async fn offline_security_events_are_queued_validated_and_sent_after_boot() {
         .await
         .unwrap();
     assert_eq!(call["techInfo"], "lid opened");
-    station_support::wait_state(&rig.station, "queue drained", |s| {
+    crate::station_support::wait_state(&rig.station, "queue drained", |s| {
         s.pending_security_events == 0
     })
     .await;
@@ -510,7 +508,7 @@ async fn profile_one_sends_basic_auth_with_the_authorization_key_and_401_is_repo
         .unwrap();
     let before = station.snapshot().pending_security_events;
     station.connect().await.unwrap();
-    station_support::wait_state(&station, "401 reported", |s| {
+    crate::station_support::wait_state(&station, "401 reported", |s| {
         s.pending_security_events > before
     })
     .await;

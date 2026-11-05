@@ -1,10 +1,11 @@
 //! Handshake, subprotocol, URL, authentication and keep-alive behaviour of
 //! `ws::Connection` over plain `ws://` (ports `tests/ocpp-websocket.test.mjs`).
 
-mod ws_support;
-
 use std::time::Duration;
 
+use crate::ws_support::{
+    Negotiate, RawServer, STEP, collect_events, connect, next_closed, options,
+};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use futures_util::SinkExt;
@@ -15,7 +16,6 @@ use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
-use ws_support::{Negotiate, RawServer, STEP, collect_events, connect, next_closed, options};
 
 #[tokio::test]
 async fn negotiates_the_ocpp16_subprotocol() {
@@ -360,7 +360,7 @@ async fn an_oversize_message_from_the_csms_closes_the_connection() {
     let mut peer = server.next_peer().await;
     // Under the limit: not valid OCPP-J, but the socket stays up.
     peer.send_text(&"x".repeat(3 * 1024 * 1024)).await;
-    let warning = ws_support::next_event(&mut events, |event| match event {
+    let warning = crate::ws_support::next_event(&mut events, |event| match event {
         kirby_ocpp_core::ws::ConnectionEvent::Frame(record) => Some(record.msg_id.is_none()),
         _ => None,
     })

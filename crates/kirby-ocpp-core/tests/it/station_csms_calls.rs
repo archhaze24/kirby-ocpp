@@ -1,16 +1,14 @@
 //! CSMS-originated CALLs against a running station: configuration, TriggerMessage,
 //! availability, DataTransfer, local list, cache, error mapping, exactly-one-reply.
 
-mod station_support;
-
 use std::collections::BTreeMap;
 
+use crate::station_support::{Rig, STEP};
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::ocpp::types::{ConnectorStatus, DiagnosticsStatus, FirmwareStatus};
 use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 use kirby_ocpp_core::station::{Command, Direction, Outcome};
 use serde_json::{Value, json};
-use station_support::{Rig, STEP};
 
 const C1: ConnectorId = ConnectorId::new(1);
 
@@ -841,7 +839,7 @@ async fn every_csms_call_gets_exactly_one_reply() {
         sent += 1;
     }
 
-    let reply_frames = |o: &station_support::Observed| {
+    let reply_frames = |o: &crate::station_support::Observed| {
         o.frames
             .iter()
             .filter(|r| r.direction == Direction::Out && matches!(r.frame[0].as_u64(), Some(3 | 4)))

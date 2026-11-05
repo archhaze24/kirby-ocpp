@@ -1,10 +1,9 @@
 //! State file wiring: restart round trip, quarantine of corrupt files, newer versions.
 
-mod station_support;
-
 use std::fs;
 use std::sync::Arc;
 
+use crate::station_support::{Observed, Rig, STEP, incrementing, t0, test_config};
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::ocpp::types::{AvailabilityType, ConnectorStatus};
 use kirby_ocpp_core::station::Command;
@@ -12,7 +11,6 @@ use kirby_ocpp_core::store::{LoadOutcome, StationStore};
 use kirby_ocpp_core::{ManualClock, Station};
 use kirby_ocpp_testkit::{CsmsOptions, MockCsms};
 use serde_json::{Value, json};
-use station_support::{Observed, Rig, STEP, incrementing, t0, test_config};
 
 async fn payload(csms: &MockCsms, action: &str, request: Value) -> Value {
     match csms.send_call(action, request).await.unwrap() {
@@ -345,7 +343,7 @@ async fn pending_availability_survives_a_restart_and_is_applied_when_the_transac
         })
         .await
         .unwrap();
-    let snapshot = station_support::wait_state(&station, "availability applied", |s| {
+    let snapshot = crate::station_support::wait_state(&station, "availability applied", |s| {
         s.connector(one)
             .is_some_and(|c| c.availability == AvailabilityType::Inoperative)
     })

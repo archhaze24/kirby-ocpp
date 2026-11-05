@@ -1,16 +1,14 @@
 //! StatusNotification behaviour: boot, plug/unplug/fault, MinimumStatusDuration, offline.
 
-mod station_support;
-
 use std::time::Duration;
 
+use crate::station_support::{Rig, STEP, t0, wait_state};
 use chrono::{DateTime, Utc};
 use kirby_ocpp_core::StationError;
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::ocpp::types::{ChargePointErrorCode, ConnectorStatus};
 use kirby_ocpp_core::station::{Command, Outcome};
 use serde_json::json;
-use station_support::{Rig, STEP, t0, wait_state};
 
 const C1: ConnectorId = ConnectorId::new(1);
 

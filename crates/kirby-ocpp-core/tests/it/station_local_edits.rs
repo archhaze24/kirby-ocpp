@@ -1,7 +1,6 @@
 //! Local edits of the configuration, the local authorization list and the charging profiles.
 
-mod station_support;
-
+use crate::station_support::{Rig, tag, wait_state};
 use kirby_ocpp_core::StationError;
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::ocpp::Frame;
@@ -9,7 +8,6 @@ use kirby_ocpp_core::ocpp::messages::{ChargingProfile, IdTagInfo};
 use kirby_ocpp_core::ocpp::types::AuthorizationStatus;
 use kirby_ocpp_core::station::Command;
 use serde_json::{Value, json};
-use station_support::{Rig, tag, wait_state};
 
 async fn booted() -> Rig {
     let mut rig = Rig::start().await;
