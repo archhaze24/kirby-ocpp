@@ -31,6 +31,29 @@ const PLATFORMS = [
   { pkg: "@archhaze24/kirby-ocpp-win32-x64", target: "x86_64-pc-windows-msvc", os: "win32", cpu: "x64", ext: "zip", win: true },
 ];
 
+const MARKER = ".kirby-npm-dist";
+
+// The output directory is wiped on every build, so refuse anything that is not clearly a
+// scratch dist: the repo root or its ancestors, the home dir, the filesystem root, and any
+// non-empty directory that was not created by a previous run (no marker file).
+function checkOut(out) {
+  const real = fs.existsSync(out) ? fs.realpathSync(out) : out;
+  const contains = (parent, child) => {
+    const rel = path.relative(parent, child);
+    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+  };
+  const protectedDirs = [os.homedir(), path.parse(real).root];
+  if (contains(real, root) || contains(real, fs.realpathSync(root)) || protectedDirs.some((dir) => path.resolve(dir) === real)) {
+    throw new Error(`refusing to use ${out} as --out: it is the repo root, one of its ancestors, the home directory or /`);
+  }
+  if (fs.existsSync(out)) {
+    if (!fs.statSync(out).isDirectory()) throw new Error(`--out ${out} exists and is not a directory`);
+    if (fs.readdirSync(out).length > 0 && !fs.existsSync(path.join(out, MARKER))) {
+      throw new Error(`refusing to overwrite non-empty ${out}: it has no ${MARKER} marker from a previous build`);
+    }
+  }
+}
+
 function parseArgs(argv) {
   const args = { tag: undefined, assets: undefined, out: path.join(root, "npm", "dist") };
   for (let i = 0; i < argv.length; i++) {
@@ -104,8 +127,10 @@ async function main() {
   const version = tag.slice(1);
   const template = JSON.parse(fs.readFileSync(path.join(root, "npm", "kirby-ocpp", "package.json"), "utf8")); // shared license/author/repository
   const work = fs.mkdtempSync(path.join(os.tmpdir(), "kirby-ocpp-npm-"));
+  checkOut(out);
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
+  fs.writeFileSync(path.join(out, MARKER), "created by npm/build.mjs; safe to delete and overwrite\n");
 
   const optionalDependencies = {};
   for (const platform of PLATFORMS) {

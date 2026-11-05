@@ -5,7 +5,8 @@
 // live in the same @archhaze24/kirby-ocpp-<platform> packages.
 "use strict";
 
-const { spawnSync } = require("node:child_process");
+const { spawn } = require("node:child_process");
+const os = require("node:os");
 const path = require("node:path");
 
 const NAME = path.basename(__filename, ".js");
@@ -70,13 +71,25 @@ try {
   process.exit(1);
 }
 
-const result = spawnSync(binary, process.argv.slice(2), { stdio: "inherit" });
-if (result.error) {
-  console.error(`${NAME}: could not run ${binary}: ${result.error.message}`);
+const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });
+
+// Forward termination signals so the native process does not outlive the launcher (docker
+// stop, timeout, CI cancel). Windows only supports SIGINT/SIGBREAK; the others are skipped.
+const FORWARDED = process.platform === "win32" ? ["SIGINT", "SIGBREAK"] : ["SIGINT", "SIGTERM", "SIGHUP"];
+for (const signal of FORWARDED) {
+  process.on(signal, () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+  });
+}
+
+child.on("error", (error) => {
+  console.error(`${NAME}: could not run ${binary}: ${error.message}`);
   process.exit(1);
-}
-if (result.signal) {
-  process.kill(process.pid, result.signal);
-} else {
-  process.exit(result.status ?? 1);
-}
+});
+
+child.on("exit", (code, signal) => {
+  if (signal) {
+    process.exit(128 + (os.constants.signals[signal] ?? 0));
+  }
+  process.exit(code ?? 1);
+});

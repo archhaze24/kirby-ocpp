@@ -2,7 +2,7 @@
 
 One release ships two binaries, the charge point emulator `kirby-ocpp` and the central system `kirby-csms`, with one shared version. It has three parts that must go out in this order: **GitHub release** (binaries, built by CI from a tag), **crates.io** (`cargo publish`), **npm** (wrapper packages assembled from the GitHub release assets, so `npx kirby-ocpp` and `npx @archhaze24/kirby-csms` work).
 
-Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.0` with the new version everywhere.
+Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.0` with the new version everywhere. For a prerelease use a SemVer prerelease version (e.g. `0.4.0-rc.1`, tag `v0.4.0-rc.1`).
 
 ## 0. Prerequisites (once)
 
@@ -12,8 +12,8 @@ Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.
 
 ## 1. Prepare
 
-1. `git switch main && git pull --ff-only` — CI on `main` must be green.
-2. Bump the version in the root `Cargo.toml`: `[workspace.package] version` and the `version = "…"` of all four internal crates in `[workspace.dependencies]`: `kirby-ocpp-core`, `kirby-ocpp-tui`, `kirby-csms-core`, `kirby-csms-tui` (`0.2.0-dev` -> `0.2.0`; `kirby-ocpp-testkit` has no version and stays unpublished). Run `cargo check --workspace` so `Cargo.lock` follows.
+1. Get the release commit onto `main`: from the development branch (e.g. `dev-0.4`) merge it into `main` (`git switch main && git pull --ff-only && git merge dev-0.4`; the owner decides fast-forward or merge commit), push, and wait until CI on `main` is green.
+2. Bump the version in the root `Cargo.toml`: `[workspace.package] version` and the `version = "…"` of all four internal crates in `[workspace.dependencies]`: `kirby-ocpp-core`, `kirby-ocpp-tui`, `kirby-csms-core`, `kirby-csms-tui` (drop the `-dev` suffix, e.g. `0.4.0-dev` -> `0.4.0`; `kirby-ocpp-testkit` has no version and stays unpublished). Run `cargo check --workspace` so `Cargo.lock` follows.
 3. Update the "Install" section of `README.md` (these channels exist only after the release):
    ```
    npx kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001     # or: npm install -g kirby-ocpp
@@ -23,9 +23,9 @@ Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.
    # prebuilt binaries: https://github.com/archhaze24/kirby-ocpp/releases
    ```
 4. `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
-5. `cargo publish --dry-run -p kirby-ocpp-core` (must succeed). The other crates can only be dry-run after the crates they depend on are on crates.io (`kirby-csms-core` needs `kirby-ocpp-core`; `kirby-ocpp-tui` needs `kirby-ocpp-core`; `kirby-csms-tui` needs `kirby-csms-core` and `kirby-ocpp-tui`; `kirby-ocpp` needs `-core` and `-tui`; `kirby-csms` needs all four libraries). `cargo package --list -p <crate>` works for all of them at any time: check that `THIRD_PARTY_NOTICES.md` is in `kirby-ocpp` and `kirby-csms`.
+5. `cargo publish --dry-run -p kirby-ocpp-core` (must succeed). The other crates can only be dry-run after the crates they depend on are on crates.io (`kirby-csms-core` needs `kirby-ocpp-core`; `kirby-ocpp-tui` needs `kirby-ocpp-core`; `kirby-csms-tui` needs `kirby-csms-core` and `kirby-ocpp-tui`; `kirby-ocpp` needs `-core` and `-tui`; `kirby-csms` needs all four libraries). `cargo package --list -p <crate>` works for all of them at any time: check that `THIRD_PARTY_NOTICES.md` is in `kirby-ocpp` and `kirby-csms`, and that `LICENSE` is in every published crate. The per-crate `LICENSE` files are plain copies of the root one and must stay identical: `for c in kirby-ocpp-core kirby-csms-core kirby-ocpp-tui kirby-csms-tui kirby-ocpp kirby-csms; do cmp LICENSE crates/$c/LICENSE; done`.
 6. Commit (`release: 0.2.0`), push `main`, wait for CI.
-7. Optional safety net: run the release workflow as a dry run (builds all six targets with both binaries, publishes nothing): `gh workflow run release.yml` (default `dry_run=true`), then check it is green. The runners `macos-15-intel` and `ubuntu-24.04-arm` have not been exercised yet, so this is worth doing once.
+7. Optional safety net: run the release workflow manually (builds all six targets with both binaries; a manual run never creates a release): `gh workflow run release.yml --ref main`, then check it is green. The tag/version check is skipped on manual runs.
 
 ## 2. GitHub release (binaries)
 
@@ -33,7 +33,7 @@ Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.
 git tag -s v0.2.0 -m "v0.2.0"
 git push origin v0.2.0
 ```
-The `Release` workflow builds x86_64 Linux (glibc and static musl), aarch64 Linux, x86_64/aarch64 macOS and x86_64 Windows, then creates the GitHub release `v0.2.0` with auto-generated notes. Wait until it is green and check that the release has 12 files (6 archives + 6 `.sha256`) and that each archive contains both `kirby-ocpp[.exe]` and `kirby-csms[.exe]` (plus `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`, `THIRD_PARTY_NOTICES-kirby-csms.md`). Edit the notes on GitHub if you want.
+The `Release` workflow first checks that the tag (without the leading `v`) equals the workspace version in `Cargo.toml`, and fails before building otherwise (tag `v0.4.0` with `0.4.0-dev` in `Cargo.toml` is rejected). Then it builds x86_64 Linux (glibc and static musl), aarch64 Linux, x86_64/aarch64 macOS and x86_64 Windows, then creates the GitHub release `v0.2.0` with auto-generated notes; a tag containing `-` (e.g. `v0.4.0-rc.1`) is marked as a GitHub prerelease. Wait until it is green and check that the release has 12 files (6 archives + 6 `.sha256`) and that each archive contains both `kirby-ocpp[.exe]` and `kirby-csms[.exe]` (plus `LICENSE`, `README.md`, `THIRD_PARTY_NOTICES.md`, `THIRD_PARTY_NOTICES-kirby-csms.md`). Edit the notes on GitHub if you want.
 
 If a build fails, fix it, delete the tag (`git push origin :refs/tags/v0.2.0 && git tag -d v0.2.0`), and tag again. Nothing is published to crates.io/npm before this step succeeds.
 
@@ -65,7 +65,9 @@ done
 (cd kirby-ocpp && npm publish --dry-run)   # launchers LAST, otherwise installs briefly fail
 (cd kirby-csms && npm publish --dry-run --access public)
 ```
-Publish the six platform packages first with `npm publish --access public` (scoped packages need it), then the launchers `kirby-ocpp` (plain `npm publish`) and `kirby-csms` (`npm publish --access public`, it is the scoped `@archhaze24/kirby-csms`). The directory names in `npm/dist` have no scope (`kirby-ocpp-linux-x64` etc.). After 72 hours a version can no longer be unpublished; use `npm deprecate kirby-ocpp@0.2.0 "reason"` instead.
+Publish the six platform packages first with `npm publish --access public` (scoped packages need it), then the launchers `kirby-ocpp` (plain `npm publish`) and `kirby-csms` (`npm publish --access public`, it is the scoped `@archhaze24/kirby-csms`). For a prerelease version (contains `-`) add `--tag next` to every `npm publish`, otherwise it becomes `latest`.
+
+`build.mjs` wipes its `--out` directory: it refuses the repo root, its ancestors, the home dir and `/`, and refuses a non-empty directory that lacks the `.kirby-npm-dist` marker it writes (delete an old `npm/dist` from before this check by hand once). The directory names in `npm/dist` have no scope (`kirby-ocpp-linux-x64` etc.). After 72 hours a version can no longer be unpublished; use `npm deprecate kirby-ocpp@0.2.0 "reason"` instead.
 
 ## 5. Verify
 
@@ -75,7 +77,7 @@ npx @archhaze24/kirby-csms@0.2.0 --version
 cargo install kirby-ocpp --version 0.2.0 --force && kirby-ocpp --version
 cargo install kirby-csms --version 0.2.0 --force && kirby-csms --version
 ```
-Then bump `main` to the next development version (e.g. `0.4.0-dev`) when you start the next cycle.
+Then bump `main` to the next development version (e.g. `0.5.0-dev`) when you start the next cycle.
 
 ## Notes
 

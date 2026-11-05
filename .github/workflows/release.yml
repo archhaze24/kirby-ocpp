@@ -1,25 +1,45 @@
 name: Release
 
-# Builds release binaries. Runs only on a `v*` tag push (which also publishes a GitHub
-# release) or manually; a manual run is a dry run unless dry_run is set to false, and a
-# manual run never publishes a release.
+# Builds release binaries. Runs only on a `v*` tag push (which also creates a GitHub
+# release) or manually. A manual run only builds and packages; it never creates a release.
+# On a tag push the tag must equal the workspace version in Cargo.toml.
 on:
   push:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "Build and package only (no release is ever created from a manual run)"
-        type: boolean
-        default: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  version:
+    name: tag matches Cargo version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Compare tag with workspace version
+        if: github.event_name == 'push'
+        shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "kirby-ocpp") | .version')"
+          tag_version="${REF_NAME#v}"
+          if [ -z "$cargo_version" ] || [ "$tag_version" != "$cargo_version" ]; then
+            echo "::error::tag '$REF_NAME' does not match the Cargo workspace version '$cargo_version'"
+            exit 1
+          fi
+          echo "tag $REF_NAME matches Cargo version $cargo_version"
+
   build:
     name: ${{ matrix.target }}
+    needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -38,31 +58,33 @@ jobs:
 
       - uses: actions/checkout@v7
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Install musl toolchain
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
-
       - name: Build
         env:
           # ring compiles C code; point it at the musl wrapper (ignored for other targets).
           CC_x86_64_unknown_linux_musl: musl-gcc
-        run: cargo build --release --locked -p kirby-ocpp -p kirby-csms --target ${{ matrix.target }}
+          TARGET: ${{ matrix.target }}
+        run: cargo build --release --locked -p kirby-ocpp -p kirby-csms --target "$TARGET"
 
       - name: Package (unix)
         if: runner.os != 'Windows'
         shell: bash
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
         run: |
-          name="kirby-ocpp-${{ github.ref_name }}-${{ matrix.target }}"
+          # Branch names may contain "/" (manual runs); tags cannot be affected.
+          name="kirby-ocpp-${REF_NAME//\//-}-${TARGET}"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/kirby-ocpp" "target/${{ matrix.target }}/release/kirby-csms" LICENSE crates/kirby-ocpp/THIRD_PARTY_NOTICES.md README.md "$name/"
+          cp "target/${TARGET}/release/kirby-ocpp" "target/${TARGET}/release/kirby-csms" LICENSE crates/kirby-ocpp/THIRD_PARTY_NOTICES.md README.md "$name/"
           cp crates/kirby-csms/THIRD_PARTY_NOTICES.md "$name/THIRD_PARTY_NOTICES-kirby-csms.md"
           tar -czf "$name.tar.gz" "$name"
           if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"; else shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"; fi
@@ -71,10 +93,13 @@ jobs:
       - name: Package (windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
         run: |
-          $name = "kirby-ocpp-${{ github.ref_name }}-${{ matrix.target }}"
+          $name = "kirby-ocpp-$($env:REF_NAME -replace '/', '-')-$($env:TARGET)"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/kirby-ocpp.exe", "target/${{ matrix.target }}/release/kirby-csms.exe", LICENSE, crates/kirby-ocpp/THIRD_PARTY_NOTICES.md, README.md $name
+          Copy-Item "target/$($env:TARGET)/release/kirby-ocpp.exe", "target/$($env:TARGET)/release/kirby-csms.exe", LICENSE, crates/kirby-ocpp/THIRD_PARTY_NOTICES.md, README.md $name
           Copy-Item crates/kirby-csms/THIRD_PARTY_NOTICES.md "$name/THIRD_PARTY_NOTICES-kirby-csms.md"
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
@@ -107,7 +132,11 @@ jobs:
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
+          REF_NAME: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
         run: |
-          gh release create "${{ github.ref_name }}" dist/* \
-            --repo "${{ github.repository }}" \
-            --title "${{ github.ref_name }}" --generate-notes
+          flags=()
+          case "$REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$REF_NAME" dist/* \
+            --repo "$REPO" \
+            --title "$REF_NAME" --generate-notes "${flags[@]}"
