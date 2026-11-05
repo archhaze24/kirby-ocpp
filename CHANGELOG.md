@@ -52,7 +52,7 @@ New binary `kirby-csms` (default listen `0.0.0.0:9000`) and the new crates `kirb
 - Terminal UI: station list and details, merged or per-station log, command forms for every
   action, response rules and security forms.
 - Shipped next to `kirby-ocpp` in every release archive and as the npm package
-  `@archhaze24/kirby-csms`.
+  `kirby-csms`.
 
 #### OCPP 1.6 Security Whitepaper (edition 4) on the emulator
 

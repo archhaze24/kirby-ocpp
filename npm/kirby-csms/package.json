@@ -1,5 +1,5 @@
 {
-  "name": "@archhaze24/kirby-csms",
+  "name": "kirby-csms",
   "version": "0.0.0-template",
   "description": "Terminal OCPP 1.6J central system (CSMS) for charge point firmware development and load tests",
   "keywords": ["ocpp", "ocpp16", "ev", "csms", "central-system", "charge-point", "tui"],

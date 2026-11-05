@@ -7,7 +7,7 @@
 // Output (one directory per package, ready for `npm publish`):
 //   <out>/kirby-ocpp-<os>-<arch>[-musl]/   platform packages @archhaze24/kirby-ocpp-<os>-<arch> (both binaries in bin/)
 //   <out>/kirby-ocpp/               launcher package `kirby-ocpp`
-//   <out>/kirby-csms/               launcher package `@archhaze24/kirby-csms`
+//   <out>/kirby-csms/               launcher package `kirby-csms`
 // Publish the platform packages first, the launcher packages last (see RELEASING.md).
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -152,7 +152,7 @@ async function main() {
     fs.copyFileSync(NOTICES_CSMS, path.join(dir, "THIRD_PARTY_NOTICES-kirby-csms.md"));
     fs.writeFileSync(
       path.join(dir, "README.md"),
-      `# ${platform.pkg}\n\nPrebuilt \`kirby-ocpp\` and \`kirby-csms\` binaries for ${platform.os}/${platform.cpu}${platform.libc ? ` (${platform.libc})` : ""}. Install \`kirby-ocpp\` or \`@archhaze24/kirby-csms\` instead of this package: https://github.com/${REPO}\n`,
+      `# ${platform.pkg}\n\nPrebuilt \`kirby-ocpp\` and \`kirby-csms\` binaries for ${platform.os}/${platform.cpu}${platform.libc ? ` (${platform.libc})` : ""}. Install \`kirby-ocpp\` or \`kirby-csms\` instead of this package: https://github.com/${REPO}\n`,
     );
     writeJson(path.join(dir, "package.json"), {
       name: platform.pkg,

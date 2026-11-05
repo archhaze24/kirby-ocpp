@@ -1,13 +1,13 @@
 # Releasing kirby-ocpp and kirby-csms
 
-One release ships two binaries, the charge point emulator `kirby-ocpp` and the central system `kirby-csms`, with one shared version. It has three parts that must go out in this order: **GitHub release** (binaries, built by CI from a tag), **crates.io** (`cargo publish`), **npm** (wrapper packages assembled from the GitHub release assets, so `npx kirby-ocpp` and `npx @archhaze24/kirby-csms` work).
+One release ships two binaries, the charge point emulator `kirby-ocpp` and the central system `kirby-csms`, with one shared version. It has three parts that must go out in this order: **GitHub release** (binaries, built by CI from a tag), **crates.io** (`cargo publish`), **npm** (wrapper packages assembled from the GitHub release assets, so `npx kirby-ocpp` and `npx kirby-csms` work).
 
 Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.0` with the new version everywhere. For a prerelease use a SemVer prerelease version (e.g. `0.4.0-rc.1`, tag `v0.4.0-rc.1`).
 
 ## 0. Prerequisites (once)
 
 - `cargo login` with a crates.io API token (scopes `publish-new` + `publish-update`). The names `kirby-ocpp`, `kirby-ocpp-core`, `kirby-ocpp-tui` are already published; `kirby-csms`, `kirby-csms-core`, `kirby-csms-tui` are new and are published by the first release that contains them.
-- `npm login` as `archhaze24` (2FA will prompt for an OTP on every `npm publish`). The package `kirby-ocpp` and the six `@archhaze24/kirby-ocpp-<platform>` packages already exist; `@archhaze24/kirby-csms` is new (first publish needs `--access public`).
+- `npm login` as `archhaze24` (2FA will prompt for an OTP on every `npm publish`). The package `kirby-ocpp` and the six `@archhaze24/kirby-ocpp-<platform>` packages already exist; `kirby-csms` is a new unscoped name (npm's spam filter may answer 403; then fall back to a scoped name).
 - Node >= 18, `tar` (bsdtar on macOS is fine), `gh` (optional).
 
 ## 1. Prepare
@@ -18,7 +18,7 @@ Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.
    ```
    npx kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001     # or: npm install -g kirby-ocpp
    cargo install kirby-ocpp
-   npx @archhaze24/kirby-csms --listen 0.0.0.0:9000           # or: npm install -g @archhaze24/kirby-csms
+   npx kirby-csms --listen 0.0.0.0:9000                       # or: npm install -g kirby-csms
    cargo install kirby-csms
    # prebuilt binaries: https://github.com/archhaze24/kirby-ocpp/releases
    ```
@@ -55,7 +55,7 @@ Order follows the dependencies: `kirby-ocpp-core` -> (`kirby-ocpp-tui`, `kirby-c
 
 ## 4. npm
 
-The wrapper has two launcher packages (`kirby-ocpp` and `@archhaze24/kirby-csms`, both using the same `npm/launcher.js`, which picks the binary by its own file name) and six platform packages under the owner's personal scope (`@archhaze24/kirby-ocpp-linux-x64`, `-linux-x64-musl`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) that carry both binaries in `bin/` (unscoped names were rejected by npm's spam filter); npm installs only the one matching the machine.
+The wrapper has two launcher packages (`kirby-ocpp` and `kirby-csms`, both using the same `npm/launcher.js`, which picks the binary by its own file name) and six platform packages under the owner's personal scope (`@archhaze24/kirby-ocpp-linux-x64`, `-linux-x64-musl`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) that carry both binaries in `bin/` (unscoped names were rejected by npm's spam filter); npm installs only the one matching the machine.
 
 ```
 node npm/build.mjs v0.2.0            # downloads the release assets, writes npm/dist/*
@@ -64,9 +64,9 @@ for p in kirby-ocpp-linux-x64 kirby-ocpp-linux-x64-musl kirby-ocpp-linux-arm64 k
   (cd "$p" && npm publish --dry-run --access public)   # look at the file list, then repeat without --dry-run
 done
 (cd kirby-ocpp && npm publish --dry-run)   # launchers LAST, otherwise installs briefly fail
-(cd kirby-csms && npm publish --dry-run --access public)
+(cd kirby-csms && npm publish --dry-run)
 ```
-Publish the six platform packages first with `npm publish --access public` (scoped packages need it), then the launchers `kirby-ocpp` (plain `npm publish`) and `kirby-csms` (`npm publish --access public`, it is the scoped `@archhaze24/kirby-csms`). For a prerelease version (contains `-`) add `--tag next` to every `npm publish`, otherwise it becomes `latest`.
+Publish the six platform packages first with `npm publish --access public` (scoped packages need it), then the launchers `kirby-ocpp` (plain `npm publish`) and `kirby-csms` (plain `npm publish`, both are unscoped). For a prerelease version (contains `-`) add `--tag next` to every `npm publish`, otherwise it becomes `latest`.
 
 `build.mjs` wipes its `--out` directory: it refuses the repo root, its ancestors, the home dir and `/`, and refuses a non-empty directory that lacks the `.kirby-npm-dist` marker it writes (delete an old `npm/dist` from before this check by hand once). The directory names in `npm/dist` have no scope (`kirby-ocpp-linux-x64` etc.). After 72 hours a version can no longer be unpublished; use `npm deprecate kirby-ocpp@0.2.0 "reason"` instead.
 
@@ -74,7 +74,7 @@ Publish the six platform packages first with `npm publish --access public` (scop
 
 ```
 npx kirby-ocpp@0.2.0 --version
-npx @archhaze24/kirby-csms@0.2.0 --version
+npx kirby-csms@0.2.0 --version
 cargo install kirby-ocpp --version 0.2.0 --force && kirby-ocpp --version
 cargo install kirby-csms --version 0.2.0 --force && kirby-csms --version
 ```

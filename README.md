@@ -23,7 +23,7 @@ With Cargo (Rust 1.88 or newer):
 cargo install kirby-ocpp
 ```
 
-The central system is a separate binary: `cargo install kirby-csms`, or `npm install -g @archhaze24/kirby-csms` (`npx @archhaze24/kirby-csms --listen 0.0.0.0:9000`). See [kirby-csms](#kirby-csms).
+The central system is a separate binary: `cargo install kirby-csms`, or `npm install -g kirby-csms` (`npx kirby-csms --listen 0.0.0.0:9000`). See [kirby-csms](#kirby-csms).
 
 Or download a prebuilt binary for Linux (x86_64 glibc, aarch64 glibc, x86_64 static musl for Alpine and minimal containers), macOS or Windows from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). Each archive holds both binaries (`kirby-ocpp` and `kirby-csms`), the licence, the third-party notices (`THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_NOTICES-kirby-csms.md`) and this README. To build from a checkout: `cargo install --path crates/kirby-ocpp` (and `--path crates/kirby-csms`).
 
