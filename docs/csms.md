@@ -1,0 +1,217 @@
+# kirby-csms
+
+`kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware development and load tests. It accepts any number of stations, answers their CALLs with canned replies, prints everything that happens and sends commands to stations. On an interactive terminal it opens a terminal UI; otherwise it runs headless.
+
+Contents: [Quick start](#quick-start) · [Connecting stations](#connecting-stations) · [Output](#output) · [Terminal UI](#terminal-ui) · [Commands on stdin](#commands-on-stdin) · [Response rules and fault injection](#response-rules-and-fault-injection) · [Headless behaviour](#headless-behaviour) · [Exit codes](#exit-codes) · [Use as a library](#use-as-a-library) · [Related pages](#related-pages)
+
+## Quick start
+
+```sh
+kirby-csms --listen 0.0.0.0:9000                          # TUI on a terminal, headless otherwise
+kirby-csms --listen 127.0.0.1:0 --json --subprotocol omit # free port, JSON lines
+kirby-csms --tls-cert cert.pem --tls-key key.pem          # wss://
+kirby-csms --script suite.toml --junit junit.xml --timeout 120
+echo '{"station":"CP-1","action":"Reset","payload":{"type":"Soft"}}' | kirby-csms
+```
+
+Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhost:9000/ocpp --id CP-1`. Every flag and its `KIRBY_CSMS_*` variable is in [configuration.md](configuration.md); precedence is command line, then environment, then default.
+
+## Connecting stations
+
+- URL: `ws(s)://HOST:PORT/<any prefix>/<station id>`. The station id is the last path segment.
+- A second connection with the same id replaces the first one (the old one shows as "replaced").
+- Default WebSocket subprotocol policy is `require:ocpp1.6` (`--subprotocol`: `require:NAME`, `select:NAME`, `omit`, `reject`).
+- TLS and authentication: [security.md](security.md).
+- Inbound CALLs are validated against the OCPP 1.6J schemas by default (`--validate-inbound`). An invalid payload gets a CALLERROR (`OccurenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormationViolation`) and is not tracked. A fault on the same action wins; unknown actions are not checked.
+- Actions a charge point may not send get a CALLERROR: `NotSupported` for known action names, `NotImplemented` for unknown ones.
+- Per station the server keeps the last `--history-cap` frames (default 1000, also capped at 8 MiB of text) and the last `--transaction-history-cap` stopped transactions (default 100). Records are never evicted automatically; `F` in the TUI (or `CsmsHandle::forget`) removes a disconnected station.
+
+## Output
+
+The first output line is the listen address, so `--listen 127.0.0.1:0` works in tests:
+
+```
+listening on ws://127.0.0.1:41234
+{"type":"listening","addr":"127.0.0.1:41234","url":"ws://127.0.0.1:41234"}   (with --json)
+```
+
+Under the TUI the `listening on ...` line goes to stderr before the screen opens.
+
+Then one line per event:
+
+| Event (`"type"`) | Text line | Notes |
+| --- | --- | --- |
+| `connected` | `HH:MM:SS.mmm CP-1 connected` | |
+| `disconnected` | `... CP-1 disconnected (reason)` | `reason` field in JSON, for example `ping_timeout` |
+| `frame` | `... CP-1 <- [2,"id","Heartbeat",{}]` | `<-` from the station, `->` to it; JSON has `direction` `in` / `out` |
+| `state` | `... CP-1 state: connectors [1=Available] active transactions [123]` | only when connector statuses or active transactions changed |
+| `malformed` | `... CP-1 sent malformed text: ...` | |
+| `forgotten` | `... CP-1 forgotten` | |
+| `auth_failed` | `... CP-1 refused (reason) from ADDR` | JSON: `{"type":"auth_failed","station":..,"remote_addr":..,"reason":..}`; `station` is `null` when the TLS handshake failed |
+| `note` | `note: ...` | for example lines dropped because the output could not keep up |
+
+JSON events carry `ts` (RFC 3339, milliseconds). Text supplied by stations is shown with control characters replaced, because station ids and payloads are attacker-controlled. `AuthorizationKey` values in frames are replaced by `***` unless `--show-secrets` is set; see [security.md](security.md#redaction-and---show-secrets).
+
+`--log-file PATH` appends every event as a JSON line, also under the TUI. Stdout and the log file are written by helper threads: if nobody reads stdout, the process keeps running, the log file keeps being written, and the lines that did not fit are dropped with a `note` line saying how many.
+
+## Terminal UI
+
+With a terminal on both stdin and stdout and none of `--no-tui`, `--json`, `--script`, `--stdin`, the UI opens. `--no-tui` (or `KIRBY_CSMS_NO_TUI=1`) keeps it headless. If the terminal cannot be set up, the server runs headless and says so. Quitting the UI (`q`, `Ctrl-C`) shuts the server down.
+
+Layout:
+
+- Left: the stations (dot: green connected, dim disconnected, yellow replaced by a newer connection; vendor and model; `txN` active transactions). The header shows the listen address, connected/total stations and frame counters.
+- Right, top: details of the selected station (boot info, remote address, subprotocol, connectors, transactions with energy and power, last heartbeat, firmware and diagnostics status, counters).
+- Right, bottom: the frame log of that station with CALL/RESULT correlation and round-trip times.
+- Header chips: `security profile N`, `N auth failures` (refused connections also show as a status-line notice, at most one per second), `N pending` commands, and the pending fault count and rule actions while any is active.
+
+Navigation:
+
+| Key | Action |
+| --- | --- |
+| `Up` `Down` `j` `k`, `PgUp` `PgDn`, `Home` `End` | move in the focused pane |
+| `Left` `Right` `Tab` `Shift-Tab` | focus the station list / the log |
+| `/` | filter stations by id (fuzzy); in the log pane: search the log |
+| `Esc` | clear the log search, then the station filter |
+| `a` | log of the selected station / merged live log of all stations |
+| `Enter` (log) | frame detail with pretty JSON and its request or answer (`c` copies) |
+| `y` `Y` | copy the row / all visible rows (clipboard tool, else OSC 52) |
+| `f` `s` `p` `G` | log filter (all, calls, errors, from stations), search, pause/follow, newest |
+| `:` | command palette: fuzzy search over every action below; unavailable ones are dimmed with the reason |
+| `?` | help |
+| `q`, `Ctrl-C` | quit |
+
+Actions on the selected station:
+
+| Key | Action |
+| --- | --- |
+| `t` | RemoteStartTransaction (idTag, optional connector) |
+| `x` | RemoteStopTransaction (pick one of the active transactions) |
+| `R` | Reset, soft or hard (asks first) |
+| `c` `g` | ChangeConfiguration / GetConfiguration (keys optional) |
+| `T` | TriggerMessage (message, optional connector) |
+| `u` `A` `C` | UnlockConnector / ChangeAvailability / ClearCache |
+| `P` | SetChargingProfile (connector and profile JSON, validated against the schema) |
+| `K` `H` | ClearChargingProfile / GetCompositeSchedule (the answer opens in a popup) |
+| `V` | ReserveNow |
+| `U` `O` | UpdateFirmware / GetDiagnostics |
+| `B` | SendLocalList (Differential or Full; entries as comma separated `idTag[:status]`, status defaults to Accepted, `idTag:-` deletes in a differential update, at most 100 entries) |
+| `D` | DataTransfer |
+| `w` | raw call: any central system action with a JSON payload checked against its request schema |
+| `l` | GetLog |
+| `I` `d` `L` | InstallCertificate (paste the PEM; line breaks become spaces in the field and are rebuilt on submit) / DeleteCertificate / GetInstalledCertificateIds |
+| `E` | ExtendedTriggerMessage (`SignChargePointCertificate` preselected) |
+| `S` `X` | SignedUpdateFirmware / CertificateSigned |
+| `e` | the last 100 security events the station reported (scrollable); the Station pane shows the last three, the last log and signed firmware status and a CSR marker |
+| `r` | the last results of the selected station (`Enter` opens one) |
+| `m` | response rule (all stations), see below |
+| `i` | inject a fault (all stations), see below |
+| `M` | clear every response rule and pending fault (asks first); one rule can be removed from the palette |
+| `F` | forget a disconnected station and its state (asks first) |
+| `n` | copy the station id |
+
+Forms: `Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels. Fields are checked as you type and the request is checked against the OCPP 1.6J schema before anything is sent; errors show under the field.
+
+Results: commands run in the background, several can be in flight (the header shows `N pending`). The answer appears in the status line (`Reset (Soft) on CP-1: Accepted`, or the CALLERROR code and text, or a timeout) and is kept in a history of the last 20 results per station (`r`). Answers that carry content (GetConfiguration as a readable key list with `(readonly)` marks and unknown keys, raw calls, DataTransfer with data, GetCompositeSchedule, hash data) open in a popup (`c` copies).
+
+## Commands on stdin
+
+Without `--script`, when stdin is not a terminal (or with `--stdin`), each input line is a JSON object and gets exactly one answer line. End of input does not stop the server. Answers are always JSON, also without `--json`.
+
+```
+{"station":"CP-1","action":"ChangeConfiguration","payload":{"key":"HeartbeatInterval","value":"60"},"timeout_ms":5000,"id":"my-tag"}
+-> {"type":"result","station":"CP-1","action":"ChangeConfiguration","ok":true,"result":{"status":"Accepted"},"id":"my-tag"}
+-> {"type":"result","station":"CP-1","action":"Reset","ok":false,"error":"CALLERROR NotSupported: ..."}
+{"cmd":"stations"}
+-> {"type":"stations","stations":[{"id":"CP-1","connected":true,"vendor":"...","model":"...","connectors":{"1":"Available"},"active_transactions":[]}]}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `station`, `action` | required for a CALL; strings |
+| `payload` | request payload, default `{}`; sent as given, not schema-checked, so malformed requests can be tested |
+| `timeout_ms` | 1 to 86 400 000, default `--call-timeout` (30 s) |
+| `id` | optional tag echoed in the answer |
+| `cmd` | `"stations"` instead of a CALL; the only command |
+
+Rules:
+
+- Answers can arrive out of order (a slow command does not hold back later ones). Match them by `id`, not by position.
+- A CALLERROR, a timeout, an unknown station or a bad line (invalid JSON, not an object, invalid UTF-8, longer than 1 MiB) is an `"ok":false` result with an `error` text, never a crash. A CALLERROR answer also carries `code` and `details`.
+- At most 256 commands are in flight; the reader waits while all slots are busy.
+- Response rules and faults are not available over stdin; use the TUI or a [script](scenarios.md).
+
+## Response rules and fault injection
+
+Both apply to all stations, not to the selected one, and to CALLs sent by stations (not to commands sent by the CSMS).
+
+- Response rule (`m`): answer every CALL of one action with a fixed CALLRESULT payload, for example `{"status":"Rejected"}` for `Authorize`. The payload is not validated, so it can break the schema on purpose. Remove one rule from the palette; `M` clears all.
+- Fault (`i`): for the next N occurrences of an action (N up to 1 000 000) do something else than the normal answer. Faults win over rules and over the canned replies.
+
+| Fault kind | Effect |
+| --- | --- |
+| `call_error` | CALLERROR `InternalError` ("injected CALLERROR") |
+| `silence` | no reply; the station's call times out |
+| `close` | close the WebSocket with code 1011 without replying |
+| `invalid_payload` | CALLRESULT with the payload you give, as is (for example schema-invalid) |
+
+In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` steps, see [scenarios.md](scenarios.md). The emulator has the mirror feature for CSMS commands ([emulator.md](emulator.md)).
+
+## Headless behaviour
+
+- Events go to stdout (text or `--json`); `--log-file` also gets them.
+- Stdin commands are read when stdin is not a terminal and there is no `--script` (or always with `--stdin`).
+- `--script FILE` runs a TOML script against the stations that connect, prints the report (`--json` for JSON), writes `--report` (JSON) and `--junit` (XML), then exits. `--timeout SECONDS` (default 60) bounds the run. Script syntax: [scenarios.md](scenarios.md).
+- SIGINT or SIGTERM shuts the server down gracefully. During `--script`, SIGTERM still writes the `--junit` file (one failed suite, `interrupted`) and exits 1; SIGINT exits 130 without a report.
+- `--ping-interval` / `--pong-timeout`: a WebSocket ping goes to each station after this much silence; a station that sends nothing for the timeout after a ping is dropped (disconnect reason `ping_timeout`). A non-zero ping interval below the pong timeout is a usage error.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | success or clean shutdown |
+| 1 | script failed or timed out, or the server could not start / runtime error |
+| 2 | usage, configuration or script error (invalid flag combinations are found before the server binds) |
+| 130 | script interrupted by SIGINT |
+
+## Use as a library
+
+`kirby-csms-core` is the UI-free engine (published as a crate). It exposes `CsmsServer::start(CsmsConfig) -> CsmsHandle`; everything else goes through the handle:
+
+| Item | Purpose |
+| --- | --- |
+| `CsmsHandle::call` / `call_timeout` / `call_typed` and command helpers (`reset`, `remote_start_transaction`, ...) | send a CALL to a station and await the answer; typed ones are schema-checked |
+| `subscribe()` | `broadcast::Receiver<CsmsEvent>` (`Connected`, `Disconnected`, `Frame`, `StateChanged`, `Malformed`, `Forgotten`, `AuthFailed`) |
+| `stations()`, `station(id)`, `history(id)`, `state(id)` | read model (`StationInfo`, `FrameEntry`, `StationState`) |
+| `respond(action, closure)`, `clear_responder`, `inject(Fault)`, `clear_faults`, `faults_remaining` | response rules and faults |
+| `forget(id)`, `shutdown()`, `url()`, `local_addr()` | housekeeping |
+
+```rust
+use kirby_csms_core::{CsmsConfig, CsmsError, CsmsEvent, CsmsServer};
+use serde_json::json;
+
+async fn run() -> Result<(), CsmsError> {
+    let csms = CsmsServer::start(CsmsConfig::new("0.0.0.0:9000".parse().unwrap())).await?;
+    let mut events = csms.subscribe();
+    while let Ok(event) = events.recv().await {
+        if let CsmsEvent::Connected { station } = event {
+            let reply = csms
+                .call(&station, "ChangeConfiguration", json!({ "key": "HeartbeatInterval", "value": "60" }))
+                .await?;
+            println!("{station}: {}", reply.to_json_string());
+        }
+    }
+    csms.shutdown().await;
+    Ok(())
+}
+```
+
+`CsmsConfig` fields mirror the CLI flags (listen address, subprotocol and transaction id policies, heartbeat interval, history caps, `tls`, `security`, `show_secrets`, `validate_inbound`, ping settings). A subscriber that falls behind the event channel (4096 events) gets `RecvError::Lagged` and loses events. Internals: [architecture.md](architecture.md#csms-internals).
+
+## Related pages
+
+- [configuration.md](configuration.md): every flag and environment variable
+- [security.md](security.md): profiles, TLS, certificates
+- [scenarios.md](scenarios.md): TOML scripts and scenarios
+- [emulator.md](emulator.md): the charge point side
+- [architecture.md](architecture.md): crate map and contracts
