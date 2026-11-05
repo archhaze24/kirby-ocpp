@@ -161,7 +161,7 @@ pub struct Cli {
     /// How long a command to a station may wait for its answer, in seconds
     #[arg(
         long, env = "KIRBY_CSMS_CALL_TIMEOUT", value_name = "SECONDS",
-        default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..)
+        default_value_t = 30, value_parser = clap::value_parser!(u64).range(1..=86_400)
     )]
     pub call_timeout: u64,
 
@@ -207,7 +207,7 @@ pub struct Cli {
     /// Give up (and fail) the script after this many seconds
     #[arg(
         long, value_name = "SECONDS", default_value_t = 60,
-        value_parser = clap::value_parser!(u64).range(1..), requires = "script"
+        value_parser = clap::value_parser!(u64).range(1..=86_400), requires = "script"
     )]
     pub timeout: u64,
 
@@ -430,6 +430,18 @@ mod tests {
         assert!(!cli(&["--json"]).wants_tui(true, true));
         assert!(!cli(&["--stdin"]).wants_tui(true, true));
         assert!(!cli(&["--script", "s.toml"]).wants_tui(true, true));
+    }
+
+    #[test]
+    fn durations_are_bounded() {
+        let parse = |args: &[&str]| {
+            Cli::try_parse_from(std::iter::once("kirby-csms").chain(args.iter().copied()))
+        };
+        let huge = "18446744073709551615";
+        assert!(parse(&["--script", "s.toml", "--timeout", huge]).is_err());
+        assert!(parse(&["--script", "s.toml", "--timeout", "86401"]).is_err());
+        assert!(parse(&["--script", "s.toml", "--timeout", "86400"]).is_ok());
+        assert!(parse(&["--call-timeout", huge]).is_err());
     }
 
     #[test]

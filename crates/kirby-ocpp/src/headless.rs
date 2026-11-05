@@ -1,7 +1,7 @@
 //! Headless output: every station [`Event`] as a human line or a JSON line.
 
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::fs::OpenOptions;
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -10,7 +10,7 @@ use std::time::Duration;
 use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::fleet::{FleetEvents, FleetItem};
 use kirby_ocpp_core::station::{Direction, Event};
-use kirby_ocpp_tui::stdout_pump::StdoutPump;
+use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump};
 use kirby_ocpp_tui::text::{escape_json_unsafe, sanitize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
@@ -18,6 +18,9 @@ use tokio::task::JoinHandle;
 
 /// How long the process waits at exit for queued stdout lines to be written.
 const STDOUT_FLUSH: Duration = Duration::from_secs(2);
+
+/// How long the process waits at exit for queued log file lines to be written.
+const FILE_FLUSH: Duration = Duration::from_secs(5);
 
 static STDOUT: OnceLock<StdoutPump> = OnceLock::new();
 
@@ -127,7 +130,7 @@ impl Sink {
         let file = log_file
             .map(|path| OpenOptions::new().create(true).append(true).open(path))
             .transpose()?
-            .map(BufWriter::new);
+            .map(|file| LinePump::to_writer(json, file));
         let stdout_on = Arc::new(AtomicBool::new(stdout));
         let mut rx = handle.subscribe();
         let (stop, mut stopped) = oneshot::channel();
@@ -154,6 +157,7 @@ impl Sink {
             while let Ok(event) = rx.try_recv() {
                 out.write(&event, None);
             }
+            out.finish_file().await;
         });
         Ok(Self {
             stop,
@@ -172,7 +176,7 @@ impl Sink {
         let file = log_file
             .map(|path| OpenOptions::new().create(true).append(true).open(path))
             .transpose()?
-            .map(BufWriter::new);
+            .map(|file| LinePump::to_writer(json, file));
         let stdout_on = Arc::new(AtomicBool::new(stdout));
         let (stop, mut stopped) = oneshot::channel();
         let flag = Arc::clone(&stdout_on);
@@ -186,7 +190,7 @@ impl Sink {
                 tokio::select! {
                     item = events.recv() => match item {
                         Some(item) => out.write_item(&item),
-                        None => return,
+                        None => break,
                     },
                     _ = &mut stopped => break,
                 }
@@ -196,6 +200,7 @@ impl Sink {
             while let Some(item) = events.recv().await {
                 out.write_item(&item);
             }
+            out.finish_file().await;
         });
         Ok(Self {
             stop,
@@ -218,11 +223,19 @@ impl Sink {
 
 struct Output {
     json: bool,
-    file: Option<BufWriter<File>>,
+    /// Written by a helper thread: a stalled file cannot block the runtime.
+    file: Option<LinePump>,
     stdout: Arc<AtomicBool>,
 }
 
 impl Output {
+    /// Waits (off the runtime threads, bounded) until the file thread has written every line.
+    async fn finish_file(&mut self) {
+        if let Some(file) = self.file.take() {
+            let _ = tokio::task::spawn_blocking(move || file.finish(FILE_FLUSH)).await;
+        }
+    }
+
     fn write(&mut self, event: &Event, station: Option<&str>) {
         if let Some(line) = format_event(event, self.json, station) {
             self.line(&line);
@@ -260,8 +273,8 @@ impl Output {
         } else {
             sanitize(line)
         };
-        if let Some(file) = &mut self.file {
-            let _ = writeln!(file, "{line}").and_then(|()| file.flush());
+        if let Some(file) = &self.file {
+            file.send(&line);
         }
         if self.stdout.load(Ordering::Relaxed) {
             stdout_line(&line, self.json);

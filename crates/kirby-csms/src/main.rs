@@ -206,7 +206,10 @@ async fn run_script(
     events: broadcast::Receiver<CsmsEvent>,
     out: &Output,
 ) -> ExitCode {
-    let deadline = Instant::now() + Duration::from_secs(cli.timeout);
+    // `--timeout` is range-checked by clap; `checked_add` keeps a future change from panicking.
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(cli.timeout))
+        .unwrap_or_else(|| Instant::now() + Duration::from_secs(86_400));
     let mut interrupted = false;
     let report = tokio::select! {
         report = script::run(script, handle, events, deadline) => Some(report),

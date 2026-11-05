@@ -33,6 +33,7 @@ use crossterm::event::{Event as TermEvent, EventStream};
 use futures_util::StreamExt;
 use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::scenario::{CancelToken, Scenario, ScenarioRunner};
+use kirby_ocpp_core::station::Snapshot;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 
@@ -113,33 +114,72 @@ struct Ctx {
     out: Out,
 }
 
-/// Forwards one station's events and snapshots into the loop.
-fn forward_station(handle: &StationHandle, out: &Out, tx: &mpsc::UnboundedSender<Inbound>) {
+/// Station events that may wait for the UI loop before new ones are dropped.
+const EVENT_QUEUE: usize = 8192;
+
+/// Pushes one forwarded station message into the bounded queue; a full queue drops it and
+/// counts it in `dropped`.
+fn deliver(tx: &mpsc::Sender<Inbound>, station: usize, msg: Msg, dropped: &mut u64) {
+    if tx.try_send(Inbound::Msg(station, msg)).is_err() {
+        *dropped += 1;
+    }
+}
+
+/// After drops, once the queue has room again: a fresh snapshot (the UI resyncs from it) and
+/// one log line with the count. Keeps `dropped` while there is no room.
+fn resync(
+    tx: &mpsc::Sender<Inbound>,
+    station: usize,
+    dropped: &mut u64,
+    snapshot: impl FnOnce() -> Snapshot,
+) {
+    if *dropped == 0 {
+        return;
+    }
+    let (Ok(first), Ok(second)) = (tx.try_reserve(), tx.try_reserve()) else {
+        return;
+    };
+    first.send(Inbound::Msg(station, Msg::Snapshot(Box::new(snapshot()))));
+    second.send(Inbound::Msg(
+        station,
+        Msg::Notice(
+            NoticeLevel::Error,
+            format!("UI too slow: {dropped} events dropped, state resynced (the log has a gap)"),
+        ),
+    ));
+    *dropped = 0;
+}
+
+/// Forwards one station's events and snapshots into the loop through a bounded queue, so a
+/// stalled draw cannot make memory grow.
+fn forward_station(handle: &StationHandle, station: usize, tx: &mpsc::Sender<Inbound>) {
     let mut events = handle.subscribe();
     let mut snapshots = handle.watch_snapshot();
-    let (out, tx) = (out.clone(), tx.clone());
+    let (handle, tx) = (handle.clone(), tx.clone());
     tokio::spawn(async move {
+        let mut dropped = 0u64;
         loop {
             tokio::select! {
                 ev = events.recv() => match ev {
-                    Ok(e) => out.send(Msg::Event(e)),
-                    Err(broadcast::error::RecvError::Lagged(n)) => out.send(Msg::Notice(
-                        NoticeLevel::Error,
-                        format!("log overflow: {n} events dropped"),
-                    )),
+                    Ok(e) => deliver(&tx, station, Msg::Event(e), &mut dropped),
+                    Err(broadcast::error::RecvError::Lagged(n)) => dropped += n,
                     Err(broadcast::error::RecvError::Closed) => {
-                        let _ = tx.send(Inbound::Gone);
+                        let _ = tx.send(Inbound::Gone).await;
                         return;
                     }
                 },
                 changed = snapshots.changed() => {
                     if changed.is_err() {
-                        let _ = tx.send(Inbound::Gone);
+                        let _ = tx.send(Inbound::Gone).await;
                         return;
                     }
-                    out.send(Msg::Snapshot(Box::new(snapshots.borrow_and_update().clone())));
+                    let snapshot = Msg::Snapshot(Box::new(snapshots.borrow_and_update().clone()));
+                    deliver(&tx, station, snapshot, &mut dropped);
                 }
+                // Retries the resync while nothing else happens.
+                () = tokio::time::sleep(Duration::from_millis(100)), if dropped > 0 => {}
             }
+            resync(&tx, station, &mut dropped, || handle.snapshot());
         }
     });
 }
@@ -166,14 +206,16 @@ pub async fn run_fleet(stations: &[StationHandle], options: TuiOptions) -> Resul
         }
     }
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<Inbound>();
+    // User-action results (few, never dropped) and forwarded station events (bounded).
+    let (user_tx, mut user_rx) = mpsc::unbounded_channel::<Inbound>();
+    let (event_tx, mut event_rx) = mpsc::channel::<Inbound>(EVENT_QUEUE);
     let mut ctxs: Vec<Ctx> = Vec::with_capacity(stations.len());
     for (station, handle) in stations.iter().enumerate() {
         let out = Out {
-            tx: tx.clone(),
+            tx: user_tx.clone(),
             station,
         };
-        forward_station(handle, &out, &tx);
+        forward_station(handle, station, &event_tx);
         ctxs.push(Ctx {
             handle: handle.clone(),
             runner: ScenarioRunner::new(handle.clone()),
@@ -198,7 +240,12 @@ pub async fn run_fleet(stations: &[StationHandle], options: TuiOptions) -> Resul
                 Some(Err(e)) => return Err(e.into()),
                 None => break,
             },
-            Some(inbound) = rx.recv() => match inbound {
+            Some(inbound) = async {
+                tokio::select! {
+                    m = user_rx.recv() => m,
+                    m = event_rx.recv() => m,
+                }
+            } => match inbound {
                 Inbound::Msg(station, msg) => FleetMsg::Station { station, msg },
                 Inbound::Gone => {
                     gone += 1;
@@ -355,5 +402,39 @@ mod tests {
     #[test]
     fn default_tick_rate_is_about_30_fps() {
         assert_eq!(TuiOptions::default().tick_rate, Duration::from_millis(33));
+    }
+
+    fn notice() -> Msg {
+        Msg::Notice(NoticeLevel::Info, "x".to_owned())
+    }
+
+    #[test]
+    fn full_queue_drops_counts_and_resyncs() {
+        let (tx, mut rx) = mpsc::channel::<Inbound>(4);
+        let mut dropped = 0;
+        for _ in 0..10 {
+            deliver(&tx, 0, notice(), &mut dropped);
+        }
+        assert_eq!(dropped, 6);
+        let snapshot = || Snapshot::initial(&kirby_ocpp_core::StationConfig::new("ws://h/p"));
+        // No room: nothing is sent and the count stays.
+        resync(&tx, 0, &mut dropped, snapshot);
+        assert_eq!(dropped, 6);
+        while rx.try_recv().is_ok() {}
+        resync(&tx, 0, &mut dropped, snapshot);
+        assert_eq!(dropped, 0);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Inbound::Msg(0, Msg::Snapshot(_)))
+        ));
+        match rx.try_recv() {
+            Ok(Inbound::Msg(0, Msg::Notice(NoticeLevel::Error, text))) => {
+                assert!(text.contains("6 events dropped"), "{text}");
+            }
+            _ => panic!("expected the drop notice"),
+        }
+        // Nothing dropped: nothing sent.
+        resync(&tx, 0, &mut dropped, snapshot);
+        assert!(rx.try_recv().is_err());
     }
 }

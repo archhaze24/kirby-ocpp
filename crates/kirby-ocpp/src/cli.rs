@@ -220,7 +220,7 @@ pub struct Cli {
     #[arg(global = true,
         long, env = "OCPP_CALL_TIMEOUT_MS", value_name = "MILLISECONDS",
         default_value_t = defaults::CALL_TIMEOUT_MS,
-        value_parser = clap::value_parser!(u64).range(1..)
+        value_parser = clap::value_parser!(u64).range(1..=86_400_000)
     )]
     pub call_timeout_ms: u64,
 
@@ -333,7 +333,7 @@ pub struct RunArgs {
     /// Give up (and fail) after this many seconds, connecting included
     #[arg(
         long, value_name = "SECONDS", default_value_t = 60,
-        value_parser = clap::value_parser!(u64).range(1..)
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
     )]
     pub timeout: u64,
 

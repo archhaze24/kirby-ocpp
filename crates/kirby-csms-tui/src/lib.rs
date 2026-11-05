@@ -262,9 +262,10 @@ where
     tokio::pin!(signal);
 
     let (mut exec, mut done) = Exec::new();
-    let mut queue = vec![resync_msg(handle)];
+    // FIFO: messages produced by effects must be handled in the order the effects ran.
+    let mut queue = std::collections::VecDeque::from([resync_msg(handle)]);
     while !app.quit {
-        let msg = if let Some(msg) = queue.pop() {
+        let msg = if let Some(msg) = queue.pop_front() {
             msg
         } else {
             tokio::select! {

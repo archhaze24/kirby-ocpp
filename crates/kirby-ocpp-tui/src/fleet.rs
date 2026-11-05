@@ -11,7 +11,7 @@ use kirby_ocpp_core::station::Snapshot;
 use kirby_ocpp_core::ws::ConnectionState;
 
 use crate::app::{App, Effect, Mode, Msg, NoticeLevel, update};
-use crate::logview::LogStore;
+use crate::logview::{LOG_BYTE_BUDGET, LogStore};
 
 /// Most log rows kept per station when there is more than one.
 pub const FLEET_LOG_CAPACITY: usize = 500;
@@ -23,6 +23,14 @@ const FLEET_LOG_TOTAL_BUDGET: usize = 20_000;
 /// Log rows kept per station in a fleet of `count` stations.
 pub fn fleet_log_capacity(count: usize) -> usize {
     (FLEET_LOG_TOTAL_BUDGET / count.max(1)).clamp(FLEET_LOG_MIN_CAPACITY, FLEET_LOG_CAPACITY)
+}
+
+/// Approximate log bytes kept across the whole fleet.
+const FLEET_LOG_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+
+/// Approximate log bytes kept per station in a fleet of `count` stations.
+pub fn fleet_log_bytes(count: usize) -> usize {
+    (FLEET_LOG_TOTAL_BYTES / count.max(1)).clamp(256 * 1024, LOG_BYTE_BUDGET)
 }
 
 /// What the event loop must do for the fleet model.
@@ -67,10 +75,11 @@ impl FleetApp {
     /// the fleet help and a smaller log buffer.
     pub fn new(mut apps: Vec<App>) -> Self {
         if apps.len() > 1 {
-            let capacity = fleet_log_capacity(apps.len());
+            let count = apps.len();
+            let capacity = fleet_log_capacity(count);
             for app in &mut apps {
                 app.in_fleet = true;
-                app.log = LogStore::new(capacity);
+                app.log = LogStore::new(capacity).with_byte_budget(fleet_log_bytes(count));
             }
         }
         Self {

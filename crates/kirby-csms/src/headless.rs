@@ -2,11 +2,11 @@
 //! output channel (stdout and the optional log file).
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{self, BufWriter, Write};
+use std::fs::OpenOptions;
+use std::io;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
@@ -14,7 +14,7 @@ use kirby_csms_core::{
     CsmsEvent, CsmsHandle, Direction, DisconnectReason, Frame, StationInfo, StationState,
     TransactionStatus,
 };
-use kirby_ocpp_tui::stdout_pump::StdoutPump;
+use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump};
 use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
@@ -27,7 +27,9 @@ pub struct Output {
     json: bool,
     /// Off while the terminal UI owns the screen: lines then go to the log file only.
     stdout: AtomicBool,
-    file: Mutex<Option<BufWriter<File>>>,
+    /// The log file is written by a helper thread too (same bounded queue as stdout), so a
+    /// file on a stalled mount or an unread FIFO cannot block the async runtime.
+    file: Option<LinePump>,
     /// Stdout is written by a helper thread behind a bounded queue, so a reader that does not
     /// read can never stall the log file or the server.
     pump: StdoutPump,
@@ -38,17 +40,20 @@ impl Output {
         let file = log_file
             .map(|path| OpenOptions::new().create(true).append(true).open(path))
             .transpose()?
-            .map(BufWriter::new);
+            .map(|file| LinePump::to_writer(true, file));
         Ok(Arc::new(Self {
             json,
             stdout: AtomicBool::new(true),
-            file: Mutex::new(file),
+            file,
             pump: StdoutPump::new(json),
         }))
     }
 
     /// Writes out the queued stdout lines (bounded wait); call before the process exits.
     pub fn finish(&self) {
+        if let Some(file) = &self.file {
+            file.finish(Duration::from_secs(5));
+        }
         self.pump.finish(Duration::from_secs(2));
     }
 
@@ -92,11 +97,8 @@ impl Output {
     fn write(&self, stdout_line: &str, file_line: &str) {
         // The file first: it must not wait for stdout. A closed or unread pipe costs stdout
         // lines only.
-        {
-            let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(file) = file.as_mut() {
-                let _ = writeln!(file, "{file_line}").and_then(|()| file.flush());
-            }
+        if let Some(file) = &self.file {
+            file.send(file_line);
         }
         if self.stdout.load(Ordering::Relaxed) {
             self.pump.send(stdout_line);

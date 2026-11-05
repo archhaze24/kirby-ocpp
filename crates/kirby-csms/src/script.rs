@@ -27,7 +27,7 @@
 //! waits may come in any order: a later wait can match a CALL that arrived before an earlier
 //! wait's match. CALLs that arrive while other steps run are kept (the last 10 000).
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -47,6 +47,8 @@ use tokio::time::timeout_at;
 const MAX_WAIT_MS: u64 = 86_400_000;
 /// Inbound CALLs remembered for `wait_call`; the oldest are forgotten beyond this.
 const SEEN_CAP: usize = 10_000;
+/// Approximate bytes of remembered CALLs (names plus kept payloads); the oldest go first.
+const SEEN_BYTES: usize = 16 * 1024 * 1024;
 
 fn default_timeout_ms() -> u64 {
     5_000
@@ -314,15 +316,28 @@ impl Step {
 struct Seen {
     station: String,
     action: String,
+    /// `Null` unless a `wait_call` for this action matches on the payload.
     payload: Value,
     /// A `wait_call` took it already.
     consumed: bool,
+    /// Approximate memory of the entry.
+    bytes: usize,
+}
+
+/// The remembered CALLs and their approximate size.
+#[derive(Default)]
+struct SeenStore {
+    calls: VecDeque<Seen>,
+    bytes: usize,
 }
 
 /// What the pump task collects while steps run.
-#[derive(Default)]
 struct Backlog {
-    seen: Mutex<VecDeque<Seen>>,
+    seen: Mutex<SeenStore>,
+    /// Actions some `wait_call` waits for -> whether any such step matches on the payload.
+    /// Other CALLs are not remembered at all.
+    wanted: HashMap<String, bool>,
+    max_bytes: usize,
     /// Events were lost to a slow receiver; `wait_call` may have missed a CALL.
     lagged: AtomicBool,
     /// The engine's event stream ended.
@@ -364,6 +379,32 @@ impl Drop for Pump {
 }
 
 impl Backlog {
+    fn new(script: &Script) -> Self {
+        let mut wanted: HashMap<String, bool> = HashMap::new();
+        for step in &script.steps {
+            if let Action::WaitCall {
+                call,
+                payload_contains,
+                ..
+            } = &step.action
+            {
+                *wanted.entry(call.clone()).or_default() |= payload_contains.is_some();
+            }
+        }
+        Self::with_wanted(wanted, SEEN_BYTES)
+    }
+
+    fn with_wanted(wanted: HashMap<String, bool>, max_bytes: usize) -> Self {
+        Self {
+            seen: Mutex::new(SeenStore::default()),
+            wanted,
+            max_bytes,
+            lagged: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            wake: Notify::new(),
+        }
+    }
+
     fn record(&self, event: CsmsEvent) {
         if let CsmsEvent::Frame {
             station,
@@ -373,23 +414,41 @@ impl Backlog {
             },
         } = event
         {
-            let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-            if seen.len() >= SEEN_CAP {
-                seen.pop_front();
-            }
-            seen.push_back(Seen {
+            let Some(&needs_payload) = self.wanted.get(&action) else {
+                return;
+            };
+            let payload = if needs_payload { payload } else { Value::Null };
+            let bytes = station.len()
+                + action.len()
+                + 64
+                + if needs_payload {
+                    payload.to_string().len()
+                } else {
+                    0
+                };
+            let mut store = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+            store.bytes += bytes;
+            store.calls.push_back(Seen {
                 station,
                 action,
                 payload,
                 consumed: false,
+                bytes,
             });
+            while store.calls.len() > 1
+                && (store.calls.len() > SEEN_CAP || store.bytes > self.max_bytes)
+            {
+                if let Some(old) = store.calls.pop_front() {
+                    store.bytes = store.bytes.saturating_sub(old.bytes);
+                }
+            }
         }
     }
 
     /// Consumes the oldest unconsumed CALL that fits.
     fn take_call(&self, station: Option<&str>, call: &str, contains: Option<&Value>) -> bool {
-        let mut seen = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
-        let found = seen.iter_mut().find(|seen| {
+        let mut store = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let found = store.calls.iter_mut().find(|seen| {
             !seen.consumed
                 && seen.action == call
                 && station.is_none_or(|id| seen.station == id)
@@ -423,7 +482,7 @@ pub async fn run(
     deadline: Instant,
 ) -> ScenarioReport {
     let started = Instant::now();
-    let backlog = Arc::new(Backlog::default());
+    let backlog = Arc::new(Backlog::new(script));
     let mut runner = Runner {
         handle,
         _pump: Pump::spawn(events, Arc::clone(&backlog)),
@@ -764,5 +823,67 @@ times = 2
         assert!(check_answer(ok("Accepted"), "X", Some("Accepted"), false).is_ok());
         assert!(check_answer(ok("Rejected"), "X", Some("Accepted"), false).is_err());
         assert!(check_answer(ok("Accepted"), "X", None, true).is_err());
+    }
+
+    fn inbound(station: &str, action: &str, payload: Value) -> CsmsEvent {
+        CsmsEvent::Frame {
+            station: station.to_owned(),
+            direction: Direction::In,
+            frame: Frame::call("1", action, payload),
+        }
+    }
+
+    #[test]
+    fn backlog_keeps_only_what_wait_call_needs() {
+        let script = Script::from_toml(
+            r#"
+name = "t"
+[[steps]]
+action = "wait_call"
+call = "Authorize"
+payload_contains = { idTag = "A" }
+[[steps]]
+action = "wait_call"
+call = "Heartbeat"
+"#,
+        )
+        .unwrap();
+        let backlog = Backlog::new(&script);
+        let big = serde_json::json!({"idTag": "A", "pad": "x".repeat(50_000)});
+        backlog.record(inbound("CP-1", "StatusNotification", big.clone()));
+        backlog.record(inbound("CP-1", "Authorize", big));
+        backlog.record(inbound(
+            "CP-1",
+            "Heartbeat",
+            serde_json::json!({"pad": "y".repeat(50_000)}),
+        ));
+        {
+            let store = backlog.seen.lock().unwrap();
+            // The unwanted action is not kept; Heartbeat keeps no payload.
+            assert_eq!(store.calls.len(), 2);
+            assert_eq!(store.calls[1].payload, Value::Null);
+            assert!(store.bytes < 200_000);
+        }
+        assert!(backlog.take_call(Some("CP-1"), "Heartbeat", None));
+        assert!(!backlog.take_call(Some("CP-1"), "Heartbeat", None));
+        let wanted = serde_json::json!({"idTag": "A"});
+        assert!(backlog.take_call(None, "Authorize", Some(&wanted)));
+    }
+
+    #[test]
+    fn backlog_byte_budget_forgets_the_oldest() {
+        let wanted = HashMap::from([("Authorize".to_owned(), true)]);
+        let backlog = Backlog::with_wanted(wanted, 150_000);
+        for i in 0..20 {
+            let pad = "z".repeat(50_000);
+            backlog.record(inbound(
+                &format!("CP-{i}"),
+                "Authorize",
+                serde_json::json!({"pad": pad}),
+            ));
+        }
+        let store = backlog.seen.lock().unwrap();
+        assert!(store.calls.len() <= 3 && !store.calls.is_empty());
+        assert_eq!(store.calls.back().unwrap().station, "CP-19");
     }
 }

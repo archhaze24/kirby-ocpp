@@ -655,7 +655,7 @@ impl App {
                 } else {
                     "->"
                 },
-                f.frame
+                entry.compact()
             ),
             None => format!("{ts}{station} {}", entry.pretty()),
         }

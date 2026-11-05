@@ -60,7 +60,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--reconnect-initial-ms` | `OCPP_RECONNECT_INITIAL_MS` | `1000` | Initial backoff; `0` is rejected (exit 2) unless `--reconnect-max-attempts` is set or reconnect is off |
 | `--reconnect-max-ms` | `OCPP_RECONNECT_MAX_MS` | `30000` | Maximum backoff |
 | `--reconnect-max-attempts` | `OCPP_RECONNECT_MAX_ATTEMPTS` | `0` | `0` = unlimited |
-| `--call-timeout-ms` | `OCPP_CALL_TIMEOUT_MS` | `30000` | CALL response timeout |
+| `--call-timeout-ms` | `OCPP_CALL_TIMEOUT_MS` | `30000` | CALL response timeout (1 to 86 400 000) |
 | `--tls-ca` | `OCPP_TLS_CA_FILE` | system roots | CA bundle (PEM) |
 | `--tls-cert`, `--tls-key` | `OCPP_TLS_CERT_FILE`, `OCPP_TLS_KEY_FILE` | | Client certificate and key for mTLS (both or neither) |
 | `--tls-server-name` | `OCPP_TLS_SERVER_NAME` | URL host | SNI / verification name override |
@@ -77,7 +77,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--print-config` | | | Print the effective configuration as JSON and exit |
 | `--no-tui` | | | Never start the TUI; log to stdout |
 | `--json` | | | JSON lines instead of text (events and the `run` report). Implies headless: the terminal UI never opens |
-| `--log-file` | | | Also append the event log to a file; works under the terminal UI too (the file then gets the events, stdout stays the UI's) |
+| `--log-file` | | | Also append the event log to a file; works under the terminal UI too (the file then gets the events, stdout stays the UI's). A helper thread writes it; if the file cannot keep up (stalled mount, unread FIFO) lines are dropped and a `note` line reports the count |
 | `--licenses` | | | Print licence notices and exit |
 | `-V, --version`, `-h, --help` | | | |
 
@@ -118,7 +118,7 @@ Data browser (Station tab: `K` config keys, `L` local authorization list, `P` ch
 
 The snapshot behind it (`Snapshot::config`, `local_list`, `charging_profiles`) is also available to API users; the local list view holds at most 500 entries (`total` has the real count).
 
-Log view (Logs tab): CALL/RESULT/ERROR correlation, filters (all, calls, errors, station, csms; `f`), search (`s`), pause/follow (`p`), jump to newest (`G`), detail view with scroll (`Enter`; `c`/`y` copies), copy row (`y`) or visible rows (`Y`), export as JSONL (`e`, default `./kirby-ocpp-<id>-<timestamp>.jsonl`), clear with confirmation (`c`). The buffer keeps the last 2000 entries. Copying tries external clipboard tools first and falls back to the terminal's OSC 52 sequence.
+Log view (Logs tab): CALL/RESULT/ERROR correlation, filters (all, calls, errors, station, csms; `f`), search (`s`), pause/follow (`p`), jump to newest (`G`), detail view with scroll (`Enter`; `c`/`y` copies), copy row (`y`) or visible rows (`Y`), export as JSONL (`e`, default `./kirby-ocpp-<id>-<timestamp>.jsonl`), clear with confirmation (`c`). The buffer keeps the last 2000 entries and at most about 64 MiB (fleet: less per station). A frame or line longer than 16 KiB is stored cut, ending in `…[truncated N bytes]`; copy and the detail view then show the cut text, JSONL export writes it as a string, and search looks at the first 4 KiB only. Copying tries external clipboard tools first (a tool that has not finished after 500 ms is killed) and falls back to the terminal's OSC 52 sequence (up to about 55 kB of text).
 
 Scenarios tab: one `Run: <name>` action per built-in scenario (keys `o`, `w`, `s`, `i` for the first four) and `l` to load a scenario file, `x` to cancel the running one.
 
@@ -183,7 +183,7 @@ connector = 1
 wh_delta = 1000
 
 [[steps]]
-action = "expect_call"      # a CALL seen since the last matched expect_call
+action = "expect_call"      # a CALL seen since the last matched expect_call (CALLs of other names are not kept; a payload only if some step uses `match`)
 call = "MeterValues"
 timeout_ms = 3000
 
@@ -195,6 +195,8 @@ expect = { status = "Accepted" }
 ```
 
 Actions: `connect`, `disconnect`, `reconnect`, `boot`, `heartbeat`, `plug`, `unplug`, `authorize`, `start_tx`, `stop_tx`, `meter`, `status`, `fault`, `clear_fault`, `sleep`, `wait_for`, `expect_call` (`call`, optional `direction`, `match` payload subset), `send_raw` (`call`, `payload`, `validate`), `data_transfer`, `set_rule` (`rule`), `clear_rules` (optional `call`), `request_certificate` (Security Whitepaper: key pair + CSR + `SignCertificate`), `security_event` (`event_type`, optional `tech_info`; the event type is checked when the scenario loads). Every step may have `name` and `expect` (`status`, `payload` subset, `error = true`). `wait_for` takes `condition = { kind = ... }` with kinds `connected`, `disconnected`, `registration`, `connector_status`, `tx_active`, `tx_idle`, `no_pending_messages`, and `timeout_ms` (default 5000). Unknown fields are rejected.
+
+`expect_call` fails with "the scenario runner fell behind" only when events were lost and the wanted CALL was not among the frames seen before the loss; the failure reports the loss once, so it does not poison later `expect_call` steps. CALLs already matched (or skipped by a match) are forgotten, and at most 10 000 unmatched CALLs (about 16 MiB) are kept.
 
 ## Response rules
 
@@ -248,14 +250,14 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | `--ping-interval SECONDS` | `PING_INTERVAL` | 30 | WebSocket ping to each station after this much silence, `0` disables the watchdog |
 | `--pong-timeout SECONDS` | `PONG_TIMEOUT` | 10 | a station that sends nothing this long after a ping is dropped (disconnect reason `ping_timeout`); a non-zero `--ping-interval` below this is a usage error (exit 2) |
 | `--transaction-history-cap N` | `TRANSACTION_HISTORY_CAP` | 100 | stopped transactions kept per station |
-| `--call-timeout SECONDS` | `CALL_TIMEOUT` | 30 | wait for a station's answer to a command |
+| `--call-timeout SECONDS` | `CALL_TIMEOUT` | 30 | wait for a station's answer to a command (1 to 86 400) |
 | `--json` | `JSON` | off | JSON lines instead of text |
-| `--log-file PATH` | `LOG_FILE` | none | append every event as a JSON line |
+| `--log-file PATH` | `LOG_FILE` | none | append every event as a JSON line (written by a helper thread; lines that cannot be written in time are dropped and a `note` line counts them) |
 | `--no-tui` | `NO_TUI` | off | never open the terminal UI, log to stdout |
 | `--stdin` | `STDIN` | auto | read JSON-line commands even on a terminal |
 | `--script FILE` | `SCRIPT` | none | run a TOML script, print the report, exit |
 | `--report PATH`, `--junit PATH` | | none | script report as JSON / JUnit XML |
-| `--timeout SECONDS` | | 60 | overall limit of a script run |
+| `--timeout SECONDS` | | 60 | overall limit of a script run (1 to 86 400) |
 | `--licenses` | | | print third-party notices |
 
 Command line beats environment beats default; booleans accept `true/false/t/f/yes/no/y/n/on/off/1/0`, case-insensitive, and nothing else.
@@ -354,7 +356,7 @@ payload = { key = "HeartbeatInterval", value = "60" }
 expect_status = "Accepted"
 ```
 
-`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived earlier than the previous wait's match). CALLs that arrive while other steps run are kept (the last 10 000).
+`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived earlier than the previous wait's match). CALLs that arrive while other steps run are kept (the last 10 000, at most about 16 MiB); only CALLs some `wait_call` of the script names are remembered, and their payload only if a `wait_call` for that action uses `payload_contains`.
 
 Other steps: `sleep {ms}`, `respond {call, payload}` (answer every such CALL with this CALLRESULT payload), `clear_respond {call}`, `inject_fault {call, kind = "call_error" | "silence" | "close" | "invalid_payload", payload, times}`. Every step takes an optional `name`; `timeout_ms` defaults to 5000. The report looks like `kirby-ocpp run` (`PASS` / `FAIL` / `SKIP` per step; `--json` for a JSON report line).
 

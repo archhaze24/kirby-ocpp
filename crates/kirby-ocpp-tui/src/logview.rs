@@ -11,6 +11,19 @@ use crate::text::sanitize;
 
 pub const LOG_CAPACITY: usize = 2000;
 
+/// Approximate bytes one log may hold; the oldest entries go first.
+pub const LOG_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+
+/// Most frame (or station line) text kept per entry. A larger frame is stored as its first
+/// `ENTRY_TEXT_MAX` bytes of compact JSON plus a `…[truncated N bytes]` marker.
+pub const ENTRY_TEXT_MAX: usize = 16 * 1024;
+
+/// Longest row summary kept.
+const SUMMARY_MAX: usize = 1024;
+
+/// How much of an entry's text the search looks at.
+const HAYSTACK_TEXT_MAX: usize = 4 * 1024;
+
 /// Which entries are listed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFilter {
@@ -72,8 +85,12 @@ pub struct LogEntry {
     pub rtt_ms: Option<i64>,
     /// Sequence number of the CALL (on answers) or of the answer (on CALLs).
     pub peer: Option<u64>,
+    /// Bytes cut from the frame or line to keep it small (`None`: stored whole).
+    pub truncated: Option<usize>,
     /// Lower-cased text the search matches against.
     haystack: String,
+    /// Approximate memory held by the entry.
+    bytes: usize,
 }
 
 impl LogEntry {
@@ -88,6 +105,22 @@ impl LogEntry {
         match &self.event {
             Event::Log(l) => Some(l),
             _ => None,
+        }
+    }
+
+    /// The frame as one line of JSON (what "copy visible" uses); truncated frames end in the
+    /// marker.
+    pub fn compact(&self) -> String {
+        match &self.event {
+            Event::Frame(f) => self.compact_text(f),
+            _ => self.pretty(),
+        }
+    }
+
+    fn compact_text(&self, f: &FrameRecord) -> String {
+        match (&f.frame, self.truncated) {
+            (Value::String(kept), Some(_)) => kept.clone(),
+            _ => f.frame.to_string(),
         }
     }
 
@@ -109,8 +142,11 @@ impl LogEntry {
     }
 
     /// The entry as pretty text (what "copy" and the detail view show).
+    ///
+    /// A truncated entry yields its kept text and the truncation marker.
     pub fn pretty(&self) -> String {
         match &self.event {
+            Event::Frame(f) if self.truncated.is_some() => self.compact_text(f),
             Event::Frame(f) => serde_json::to_string_pretty(&f.frame).unwrap_or_default(),
             Event::Log(l) => l.text.clone(),
             Event::StateChanged => String::new(),
@@ -118,10 +154,21 @@ impl LogEntry {
     }
 }
 
+/// The longest prefix of `text` of at most `max` bytes that ends on a character boundary.
+fn prefix(text: &str, max: usize) -> &str {
+    let mut end = max.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 #[derive(Debug)]
 pub struct LogStore {
     entries: VecDeque<LogEntry>,
     capacity: usize,
+    max_bytes: usize,
+    bytes: usize,
     next_seq: u64,
     /// CALL message id -> (seq, ts) while unanswered.
     pending: HashMap<String, (u64, DateTime<Utc>)>,
@@ -148,6 +195,8 @@ impl LogStore {
         Self {
             entries: VecDeque::new(),
             capacity: capacity.max(1),
+            max_bytes: LOG_BYTE_BUDGET,
+            bytes: 0,
             next_seq: 0,
             pending: HashMap::new(),
             filter: LogFilter::All,
@@ -155,6 +204,18 @@ impl LogStore {
             follow: true,
             selected: None,
         }
+    }
+
+    /// Sets the approximate memory budget (default [`LOG_BYTE_BUDGET`]).
+    #[must_use]
+    pub fn with_byte_budget(mut self, max_bytes: usize) -> Self {
+        self.max_bytes = max_bytes.max(1);
+        self
+    }
+
+    /// Approximate memory held by the entries.
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn len(&self) -> usize {
@@ -167,6 +228,7 @@ impl LogStore {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.bytes = 0;
         self.pending.clear();
         self.selected = None;
         self.follow = true;
@@ -176,9 +238,16 @@ impl LogStore {
         let Some(entry) = self.build(event) else {
             return;
         };
-        if self.entries.len() == self.capacity
-            && let Some(old) = self.entries.pop_front()
+        self.bytes += entry.bytes;
+        self.entries.push_back(entry);
+        // Evict the oldest while over the count or the byte budget (the newest always stays).
+        while self.entries.len() > 1
+            && (self.entries.len() > self.capacity || self.bytes > self.max_bytes)
         {
+            let Some(old) = self.entries.pop_front() else {
+                break;
+            };
+            self.bytes = self.bytes.saturating_sub(old.bytes);
             if old.kind == Some(FrameKind::Call)
                 && let Some(id) = old.frame().and_then(|f| f.msg_id.as_ref())
                 && self.pending.get(id).is_some_and(|(s, _)| *s == old.seq)
@@ -189,25 +258,47 @@ impl LogStore {
                 self.selected = self.entries.front().map(|e| e.seq);
             }
         }
-        self.entries.push_back(entry);
     }
 
-    fn build(&mut self, event: Event) -> Option<LogEntry> {
+    fn build(&mut self, mut event: Event) -> Option<LogEntry> {
         let seq = self.next_seq;
-        let (ts, kind, summary, haystack) = match &event {
+        let mut truncated = None;
+        // A parsed `Value` costs a few times its JSON text.
+        let held: usize;
+        let (ts, kind, summary, haystack) = match &mut event {
             Event::Frame(f) => {
                 let kind = frame_kind(&f.frame);
-                let summary = summarize(&f.frame);
+                // The row shows a short summary; a huge string field must not be kept whole.
+                let summary = prefix(&summarize(&f.frame), SUMMARY_MAX).to_owned();
+                let text = f.frame.to_string();
+                if text.len() > ENTRY_TEXT_MAX {
+                    let kept = prefix(&text, ENTRY_TEXT_MAX);
+                    let cut = text.len() - kept.len();
+                    f.frame = Value::String(format!("{kept}…[truncated {cut} bytes]"));
+                    truncated = Some(cut);
+                }
+                held = match &f.frame {
+                    Value::String(kept) if truncated.is_some() => kept.len(),
+                    _ => text.len().saturating_mul(3),
+                };
                 let hay = format!(
                     "{} {} {}",
                     f.action.as_deref().unwrap_or(""),
                     summary,
-                    f.frame
+                    prefix(&text, HAYSTACK_TEXT_MAX)
                 )
                 .to_lowercase();
                 (f.ts, Some(kind), summary, hay)
             }
             Event::Log(l) => {
+                if l.text.len() > ENTRY_TEXT_MAX {
+                    let cut = l.text.len() - prefix(&l.text, ENTRY_TEXT_MAX).len();
+                    l.text.truncate(l.text.len() - cut);
+                    let marker = format!("…[truncated {cut} bytes]");
+                    l.text.push_str(&marker);
+                    truncated = Some(cut);
+                }
+                held = l.text.len();
                 let text = sanitize(&l.text);
                 (l.ts, None, text.clone(), text.to_lowercase())
             }
@@ -235,6 +326,7 @@ impl LogStore {
                 _ => {}
             }
         }
+        let bytes = held + summary.len() + haystack.len() + 256;
         Some(LogEntry {
             seq,
             ts,
@@ -243,7 +335,9 @@ impl LogStore {
             summary,
             rtt_ms,
             peer,
+            truncated,
             haystack,
+            bytes,
         })
     }
 
@@ -556,5 +650,83 @@ mod tests {
             json!([2, "i", "X", {"k": "\u{1b}[31m"}]),
         ));
         assert!(!log.visible()[1].summary.contains('\x1b'));
+    }
+
+    fn big_call(ms: i64, id: &str, numbers: usize) -> Event {
+        let data: Vec<u32> = (0..u32::try_from(numbers).unwrap()).collect();
+        frame(
+            ms,
+            Direction::Out,
+            id,
+            Some("DataTransfer"),
+            json!([2, id, "DataTransfer", {"data": data, "tail": ["needle-at-the-end"]}]),
+        )
+    }
+
+    #[test]
+    fn large_frames_are_truncated_with_a_marker() {
+        let mut log = LogStore::default();
+        log.push(big_call(0, "1", 100_000));
+        let e = log.get(0).unwrap();
+        let cut = e.truncated.expect("truncated");
+        assert!(cut > 100_000);
+        assert!(e.bytes < ENTRY_TEXT_MAX * 2 + 4096, "{}", e.bytes);
+        let text = e.pretty();
+        assert!(
+            text.starts_with("[2,\"1\",\"DataTransfer\""),
+            "{}",
+            &text[..40]
+        );
+        assert!(text.ends_with(&format!("…[truncated {cut} bytes]")));
+        assert_eq!(e.compact(), text);
+        // Search looks at the head only; the summary still works.
+        log.search = "needle-at-the-end".to_owned();
+        assert_eq!(log.visible_count(), 0);
+        log.search = "datatransfer".to_owned();
+        assert_eq!(log.visible_count(), 1);
+    }
+
+    #[test]
+    fn small_frames_are_stored_whole() {
+        let mut log = LogStore::default();
+        log.push(big_call(0, "1", 10));
+        let e = log.get(0).unwrap();
+        assert!(e.truncated.is_none());
+        assert!(e.pretty().contains("needle-at-the-end"));
+    }
+
+    #[test]
+    fn long_station_lines_are_truncated_on_a_char_boundary() {
+        let mut log = LogStore::default();
+        log.push(Event::Log(LogRecord {
+            ts: at(0),
+            level: LogLevel::Info,
+            text: "é".repeat(ENTRY_TEXT_MAX),
+        }));
+        let e = log.get(0).unwrap();
+        assert!(e.truncated.is_some());
+        assert!(e.pretty().contains("…[truncated"));
+    }
+
+    #[test]
+    fn byte_budget_evicts_the_oldest() {
+        let mut log = LogStore::default().with_byte_budget(200_000);
+        for i in 0..40 {
+            log.push(big_call(i, &i.to_string(), 20_000));
+        }
+        assert!(log.len() < 40 && !log.is_empty());
+        assert!(
+            log.bytes() <= 200_000 + ENTRY_TEXT_MAX * 3,
+            "{}",
+            log.bytes()
+        );
+        // The newest entry is kept and the bookkeeping matches the entries.
+        assert_eq!(log.get(39).unwrap().seq, 39);
+        let sum: usize = log.entries.iter().map(|e| e.bytes).sum();
+        assert_eq!(sum, log.bytes());
+        // Even an over-budget single entry stays.
+        let mut tiny = LogStore::default().with_byte_budget(1);
+        tiny.push(big_call(0, "1", 10));
+        assert_eq!(tiny.len(), 1);
     }
 }
