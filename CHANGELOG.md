@@ -9,6 +9,10 @@ tag as the GitHub release notes.
 
 Work in progress after 0.4.0.
 
+### Documentation
+
+- `README.md` is now a landing page; detailed pages live under `docs/` (index in `docs/README.md`): architecture, emulator, CSMS, scenarios and scripts, security, configuration reference, testing, development.
+
 ## [0.4.0] - 2026-11-05
 
 **kirby-csms joins kirby-ocpp: a full central system for your terminal, the OCPP 1.6 Security
