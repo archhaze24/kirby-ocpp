@@ -1,5 +1,7 @@
 //! Single-line text editing and display-width helpers (unicode-correct).
 
+use std::fmt::Write as _;
+
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -8,11 +10,38 @@ pub fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Replaces control characters (which could drive the terminal) with a visible dot.
+/// Characters that must not reach a terminal or a log line: C0/C1 controls (escape sequences,
+/// newlines), the Unicode line and paragraph separators and the bidirectional overrides.
+pub fn is_unsafe_char(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+        )
+}
+
+/// Replaces unsafe characters (see [`is_unsafe_char`]) with a visible dot.
 pub fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_control() { '·' } else { c })
+        .map(|c| if is_unsafe_char(c) { '·' } else { c })
         .collect()
+}
+
+/// Escapes the unsafe characters of one JSON text as `\uXXXX`. serde already escapes the C0
+/// controls; this covers the rest (C1, U+2028/2029, bidi), which are legal raw in JSON.
+pub fn escape_json_unsafe(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if is_unsafe_char(c) {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                let _ = write!(out, "\\u{unit:04x}");
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Drops the `user:password@` part of a URL so credentials are never displayed or printed.
@@ -77,7 +106,7 @@ impl TextInput {
     }
 
     pub fn insert_char(&mut self, c: char) {
-        if c.is_control() {
+        if is_unsafe_char(c) {
             return;
         }
         self.text.insert(self.cursor, c);
@@ -162,7 +191,7 @@ fn sanitize_line(s: &str) -> String {
     s.chars()
         .filter_map(|c| match c {
             '\n' | '\r' | '\t' => Some(' '),
-            c if c.is_control() => None,
+            c if is_unsafe_char(c) => None,
             c => Some(c),
         })
         .collect()
@@ -197,6 +226,18 @@ mod tests {
         let mut t = TextInput::default();
         t.insert_str("a\nb\x1b[31m\tc");
         assert_eq!(t.text(), "a b[31m c");
+    }
+
+    #[test]
+    fn sanitize_covers_c1_separators_and_bidi() {
+        let hostile = "a\u{85}b\u{9b}c\u{2028}d\u{2029}e\u{202e}f\u{2066}g\u{1b}h\n";
+        assert_eq!(sanitize(hostile), "a·b·c·d·e·f·g·h·");
+        let escaped = escape_json_unsafe("\"a\u{85}\u{202e}b\u{1f600}\"");
+        assert_eq!(escaped, "\"a\\u0085\\u202eb\u{1f600}\"");
+        assert_eq!(
+            serde_json::from_str::<String>(&escaped).unwrap(),
+            "a\u{85}\u{202e}b\u{1f600}"
+        );
     }
 
     #[test]

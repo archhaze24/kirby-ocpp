@@ -1163,6 +1163,7 @@ dependencies = [
  "kirby-csms-core",
  "kirby-csms-tui",
  "kirby-ocpp-core",
+ "kirby-ocpp-tui",
  "rcgen",
  "serde",
  "serde_json",

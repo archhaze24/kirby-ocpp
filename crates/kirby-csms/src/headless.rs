@@ -7,12 +7,15 @@ use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use chrono::{SecondsFormat, Utc};
 use kirby_csms_core::{
     CsmsEvent, CsmsHandle, Direction, DisconnectReason, Frame, StationInfo, StationState,
     TransactionStatus,
 };
+use kirby_ocpp_tui::stdout_pump::StdoutPump;
+use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
@@ -25,6 +28,9 @@ pub struct Output {
     /// Off while the terminal UI owns the screen: lines then go to the log file only.
     stdout: AtomicBool,
     file: Mutex<Option<BufWriter<File>>>,
+    /// Stdout is written by a helper thread behind a bounded queue, so a reader that does not
+    /// read can never stall the log file or the server.
+    pump: StdoutPump,
 }
 
 impl Output {
@@ -37,7 +43,13 @@ impl Output {
             json,
             stdout: AtomicBool::new(true),
             file: Mutex::new(file),
+            pump: StdoutPump::new(json),
         }))
+    }
+
+    /// Writes out the queued stdout lines (bounded wait); call before the process exits.
+    pub fn finish(&self) {
+        self.pump.finish(Duration::from_secs(2));
     }
 
     /// Turns the stdout lines on or off (the log file is unaffected).
@@ -47,7 +59,7 @@ impl Output {
 
     /// An event: `human` on stdout, or `value` with `--json`; `value` goes to the log file.
     pub fn event(&self, value: &Value, human: &str) {
-        let json_line = value.to_string();
+        let json_line = escape_json_unsafe(&value.to_string());
         if self.json {
             self.write(&json_line, &json_line);
         } else {
@@ -65,7 +77,7 @@ impl Output {
 
     /// A machine line (stdin command results): JSON on stdout in both modes.
     pub fn json_line(&self, value: &Value) {
-        let line = value.to_string();
+        let line = escape_json_unsafe(&value.to_string());
         self.write(&line, &line);
     }
 
@@ -78,22 +90,24 @@ impl Output {
     }
 
     fn write(&self, stdout_line: &str, file_line: &str) {
-        // A closed pipe must not kill the server.
-        if self.stdout.load(Ordering::Relaxed) {
-            let _ = writeln!(io::stdout().lock(), "{stdout_line}");
+        // The file first: it must not wait for stdout. A closed or unread pipe costs stdout
+        // lines only.
+        {
+            let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some(file) = file.as_mut() {
+                let _ = writeln!(file, "{file_line}").and_then(|()| file.flush());
+            }
         }
-        let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(file) = file.as_mut() {
-            let _ = writeln!(file, "{file_line}").and_then(|()| file.flush());
+        if self.stdout.load(Ordering::Relaxed) {
+            self.pump.send(stdout_line);
         }
     }
 }
 
-/// Replaces control characters (which could drive the terminal, or fake extra lines) with a dot.
+/// Replaces control characters, line separators and bidi overrides (which could drive the
+/// terminal, or fake extra lines) with a dot.
 pub fn sanitize(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { '\u{b7}' } else { c })
-        .collect()
+    kirby_ocpp_tui::text::sanitize(text)
 }
 
 /// Prints the `listening` line.

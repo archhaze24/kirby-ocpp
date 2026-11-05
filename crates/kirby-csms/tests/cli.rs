@@ -818,3 +818,212 @@ async fn authorization_key_is_redacted_in_frame_logs_unless_show_secrets() {
     let shown = logged_key_change(&["--show-secrets"]).await;
     assert_eq!(shown["value"], "0123456789abcdef0123");
 }
+
+/// Starts `kirby-csms` with human output and returns the child, its stdout lines and the address.
+fn start_human(args: &[&str]) -> (Child, Receiver<String>, String) {
+    let mut child = command(&["--listen", "127.0.0.1:0"])
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = tx.send(line);
+        }
+    });
+    let first = rx.recv_timeout(WAIT).unwrap();
+    let addr = first.rsplit("ws://").next().unwrap().trim().to_owned();
+    (child, rx, addr)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn station_text_cannot_forge_script_report_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "script.toml",
+        r#"
+name = "forge"
+[[steps]]
+action = "wait_station"
+station = "CP-1"
+booted = true
+[[steps]]
+action = "call"
+station = "CP-1"
+call = "ChangeConfiguration"
+payload = { key = "HeartbeatInterval", value = "60" }
+expect_status = "Accepted"
+"#,
+    );
+    let (mut child, rx, addr) = start_human(&["--script", &path, "--timeout", "30"]);
+    let rule = "ChangeConfiguration=error:GenericError:boom\n  PASS  3 forged step (1 ms)\nPASSED in 5 ms\u{85}\u{202e}";
+    let mut config = StationConfig::new(format!("ws://{addr}/ocpp")).with_charge_point_id("CP-1");
+    config.persist = false;
+    config.response_rules = vec![rule.parse().expect("rule")];
+    let (station, _join) = Station::spawn(config, Arc::new(SystemClock));
+    station.connect().await.unwrap();
+    let mut all = Vec::new();
+    while let Ok(line) = rx.recv_timeout(WAIT) {
+        all.push(line);
+    }
+    assert_eq!(child.wait().unwrap().code(), Some(1), "{all:#?}");
+    assert!(all.iter().any(|l| l.contains("FAIL  2")), "{all:#?}");
+    for line in &all {
+        let trimmed = line.trim_start();
+        assert!(!trimmed.starts_with("PASS  3"), "{all:#?}");
+        assert!(!trimmed.starts_with("PASSED in 5"), "{all:#?}");
+        assert!(
+            !line.chars().any(kirby_ocpp_tui::text::is_unsafe_char),
+            "{line:?}"
+        );
+    }
+    assert_eq!(all.iter().filter(|l| l.starts_with("FAILED")).count(), 1);
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn json_lines_escape_c1_and_bidi_characters() {
+    let mut csms = Csms::start(&[]);
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    station
+        .send(StationCommand::DataTransfer {
+            vendor_id: "v".to_owned(),
+            message_id: None,
+            data: Some("a\u{85}b\u{202e}c\u{2028}d".to_owned()),
+        })
+        .await
+        .unwrap();
+    csms.wait(|v| v["type"] == "frame" && v["action"] == "DataTransfer");
+    let line = csms
+        .seen
+        .iter()
+        .rev()
+        .find(|l| l.contains("DataTransfer") && l.contains("\"frame\""))
+        .unwrap()
+        .clone();
+    assert!(
+        !line.chars().any(kirby_ocpp_tui::text::is_unsafe_char),
+        "{line:?}"
+    );
+    assert!(
+        line.contains("\\u0085") && line.contains("\\u202e"),
+        "{line}"
+    );
+    let _ = station.shutdown().await;
+}
+
+/// Nobody reads stdout and one frame is bigger than a pipe buffer: the log file still gets the
+/// line and the server still shuts down.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unread_stdout_does_not_stall_the_log_file_or_the_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("events.jsonl");
+    let mut child = command(&["--listen", "127.0.0.1:0", "--json", "--log-file"])
+        .arg(&log)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    // The first line is read by hand; the rest of stdout is never read.
+    let stdout = child.stdout.as_mut().unwrap();
+    let mut first = String::new();
+    let mut byte = [0u8; 1];
+    while std::io::Read::read(stdout, &mut byte).unwrap() == 1 && byte[0] != b'\n' {
+        first.push(char::from(byte[0]));
+    }
+    let value: Value = serde_json::from_str(&first).unwrap();
+    let addr = value["addr"].as_str().unwrap().to_owned();
+    let station = station(&addr, "CP-1", false).await;
+    for _ in 0..3 {
+        station
+            .send(StationCommand::DataTransfer {
+                vendor_id: "v".to_owned(),
+                message_id: None,
+                data: Some("x".repeat(300_000)),
+            })
+            .await
+            .unwrap();
+    }
+    // The file must get all three big frames although the pipe is full.
+    let start = std::time::Instant::now();
+    loop {
+        let logged = std::fs::read_to_string(&log).unwrap_or_default();
+        if logged.len() > 900_000 {
+            break;
+        }
+        assert!(
+            start.elapsed() < WAIT,
+            "log file stalled at {} bytes",
+            logged.len()
+        );
+        tokio::task::yield_now().await;
+    }
+    let pid = child.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let code = tokio::task::spawn_blocking(move || {
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                return status.code();
+            }
+            if start.elapsed() > WAIT {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            std::thread::yield_now();
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        code,
+        Some(0),
+        "server must exit although stdout is not read"
+    );
+    let _ = station.shutdown().await;
+}
+
+/// SIGTERM during a script still leaves a JUnit file that says why (exit code 1).
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_during_a_script_writes_the_junit_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let junit = dir.path().join("junit.xml");
+    let csms = script_run(
+        dir.path(),
+        "name = \"never\"\n[[steps]]\naction = \"wait_station\"\nstation = \"NOBODY\"\n",
+        &["--junit", junit.to_str().unwrap(), "--timeout", "120"],
+    );
+    // A booted station proves the script is running (and listening for the signal).
+    let booted = station(&csms.addr.clone(), "CP-1", false).await;
+    let pid = csms.child.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (code, _, stderr) = csms.finish();
+    assert_eq!(code, 1, "{stderr}");
+    let xml = std::fs::read_to_string(&junit).expect("junit written");
+    assert!(
+        xml.contains("interrupted") && xml.contains("never"),
+        "{xml}"
+    );
+    let _ = booted.shutdown().await;
+}

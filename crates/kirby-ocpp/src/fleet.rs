@@ -17,7 +17,7 @@ use kirby_ocpp_tui::{TuiError, TuiOptions};
 use serde_json::{Value, json};
 
 use crate::cli::RunArgs;
-use crate::headless::Sink;
+use crate::headless::{Sink, stdout_line};
 use crate::{
     EXIT_INTERRUPTED, EXIT_USAGE, connect_and_run, load_scenario, print_report, shutdown_signal,
     usage_error, write_junit, write_report,
@@ -40,7 +40,18 @@ pub async fn interactive(
         Ok(fleet) => fleet,
         Err(error) => return usage_error(&error.to_string()),
     };
+    let mut sink = None;
     if tui {
+        if log_file.is_some() {
+            match Sink::spawn_fleet(fleet.subscribe(), json, log_file, false) {
+                Ok(started) => sink = Some(started),
+                Err(error) => {
+                    fleet.shutdown().await;
+                    eprintln!("error: cannot open the log file: {error}");
+                    return ExitCode::from(EXIT_USAGE);
+                }
+            }
+        }
         let handles: Vec<_> = fleet.stations().iter().map(|(_, h)| h.clone()).collect();
         let mut ui = std::pin::pin!(kirby_ocpp_tui::run_fleet(&handles, TuiOptions::default()));
         // Like the single station: connect at startup (staggered), while the UI is up.
@@ -66,25 +77,37 @@ pub async fn interactive(
         match result {
             Ok(()) => {
                 fleet.shutdown().await;
+                if let Some(sink) = sink {
+                    sink.finish().await;
+                }
                 return ExitCode::SUCCESS;
             }
             Err(error @ TuiError::Terminal(_)) => {
                 eprintln!("note: {error}; running headless (pass --no-tui to hide this)");
+                if let Some(sink) = &sink {
+                    sink.enable_stdout();
+                }
             }
             Err(error) => {
                 fleet.shutdown().await;
+                if let Some(sink) = sink {
+                    sink.finish().await;
+                }
                 eprintln!("error: {error}");
                 return ExitCode::FAILURE;
             }
         }
     }
-    let sink = match Sink::spawn_fleet(fleet.subscribe(), json, log_file) {
-        Ok(sink) => sink,
-        Err(error) => {
-            fleet.shutdown().await;
-            eprintln!("error: cannot open the log file: {error}");
-            return ExitCode::from(EXIT_USAGE);
-        }
+    let sink = match sink {
+        Some(sink) => sink,
+        None => match Sink::spawn_fleet(fleet.subscribe(), json, log_file, true) {
+            Ok(sink) => sink,
+            Err(error) => {
+                fleet.shutdown().await;
+                eprintln!("error: cannot open the log file: {error}");
+                return ExitCode::from(EXIT_USAGE);
+            }
+        },
     };
     let interrupted = tokio::select! {
         failed = fleet.connect_all() => {
@@ -120,7 +143,7 @@ pub async fn run(
         Ok(fleet) => fleet,
         Err(error) => return usage_error(&error.to_string()),
     };
-    let sink = match Sink::spawn_fleet(fleet.subscribe(), json, log_file) {
+    let sink = match Sink::spawn_fleet(fleet.subscribe(), json, log_file, true) {
         Ok(sink) => sink,
         Err(error) => {
             fleet.shutdown().await;
@@ -181,7 +204,6 @@ pub async fn run(
     for (id, outcome) in ids.iter().zip(&outcomes) {
         match outcome {
             Ok(report) => {
-                print_report(report, json, Some(id));
                 if let Some(path) = &args.report
                     && let Err(error) = write_report(&station_report_path(path, id), report)
                 {
@@ -200,11 +222,17 @@ pub async fn run(
             }
         }
     }
-    print_aggregate(ids.len(), &failed, &stations, json);
     write_failed |= args
         .junit
         .as_ref()
         .is_some_and(|path| !write_fleet_junit(path, &scenario.name, &ids, &outcomes));
+    // Files first: a closed stdout must not cost the machine-readable reports.
+    for (id, outcome) in ids.iter().zip(&outcomes) {
+        if let Ok(report) = outcome {
+            print_report(report, json, Some(id));
+        }
+    }
+    print_aggregate(ids.len(), &failed, &stations, json);
 
     if write_failed || !failed.is_empty() {
         ExitCode::FAILURE
@@ -251,23 +279,24 @@ fn write_fleet_junit(
 fn print_aggregate(total: usize, failed: &[&str], stations: &[Value], json: bool) {
     let passed = total - failed.len();
     if json {
-        println!(
-            "{}",
-            json!({
-                "type": "fleet_report",
-                "passed": failed.is_empty(),
-                "total": total,
-                "passed_count": passed,
-                "failed": failed,
-                "stations": stations,
-            })
-        );
+        let value = json!({
+            "type": "fleet_report",
+            "passed": failed.is_empty(),
+            "total": total,
+            "passed_count": passed,
+            "failed": failed,
+            "stations": stations,
+        });
+        stdout_line(&value.to_string(), true);
     } else if failed.is_empty() {
-        println!("fleet: {passed}/{total} stations PASSED");
+        stdout_line(&format!("fleet: {passed}/{total} stations PASSED"), false);
     } else {
-        println!(
-            "fleet: {passed}/{total} stations passed, FAILED: {}",
-            failed.join(", ")
+        stdout_line(
+            &format!(
+                "fleet: {passed}/{total} stations passed, FAILED: {}",
+                failed.join(", ")
+            ),
+            false,
         );
     }
 }

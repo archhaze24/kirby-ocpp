@@ -3,7 +3,7 @@
 //! Mirrors the options of the TypeScript CLI (`src/cli.ts`, README) and fixes its
 //! config bugs: precedence is **CLI flag > environment variable > default** (in the
 //! TS CLI commander always supplied defaults, so the `OCPP_*` fallbacks were dead
-//! code), and booleans are parsed strictly: only `true/false/yes/no/y/n/on/off/1/0`
+//! code), and booleans are parsed strictly: only `true/false/t/f/yes/no/y/n/on/off/1/0` (any case)
 //! are accepted (any other text is an error, whereas `z.coerce.boolean()` made every
 //! non-empty string `true`).
 
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Args, Parser, Subcommand};
 use kirby_ocpp_core::StationConfig;
-use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults, validate_ws_url};
+use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults};
 use kirby_ocpp_core::fleet::{FleetSpec, MAX_COUNT};
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::station::ResponseRule;
@@ -41,7 +41,14 @@ Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage 
 )]
 pub struct Cli {
     /// Central System WebSocket URL, e.g. ws://localhost:9000/ocpp
-    #[arg(global = true, short, long, env = "OCPP_URL", value_name = "URL", value_parser = parse_url)]
+    #[arg(
+        global = true,
+        short,
+        long,
+        env = "OCPP_URL",
+        value_name = "URL",
+        hide_env_values = true
+    )]
     pub url: Option<String>,
 
     /// Charge point id
@@ -51,7 +58,7 @@ pub struct Cli {
     )]
     pub id: String,
 
-    /// Number of stations to run (fleet mode, 1-1000); needs a `{n}` placeholder in the id
+    /// Number of stations to run (fleet mode, 1-1000); the id needs an index placeholder such as CP-{n:03}
     #[arg(global = true,
         long, env = "OCPP_COUNT", value_name = "COUNT", default_value_t = 1,
         value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_COUNT))
@@ -62,7 +69,7 @@ pub struct Cli {
     #[arg(global = true, long, env = "OCPP_ID_TEMPLATE", value_name = "TEMPLATE", value_parser = non_empty)]
     pub id_template: Option<String>,
 
-    /// Index substituted for {n} in the first station's id
+    /// Index of the first station of a fleet (the value its id placeholder gets)
     #[arg(
         global = true,
         long,
@@ -281,11 +288,11 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
     #[arg(global = true, long)]
     pub no_tui: bool,
 
-    /// Machine-readable output: one JSON object per line (events, and the report of `run`)
+    /// Machine-readable output: one JSON object per line (events, and the report of `run`); never opens the terminal UI
     #[arg(global = true, long)]
     pub json: bool,
 
-    /// Also append the headless event log to this file
+    /// Also append the event log to this file (with the terminal UI too)
     #[arg(global = true, long, value_name = "PATH", value_parser = non_empty_path)]
     pub log_file: Option<PathBuf>,
 
@@ -401,11 +408,6 @@ impl Cli {
             additional_root_certificate_check: self.additional_root_certificate_check,
         })
     }
-}
-
-fn parse_url(value: &str) -> Result<String, String> {
-    validate_ws_url(value)?;
-    Ok(value.to_owned())
 }
 
 fn parse_rule(value: &str) -> Result<ResponseRule, String> {

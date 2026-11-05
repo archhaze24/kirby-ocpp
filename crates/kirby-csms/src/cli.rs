@@ -1,5 +1,5 @@
 //! Command-line interface. Precedence is CLI flag > environment variable (`KIRBY_CSMS_*`) >
-//! default; booleans are strict (`true/false/yes/no/y/n/on/off/1/0`), like `kirby-ocpp`.
+//! default; booleans accept only `true/false/t/f/yes/no/y/n/on/off/1/0` (any case), like `kirby-ocpp`.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -66,9 +66,8 @@ pub struct Cli {
     /// Basic Auth key of one station as ID=KEY (repeatable). The station sends the key as the
     /// password and its id as the user name. Environment KIRBY_CSMS_AUTH_KEY holds several
     /// entries separated by `;` (used only when no --auth-key is given)
-    ///
-    /// Parsed by `apply_env_auth_keys` rather than by clap, so that a rejected value is never
-    /// echoed in an error message.
+    // Parsed by `apply_env_auth_keys` rather than by clap, so that a rejected value is never
+    // echoed in an error message.
     #[arg(long = "auth-key", value_name = "ID=KEY", hide_env_values = true)]
     auth_key_raw: Vec<String>,
 

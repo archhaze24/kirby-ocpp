@@ -3,13 +3,46 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::fleet::{FleetEvents, FleetItem};
 use kirby_ocpp_core::station::{Direction, Event};
+use kirby_ocpp_tui::stdout_pump::StdoutPump;
+use kirby_ocpp_tui::text::{escape_json_unsafe, sanitize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
+
+/// How long the process waits at exit for queued stdout lines to be written.
+const STDOUT_FLUSH: Duration = Duration::from_secs(2);
+
+static STDOUT: OnceLock<StdoutPump> = OnceLock::new();
+
+/// Sets up the stdout queue; `json` picks the form of its "lines dropped" note.
+pub fn init_stdout(json: bool) {
+    let _ = STDOUT.set(StdoutPump::new(json));
+}
+
+/// Queues one stdout line, made safe for a terminal: control characters, line separators and
+/// bidi overrides are replaced (human) or escaped (`json`). Never blocks, never panics.
+pub fn stdout_line(line: &str, json: bool) {
+    let line = if json {
+        escape_json_unsafe(line)
+    } else {
+        sanitize(line)
+    };
+    STDOUT.get_or_init(|| StdoutPump::new(json)).send(&line);
+}
+
+/// Writes out the queued stdout lines (bounded wait); call before the process exits.
+pub fn flush_stdout() {
+    if let Some(pump) = STDOUT.get() {
+        pump.finish(STDOUT_FLUSH);
+    }
+}
 
 /// One event as a JSON object: the serde form plus the extracted `payload` of frames.
 pub fn event_json(event: &Event) -> Value {
@@ -80,19 +113,31 @@ pub fn tagged(line: &str, station: Option<&str>) -> String {
 pub struct Sink {
     stop: oneshot::Sender<()>,
     task: JoinHandle<()>,
+    stdout: Arc<AtomicBool>,
 }
 
 impl Sink {
     /// Subscribes to the station now (so nothing after this call is missed).
-    pub fn spawn(handle: &StationHandle, json: bool, log_file: Option<&Path>) -> io::Result<Self> {
+    pub fn spawn(
+        handle: &StationHandle,
+        json: bool,
+        log_file: Option<&Path>,
+        stdout: bool,
+    ) -> io::Result<Self> {
         let file = log_file
             .map(|path| OpenOptions::new().create(true).append(true).open(path))
             .transpose()?
             .map(BufWriter::new);
+        let stdout_on = Arc::new(AtomicBool::new(stdout));
         let mut rx = handle.subscribe();
         let (stop, mut stopped) = oneshot::channel();
+        let flag = Arc::clone(&stdout_on);
         let task = tokio::spawn(async move {
-            let mut out = Output { json, file };
+            let mut out = Output {
+                json,
+                file,
+                stdout: flag,
+            };
             loop {
                 tokio::select! {
                     event = rx.recv() => match event {
@@ -110,7 +155,11 @@ impl Sink {
                 out.write(&event, None);
             }
         });
-        Ok(Self { stop, task })
+        Ok(Self {
+            stop,
+            task,
+            stdout: stdout_on,
+        })
     }
 
     /// Like [`Sink::spawn`] for a whole fleet: every line is tagged with its station id.
@@ -118,14 +167,21 @@ impl Sink {
         mut events: FleetEvents,
         json: bool,
         log_file: Option<&Path>,
+        stdout: bool,
     ) -> io::Result<Self> {
         let file = log_file
             .map(|path| OpenOptions::new().create(true).append(true).open(path))
             .transpose()?
             .map(BufWriter::new);
+        let stdout_on = Arc::new(AtomicBool::new(stdout));
         let (stop, mut stopped) = oneshot::channel();
+        let flag = Arc::clone(&stdout_on);
         let task = tokio::spawn(async move {
-            let mut out = Output { json, file };
+            let mut out = Output {
+                json,
+                file,
+                stdout: flag,
+            };
             loop {
                 tokio::select! {
                     item = events.recv() => match item {
@@ -141,7 +197,16 @@ impl Sink {
                 out.write_item(&item);
             }
         });
-        Ok(Self { stop, task })
+        Ok(Self {
+            stop,
+            task,
+            stdout: stdout_on,
+        })
+    }
+
+    /// Starts printing to stdout too (the terminal UI could not be set up).
+    pub fn enable_stdout(&self) {
+        self.stdout.store(true, Ordering::Relaxed);
     }
 
     /// Writes everything that is queued, then ends the task.
@@ -154,6 +219,7 @@ impl Sink {
 struct Output {
     json: bool,
     file: Option<BufWriter<File>>,
+    stdout: Arc<AtomicBool>,
 }
 
 impl Output {
@@ -186,10 +252,19 @@ impl Output {
     }
 
     fn line(&mut self, line: &str) {
-        // A closed pipe must not kill the station.
-        let _ = writeln!(io::stdout().lock(), "{line}");
+        // Station-supplied text must not forge lines or drive the terminal, on stdout or in
+        // the file. The file goes first and stdout never blocks it: a closed or unread pipe
+        // costs stdout lines only.
+        let line = if self.json {
+            escape_json_unsafe(line)
+        } else {
+            sanitize(line)
+        };
         if let Some(file) = &mut self.file {
             let _ = writeln!(file, "{line}").and_then(|()| file.flush());
+        }
+        if self.stdout.load(Ordering::Relaxed) {
+            stdout_line(&line, self.json);
         }
     }
 }

@@ -17,6 +17,7 @@ use kirby_ocpp_core::scenario::{
     CancelToken, JunitSuite, Scenario, ScenarioReport, StepStatus, builtin, junit_xml, run_scenario,
 };
 use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
+use kirby_ocpp_tui::stdout_pump::print_lossy;
 use kirby_ocpp_tui::{TuiError, TuiOptions};
 use tokio::task::JoinHandle;
 
@@ -36,11 +37,19 @@ const EXIT_INTERRUPTED: u8 = 130;
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    let code = real_main().await;
+    // Queued stdout lines (events, the report) are written by a helper thread.
+    headless::flush_stdout();
+    code
+}
+
+async fn real_main() -> ExitCode {
     let mut cli = Cli::parse();
     if cli.licenses {
-        print!("{LICENSES}");
+        print_lossy(LICENSES);
         return ExitCode::SUCCESS;
     }
+    headless::init_stdout(cli.json);
     let command = cli.command.take();
     if let Some(Cmd::Scenarios { action }) = &command {
         return scenarios(action);
@@ -90,7 +99,7 @@ async fn main() -> ExitCode {
         };
         return match printed {
             Ok(json) => {
-                println!("{json}");
+                print_lossy(&format!("{json}\n"));
                 ExitCode::SUCCESS
             }
             Err(error) => {
@@ -107,7 +116,8 @@ async fn main() -> ExitCode {
         Some(Cmd::Run(args)) => run(config, &args, connector, json, log_file.as_deref()).await,
         Some(Cmd::Scenarios { .. }) => unreachable!("handled above"),
         None => {
-            let tui = !no_tui && std::io::stdout().is_terminal();
+            // `--json` is for machines: it never opens the terminal UI.
+            let tui = !no_tui && !json && std::io::stdout().is_terminal();
             if is_fleet {
                 return fleet::interactive(config, spec, tui, json, log_file.as_deref()).await;
             }
@@ -125,13 +135,13 @@ fn scenarios(action: &ScenariosCmd) -> ExitCode {
     match action {
         ScenariosCmd::List => {
             for scenario in builtin::all() {
-                println!("{:<16} {}", scenario.name, scenario.description);
+                print_lossy(&format!("{:<16} {}\n", scenario.name, scenario.description));
             }
             ExitCode::SUCCESS
         }
         ScenariosCmd::Show { name } => match builtin::source(name) {
             Some(text) => {
-                print!("{text}");
+                print_lossy(text);
                 ExitCode::SUCCESS
             }
             None => usage_error(&format!(
@@ -189,8 +199,9 @@ fn spawn_sink(
     handle: &StationHandle,
     json: bool,
     log_file: Option<&Path>,
+    stdout: bool,
 ) -> Result<Sink, ExitCode> {
-    Sink::spawn(handle, json, log_file).map_err(|error| {
+    Sink::spawn(handle, json, log_file, stdout).map_err(|error| {
         eprintln!("error: cannot open the log file: {error}");
         ExitCode::from(EXIT_USAGE)
     })
@@ -210,7 +221,19 @@ async fn interactive(
     log_file: Option<&Path>,
 ) -> ExitCode {
     let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
+    // Under the terminal UI the screen is the UI's: `--log-file` still gets the events, stdout
+    // does not.
+    let mut sink = None;
     if tui {
+        if log_file.is_some() {
+            match spawn_sink(&handle, json, log_file, false) {
+                Ok(started) => sink = Some(started),
+                Err(code) => {
+                    stop_station(&handle, join).await;
+                    return code;
+                }
+            }
+        }
         // Like the TS CLI: connect at startup (the station does not do it by itself).
         if let Err(error) = handle.connect().await {
             eprintln!("error: {error}");
@@ -218,25 +241,37 @@ async fn interactive(
         match kirby_ocpp_tui::run(handle.clone(), TuiOptions::default()).await {
             Ok(()) => {
                 stop_station(&handle, join).await;
+                if let Some(sink) = sink {
+                    sink.finish().await;
+                }
                 return ExitCode::SUCCESS;
             }
             Err(error @ TuiError::Terminal(_)) => {
                 // The terminal could not be set up (no usable TTY): keep going headless.
                 eprintln!("note: {error}; running headless (pass --no-tui to hide this)");
+                if let Some(sink) = &sink {
+                    sink.enable_stdout();
+                }
             }
             Err(error) => {
                 stop_station(&handle, join).await;
+                if let Some(sink) = sink {
+                    sink.finish().await;
+                }
                 eprintln!("error: {error}");
                 return ExitCode::FAILURE;
             }
         }
     }
-    let sink = match spawn_sink(&handle, json, log_file) {
-        Ok(sink) => sink,
-        Err(code) => {
-            stop_station(&handle, join).await;
-            return code;
-        }
+    let sink = match sink {
+        Some(sink) => sink,
+        None => match spawn_sink(&handle, json, log_file, true) {
+            Ok(sink) => sink,
+            Err(code) => {
+                stop_station(&handle, join).await;
+                return code;
+            }
+        },
     };
     if !tui && let Err(error) = handle.connect().await {
         eprintln!("error: {error}");
@@ -259,7 +294,7 @@ async fn run(
         Err(error) => return usage_error(&error),
     };
     let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
-    let sink = match spawn_sink(&handle, json, log_file) {
+    let sink = match spawn_sink(&handle, json, log_file, true) {
         Ok(sink) => sink,
         Err(code) => {
             stop_station(&handle, join).await;
@@ -298,14 +333,13 @@ async fn run(
         eprintln!("error: {error}");
     }
     let mut write_failed = false;
-    if let Some(report) = &report {
-        print_report(report, json, None);
-        if let Some(path) = &args.report
-            && let Err(error) = write_report(path, report)
-        {
-            eprintln!("error: cannot write the report: {error}");
-            write_failed = true;
-        }
+    // Files first: a closed stdout must not cost the machine-readable reports.
+    if let Some(report) = &report
+        && let Some(path) = &args.report
+        && let Err(error) = write_report(path, report)
+    {
+        eprintln!("error: cannot write the report: {error}");
+        write_failed = true;
     }
     if !interrupted && let Some(path) = &args.junit {
         let suite = JunitSuite {
@@ -319,6 +353,9 @@ async fn run(
             eprintln!("error: cannot write the JUnit report: {error}");
             write_failed = true;
         }
+    }
+    if let Some(report) = &report {
+        print_report(report, json, None);
     }
     if write_failed {
         ExitCode::FAILURE
@@ -359,10 +396,10 @@ fn print_report(report: &ScenarioReport, json: bool, station: Option<&str>) {
                 object.insert("station".to_owned(), station.into());
             }
         }
-        println!("{value}");
+        headless::stdout_line(&value.to_string(), true);
         return;
     }
-    let say = |line: String| println!("{}", headless::tagged(&line, station));
+    let say = |line: String| headless::stdout_line(&headless::tagged(&line, station), false);
     say(format!("scenario {}", report.scenario));
     for step in &report.steps {
         let (mark, detail) = match &step.status {

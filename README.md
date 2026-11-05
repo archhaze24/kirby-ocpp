@@ -23,7 +23,9 @@ With Cargo (Rust 1.88 or newer):
 cargo install kirby-ocpp
 ```
 
-Or download a prebuilt binary for Linux (x86_64 glibc, aarch64 glibc, x86_64 static musl for Alpine and minimal containers), macOS or Windows from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). To build from a checkout: `cargo install --path crates/kirby-ocpp`.
+The central system is a separate binary: `cargo install kirby-csms`, or `npm install -g @archhaze24/kirby-csms` (`npx @archhaze24/kirby-csms --listen 0.0.0.0:9000`). See [kirby-csms](#kirby-csms).
+
+Or download a prebuilt binary for Linux (x86_64 glibc, aarch64 glibc, x86_64 static musl for Alpine and minimal containers), macOS or Windows from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). Each archive holds both binaries (`kirby-ocpp` and `kirby-csms`), the licence, the third-party notices (`THIRD_PARTY_NOTICES.md` and `THIRD_PARTY_NOTICES-kirby-csms.md`) and this README. To build from a checkout: `cargo install --path crates/kirby-ocpp` (and `--path crates/kirby-csms`).
 
 ## Quick start
 
@@ -33,7 +35,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp --no-tui --json       # headless, JSON
 kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 ```
 
-`--url` (or `OCPP_URL`) is the only required option. Precedence is flag, then environment variable, then default. Booleans accept `true/false/yes/no/y/n/on/off/1/0`.
+`--url` (or `OCPP_URL`) is the only required option. Precedence is flag, then environment variable, then default. Booleans accept `true/false/t/f/yes/no/y/n/on/off/1/0`, case-insensitive; anything else is an error (exit 2).
 
 ## Options
 
@@ -74,12 +76,12 @@ kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 | `--rule ACTION=BEHAVIOR[*N]` | `KIRBY_OCPP_RULES` (`;` separates rules) | none | Response rule for a CSMS command, repeatable; see [Response rules](#response-rules) |
 | `--print-config` | | | Print the effective configuration as JSON and exit |
 | `--no-tui` | | | Never start the TUI; log to stdout |
-| `--json` | | | JSON lines instead of text (events and the `run` report) |
-| `--log-file` | | | Also append the headless event log to a file |
+| `--json` | | | JSON lines instead of text (events and the `run` report). Implies headless: the terminal UI never opens |
+| `--log-file` | | | Also append the event log to a file; works under the terminal UI too (the file then gets the events, stdout stays the UI's) |
 | `--licenses` | | | Print licence notices and exit |
 | `-V, --version`, `-h, --help` | | | |
 
-Options are global and may be placed before or after a subcommand.
+Options are global and may be placed before or after a subcommand, except `--licenses`, which must come before it (after a subcommand it is a usage error, exit 2).
 
 ## TLS
 
@@ -196,11 +198,11 @@ Actions: `connect`, `disconnect`, `reconnect`, `boot`, `heartbeat`, `plug`, `unp
 
 ## Response rules
 
-Response rules make the station misbehave on purpose, to test how a CSMS reacts. A rule overrides how one CSMS command (any of the 23 the station handles: the 19 of OCPP 1.6 and the four certificate commands of the Security Whitepaper, e.g. `Reset`, `RemoteStartTransaction`, `InstallCertificate`) is answered. Form: `ACTION=BEHAVIOR[*COUNT]`, action names case-insensitive.
+Response rules make the station misbehave on purpose, to test how a CSMS reacts. A rule overrides how one CSMS command (any of the 26 the station handles: the 19 of OCPP 1.6 and the Security Whitepaper commands, e.g. `Reset`, `RemoteStartTransaction`, `InstallCertificate`, `GetLog`, `ExtendedTriggerMessage`, `SignedUpdateFirmware`) is answered. Form: `ACTION=BEHAVIOR[*COUNT]`, action names case-insensitive.
 
 | Behavior | Effect |
 | --- | --- |
-| `reject` | The action's own rejection (`Rejected`; `NotSupported` for `SendLocalList` and `UnlockConnector`). `GetConfiguration`, `GetLocalListVersion`, `ClearChargingProfile`, `GetDiagnostics` and `UpdateFirmware` have no rejection status, so they get CALLERROR `NotSupported`. |
+| `reject` | The action's own rejection (`Rejected`; `NotSupported` for `SendLocalList` and `UnlockConnector`; `Failed` for `DeleteCertificate`; `NotFound` for `GetInstalledCertificateIds`). `GetConfiguration`, `GetLocalListVersion`, `ClearChargingProfile`, `GetDiagnostics` and `UpdateFirmware` have no rejection status, so they get CALLERROR `NotSupported`. |
 | `delay:MS` | The command is handled normally; only the reply is sent `MS` ms later (0 to 3600000). The station keeps working meanwhile. |
 | `error:CODE[:TEXT]` | CALLERROR with an OCPP 1.6 code (`NotImplemented`, `NotSupported`, `InternalError`, `ProtocolError`, `SecurityError`, `FormationViolation`, `PropertyConstraintViolation`, `OccurenceConstraintViolation`, `TypeConstraintViolation`, `GenericError`). |
 | `drop` | Close the WebSocket without replying; the normal reconnect lifecycle follows (disabled by `--no-reconnect`). |
@@ -226,7 +228,7 @@ kirby-csms --tls-cert cert.pem --tls-key key.pem
 kirby-csms --script suite.toml --junit junit.xml --timeout 120
 ```
 
-The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","addr":"127.0.0.1:41234","url":"ws://127.0.0.1:41234"}`), so `--listen 127.0.0.1:0` works for tests. Then one line per event: station connected / disconnected (with reason), every frame in and out, and a compact line when connector statuses or active transactions of a station change. SIGINT or SIGTERM shuts down gracefully.
+The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","addr":"127.0.0.1:41234","url":"ws://127.0.0.1:41234"}`), so `--listen 127.0.0.1:0` works for tests. Then one line per event: station connected / disconnected (with reason), every frame in and out, and a compact line when connector statuses or active transactions of a station change. SIGINT or SIGTERM shuts down gracefully. During `--script`, SIGTERM still writes the `--junit` file (one failed suite, `interrupted`) and exits 1; SIGINT exits 130 without a report. Text supplied by stations is shown with control characters replaced by `·`. Stdout is written by a helper thread: if nobody reads it, the process keeps running, `--log-file` keeps being written, and the lines that did not fit are dropped with a `note` line saying how many.
 
 | Flag | Env (`KIRBY_CSMS_`) | Default | Meaning |
 | --- | --- | --- | --- |
@@ -256,7 +258,7 @@ The first output line is `listening on ws://ADDR` (JSON: `{"type":"listening","a
 | `--timeout SECONDS` | | 60 | overall limit of a script run |
 | `--licenses` | | | print third-party notices |
 
-Command line beats environment beats default; booleans are strict (`true/false/yes/no/y/n/on/off/1/0`).
+Command line beats environment beats default; booleans accept `true/false/t/f/yes/no/y/n/on/off/1/0`, case-insensitive, and nothing else.
 
 **Security profiles** (OCPP 1.6 Security Whitepaper): `0` accepts everybody. `1` requires HTTP Basic Auth (user name = station id from the URL, password = that station's key) over `ws://` or `wss://`; `2` is the same over TLS (`--tls-cert`/`--tls-key` required); `3` requires TLS with a client certificate signed by `--tls-client-ca` whose Common Name equals the station id. Profiles 1 and 2 need at least one key (`--auth-key`, `--auth-keys-file` or `--default-auth-key`); a station without a key is refused. The key is compared byte for byte with the password the station sends (the station's `AuthorizationKey` configuration value). Refusals answer HTTP 401 (403 for certificates) and print an `auth_failed` event (JSON: `{"type":"auth_failed","station":..,"remote_addr":..,"reason":..}`); keys are never printed. A failed TLS handshake under profile 3 is reported with `"station":null`. Invalid flag combinations exit with code 2. The CSMS also tracks what stations report (security events, `LogStatusNotification`, `SignedFirmwareStatusNotification`, the last `SignCertificate` CSR, the last answered `GetInstalledCertificateIds` per certificate type) in each station's state, and the engine has typed commands for `CertificateSigned`, `InstallCertificate`, `DeleteCertificate`, `GetInstalledCertificateIds`, `ExtendedTriggerMessage`, `GetLog` and `SignedUpdateFirmware` (headless: raw `action`/`payload` commands).
 
@@ -324,7 +326,7 @@ Without `--script`, when stdin is not a terminal (or with `--stdin`), each input
 -> {"type":"stations","stations":[{"id":"CP-1","connected":true,"vendor":"...","model":"...","connectors":{"1":"Available"},"active_transactions":[]}]}
 ```
 
-`payload` defaults to `{}`, `timeout_ms` to `--call-timeout`, `id` is optional and echoed. Payloads are sent as given (not schema-checked), so malformed requests can be tested. A CALLERROR, a timeout, an unknown station or a bad line is an `"ok":false` result with an `error` text, never a crash.
+Answers can arrive out of order (a slow command does not hold back later ones): match them to commands by `id`, not by position. `payload` defaults to `{}`, `timeout_ms` to `--call-timeout`, `id` is optional and echoed. Payloads are sent as given (not schema-checked), so malformed requests can be tested. A CALLERROR, a timeout, an unknown station or a bad line is an `"ok":false` result with an `error` text, never a crash.
 
 ### Scripts
 

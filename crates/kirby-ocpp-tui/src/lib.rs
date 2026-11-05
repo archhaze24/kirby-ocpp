@@ -20,6 +20,7 @@ pub mod forms;
 mod keys;
 pub mod logview;
 pub mod palette;
+pub mod stdout_pump;
 pub mod terminal;
 #[cfg(test)]
 mod tests_support;

@@ -21,7 +21,7 @@ use kirby_ocpp_core::scenario::{JunitSuite, ScenarioReport, StepStatus, junit_xm
 use tokio::sync::broadcast;
 
 use crate::cli::Cli;
-use crate::headless::{Output, Sink};
+use crate::headless::{Output, Sink, sanitize};
 use crate::script::Script;
 
 /// Project licence line and third-party notices (`--licenses`).
@@ -56,20 +56,10 @@ async fn main() -> ExitCode {
         return usage_error(&error);
     }
     let mut config = cli.csms_config();
-    if let Some(path) = &cli.auth_keys_file {
-        match std::fs::read_to_string(path)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))
-            .and_then(|text| {
-                cli::parse_auth_keys_text(&text).map_err(|e| format!("{}: {e}", path.display()))
-            }) {
-            // Entries given on the command line win over the file.
-            Ok(keys) => {
-                for (id, key) in keys {
-                    config.security.keys.entry(id).or_insert(key);
-                }
-            }
-            Err(error) => return usage_error(&error),
-        }
+    if let Some(path) = &cli.auth_keys_file
+        && let Err(error) = merge_auth_keys_file(&mut config, path)
+    {
+        return usage_error(&error);
     }
     if let Err(error) = cli.require_keys(&config) {
         return usage_error(&error);
@@ -148,7 +138,19 @@ async fn main() -> ExitCode {
     if let Some(sink) = sink {
         sink.finish().await;
     }
+    out.finish();
     code
+}
+
+/// Adds the keys of an `--auth-keys-file`; entries given on the command line win.
+fn merge_auth_keys_file(config: &mut CsmsConfig, path: &Path) -> Result<(), String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let keys = cli::parse_auth_keys_text(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    for (id, key) in keys {
+        config.security.keys.entry(id).or_insert(key);
+    }
+    Ok(())
 }
 
 fn usage_error(error: &str) -> ExitCode {
@@ -215,6 +217,18 @@ async fn run_script(
     };
     let Some(report) = report else {
         eprintln!("error: interrupted");
+        // Like `kirby-ocpp run`: SIGTERM (a CI cancel) still leaves a JUnit file saying why;
+        // Ctrl-C is a deliberate abort and leaves nothing.
+        if !interrupted && let Some(path) = &cli.junit {
+            let suite = JunitSuite {
+                station: None,
+                scenario: &script.name,
+                outcome: Err("interrupted"),
+            };
+            if let Err(error) = std::fs::write(path, junit_xml(&[suite])) {
+                eprintln!("error: cannot write the JUnit report: {error}");
+            }
+        }
         return ExitCode::from(if interrupted { EXIT_INTERRUPTED } else { 1 });
     };
     print_report(&report, out);
@@ -249,18 +263,20 @@ fn print_report(report: &ScenarioReport, out: &Output) {
     if let Some(object) = value.as_object_mut() {
         object.insert("type".to_owned(), "report".into());
     }
-    let mut human = format!("script {}", report.scenario);
+    // Texts from stations (CALLERROR descriptions) end up in step names and reasons: one line
+    // each, so a station cannot forge `PASS` lines.
+    let mut human = format!("script {}", sanitize(&report.scenario));
     for step in &report.steps {
         let (mark, detail) = match &step.status {
             StepStatus::Passed => ("PASS", String::new()),
-            StepStatus::Failed(reason) => ("FAIL", format!(": {reason}")),
+            StepStatus::Failed(reason) => ("FAIL", format!(": {}", sanitize(reason))),
             StepStatus::Skipped => ("SKIP", String::new()),
         };
         let _ = write!(
             human,
             "\n  {mark} {:>2} {} ({} ms){detail}",
             step.index + 1,
-            step.name,
+            sanitize(&step.name),
             step.duration_ms
         );
     }

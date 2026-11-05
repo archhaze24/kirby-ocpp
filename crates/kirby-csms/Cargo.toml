@@ -19,6 +19,7 @@ path = "src/main.rs"
 kirby-csms-core.workspace = true
 kirby-csms-tui.workspace = true
 kirby-ocpp-core.workspace = true
+kirby-ocpp-tui.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde.workspace = true
