@@ -12,7 +12,7 @@
 
 use serde_json::Value;
 
-use super::actor::{StationActor, TimerKey};
+use super::actor::StationActor;
 use super::calls::{Origin, Reply};
 use super::command::{Command, Outcome};
 use super::connector::{
@@ -332,8 +332,8 @@ impl StationActor {
                 let tag = connector.last_id_tag.clone();
                 return self.stop_transaction(id, StopReason::EVDisconnected, tag, done);
             }
-            // StopTransactionOnEVSideDisconnect=false: the transaction is suspended.
-            self.timers.cancel(&TimerKey::MeterPeriodic(id));
+            // StopTransactionOnEVSideDisconnect=false: the transaction is suspended; the
+            // periodic sampling goes on (MeterValueSampleInterval covers the whole transaction).
             if let Ok(connector) = self.connector_or_station_mut(id) {
                 connector.ev_connected = false;
                 connector.status = ConnectorStatus::SuspendedEV;

@@ -68,14 +68,18 @@ pub(crate) enum TimerKey {
     MeterAligned,
     /// A reservation may have expired.
     ReservationExpiry(ConnectorId),
-    /// Next simulated diagnostics/firmware step.
-    Maintenance,
+    /// Next simulated `GetDiagnostics` status.
+    Diagnostics,
+    /// Next simulated `UpdateFirmware` status.
+    Firmware,
     /// Next simulated `GetLog` upload status.
     LogUpload,
     /// Next simulated `SignedUpdateFirmware` status.
     SignedFirmware,
     /// A hard `Reset` waits for in-flight CALLs, then reconnects.
     HardReset,
+    /// Queued transaction messages the CSMS failed to process are tried again.
+    SyncRetry,
 }
 
 /// What woke the actor loop.
@@ -175,12 +179,19 @@ pub(crate) struct StationActor {
     pub(super) sync_outstanding: usize,
     /// Queue keys not yet started by the running offline sync (entries run one at a time, in order).
     pub(super) sync_keys: VecDeque<u64>,
+    /// The running sync follows an accepted boot (it ends in `finish_boot_accepted`).
+    pub(super) sync_boot: bool,
+    /// A queued message failed in the running sync: arm a retry when it ends.
+    pub(super) sync_failed: bool,
+    /// Rounds each queued message failed in this connection (not persisted).
+    pub(super) sync_failures: HashMap<u64, u32>,
     /// Boot attempts left after a `Reset` (`ResetRetries`).
     pub(super) reset_retries: Option<u32>,
     /// A hard `Reset` reconnects at the latest at this instant (see `handlers/remote.rs`).
     pub(super) hard_reset_deadline: Option<tokio::time::Instant>,
     /// Simulated diagnostics/firmware steps still to report.
-    pub(super) maintenance: VecDeque<(Duration, super::maintenance::Step)>,
+    pub(super) diagnostics_plan: VecDeque<(Duration, super::maintenance::Step)>,
+    pub(super) firmware_plan: VecDeque<(Duration, super::maintenance::Step)>,
     /// Simulated `GetLog` upload statuses still to report (own queue: a log upload runs next to
     /// a firmware update), with the request id they belong to.
     pub(super) log_upload: VecDeque<(Duration, crate::ocpp::messages::UploadLogStatus)>,
@@ -279,9 +290,13 @@ impl StationActor {
             meters: HashMap::new(),
             sync_outstanding: 0,
             sync_keys: VecDeque::new(),
+            sync_boot: false,
+            sync_failed: false,
+            sync_failures: HashMap::new(),
             reset_retries: None,
             hard_reset_deadline: None,
-            maintenance: VecDeque::new(),
+            diagnostics_plan: VecDeque::new(),
+            firmware_plan: VecDeque::new(),
             log_upload: VecDeque::new(),
             log_request_id: None,
             signed_fw: VecDeque::new(),
@@ -348,6 +363,10 @@ impl StationActor {
                 Wake::Internal(internal) => self.on_internal(internal),
                 Wake::Timer(key) => self.on_timer(key),
             }
+            // A handler may have changed a connector's status without settling afterwards
+            // (unplug, plug-in resume, manual status, fault clear): record the new status now,
+            // so the next span is integrated with it and not with the stale one.
+            self.settle_meters();
             self.publish();
         }
         self.log(LogLevel::Info, "station stopped".to_owned());
@@ -379,10 +398,12 @@ impl StationActor {
             TimerKey::MeterPeriodic(id) => self.on_meter_periodic(id),
             TimerKey::MeterAligned => self.on_meter_aligned(),
             TimerKey::ReservationExpiry(id) => self.on_reservation_timer(id),
-            TimerKey::Maintenance => self.on_maintenance_timer(),
+            TimerKey::Diagnostics => self.on_diagnostics_timer(),
+            TimerKey::Firmware => self.on_firmware_timer(),
             TimerKey::LogUpload => self.on_log_timer(),
             TimerKey::SignedFirmware => self.on_signed_firmware_timer(),
             TimerKey::HardReset => self.on_hard_reset_timer(),
+            TimerKey::SyncRetry => self.on_sync_retry_timer(),
         }
     }
 

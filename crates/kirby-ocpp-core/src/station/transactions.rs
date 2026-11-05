@@ -15,7 +15,14 @@
 //! * **Stop** has an in-flight guard (`Stopping`): a second stop is `InvalidState`. If the
 //!   CALL fails or the link drops, the stop is queued (nothing is lost) and the connector is
 //!   idle again. Stops while offline are queued at once.
-//! * **Sync** after boot `Accepted` runs before meter timers and status re-sends.
+//! * **Sync** after boot `Accepted` runs before meter timers and status re-sends. A queued
+//!   message the CSMS fails to process (CALLERROR, timeout; each CALL already tried
+//!   `TransactionMessageAttempts` times, `TransactionMessageRetryInterval` apart) is tried
+//!   again while the link is up, after `TransactionMessageRetryInterval`, for at most
+//!   `TransactionMessageAttempts` retry rounds. Then a queued `StopTransaction` is dropped with a
+//!   warning (the Charge Point gives up after its configured attempts); a queued
+//!   `StartTransaction` stays queued until the next connection. The queue holds at most
+//!   [`MAX_QUEUED_TRANSACTIONS`] entries; beyond that the oldest one is dropped.
 
 use super::actor::{StationActor, TimerKey};
 use super::calls::{Origin, Reply};
@@ -23,7 +30,7 @@ use super::command::Outcome;
 use super::commands::call_failure;
 use super::event::LogLevel;
 use super::metering::stop_transaction_data;
-use super::offline::{OfflineTx, StopInfo};
+use super::offline::{MAX_QUEUED_TRANSACTIONS, OfflineTx, StopInfo};
 use super::transaction::{
     ActiveTransaction, PendingStart, StoppingTransaction, TransactionState, state_after_stop,
 };
@@ -41,6 +48,10 @@ use crate::station::authorization::{
 };
 use crate::station::config_registry::{STOP_TXN_ALIGNED_DATA, STOP_TXN_SAMPLED_DATA};
 use crate::station::reservation::{clear_reservation, reserved_for_other};
+
+/// Shortest pause before a queued message is tried again (a zero
+/// `TransactionMessageRetryInterval` must not spin).
+const MIN_SYNC_RETRY: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Completion of an operation that may span a CSMS round trip.
 pub(super) type Done = Box<dyn FnOnce(&mut StationActor, Result<Outcome, StationError>) + Send>;
@@ -129,9 +140,6 @@ impl StationActor {
                             decision.id_tag_info.status
                         ),
                     );
-                    if !decision.accepted {
-                        actor.handle_invalid_id(&id_tag);
-                    }
                     done(actor, Ok(Outcome::Authorized(decision)));
                 }
                 Err(error) => done(actor, Err(call_failure(error))),
@@ -139,31 +147,32 @@ impl StationActor {
         );
     }
 
-    /// `StopTransactionOnInvalidId`: stop (or cap the energy of) running transactions of `id_tag`.
-    fn handle_invalid_id(&mut self, id_tag: &IdTag) {
+    /// The Central System refused the idTag of a started transaction (non-`Accepted`
+    /// `StartTransaction.conf`) while `StopTransactionOnInvalidId` is `false`: the transaction
+    /// goes on, limited to `MaxEnergyOnInvalidId` Wh when that is set (`0` = no limit).
+    fn limit_energy_on_invalid_id(
+        &mut self,
+        id: ConnectorId,
+        id_tag: &IdTag,
+        status: AuthorizationStatus,
+    ) {
         self.flush_meters();
-        if !self.registry.stop_transaction_on_invalid_id() {
+        let max = u64::from(self.registry.max_energy_on_invalid_id());
+        let Some(meter) = self.find_connector(id).map(|c| c.meter_wh) else {
+            return;
+        };
+        if max == 0 {
+            self.log(
+                LogLevel::Warn,
+                format!("idTag {id_tag} was refused ({status}); the transaction on connector {id} continues (StopTransactionOnInvalidId=false, no MaxEnergyOnInvalidId)"),
+            );
             return;
         }
-        let max = u64::from(self.registry.max_energy_on_invalid_id());
-        let affected: Vec<(ConnectorId, u64)> = self
-            .state
-            .connectors
-            .iter()
-            .filter(|c| !c.transaction.is_idle() && c.last_id_tag.as_ref() == Some(id_tag))
-            .map(|c| (c.id, c.meter_wh))
-            .collect();
-        for (id, meter) in affected {
-            if max == 0 {
-                self.stop_transaction(id, StopReason::DeAuthorized, Some(id_tag.clone()), ignore());
-            } else {
-                self.invalid_limits.insert(id, meter.saturating_add(max));
-                self.log(
-                    LogLevel::Warn,
-                    format!("Connector {id} will stop after {max}Wh because idTag {id_tag} is no longer authorized"),
-                );
-            }
-        }
+        self.invalid_limits.insert(id, meter.saturating_add(max));
+        self.log(
+            LogLevel::Warn,
+            format!("idTag {id_tag} was refused ({status}); connector {id} will stop after {max}Wh (MaxEnergyOnInvalidId)"),
+        );
     }
 
     /// After the meter advanced: stop a transaction that used up its `MaxEnergyOnInvalidId`.
@@ -286,7 +295,7 @@ impl StationActor {
 
         if !online {
             self.begin_charging(id, &id_tag);
-            self.queue.push(OfflineTx {
+            self.push_queue(OfflineTx {
                 key,
                 connector: id,
                 tx_id: local,
@@ -353,7 +362,11 @@ impl StationActor {
             &self.registry,
         );
         self.mark_dirty();
-        if !decision.accepted || !still_ours {
+        // `StopTransactionOnInvalidId=false`: a refused idTag does not end the transaction
+        // (OCPP 1.6 configuration keys); `MaxEnergyOnInvalidId` caps the energy instead.
+        let lenient =
+            !decision.accepted && still_ours && !self.registry.stop_transaction_on_invalid_id();
+        if (!decision.accepted && !lenient) || !still_ours {
             let status = if decision.accepted {
                 AuthorizationStatus::Invalid
             } else {
@@ -378,6 +391,34 @@ impl StationActor {
             );
             return done(self, Ok(Outcome::TransactionRejected { status }));
         }
+        // A fault or an unavailable status that landed while the start was in flight must
+        // not be overwritten with `Charging`: the transaction the CSMS opened is closed.
+        let blocked = self.find_connector(id).is_some_and(|c| {
+            matches!(
+                c.status,
+                ConnectorStatus::Faulted | ConnectorStatus::Unavailable
+            )
+        });
+        if blocked {
+            self.log(
+                LogLevel::Warn,
+                format!("connector {id} became unavailable while the start was in flight; closing transaction {}", response.transaction_id),
+            );
+            self.abandon_start(id);
+            self.send_stop_for(
+                response.transaction_id,
+                pending.meter_start_wh,
+                Some(pending.id_tag),
+                StopReason::Other,
+            );
+            return done(
+                self,
+                Err(invalid(
+                    id,
+                    "became unavailable while the start was in flight",
+                )),
+            );
+        }
         let tx_id = TxId::Csms(response.transaction_id);
         if let Some(connector) = self.find_connector_mut(id) {
             connector.transaction = TransactionState::Active(ActiveTransaction {
@@ -388,6 +429,9 @@ impl StationActor {
             });
         }
         self.begin_charging(id, &pending.id_tag);
+        if lenient {
+            self.limit_energy_on_invalid_id(id, &pending.id_tag, decision.id_tag_info.status);
+        }
         done(
             self,
             Ok(Outcome::TransactionStarted {
@@ -422,6 +466,8 @@ impl StationActor {
                 };
             }
         }
+        // A ChangeAvailability that waited for this (never started) transaction.
+        self.apply_pending_availability(id);
         self.status_changed(id);
     }
 
@@ -515,7 +561,7 @@ impl StationActor {
                 format!("Queued StopTransaction for connector {id}; will sync after reconnect"),
             );
             if self.can_talk() {
-                self.start_offline_sync();
+                self.start_offline_sync(false);
             }
             return done(self, Ok(Outcome::Done));
         }
@@ -543,18 +589,36 @@ impl StationActor {
                     done(actor, Ok(Outcome::Done));
                 }
                 Err(error) => {
-                    actor.queue_stop(id, tx, tag, started_at, meter_start_wh, info);
+                    let key = actor.queue_stop(id, tx, tag, started_at, meter_start_wh, info);
                     actor.finish_stop(id, tx);
                     actor.log(
                         LogLevel::Warn,
-                        format!("StopTransaction failed ({error}); queued for the next sync"),
+                        format!("StopTransaction failed ({error}); queued, will be retried"),
                     );
+                    actor.record_sync_failure(key, &error);
+                    actor.arm_sync_retry_if_idle();
                     done(actor, Err(call_failure(error)));
                 }
             },
         );
     }
 
+    /// Adds an entry to the offline queue; when the queue is over its bound the oldest
+    /// entry is dropped (non-start entries first) with a warning.
+    fn push_queue(&mut self, entry: OfflineTx) {
+        if let Some(dropped) = self.queue.push(entry) {
+            self.sync_failures.remove(&dropped.key);
+            self.log(
+                LogLevel::Warn,
+                format!(
+                    "offline queue is full ({MAX_QUEUED_TRANSACTIONS} entries): dropped the oldest entry (transaction {}, connector {})",
+                    dropped.tx_id, dropped.connector
+                ),
+            );
+        }
+    }
+
+    /// Queues the stop of `tx`; returns the key of its queue entry.
     fn queue_stop(
         &mut self,
         id: ConnectorId,
@@ -563,13 +627,13 @@ impl StationActor {
         started_at: chrono::DateTime<chrono::Utc>,
         meter_start_wh: u64,
         info: StopInfo,
-    ) {
+    ) -> u64 {
         if let Some(entry) = self.queue.find_by_tx_on(id, tx) {
             entry.stop = Some(info);
-            return;
+            return entry.key;
         }
         let key = self.next_key();
-        self.queue.push(OfflineTx {
+        self.push_queue(OfflineTx {
             key,
             connector: id,
             tx_id: tx,
@@ -580,6 +644,7 @@ impl StationActor {
             start_pending: false,
             stop: Some(info),
         });
+        key
     }
 
     /// The transaction on `id` is over (delivered or queued): connector idle, profiles cleaned,
@@ -601,34 +666,143 @@ impl StationActor {
     // ---- offline sync ----------------------------------------------------------------
 
     /// Delivers the queued transactions. Returns the number of entries being synced.
-    pub(super) fn start_offline_sync(&mut self) -> usize {
+    /// `boot` marks the sync that follows an accepted `BootNotification`: only it ends in
+    /// `finish_boot_accepted` (meter timers, status re-send); a sync triggered later (a stop
+    /// queued while online, a retry round) just delivers the entries.
+    ///
+    /// Entries are delivered one at a time so the CSMS sees start/stop in chronological order.
+    /// An entry that failed `TransactionMessageAttempts` rounds in this connection is left
+    /// alone until the next connection (see [`Self::arm_sync_retry`]).
+    pub(super) fn start_offline_sync(&mut self, boot: bool) -> usize {
         if self.sync_outstanding > 0 {
             return self.sync_outstanding;
         }
-        let keys = self.queue.keys();
+        self.timers.cancel(&TimerKey::SyncRetry);
+        let rounds = self.sync_round_limit();
+        let keys: Vec<u64> = self
+            .queue
+            .keys()
+            .into_iter()
+            .filter(|key| self.sync_failures.get(key).copied().unwrap_or(0) <= rounds)
+            .collect();
         let count = keys.len();
-        self.sync_outstanding = count;
-        self.sync_keys = keys.into();
-        // Entries are delivered one at a time so the CSMS sees start/stop in chronological order.
-        if let Some(first) = self.sync_keys.pop_front() {
-            self.sync_entry(first);
+        if count == 0 {
+            return 0;
         }
+        self.sync_outstanding = count;
+        self.sync_boot = boot;
+        self.sync_keys = keys.into();
+        self.run_sync();
         count
     }
 
+    /// Starts the next entry that needs a CALL. Iterative: entries that finish without a
+    /// CALL (gone from the queue, nothing to send) never nest.
+    fn run_sync(&mut self) {
+        while let Some(key) = self.sync_keys.pop_front() {
+            if self.sync_entry(key) {
+                return;
+            }
+            self.sync_outstanding = self.sync_outstanding.saturating_sub(1);
+        }
+        self.sync_finished();
+    }
+
+    /// The CALL of one entry has completed.
     fn sync_done(&mut self) {
         self.sync_outstanding = self.sync_outstanding.saturating_sub(1);
-        if self.sync_outstanding == 0 {
-            self.sync_keys.clear();
+        self.run_sync();
+    }
+
+    fn sync_finished(&mut self) {
+        self.sync_outstanding = 0;
+        if std::mem::take(&mut self.sync_boot) {
             self.finish_boot_accepted();
-        } else if let Some(next) = self.sync_keys.pop_front() {
-            self.sync_entry(next);
+        }
+        self.arm_sync_retry_if_idle();
+    }
+
+    /// Retry rounds an entry gets after its first failed round (`TransactionMessageAttempts`,
+    /// at least one). Each round is itself a CALL with up to `TransactionMessageAttempts`
+    /// attempts, `TransactionMessageRetryInterval` apart.
+    fn sync_round_limit(&self) -> u32 {
+        self.registry.transaction_message_attempts().max(1)
+    }
+
+    /// Remembers that the CSMS did not process the queued message `key`. A lost link is not
+    /// the CSMS's fault: the sync starts over after the reconnect.
+    fn record_sync_failure(&mut self, key: u64, error: &CallError) {
+        if matches!(
+            error,
+            CallError::NotConnected | CallError::Closed { .. } | CallError::NotRegistered { .. }
+        ) {
+            return;
+        }
+        *self.sync_failures.entry(key).or_insert(0) += 1;
+        self.sync_failed = true;
+    }
+
+    fn arm_sync_retry_if_idle(&mut self) {
+        if self.sync_outstanding == 0 && std::mem::take(&mut self.sync_failed) {
+            self.arm_sync_retry();
         }
     }
 
-    fn sync_entry(&mut self, key: u64) {
+    /// While the link is up, queued messages the CSMS failed to process are tried again after
+    /// `TransactionMessageRetryInterval`, for at most `TransactionMessageAttempts` retry rounds
+    /// per entry. Then a queued `StopTransaction` is dropped (OCPP 1.6: the Charge Point gives up
+    /// after the configured attempts; this also bounds what a hostile CSMS can leave queued);
+    /// a queued `StartTransaction` stays for the next connection, its transaction is running.
+    fn arm_sync_retry(&mut self) {
+        if !self.can_talk() {
+            return;
+        }
+        let rounds = self.sync_round_limit();
+        let exhausted: Vec<u64> = self
+            .queue
+            .entries()
+            .iter()
+            .filter(|e| {
+                !e.start_pending && self.sync_failures.get(&e.key).copied().unwrap_or(0) > rounds
+            })
+            .map(|e| e.key)
+            .collect();
+        for key in exhausted {
+            if let Some(entry) = self.queue.remove(key) {
+                self.log(
+                    LogLevel::Warn,
+                    format!(
+                        "giving up on the queued StopTransaction of {} (connector {}) after {rounds} retry round(s)",
+                        entry.tx_id, entry.connector
+                    ),
+                );
+            }
+            self.sync_failures.remove(&key);
+            self.flush_now();
+        }
+        let retryable = self.queue.entries().iter().any(|e| {
+            let failures = self.sync_failures.get(&e.key).copied().unwrap_or(0);
+            failures > 0 && failures <= rounds
+        });
+        if retryable {
+            let interval = self
+                .registry
+                .transaction_message_retry_interval()
+                .max(MIN_SYNC_RETRY);
+            self.timers.set(TimerKey::SyncRetry, interval);
+        }
+    }
+
+    pub(super) fn on_sync_retry_timer(&mut self) {
+        if self.can_talk() {
+            self.start_offline_sync(false);
+        }
+    }
+
+    /// Starts the CALL for one entry. `false`: nothing to send, the entry is done.
+    fn sync_entry(&mut self, key: u64) -> bool {
         let Some(entry) = self.queue.get(key).cloned() else {
-            return self.sync_done();
+            return false;
         };
         if entry.start_pending {
             let request = StartTransactionRequest {
@@ -641,8 +815,9 @@ impl StationActor {
             self.call::<StartTransaction>(Origin::Station, &request, move |actor, result| {
                 actor.on_sync_start(key, result);
             });
+            true
         } else {
-            self.sync_stop(key);
+            self.sync_stop(key)
         }
     }
 
@@ -654,6 +829,7 @@ impl StationActor {
                     LogLevel::Warn,
                     format!("sync of queued StartTransaction failed: {error}"),
                 );
+                self.record_sync_failure(key, &error);
                 return self.sync_done();
             }
         };
@@ -670,7 +846,10 @@ impl StationActor {
         );
         self.mark_dirty();
         let local = entry.tx_id;
-        if !decision.accepted {
+        self.sync_failures.remove(&key);
+        // `StopTransactionOnInvalidId=false`: the refused transaction goes on (see `on_start_result`).
+        let lenient = !decision.accepted && !self.registry.stop_transaction_on_invalid_id();
+        if !decision.accepted && !lenient {
             self.log(
                 LogLevel::Warn,
                 format!(
@@ -713,25 +892,33 @@ impl StationActor {
             self.mark_dirty();
         }
         self.flush_now();
-        if entry.stop.is_some() {
-            self.sync_stop(key);
-        } else {
-            self.sync_done();
+        if lenient && entry.stop.is_none() {
+            self.limit_energy_on_invalid_id(
+                entry.connector,
+                &entry.id_tag,
+                decision.id_tag_info.status,
+            );
         }
+        if entry.stop.is_some() && self.sync_stop(key) {
+            return;
+        }
+        self.sync_done();
     }
 
-    fn sync_stop(&mut self, key: u64) {
+    /// Starts the `StopTransaction` CALL of an entry; `false` if there is nothing to send.
+    fn sync_stop(&mut self, key: u64) -> bool {
         let Some(entry) = self.queue.get(key).cloned() else {
-            return self.sync_done();
+            return false;
         };
         let (Some(info), Some(wire)) = (entry.stop, entry.tx_id.wire()) else {
-            return self.sync_done();
+            return false;
         };
         let request = stop_request(&info, wire);
         self.call::<StopTransaction>(Origin::Station, &request, move |actor, result| {
             match result {
                 Ok(_) => {
                     actor.queue.remove(key);
+                    actor.sync_failures.remove(&key);
                     actor.flush_now();
                 }
                 Err(error) => {
@@ -739,10 +926,12 @@ impl StationActor {
                         LogLevel::Warn,
                         format!("sync of queued StopTransaction failed: {error}"),
                     );
+                    actor.record_sync_failure(key, &error);
                 }
             }
             actor.sync_done();
         });
+        true
     }
 
     /// A local transaction the CSMS refused: the connector forgets it.
@@ -761,6 +950,8 @@ impl StationActor {
         }
         self.timers.cancel(&TimerKey::MeterPeriodic(id));
         self.profiles.on_transaction_ended(local);
+        self.apply_pending_availability(id);
+        self.status_changed(id);
     }
 
     /// Meter timers and status re-send, once the offline sync is complete.

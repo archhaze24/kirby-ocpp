@@ -200,3 +200,38 @@ async fn interval_measurand_is_the_energy_since_the_previous_sample() {
     assert_eq!(interval, register_now - first, "{values:?}");
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn energy_follows_the_status_a_command_left_behind() {
+    // 3.6 GW nominal: 1 000 Wh per millisecond.
+    let rig = fast_rig(3_600_000_000).await;
+    rig.cfg("StopTransactionOnEVSideDisconnect", "false").await;
+    // A long debounce keeps the status timer from waking the actor right after the command.
+    rig.cfg("MinimumStatusDuration", "3600").await;
+    rig.begin(1, "TAG1").await;
+    register_above(&rig, 0).await;
+    sample(&rig, &[Measurand::PowerActiveImport]).await;
+    let before = register(&rig);
+
+    // Unplug suspends the transaction (SuspendedEV). Deliberate wait: no energy may be
+    // credited for the time spent suspended.
+    rig.send(Command::Unplug { connector: C1 }).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    sample(&rig, &[Measurand::PowerActiveImport]).await;
+    let suspended = register(&rig);
+    assert!(
+        suspended - before < 50_000,
+        "energy credited while suspended: {before} -> {suspended}"
+    );
+
+    // Plugging in resumes charging; the time after it counts (it was lost with a stale flag).
+    rig.send(Command::PlugIn { connector: C1 }).await;
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    sample(&rig, &[Measurand::PowerActiveImport]).await;
+    let resumed = register(&rig);
+    assert!(
+        resumed - suspended > 100_000,
+        "energy lost after resume: {suspended} -> {resumed}"
+    );
+    rig.shutdown().await;
+}

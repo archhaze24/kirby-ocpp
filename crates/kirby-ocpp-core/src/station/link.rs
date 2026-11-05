@@ -204,14 +204,17 @@ impl StationActor {
         self.link.boot_in_flight = false;
         self.timers.cancel(&TimerKey::Heartbeat);
         self.timers.cancel(&TimerKey::BootRetry);
-        self.timers.cancel(&TimerKey::Maintenance);
         self.timers.cancel(&TimerKey::HardReset);
         self.hard_reset_deadline = None;
-        self.maintenance.clear();
+        self.cancel_maintenance();
         self.cancel_log_upload();
         self.cancel_signed_firmware();
         self.sync_outstanding = 0;
         self.sync_keys.clear();
+        self.sync_boot = false;
+        self.sync_failed = false;
+        self.sync_failures.clear();
+        self.timers.cancel(&TimerKey::SyncRetry);
         self.reset_status_tracking();
         self.state.registration = None;
         let code = match error {
@@ -393,7 +396,7 @@ impl StationActor {
     /// (`finish_boot_accepted`).
     fn after_boot_accepted(&mut self) {
         self.reset_retries = None;
-        if self.start_offline_sync() == 0 {
+        if self.start_offline_sync(true) == 0 {
             self.finish_boot_accepted();
         }
     }

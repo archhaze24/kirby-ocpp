@@ -6,12 +6,15 @@
 //!   (`power.rs`: energy is the integral of the charging power); sampling only flushes the
 //!   integrated energy and reads the numbers, so periodic and clock-aligned samples cannot
 //!   double count. The `MeterValues` command additionally adds its `wh_delta` to the register.
-//! * Periodic timers run per connector with a `Charging` transaction, **also while offline**:
-//!   the meter keeps advancing, samples are dropped (nothing is queued). A transaction that
-//!   is still local (`PendingStart`) is not sampled either (it has no CSMS id yet).
+//! * Periodic timers run per connector with a running transaction (`MeterValueSampleInterval`
+//!   applies for the whole transaction, also while it is suspended: the energy values just do
+//!   not advance), **also while offline**: samples are dropped, nothing is queued (see the
+//!   conformance document). A transaction that is still local (`PendingStart` on a local id)
+//!   is not sent either (it has no CSMS id yet).
 //! * The clock-aligned timer fires at the next multiple of `ClockAlignedDataInterval` and
 //!   samples every connector, idle ones too (without `transactionId`).
-//! * Timer-driven samples in flight are bounded ([`MAX_PENDING_SAMPLES`]): a silent CSMS and a
+//! * Timer-driven samples in flight are bounded (at least [`MAX_PENDING_SAMPLES`], and never
+//!   fewer than the number of connectors, so one clock-aligned burst fits): a silent CSMS and a
 //!   tiny interval must not pile up calls. When the limit is hit the oldest sample is
 //!   abandoned (its task is aborted; a queued CALL is withdrawn from the connection) and one
 //!   warning per burst is logged; the next answered sample re-arms the warning.
@@ -25,10 +28,11 @@ use super::command::Outcome;
 use super::commands::call_failure;
 use super::event::LogLevel;
 use super::metering::{clock_aligned_delay, meter_value};
+use super::transaction::TransactionState;
 use crate::error::StationError;
 use crate::ids::ConnectorId;
 use crate::ocpp::messages::{MeterValues, MeterValuesRequest};
-use crate::ocpp::types::{ConnectorStatus, Measurand, ReadingContext};
+use crate::ocpp::types::{Measurand, ReadingContext};
 use crate::station::config_registry::{METER_VALUES_ALIGNED_DATA, METER_VALUES_SAMPLED_DATA};
 
 /// Most timer-driven `MeterValues` calls that may await an answer at the same time.
@@ -36,8 +40,12 @@ pub(crate) const MAX_PENDING_SAMPLES: usize = 16;
 
 impl StationActor {
     fn is_sampling(&self, id: ConnectorId) -> bool {
-        self.find_connector(id)
-            .is_some_and(|c| !c.transaction.is_idle() && c.status == ConnectorStatus::Charging)
+        self.find_connector(id).is_some_and(|c| {
+            matches!(
+                c.transaction,
+                TransactionState::PendingStart(_) | TransactionState::Active(_)
+            )
+        })
     }
 
     /// (Re)arms the periodic timers of charging connectors and the aligned timer. Timers that
@@ -168,7 +176,8 @@ impl StationActor {
     /// Abandons the oldest in-flight timer-driven samples until one more fits.
     fn make_room_for_sample(&mut self) {
         self.sample_calls.retain(|t| self.calls.contains_key(t));
-        while self.sample_calls.len() >= MAX_PENDING_SAMPLES {
+        let limit = MAX_PENDING_SAMPLES.max(self.state.connectors.len());
+        while self.sample_calls.len() >= limit {
             let Some(call) = self
                 .sample_calls
                 .pop_front()
@@ -183,7 +192,7 @@ impl StationActor {
                     LogLevel::Warn,
                     format!(
                         "CSMS is not answering MeterValues; dropping the oldest samples \
-                         (keeping at most {MAX_PENDING_SAMPLES} in flight)"
+                         (keeping at most {limit} in flight)"
                     ),
                 );
             }

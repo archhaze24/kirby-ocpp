@@ -812,7 +812,7 @@ fn second_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEnt
             Kind::Boolean,
             "true",
         ),
-        writable(STOP_TRANSACTION_ON_INVALID_ID, Kind::Boolean, "false"),
+        writable(STOP_TRANSACTION_ON_INVALID_ID, Kind::Boolean, "true"),
         writable_list(
             STOP_TXN_ALIGNED_DATA,
             Kind::Measurands,
@@ -1141,7 +1141,7 @@ mod tests {
         assert!(registry.allow_offline_tx_for_unknown_id());
         assert!(!registry.authorize_remote_tx_requests());
         assert!(registry.stop_transaction_on_ev_side_disconnect());
-        assert!(!registry.stop_transaction_on_invalid_id());
+        assert!(registry.stop_transaction_on_invalid_id());
         assert!(registry.reserve_connector_zero_supported());
         assert_eq!(registry.charge_profile_max_stack_level(), 10);
         assert_eq!(registry.charging_schedule_max_periods(), 24);

@@ -10,9 +10,9 @@
 //! * **Cancellable:** [`TimerWheel::cancel`] and friends; a cancelled timer never fires.
 //! * **Delivered to the actor loop:** the wheel is a single event source:
 //!   `select!` on [`TimerWheel::next`], no callbacks, no locks. `next` is cancel-safe.
-//! * **Clamped:** delays are capped at [`MAX_DELAY`] so absurd configuration values
-//!   cannot overflow `Instant` arithmetic. A caller that needs a longer wait re-arms
-//!   when the timer fires early (see `reservation::MAX_EXPIRY_TIMER`).
+//! * **Any length:** a delay is slept in steps of at most [`MAX_DELAY`] (so `Instant`
+//!   arithmetic cannot overflow) until the whole delay has elapsed; only an absurd delay
+//!   beyond [`MAX_TOTAL_DELAY`] is capped there.
 //!
 //! Timers use `tokio::time`, never the injected wall [`Clock`](crate::clock::Clock).
 //! A zero delay fires on the next poll; callers of *periodic* timers must never pass a
@@ -26,8 +26,11 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 
-/// Longest delay a single timer waits (24 hours).
+/// Longest single sleep of a timer task (24 hours); longer delays are slept in several steps.
 pub const MAX_DELAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Longest total delay of one arming (200 years; a `u32` number of seconds is below it).
+pub const MAX_TOTAL_DELAY: Duration = Duration::from_secs(200 * 365 * 24 * 60 * 60);
 
 struct Armed {
     generation: u64,
@@ -81,14 +84,20 @@ where
         }
     }
 
-    /// Arms `key` to fire after `delay` (clamped to [`MAX_DELAY`]); an armed `key` is replaced.
+    /// Arms `key` to fire after `delay` (slept in steps of at most [`MAX_DELAY`], so a delay
+    /// of any length is honoured); an armed `key` is replaced.
     pub fn set(&mut self, key: K, delay: Duration) {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
         let tx = self.tx.clone();
         let fired = key.clone();
         let task = tokio::spawn(async move {
-            sleep(delay.min(MAX_DELAY)).await;
+            let mut remaining = delay.min(MAX_TOTAL_DELAY);
+            while remaining > MAX_DELAY {
+                sleep(MAX_DELAY).await;
+                remaining -= MAX_DELAY;
+            }
+            sleep(remaining).await;
             // The wheel may be gone by now.
             let _ = tx.send((fired, generation));
         });
@@ -262,12 +271,26 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn absurd_delays_are_clamped_not_panicking() {
+    async fn absurd_delays_are_capped_not_panicking() {
         let mut wheel = TimerWheel::new();
         wheel.set("a", Duration::MAX);
         assert!(wheel.is_armed(&"a"));
-        // Fires after the clamp, i.e. after at most 24 h of (virtual) time.
+        // Fires after the cap, i.e. after at most 200 years of (virtual) time.
         assert_eq!(wheel.next().await, "a");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delays_longer_than_a_day_are_honoured() {
+        let mut wheel = TimerWheel::new();
+        let two_days = MAX_DELAY * 2 + Duration::from_secs(5);
+        wheel.set("a", two_days);
+        // Not after the old 24 h clamp, nor shortly before the real deadline ...
+        assert!(timeout(MAX_DELAY * 2, wheel.next()).await.is_err());
+        // ... but at it.
+        assert_eq!(
+            timeout(Duration::from_secs(10), wheel.next()).await,
+            Ok("a")
+        );
     }
 
     #[tokio::test(start_paused = true)]

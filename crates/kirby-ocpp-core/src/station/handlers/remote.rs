@@ -30,7 +30,7 @@ use crate::station::actor::{StationActor, TimerKey};
 use crate::station::authorization::known_parent;
 use crate::station::command::Outcome;
 use crate::station::event::LogLevel;
-use crate::station::reservation::{can_remote_start, clear_reservation};
+use crate::station::reservation::{can_remote_start, clear_reservation, remote_start_usable};
 use crate::station::transactions::{Done, ignore};
 
 pub(super) fn remote_start(
@@ -62,20 +62,39 @@ pub(super) fn remote_start(
     let reply = |actor: &StationActor, responder, status| {
         actor.respond(responder, RemoteStartTransactionResponse { status });
     };
+    let authorize_first = actor.registry.authorize_remote_tx_requests();
+    // With `AuthorizeRemoteTxRequests` the reservation's parentIdTag may only be known from
+    // the Authorize answer: the reservation is checked once, after it.
+    let gate = |connector: Option<&_>, parent: Option<&IdTag>, check_reservation: bool| {
+        if check_reservation {
+            can_remote_start(connector, &id_tag, parent, now)
+        } else {
+            connector.is_some_and(remote_start_usable)
+        }
+    };
     let Some(id) =
-        target.filter(|_| profile_ok && can_remote_start(connector, &id_tag, parent.as_ref(), now))
+        target.filter(|_| profile_ok && gate(connector, parent.as_ref(), !authorize_first))
     else {
         return reply(actor, responder, RemoteStartStopStatus::Rejected);
     };
     let profile = request.charging_profile;
-    if actor.registry.authorize_remote_tx_requests() {
+    if authorize_first {
         let tag = id_tag.clone();
         actor.authorize(
             id_tag,
             Box::new(move |actor, result| match result {
                 Ok(Outcome::Authorized(decision)) if decision.accepted => {
-                    reply(actor, responder, RemoteStartStopStatus::Accepted);
-                    actor.begin_remote_start(id, tag, profile);
+                    let now = actor.clock.now_utc();
+                    let parent =
+                        decision.id_tag_info.parent_id_tag.clone().or_else(|| {
+                            known_parent(&tag, now, &actor.local_list, &actor.auth_cache)
+                        });
+                    if can_remote_start(actor.connector(id).ok(), &tag, parent.as_ref(), now) {
+                        reply(actor, responder, RemoteStartStopStatus::Accepted);
+                        actor.begin_remote_start(id, tag, profile);
+                    } else {
+                        reply(actor, responder, RemoteStartStopStatus::Rejected);
+                    }
                 }
                 _ => reply(actor, responder, RemoteStartStopStatus::Rejected),
             }),
@@ -169,8 +188,7 @@ impl StationActor {
         );
         self.timers.cancel(&TimerKey::Heartbeat);
         self.timers.cancel(&TimerKey::BootRetry);
-        self.timers.cancel(&TimerKey::Maintenance);
-        self.maintenance.clear();
+        self.cancel_maintenance();
         self.cancel_log_upload();
         self.cancel_signed_firmware();
         self.timers

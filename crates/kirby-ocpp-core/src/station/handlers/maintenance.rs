@@ -1,7 +1,8 @@
 //! `GetDiagnostics`, `UpdateFirmware` and their simulated lifecycles (plans: `station::maintenance`).
 //!
-//! The reply comes first; the status reports follow from `TimerKey::Maintenance`, one step per
-//! tick, with delays of at most one second. The selected outcome (`SetDiagnosticsOutcome` /
+//! The reply comes first; the status reports follow from `TimerKey::Diagnostics` /
+//! `TimerKey::Firmware` (each kind has its own queue and timer, so a firmware update and a
+//! diagnostics upload run side by side), one step per tick, with delays of at most one second. The selected outcome (`SetDiagnosticsOutcome` /
 //! `SetFirmwareOutcome`) decides success or failure, failures repeat up to `retries` times
 //! (at most 5). An unexpected disconnect, a `Disconnect` and a `Reset` drop the remaining steps.
 
@@ -49,7 +50,7 @@ pub(super) fn get_diagnostics(
         non_negative(request.retries),
         Duration::from_secs(u64::from(non_negative(request.retry_interval))),
     );
-    actor.run_plan(plan, None);
+    actor.run_diagnostics_plan(plan);
 }
 
 /// `GetLog`: the reply comes first, then a simulated upload (`Uploading`, then `Uploaded` or
@@ -128,7 +129,7 @@ pub(super) fn update_firmware(
         .to_std()
         .unwrap_or(Duration::ZERO)
         .min(MAX_DELAY);
-    actor.run_plan(plan, Some(wait));
+    actor.run_firmware_plan(plan, wait);
 }
 
 /// Checks the signing certificate of a `SignedUpdateFirmware`: it must parse, be valid now and,
@@ -215,7 +216,9 @@ impl StationActor {
     /// Drops the remaining signed-update statuses (disconnect, reset, a newer request).
     pub(in crate::station) fn cancel_signed_firmware(&mut self) {
         self.timers.cancel(&TimerKey::SignedFirmware);
-        self.signed_fw.clear();
+        if !std::mem::take(&mut self.signed_fw).is_empty() {
+            self.state.signed_firmware_status = SignedFirmwareStatus::Idle;
+        }
     }
 
     pub(in crate::station) fn on_signed_firmware_timer(&mut self) {
@@ -253,31 +256,64 @@ impl StationActor {
         );
     }
 
-    fn run_plan(&mut self, plan: Vec<(Duration, Step)>, first_delay: Option<Duration>) {
-        self.maintenance = plan.into();
-        if let Some((delay, _)) = self.maintenance.front().copied() {
-            self.timers
-                .set(TimerKey::Maintenance, first_delay.unwrap_or(delay));
+    fn run_diagnostics_plan(&mut self, plan: Vec<(Duration, Step)>) {
+        self.diagnostics_plan = plan.into();
+        if let Some((delay, _)) = self.diagnostics_plan.front().copied() {
+            self.timers.set(TimerKey::Diagnostics, delay);
         }
     }
 
-    pub(in crate::station) fn on_maintenance_timer(&mut self) {
-        let Some((_, step)) = self.maintenance.pop_front() else {
+    fn run_firmware_plan(&mut self, plan: Vec<(Duration, Step)>, first_delay: Duration) {
+        self.firmware_plan = plan.into();
+        if self.firmware_plan.front().is_some() {
+            self.timers.set(TimerKey::Firmware, first_delay);
+        }
+    }
+
+    /// Drops the remaining `GetDiagnostics` and `UpdateFirmware` statuses (disconnect, reset).
+    /// A status that was only an intermediate step of the cancelled plan goes back to `Idle`,
+    /// so `TriggerMessage` does not report an operation that no longer runs.
+    pub(in crate::station) fn cancel_maintenance(&mut self) {
+        self.timers.cancel(&TimerKey::Diagnostics);
+        self.timers.cancel(&TimerKey::Firmware);
+        if !std::mem::take(&mut self.diagnostics_plan).is_empty() {
+            self.state.diagnostics_status = DiagnosticsStatus::Idle;
+        }
+        if !std::mem::take(&mut self.firmware_plan).is_empty() {
+            self.state.firmware_status = FirmwareStatus::Idle;
+        }
+    }
+
+    pub(in crate::station) fn on_diagnostics_timer(&mut self) {
+        let Some((_, step)) = self.diagnostics_plan.pop_front() else {
             return;
         };
-        match step {
-            Step::Diagnostics(status) => self.report_diagnostics(status),
-            Step::Firmware(status) => self.report_firmware(status),
+        if let Step::Diagnostics(status) = step {
+            self.report_diagnostics(status);
         }
-        if let Some((delay, _)) = self.maintenance.front().copied() {
-            self.timers.set(TimerKey::Maintenance, delay);
+        if let Some((delay, _)) = self.diagnostics_plan.front().copied() {
+            self.timers.set(TimerKey::Diagnostics, delay);
+        }
+    }
+
+    pub(in crate::station) fn on_firmware_timer(&mut self) {
+        let Some((_, step)) = self.firmware_plan.pop_front() else {
+            return;
+        };
+        if let Step::Firmware(status) = step {
+            self.report_firmware(status);
+        }
+        if let Some((delay, _)) = self.firmware_plan.front().copied() {
+            self.timers.set(TimerKey::Firmware, delay);
         }
     }
 
     /// Drops the remaining `GetLog` statuses (disconnect, reset, a newer `GetLog`).
     pub(in crate::station) fn cancel_log_upload(&mut self) {
         self.timers.cancel(&TimerKey::LogUpload);
-        self.log_upload.clear();
+        if !std::mem::take(&mut self.log_upload).is_empty() {
+            self.state.log_status = UploadLogStatus::Idle;
+        }
     }
 
     pub(in crate::station) fn on_log_timer(&mut self) {

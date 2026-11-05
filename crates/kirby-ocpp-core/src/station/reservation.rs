@@ -141,19 +141,24 @@ pub fn can_remote_start(
     let Some(connector) = connector else {
         return false;
     };
-    let usable = connector.transaction.is_idle()
-        && connector.availability == AvailabilityType::Operative
-        && !matches!(
-            connector.status,
-            ConnectorStatus::Unavailable | ConnectorStatus::Faulted
-        );
-    if !usable {
+    if !remote_start_usable(connector) {
         return false;
     }
     match live_reservation(connector, now) {
         Some(reservation) => reservation.accepts(id_tag, id_tag_parent),
         None => connector.status != ConnectorStatus::Reserved,
     }
+}
+
+/// The part of the `RemoteStartTransaction` gate that does not depend on the idTag: the
+/// connector is idle, operative and neither `Unavailable` nor `Faulted`.
+pub fn remote_start_usable(connector: &ConnectorSnapshot) -> bool {
+    connector.transaction.is_idle()
+        && connector.availability == AvailabilityType::Operative
+        && !matches!(
+            connector.status,
+            ConnectorStatus::Unavailable | ConnectorStatus::Faulted
+        )
 }
 
 /// Decides and applies a `ReserveNow`. On `Ok` the connector now holds the

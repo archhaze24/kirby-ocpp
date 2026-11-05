@@ -5,8 +5,10 @@
 //! looked and the energy not yet added to `meter_wh`.
 //!
 //! * [`StationActor::settle_meters`] runs at the start of every actor loop iteration, before
-//!   anything mutates the state. The state does not change between iterations, so the
-//!   status and the profiles it sees held for the whole elapsed time. Elapsed time is
+//!   anything mutates the state, and once more after the handler, before the snapshot is
+//!   published (it is idempotent): the second call records the status the handler left, so
+//!   the next span is not integrated with a stale `Charging` flag. The state does not change
+//!   between iterations, so the status and the profiles it sees held for the whole elapsed time. Elapsed time is
 //!   measured with the monotonic clock; the wall-clock start of the span is only used to
 //!   find the active schedule periods, which are integrated piecewise.
 //! * [`StationActor::flush_meters`] moves the accumulated energy into the snapshot's

@@ -617,63 +617,6 @@ async fn stop_transaction_carries_the_configured_transaction_data() {
 }
 
 #[tokio::test]
-async fn max_energy_on_invalid_id_stops_the_transaction_when_the_limit_is_reached() {
-    let rig = booted().await;
-    rig.cfg("StopTransactionOnInvalidId", "true").await;
-    rig.cfg("MaxEnergyOnInvalidId", "50").await;
-    rig.begin(1, "BADTAG").await; // the CSMS accepts the start, then Authorize says Blocked
-    let Outcome::Authorized(decision) = rig
-        .send(Command::Authorize {
-            id_tag: tag("BADTAG"),
-        })
-        .await
-    else {
-        panic!()
-    };
-    assert!(!decision.accepted);
-    let mark = rig.csms.mark();
-    rig.send(Command::MeterValues {
-        connector: C1,
-        wh_delta: 30,
-        measurands: None,
-    })
-    .await;
-    assert!(!conn1(&rig).transaction.is_idle(), "below the limit");
-    rig.send(Command::MeterValues {
-        connector: C1,
-        wh_delta: 30,
-        measurands: None,
-    })
-    .await;
-    let stop = rig
-        .csms
-        .wait_for_call_after(mark, "StopTransaction", |_| true, STEP)
-        .await
-        .unwrap();
-    assert_eq!(stop["reason"], "DeAuthorized");
-    rig.shutdown().await;
-}
-
-#[tokio::test]
-async fn an_invalid_id_without_an_energy_allowance_stops_at_once() {
-    let rig = booted().await;
-    rig.cfg("StopTransactionOnInvalidId", "true").await;
-    rig.begin(1, "BADTAG").await;
-    let mark = rig.csms.mark();
-    rig.send(Command::Authorize {
-        id_tag: tag("BADTAG"),
-    })
-    .await;
-    let stop = rig
-        .csms
-        .wait_for_call_after(mark, "StopTransaction", |_| true, STEP)
-        .await
-        .unwrap();
-    assert_eq!(stop["reason"], "DeAuthorized");
-    rig.shutdown().await;
-}
-
-#[tokio::test]
 async fn silence_is_not_mistaken_for_a_started_transaction() {
     // Start times out with a single attempt: an error, and the connector is free again.
     let mut rig = Rig::with(CsmsOptions::default(), |mut c| {

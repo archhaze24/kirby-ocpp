@@ -15,9 +15,13 @@
 //! After `BootNotification` is `Accepted` the actor syncs the entries in order, **before** the
 //! meter timers are re-armed and the statuses re-sent: start (real id assigned, TxProfiles of the
 //! local id cleared), then stop with the real id. Each entry is an independent chain, so one
-//! failure never aborts the others (a failed entry stays queued for the next boot). A start whose
-//! idTag the CSMS rejects drops the transaction and sends a `StopTransaction` with `DeAuthorized`.
-//! Retry policy for the CALLs themselves lives in `calls.rs`.
+//! failure never aborts the others. An entry the CSMS fails to process is tried again while the
+//! link is up (`TransactionMessageRetryInterval`, at most `TransactionMessageAttempts` retry rounds);
+//! then a stop-only entry is dropped and a start stays queued for the next boot. The queue is
+//! bounded ([`MAX_QUEUED_TRANSACTIONS`]). A start whose idTag the CSMS rejects drops the
+//! transaction and sends a `StopTransaction` with `DeAuthorized` (with
+//! `StopTransactionOnInvalidId=false` it goes on instead). Retry policy for the CALLs themselves
+//! lives in `calls.rs`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -25,6 +29,9 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{ConnectorId, IdTag, ReservationId, TxId};
 use crate::ocpp::messages::MeterValue;
 use crate::ocpp::types::StopReason;
+
+/// Most entries the queue keeps (a hostile or broken CSMS must not grow it without bound).
+pub const MAX_QUEUED_TRANSACTIONS: usize = 1_000;
 
 /// What a queued `StopTransaction` carries.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -60,8 +67,19 @@ pub struct OfflineQueue {
 }
 
 impl OfflineQueue {
-    pub fn push(&mut self, entry: OfflineTx) {
+    /// Appends `entry`. Over [`MAX_QUEUED_TRANSACTIONS`] entries the oldest one is dropped
+    /// and returned: a stop-only entry first (its transaction is over), else the oldest.
+    pub fn push(&mut self, entry: OfflineTx) -> Option<OfflineTx> {
         self.entries.push(entry);
+        if self.entries.len() <= MAX_QUEUED_TRANSACTIONS {
+            return None;
+        }
+        let index = self
+            .entries
+            .iter()
+            .position(|e| !e.start_pending)
+            .unwrap_or(0);
+        Some(self.entries.remove(index))
     }
 
     pub fn entries(&self) -> &[OfflineTx] {
@@ -157,6 +175,32 @@ mod tests {
         queue.find_by_tx(TxId::Local(7)).unwrap().tx_id = TxId::Csms(55);
         assert!(queue.find_by_tx(TxId::Local(7)).is_none());
         assert!(queue.find_by_tx(TxId::Csms(55)).is_some());
+    }
+
+    #[test]
+    fn the_queue_is_bounded_and_drops_stop_only_entries_first() {
+        let mut queue = OfflineQueue::default();
+        // One start-pending entry first (the oldest), then stop-only entries.
+        assert!(queue.push(entry(0, true, false)).is_none());
+        for key in 1..MAX_QUEUED_TRANSACTIONS as u64 {
+            assert!(queue.push(entry(key, false, true)).is_none());
+        }
+        assert_eq!(queue.keys().len(), MAX_QUEUED_TRANSACTIONS);
+        let dropped = queue
+            .push(entry(5_000, false, true))
+            .expect("over the bound");
+        assert_eq!(dropped.key, 1, "the oldest stop-only entry goes first");
+        assert_eq!(queue.keys().len(), MAX_QUEUED_TRANSACTIONS);
+        assert!(queue.get(0).is_some(), "the pending start stays");
+        assert!(queue.get(5_000).is_some());
+
+        // Only start-pending entries: the oldest one goes.
+        let mut starts = OfflineQueue::default();
+        for key in 0..=MAX_QUEUED_TRANSACTIONS as u64 {
+            let dropped = starts.push(entry(key, true, false));
+            assert_eq!(dropped.is_some(), key == MAX_QUEUED_TRANSACTIONS as u64);
+        }
+        assert!(starts.get(0).is_none());
     }
 
     #[test]
