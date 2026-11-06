@@ -29,7 +29,7 @@ Needs Rust 1.88 or newer.
 
 ## Docker
 
-Image: `ghcr.io/archhaze24/kirby-ocpp`, multi-arch (`linux/amd64`, `linux/arm64`), built from the static musl binaries on every version tag. Tags: `X.Y.Z`, `X.Y` and `latest` (prereleases only get `X.Y.Z`). It runs as the non-root user `kirby` (uid 10001), has the system CA roots for `wss://`, keeps emulator state in the volume `/data` (`KIRBY_OCPP_STATE_DIR=/data`) and exposes port 9000.
+Image: `ghcr.io/archhaze24/kirby-ocpp`, multi-arch (`linux/amd64`, `linux/arm64`), built from the static musl binaries on every version tag. Tags: `X.Y.Z`, plus `X.Y` and `latest` when the release is the highest final version so far (prereleases and re-tagged older versions only get `X.Y.Z`; `latest` never moves backwards). It runs as the non-root user `kirby` (uid 10001), has the system CA roots for `wss://`, keeps emulator state in the volume `/data` (`KIRBY_OCPP_STATE_DIR=/data`) and exposes port 9000.
 
 The entrypoint starts the emulator by default; naming `kirby-csms` as the first argument starts the central system. `docker run --entrypoint kirby-csms ...` works too.
 
