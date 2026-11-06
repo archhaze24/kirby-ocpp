@@ -3,6 +3,7 @@
 mod cli;
 mod fleet;
 mod headless;
+mod suite;
 
 use std::io::IsTerminal;
 use std::path::Path;
@@ -32,9 +33,9 @@ const LICENSES: &str = concat!(
 );
 
 /// Bad usage or configuration.
-const EXIT_USAGE: u8 = 2;
+pub(crate) const EXIT_USAGE: u8 = 2;
 /// `run` stopped by SIGINT (128 + 2, the shell convention).
-const EXIT_INTERRUPTED: u8 = 130;
+pub(crate) const EXIT_INTERRUPTED: u8 = 130;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -115,6 +116,12 @@ async fn real_main() -> ExitCode {
             fleet::run(config, spec, &args, connector, json, log_file.as_deref()).await
         }
         Some(Cmd::Run(args)) => run(config, &args, connector, json, log_file.as_deref()).await,
+        Some(Cmd::Suite(_)) if is_fleet => usage_error(
+            "`suite` runs one station per scenario; fleet mode (--count > 1) is not supported",
+        ),
+        Some(Cmd::Suite(args)) => {
+            suite::run(config, &args, connector, json, log_file.as_deref()).await
+        }
         Some(Cmd::Scenarios { .. }) => unreachable!("handled above"),
         None => {
             // `--json` is for machines: it never opens the terminal UI.
@@ -127,7 +134,7 @@ async fn real_main() -> ExitCode {
     }
 }
 
-fn usage_error(error: &str) -> ExitCode {
+pub(crate) fn usage_error(error: &str) -> ExitCode {
     eprintln!("error: {error}");
     ExitCode::from(EXIT_USAGE)
 }
@@ -175,7 +182,7 @@ fn load_scenario(
 }
 
 /// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C).
-async fn shutdown_signal() -> bool {
+pub(crate) async fn shutdown_signal() -> bool {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
@@ -196,7 +203,7 @@ async fn shutdown_signal() -> bool {
     }
 }
 
-fn spawn_sink(
+pub(crate) fn spawn_sink(
     handle: &StationHandle,
     json: bool,
     log_file: Option<&Path>,
@@ -209,7 +216,7 @@ fn spawn_sink(
 }
 
 /// Closes the connection (WebSocket Close) and waits for the station to end.
-async fn stop_station(handle: &StationHandle, join: JoinHandle<()>) {
+pub(crate) async fn stop_station(handle: &StationHandle, join: JoinHandle<()>) {
     // The station may already be gone; either way we are leaving.
     let _ = handle.shutdown().await;
     let _ = join.await;
@@ -313,7 +320,7 @@ async fn run(
         })
     };
 
-    let overrides = override_vars(args);
+    let overrides = override_vars(&args.vars);
     let mut interrupted = false;
     let outcome = tokio::select! {
         outcome = connect_and_run(&handle, &scenario, &cancel, &overrides, 1) => outcome,
@@ -370,7 +377,7 @@ async fn run(
     }
 }
 
-async fn connect_and_run(
+pub(crate) async fn connect_and_run(
     handle: &StationHandle,
     scenario: &Scenario,
     cancel: &CancelToken,
@@ -390,18 +397,18 @@ async fn connect_and_run(
     Ok(run_scenario_with_vars(handle, scenario, cancel, None, overrides, index).await)
 }
 
-/// The `--var` overrides of a `run` command.
-fn override_vars(args: &RunArgs) -> Vars {
-    let mut vars = Vars::new();
-    for (name, value) in &args.vars {
+/// The `--var` overrides of a `run` or `suite` command.
+pub(crate) fn override_vars(vars: &[(String, serde_json::Value)]) -> Vars {
+    let mut out = Vars::new();
+    for (name, value) in vars {
         // Names were validated by the argument parser.
-        let _ = vars.insert(name, value.clone());
+        let _ = out.insert(name, value.clone());
     }
-    vars
+    out
 }
 
 /// Prints a scenario report; `station` (fleet mode) tags every line.
-fn print_report(report: &ScenarioReport, json: bool, station: Option<&str>) {
+pub(crate) fn print_report(report: &ScenarioReport, json: bool, station: Option<&str>) {
     if json {
         let mut value = serde_json::to_value(report).unwrap_or_default();
         if let Some(object) = value.as_object_mut() {
@@ -435,7 +442,7 @@ fn print_report(report: &ScenarioReport, json: bool, station: Option<&str>) {
     ));
 }
 
-fn write_junit(path: &Path, suites: &[JunitSuite<'_>]) -> std::io::Result<()> {
+pub(crate) fn write_junit(path: &Path, suites: &[JunitSuite<'_>]) -> std::io::Result<()> {
     std::fs::write(path, junit_xml(suites))
 }
 

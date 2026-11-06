@@ -164,7 +164,7 @@ pub async fn run(
     };
 
     let stagger = fleet.stagger();
-    let overrides = override_vars(args);
+    let overrides = override_vars(&args.vars);
     let first_index = u64::from(spec.first_index);
     let runs = fleet
         .stations()

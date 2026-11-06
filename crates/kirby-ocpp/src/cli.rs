@@ -32,8 +32,9 @@ use kirby_ocpp_core::station::ResponseRule;
   kirby-ocpp --url wss://csms.example/ocpp --tls-ca ca.pem --connectors 2\n  \
   kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session\n  \
   kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n:03}' --count 10 --no-tui\n  \
+  kirby-ocpp --url ws://localhost:9000/ocpp suite --all-builtins --junit junit.xml\n  \
   kirby-ocpp scenarios list\n\n\
-Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage or configuration error, 130 `run` interrupted by SIGINT."
+Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage or configuration error, 130 `run` or `suite` interrupted by SIGINT."
 )]
 #[allow(
     clippy::struct_excessive_bools,
@@ -309,6 +310,8 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
 pub enum Cmd {
     /// Connect, run a scenario, print the report; exit code 1 if any step fails
     Run(RunArgs),
+    /// Run several scenarios one after another, each on a fresh station; exit code 1 if any fails
+    Suite(SuiteArgs),
     /// Built-in scenarios
     Scenarios {
         #[command(subcommand)]
@@ -344,6 +347,41 @@ pub struct RunArgs {
     /// Set a scenario variable (repeatable): `${NAME}` in the scenario becomes VALUE.
     /// Overrides `[vars]`; `true`/`false`/numbers keep their type. `station_id` and `index`
     /// are built in and cannot be set.
+    #[arg(long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
+    pub vars: Vec<(String, serde_json::Value)>,
+}
+
+#[derive(Debug, Args)]
+pub struct SuiteArgs {
+    /// Scenario sources: a TOML file, a directory (every `*.toml` directly inside, sorted by
+    /// name) or a built-in name (see `scenarios list`)
+    #[arg(value_name = "SOURCE")]
+    pub sources: Vec<String>,
+
+    /// Also run every built-in scenario except `finish-session`, which needs a transaction left by an earlier run
+    #[arg(long)]
+    pub all_builtins: bool,
+
+    /// Write the suite summary as JSON to this file
+    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    pub report: Option<PathBuf>,
+
+    /// Write one JUnit XML report to this file (one test suite per scenario)
+    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    pub junit: Option<PathBuf>,
+
+    /// Give up on a scenario (and fail it) after this many seconds, connecting included
+    #[arg(
+        long, value_name = "SECONDS", default_value_t = 60,
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
+    )]
+    pub timeout: u64,
+
+    /// Stop after the first scenario that fails; the rest are reported as SKIP
+    #[arg(long)]
+    pub fail_fast: bool,
+
+    /// Set a scenario variable for every scenario (repeatable), see `run --var`
     #[arg(long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
     pub vars: Vec<(String, serde_json::Value)>,
 }
