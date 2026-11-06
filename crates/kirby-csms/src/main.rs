@@ -43,10 +43,17 @@ async fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     // Everything that can be wrong with the input is found before the server binds.
-    let script = match cli.script.as_deref().map(Script::load).transpose() {
+    let mut script = match cli.script.as_deref().map(Script::load).transpose() {
         Ok(script) => script,
         Err(error) => return usage_error(&error),
     };
+    if let Some(script) = &mut script {
+        for (name, value) in &cli.vars {
+            if let Err(error) = script.set_var(name, value.clone()) {
+                return usage_error(&format!("--var {name}: {error}"));
+            }
+        }
+    }
     if let Err(error) =
         cli.apply_env_auth_keys(std::env::var("KIRBY_CSMS_AUTH_KEY").ok().as_deref())
     {

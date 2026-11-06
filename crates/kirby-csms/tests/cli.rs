@@ -786,6 +786,106 @@ timeout_ms = 300
     let _ = station.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn script_vars_capture_and_expect_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut csms = script_run(
+        dir.path(),
+        r#"
+name = "vars"
+[vars]
+key = "NotTheKey"
+[[steps]]
+action = "wait_station"
+station = "CP-1"
+[[steps]]
+action = "wait_call"
+call = "Authorize"
+capture = { tag = "/idTag" }
+[[steps]]
+action = "call"
+station = "CP-1"
+call = "ChangeConfiguration"
+payload = { key = "${key}", value = "60" }
+expect_status = "Accepted"
+expect_payload = { status = "Accepted" }
+capture = { st = "/status" }
+[[steps]]
+action = "call"
+station = "CP-1"
+call = "DataTransfer"
+payload = { vendorId = "${tag}", data = "id-${tag}" }
+expect_payload = { status = "UnknownVendorId" }
+[[steps]]
+action = "call"
+station = "CP-1"
+call = "ChangeConfiguration"
+payload = { key = "HeartbeatInterval", value = "61" }
+expect_status = "${st}"
+"#,
+        &["--var", "key=HeartbeatInterval"],
+    );
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    station
+        .authorize(IdTag::new("TAG7").unwrap())
+        .await
+        .unwrap();
+    let printed = csms.wait(|v| v["type"] == "report");
+    assert_eq!(printed["passed"], true, "{printed}");
+    let (code, _, stderr) = csms.finish();
+    assert_eq!(code, 0, "{stderr}");
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn script_expect_payload_mismatch_and_unknown_var_fail_the_step() {
+    for (extra, reason) in [
+        (
+            "expect_payload = { status = \"Rejected\" }",
+            "does not contain",
+        ),
+        ("expect_payload = { status = \"${missing}\" }", "missing"),
+        ("capture = { x = \"/nothing\" }", "/nothing"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!(
+            "name = \"f\"\n[[steps]]\naction = \"wait_station\"\nstation = \"CP-1\"\nbooted = true\n\
+             [[steps]]\naction = \"call\"\nstation = \"CP-1\"\ncall = \"ChangeConfiguration\"\n\
+             payload = {{ key = \"HeartbeatInterval\", value = \"60\" }}\n{extra}\n"
+        );
+        let mut csms = script_run(dir.path(), &script, &[]);
+        // Not waiting for the boot reply: the failing script ends the server first.
+        let mut config =
+            StationConfig::new(format!("ws://{}/ocpp", csms.addr)).with_charge_point_id("CP-1");
+        config.persist = false;
+        let (station, _join) = Station::spawn(config, Arc::new(SystemClock));
+        station.connect().await.unwrap();
+        let printed = csms.wait(|v| v["type"] == "report");
+        assert_eq!(printed["passed"], false, "{printed}");
+        assert!(
+            printed["steps"][1]["reason"].to_string().contains(reason),
+            "{printed}"
+        );
+        let (code, _, _) = csms.finish();
+        assert_eq!(code, 1);
+        let _ = station.shutdown().await;
+    }
+}
+
+#[test]
+fn bad_var_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(
+        dir.path(),
+        "s.toml",
+        "name = \"t\"\n[[steps]]\naction = \"sleep\"\nms = 1\n",
+    );
+    let (code, _, stderr) = run_to_end(&["--script", &path, "--var", "bad-name=1"]);
+    assert_eq!(code, 2, "{stderr}");
+    let (code, _, stderr) = run_to_end(&["--var", "a=1"]);
+    assert_eq!(code, 2, "{stderr}");
+}
+
 /// Sends `ChangeConfiguration(AuthorizationKey)` and returns the logged outbound CALL payload.
 async fn logged_key_change(args: &[&str]) -> Value {
     let mut csms = Csms::start(args);

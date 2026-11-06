@@ -204,6 +204,11 @@ pub struct Cli {
     #[arg(long, value_name = "PATH", value_parser = non_empty_path, requires = "script")]
     pub junit: Option<PathBuf>,
 
+    /// Set a script variable (repeatable): `${NAME}` in the script becomes VALUE. Overrides
+    /// `[vars]`; `true`/`false`/numbers keep their type
+    #[arg(long = "var", value_name = "NAME=VALUE", value_parser = script_var, requires = "script")]
+    pub vars: Vec<(String, serde_json::Value)>,
+
     /// Give up (and fail) the script after this many seconds
     #[arg(
         long, value_name = "SECONDS", default_value_t = 60,
@@ -214,6 +219,11 @@ pub struct Cli {
     /// Print the third-party licence notices and exit
     #[arg(long)]
     pub licenses: bool,
+}
+
+/// Parses a `--var` argument.
+fn script_var(text: &str) -> Result<(String, serde_json::Value), String> {
+    kirby_ocpp_core::scenario::vars::parse_assignment(text)
 }
 
 impl Cli {

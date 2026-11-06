@@ -23,17 +23,26 @@
 //! `inject_fault {call, kind = "call_error"|"silence"|"close"|"invalid_payload", payload?, times}`.
 //! Every step takes an optional `name`.
 //!
+//! Variables: an optional top-level `[vars]` table (strings, numbers, booleans; `--var`
+//! overrides it) and `capture = { name = "/json/pointer" }` on `call` (from the CALLRESULT
+//! payload) and `wait_call` (from the matched CALL payload). `${name}` is substituted at run
+//! time in `station`, `expect_status` and the JSON of `payload`, `payload_contains`,
+//! `expect_payload` and `respond`/`inject_fault` payloads. Action names (`call`) and typed
+//! fields (`ms`, `times`, `timeout_ms`, `count`, `booted`) are never substituted. `call` also
+//! takes `expect_payload = { ... }`: a JSON subset the CALLRESULT payload must contain.
+//!
 //! `wait_call` consumes the CALL it matches (each CALL satisfies at most one `wait_call`), but
 //! waits may come in any order: a later wait can match a CALL that arrived before an earlier
 //! wait's match. CALLs that arrive while other steps run are kept (the last 10 000).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Fault, Frame, Reply};
+use kirby_ocpp_core::scenario::vars::{self, Vars};
 use kirby_ocpp_core::scenario::{ScenarioReport, StepReport, StepStatus};
 use serde::Deserialize;
 use serde_json::Value;
@@ -69,6 +78,8 @@ fn default_payload() -> Value {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Script {
     pub name: String,
+    /// Declared `[vars]`; `--var` overrides are added with [`Script::set_var`].
+    pub vars: Vars,
     pub steps: Vec<Step>,
 }
 
@@ -109,6 +120,9 @@ pub enum Action {
         call: String,
         #[serde(default)]
         payload_contains: Option<Value>,
+        /// Variable name -> JSON pointer into the matched CALL payload.
+        #[serde(default)]
+        capture: BTreeMap<String, String>,
         #[serde(default = "default_timeout_ms")]
         timeout_ms: u64,
     },
@@ -122,6 +136,12 @@ pub enum Action {
         expect_status: Option<String>,
         #[serde(default)]
         expect_error: bool,
+        /// JSON subset the CALLRESULT payload must contain.
+        #[serde(default)]
+        expect_payload: Option<Value>,
+        /// Variable name -> JSON pointer into the CALLRESULT payload.
+        #[serde(default)]
+        capture: BTreeMap<String, String>,
         #[serde(default = "default_timeout_ms")]
         timeout_ms: u64,
     },
@@ -150,6 +170,8 @@ pub enum Action {
 struct RawScript {
     name: String,
     #[serde(default)]
+    vars: toml::Table,
+    #[serde(default)]
     steps: Vec<toml::Table>,
 }
 
@@ -168,6 +190,14 @@ impl Script {
         if raw.steps.is_empty() {
             return Err("invalid script: a script needs at least one `[[steps]]`".to_owned());
         }
+        let mut script_vars = Vars::new();
+        for (name, value) in raw.vars {
+            let value = serde_json::to_value(&value)
+                .map_err(|e| format!("invalid script: [vars] `{name}`: {e}"))?;
+            vars::check_scalar(&value)
+                .and_then(|()| script_vars.insert(&name, value))
+                .map_err(|e| format!("invalid script: [vars] `{name}`: {e}"))?;
+        }
         let steps = raw
             .steps
             .into_iter()
@@ -178,8 +208,17 @@ impl Script {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             name: raw.name,
+            vars: script_vars,
             steps,
         })
+    }
+
+    /// Sets (or replaces) a variable, e.g. from `--var`.
+    ///
+    /// # Errors
+    /// The name is not valid.
+    pub fn set_var(&mut self, name: &str, value: Value) -> Result<(), String> {
+        self.vars.insert(name, value)
     }
 
     /// Reads and parses a script file.
@@ -234,12 +273,16 @@ fn validate(action: &Action) -> Result<(), String> {
             }
         }
         Action::WaitCall {
-            call, timeout_ms, ..
+            call,
+            timeout_ms,
+            capture,
+            ..
         } => {
             check_wait(*timeout_ms)?;
             if call.is_empty() {
                 return bad("`call` must not be empty");
             }
+            check_captures(capture)?;
         }
         Action::Call {
             station,
@@ -247,9 +290,15 @@ fn validate(action: &Action) -> Result<(), String> {
             timeout_ms,
             expect_status,
             expect_error,
+            expect_payload,
+            capture,
             ..
         } => {
             check_wait(*timeout_ms)?;
+            check_captures(capture)?;
+            if *expect_error && (expect_payload.is_some() || !capture.is_empty()) {
+                return bad("`expect_error` excludes `expect_payload` and `capture`");
+            }
             if station.is_empty() || call.is_empty() {
                 return bad("`station` and `call` must not be empty");
             }
@@ -280,6 +329,16 @@ fn validate(action: &Action) -> Result<(), String> {
                 return bad("kind `invalid_payload` needs a `payload`");
             }
         }
+    }
+    Ok(())
+}
+
+fn check_captures(capture: &BTreeMap<String, String>) -> Result<(), String> {
+    for (name, pointer) in capture {
+        if !vars::is_valid_name(name) {
+            return Err(format!("capture: `{name}` is not a valid variable name"));
+        }
+        vars::check_pointer(pointer).map_err(|e| format!("capture `{name}`: {e}"))?;
     }
     Ok(())
 }
@@ -391,10 +450,12 @@ impl Backlog {
             if let Action::WaitCall {
                 call,
                 payload_contains,
+                capture,
                 ..
             } = &step.action
             {
-                *wanted.entry(call.clone()).or_default() |= payload_contains.is_some();
+                *wanted.entry(call.clone()).or_default() |=
+                    payload_contains.is_some() || !capture.is_empty();
             }
         }
         Self::with_wanted(wanted, SEEN_BYTES)
@@ -411,7 +472,8 @@ impl Backlog {
         }
     }
 
-    /// Waits for a matching CALL. Fails at once when events were lost and nothing matches:
+    /// Waits for a matching CALL and returns its payload (`Null` unless the action's payload
+    /// is kept). Fails at once when events were lost and nothing matches:
     /// the CALL may be among the lost ones, so waiting out the timeout would only stall.
     async fn wait_call(
         &self,
@@ -419,10 +481,10 @@ impl Backlog {
         call: &str,
         payload_contains: Option<&Value>,
         end: tokio::time::Instant,
-    ) -> Result<(), WaitLost> {
+    ) -> Result<Value, WaitLost> {
         loop {
-            if self.take_call(station, call, payload_contains) {
-                return Ok(());
+            if let Some(payload) = self.take_call(station, call, payload_contains) {
+                return Ok(payload);
             }
             if self.lagged.load(Ordering::Relaxed) {
                 return Err(WaitLost::Lagged);
@@ -480,8 +542,13 @@ impl Backlog {
         }
     }
 
-    /// Consumes the oldest unconsumed CALL that fits.
-    fn take_call(&self, station: Option<&str>, call: &str, contains: Option<&Value>) -> bool {
+    /// Consumes the oldest unconsumed CALL that fits and returns its kept payload.
+    fn take_call(
+        &self,
+        station: Option<&str>,
+        call: &str,
+        contains: Option<&Value>,
+    ) -> Option<Value> {
         let mut store = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         let found = store.calls.iter_mut().find(|seen| {
             !seen.consumed
@@ -489,19 +556,17 @@ impl Backlog {
                 && station.is_none_or(|id| seen.station == id)
                 && contains.is_none_or(|expected| json_subset(expected, &seen.payload))
         });
-        match found {
-            Some(seen) => {
-                seen.consumed = true;
-                true
-            }
-            None => false,
-        }
+        found.map(|seen| {
+            seen.consumed = true;
+            seen.payload.clone()
+        })
     }
 }
 
 struct Runner<'a> {
     handle: &'a CsmsHandle,
     backlog: Arc<Backlog>,
+    vars: Vars,
     _pump: Pump,
 }
 
@@ -520,6 +585,7 @@ pub async fn run(
     let backlog = Arc::new(Backlog::new(script));
     let mut runner = Runner {
         handle,
+        vars: script.vars.clone(),
         _pump: Pump::spawn(events, Arc::clone(&backlog)),
         backlog,
     };
@@ -577,6 +643,7 @@ impl Runner<'_> {
                 let end = end_of(*timeout_ms);
                 let need = count.unwrap_or(1);
                 let count = *count;
+                let station = self.sub_opt(station.as_deref())?;
                 loop {
                     if self.stations_ready(station.as_deref(), count, booted) {
                         return Ok(());
@@ -599,11 +666,18 @@ impl Runner<'_> {
                 station,
                 call,
                 payload_contains,
+                capture,
                 timeout_ms,
             } => {
+                let station = self.sub_opt(station.as_deref())?;
+                let contains = payload_contains
+                    .as_ref()
+                    .map(|v| self.sub("payload_contains", v))
+                    .transpose()?;
                 let end = end_of(*timeout_ms);
-                self.backlog
-                    .wait_call(station.as_deref(), call, payload_contains.as_ref(), end)
+                let payload = self
+                    .backlog
+                    .wait_call(station.as_deref(), call, contains.as_ref(), end)
                     .await
                     .map_err(|lost| match lost {
                         WaitLost::Timeout => {
@@ -612,7 +686,8 @@ impl Runner<'_> {
                         WaitLost::Lagged => format!(
                             "events were lost (the event stream lagged), so a {call} CALL may have been missed"
                         ),
-                    })
+                    })?;
+                self.capture(capture, &payload)
             }
             Action::Call {
                 station,
@@ -620,25 +695,43 @@ impl Runner<'_> {
                 payload,
                 expect_status,
                 expect_error,
+                expect_payload,
+                capture,
                 timeout_ms,
             } => {
+                let station = self.sub_str("station", station)?;
+                let payload = self.sub("payload", payload)?;
+                let expect_status = expect_status
+                    .as_deref()
+                    .map(|s| self.sub_str("expect_status", s))
+                    .transpose()?;
+                let expect_payload = expect_payload
+                    .as_ref()
+                    .map(|v| self.sub("expect_payload", v))
+                    .transpose()?;
                 let timeout = Duration::from_millis(*timeout_ms);
-                let sent = self
-                    .handle
-                    .call_timeout(station, call, payload.clone(), timeout);
+                let sent = self.handle.call_timeout(&station, call, payload, timeout);
                 // The engine times the answer; this also bounds the time in the queue.
                 let Ok(result) = tokio::time::timeout(timeout + Duration::from_secs(1), sent).await
                 else {
                     return Err(format!("{call} was still queued after {timeout_ms} ms"));
                 };
-                check_answer(result, call, expect_status.as_deref(), *expect_error)
+                let answer = check_answer(result, call, expect_status.as_deref(), *expect_error)?;
+                if let Some(expected) = &expect_payload
+                    && !json_subset(expected, &answer)
+                {
+                    return Err(format!(
+                        "{call}: payload {answer} does not contain {expected}"
+                    ));
+                }
+                self.capture(capture, &answer)
             }
             Action::Sleep { ms } => {
                 tokio::time::sleep(Duration::from_millis(*ms)).await;
                 Ok(())
             }
             Action::Respond { call, payload } => {
-                let payload = payload.clone();
+                let payload = self.sub("payload", payload)?;
                 self.handle
                     .respond(call, move |_| Reply::Result(payload.clone()));
                 Ok(())
@@ -653,7 +746,11 @@ impl Runner<'_> {
                 payload,
                 times,
             } => {
-                let fault = match (kind, payload) {
+                let payload = payload
+                    .as_ref()
+                    .map(|v| self.sub("payload", v))
+                    .transpose()?;
+                let fault = match (kind, &payload) {
                     (FaultKind::CallError, _) => Fault::call_error(call),
                     (FaultKind::Silence, _) => Fault::silence(call),
                     (FaultKind::Close, _) => Fault::close(call),
@@ -665,6 +762,32 @@ impl Runner<'_> {
                 Ok(())
             }
         }
+    }
+
+    fn sub(&self, field: &str, value: &Value) -> Result<Value, String> {
+        vars::substitute(value, &self.vars).map_err(|e| format!("`{field}`: {e}"))
+    }
+
+    fn sub_str(&self, field: &str, text: &str) -> Result<String, String> {
+        vars::substitute_str(text, &self.vars).map_err(|e| format!("`{field}`: {e}"))
+    }
+
+    fn sub_opt(&self, station: Option<&str>) -> Result<Option<String>, String> {
+        station.map(|s| self.sub_str("station", s)).transpose()
+    }
+
+    /// Stores the values of `payload` at the pointers as variables.
+    fn capture(
+        &mut self,
+        capture: &BTreeMap<String, String>,
+        payload: &Value,
+    ) -> Result<(), String> {
+        for (name, pointer) in capture {
+            let value =
+                vars::capture(payload, pointer).map_err(|e| format!("capture `{name}`: {e}"))?;
+            self.vars.insert(name, value)?;
+        }
+        Ok(())
     }
 
     /// Connected stations (with `booted`: only those whose BootNotification was tracked).
@@ -712,18 +835,18 @@ fn check_answer(
     call: &str,
     expect_status: Option<&str>,
     expect_error: bool,
-) -> Result<(), String> {
+) -> Result<Value, String> {
     match result {
         Ok(Frame::CallResult { payload, .. }) => {
             if expect_error {
                 return Err(format!("{call}: expected a CALLERROR, got a CALLRESULT"));
             }
             match expect_status {
-                None => Ok(()),
+                None => Ok(payload),
                 Some(expected) => {
                     let actual = payload.get("status").and_then(Value::as_str);
                     if actual == Some(expected) {
-                        Ok(())
+                        Ok(payload)
                     } else {
                         Err(format!(
                             "{call}: expected status {expected}, got {}",
@@ -737,7 +860,7 @@ fn check_answer(
             code, description, ..
         }) => {
             if expect_error {
-                Ok(())
+                Ok(Value::Null)
             } else {
                 Err(format!(
                     "{call}: CALLERROR {}: {description}",
@@ -850,6 +973,84 @@ times = 2
         assert!(check_answer(ok("Accepted"), "X", None, true).is_err());
     }
 
+    #[test]
+    fn vars_capture_and_expect_payload_are_validated() {
+        let head = "name = \"t\"\n";
+        let script = Script::from_toml(&format!(
+            "{head}[vars]\nn = 5\ns = \"x\"\nb = true\n[[steps]]\naction = \"wait_call\"\ncall = \"Authorize\"\ncapture = {{ tag = \"/idTag\", all = \"\" }}\n[[steps]]\naction = \"call\"\nstation = \"CP-${{s}}\"\ncall = \"X\"\nexpect_payload = {{ status = \"Accepted\" }}\ncapture = {{ st = \"/status\" }}\n"
+        ))
+        .unwrap();
+        assert_eq!(script.vars.len(), 3);
+        assert_eq!(script.vars.get("n"), Some(&serde_json::json!(5)));
+        let step = |body: &str| err(&format!("{head}[[steps]]\n{body}"));
+        assert!(
+            err(&format!(
+                "{head}[vars]\nbad-name = 1\n[[steps]]\naction = \"sleep\"\nms = 1"
+            ))
+            .contains("bad-name")
+        );
+        assert!(
+            err(&format!(
+                "{head}[vars]\nl = [1]\n[[steps]]\naction = \"sleep\"\nms = 1"
+            ))
+            .contains("`l`")
+        );
+        assert!(
+            step("action = \"wait_call\"\ncall = \"X\"\ncapture = { \"a b\" = \"/x\" }")
+                .contains("a b")
+        );
+        assert!(
+            step("action = \"wait_call\"\ncall = \"X\"\ncapture = { a = \"x\" }")
+                .contains("JSON pointer")
+        );
+        assert!(step("action = \"call\"\nstation = \"a\"\ncall = \"X\"\nexpect_error = true\nexpect_payload = {}").contains("exclud"));
+        assert!(step("action = \"call\"\nstation = \"a\"\ncall = \"X\"\nexpect_error = true\ncapture = { a = \"/x\" }").contains("exclud"));
+    }
+
+    #[test]
+    fn answers_return_the_payload() {
+        let ok = Ok(Frame::call_result(
+            "1",
+            serde_json::json!({"status": "Accepted", "n": 1}),
+        ));
+        let payload = check_answer(ok, "X", Some("Accepted"), false).unwrap();
+        assert_eq!(payload["n"], 1);
+    }
+
+    #[test]
+    fn backlog_keeps_payload_for_capture_and_returns_it() {
+        let script = Script::from_toml(
+            "name = \"t\"\n[[steps]]\naction = \"wait_call\"\ncall = \"Authorize\"\ncapture = { tag = \"/idTag\" }\n",
+        )
+        .unwrap();
+        let backlog = Backlog::new(&script);
+        backlog.record(inbound(
+            "CP-1",
+            "Authorize",
+            serde_json::json!({"idTag": "A"}),
+        ));
+        let got = backlog.take_call(None, "Authorize", None).unwrap();
+        assert_eq!(got["idTag"], "A");
+    }
+
+    #[test]
+    fn substitution_and_capture_failures_have_reasons() {
+        let mut vars = Vars::new();
+        vars.insert("n", serde_json::json!(5)).unwrap();
+        let sub = vars::substitute(&serde_json::json!({"a": "${n}", "b": "x${n}"}), &vars).unwrap();
+        assert_eq!(sub, serde_json::json!({"a": 5, "b": "x5"}));
+        assert!(
+            vars::substitute(&serde_json::json!("${nope}"), &vars)
+                .unwrap_err()
+                .contains("nope")
+        );
+        assert!(
+            vars::capture(&serde_json::json!({"a": 1}), "/b")
+                .unwrap_err()
+                .contains("/b")
+        );
+    }
+
     fn inbound(station: &str, action: &str, payload: Value) -> CsmsEvent {
         CsmsEvent::Frame {
             station: station.to_owned(),
@@ -889,10 +1090,14 @@ call = "Heartbeat"
             assert_eq!(store.calls[1].payload, Value::Null);
             assert!(store.bytes < 200_000);
         }
-        assert!(backlog.take_call(Some("CP-1"), "Heartbeat", None));
-        assert!(!backlog.take_call(Some("CP-1"), "Heartbeat", None));
+        assert!(backlog.take_call(Some("CP-1"), "Heartbeat", None).is_some());
+        assert!(backlog.take_call(Some("CP-1"), "Heartbeat", None).is_none());
         let wanted = serde_json::json!({"idTag": "A"});
-        assert!(backlog.take_call(None, "Authorize", Some(&wanted)));
+        assert!(
+            backlog
+                .take_call(None, "Authorize", Some(&wanted))
+                .is_some()
+        );
     }
 
     #[test]
