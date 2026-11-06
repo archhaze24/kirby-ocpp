@@ -179,6 +179,18 @@ async fn run_human_output_and_failing_scenario_exit_code() {
         "{xml}"
     );
     assert!(xml.contains("<skipped/>"), "{xml}");
+    assert!(
+        xml.contains("classname=\"ocpp1.6.bad\" name=\"authorize BADTAG\""),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<property name=\"ocpp_version\" value=\"1.6\"/>"),
+        "{xml}"
+    );
+    assert!(xml.contains("<property name=\"source\" value="), "{xml}");
+    assert!(xml.contains("action: authorize"), "{xml}");
+    assert!(xml.contains("expected: &quot;Accepted&quot;"), "{xml}");
+    assert!(xml.contains("actual: Blocked"), "{xml}");
     csms.shutdown().await;
 }
 

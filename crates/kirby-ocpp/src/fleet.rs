@@ -11,13 +11,15 @@ use std::time::Duration;
 use futures_util::future::join_all;
 use kirby_ocpp_core::fleet::{Fleet, FleetSpec};
 use kirby_ocpp_core::ids::ConnectorId;
-use kirby_ocpp_core::scenario::{CancelToken, JunitSuite, ScenarioReport};
+use kirby_ocpp_core::scenario::{
+    CancelToken, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, ScenarioReport, TOOL_VERSION,
+};
 use kirby_ocpp_core::{Clock, StationConfig, SystemClock};
 use kirby_ocpp_tui::{TuiError, TuiOptions};
 use serde_json::{Value, json};
 
 use crate::cli::RunArgs;
-use crate::headless::{Sink, stdout_line};
+use crate::headless::{self, LinkWatch, Sink, stdout_line};
 use crate::{
     EXIT_INTERRUPTED, EXIT_USAGE, connect_and_run, load_scenario, override_vars, print_report,
     shutdown_signal, usage_error, write_junit, write_report,
@@ -29,6 +31,7 @@ fn clock() -> Arc<dyn Clock> {
 
 /// Connects every station and shows them in the terminal UI, or logs tagged events until
 /// interrupted.
+#[allow(clippy::too_many_lines)]
 pub async fn interactive(
     config: StationConfig,
     spec: FleetSpec,
@@ -109,6 +112,22 @@ pub async fn interactive(
             }
         },
     };
+    // One watcher per station, subscribed before connecting. When every station has given up
+    // reconnecting the process ends with code 1 instead of idling.
+    let mut watches: Vec<(String, LinkWatch)> = fleet
+        .stations()
+        .iter()
+        .map(|(id, handle)| (id.clone(), LinkWatch::new(handle)))
+        .collect();
+    let dead = async {
+        let all_dead = futures_util::future::join_all(
+            watches
+                .iter_mut()
+                .map(|(id, watch)| async move { (id.clone(), watch.dead().await) }),
+        );
+        all_dead.await
+    };
+    let mut dead = std::pin::pin!(dead);
     let interrupted = tokio::select! {
         failed = fleet.connect_all() => {
             for (id, error) in failed {
@@ -118,11 +137,22 @@ pub async fn interactive(
         }
         _ = shutdown_signal() => true,
     };
-    if !interrupted {
-        let _ = shutdown_signal().await;
-    }
+    let gave_up = if interrupted {
+        None
+    } else {
+        tokio::select! {
+            _ = shutdown_signal() => None,
+            gave_up = &mut dead => Some(gave_up),
+        }
+    };
     fleet.shutdown().await;
     sink.finish().await;
+    if let Some(gave_up) = gave_up {
+        for (id, reason) in gave_up {
+            eprintln!("error: [{id}] {}", kirby_ocpp_tui::text::sanitize(&reason));
+        }
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
 
@@ -149,7 +179,8 @@ pub async fn run(
         Ok(fleet) => fleet,
         Err(error) => return usage_error(&error.to_string()),
     };
-    let sink = match Sink::spawn_fleet(fleet.subscribe(), json, log_file, true) {
+    let stdout = headless::events_on_stdout(json);
+    let sink = match Sink::spawn_fleet(fleet.subscribe(), json, log_file, stdout) {
         Ok(sink) => sink,
         Err(error) => {
             fleet.shutdown().await;
@@ -222,12 +253,27 @@ pub async fn run(
                 if !report.passed {
                     failed.push(id);
                 }
-                stations.push(json!({"station": id, "passed": report.passed}));
+                stations.push(json!({
+                    "station": id,
+                    "schema": SCHEMA_VERSION,
+                    "ocpp_version": OCPP_VERSION,
+                    "tool_version": TOOL_VERSION,
+                    "status": report.status.as_str(),
+                    "passed": report.passed,
+                }));
             }
             Err(error) => {
                 eprintln!("error: [{id}] {error}");
                 failed.push(id);
-                stations.push(json!({"station": id, "passed": false, "error": error}));
+                stations.push(json!({
+                    "station": id,
+                    "schema": SCHEMA_VERSION,
+                    "ocpp_version": OCPP_VERSION,
+                    "tool_version": TOOL_VERSION,
+                    "status": "error",
+                    "passed": false,
+                    "error": error,
+                }));
             }
         }
     }
@@ -288,8 +334,18 @@ fn write_fleet_junit(
 fn print_aggregate(total: usize, failed: &[&str], stations: &[Value], json: bool) {
     let passed = total - failed.len();
     if json {
+        let count = |status: &str| stations.iter().filter(|s| s["status"] == status).count();
         let value = json!({
             "type": "fleet_report",
+            "schema": SCHEMA_VERSION,
+            "tool_version": TOOL_VERSION,
+            "status": if failed.is_empty() { "passed" } else { "failed" },
+            "counts": {
+                "passed": count("passed"),
+                "failed": count("failed"),
+                "error": count("error"),
+                "skipped": 0,
+            },
             "passed": failed.is_empty(),
             "total": total,
             "passed_count": passed,

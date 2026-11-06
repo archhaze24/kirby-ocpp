@@ -10,7 +10,7 @@
 use std::path::PathBuf;
 
 use clap::builder::BoolishValueParser;
-use clap::{ArgAction, Args, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults};
 use kirby_ocpp_core::fleet::{FleetSpec, MAX_COUNT};
@@ -43,6 +43,7 @@ Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage 
 pub struct Cli {
     /// Central System WebSocket URL, e.g. ws://localhost:9000/ocpp
     #[arg(
+        help_heading = "Connection",
         global = true,
         short,
         long,
@@ -53,25 +54,26 @@ pub struct Cli {
     pub url: Option<String>,
 
     /// Charge point id
-    #[arg(global = true,
+    #[arg(help_heading = "Identity", global = true,
         short, long, env = "OCPP_CHARGE_POINT_ID", value_name = "ID",
         default_value = defaults::CHARGE_POINT_ID, value_parser = non_empty
     )]
     pub id: String,
 
     /// Number of stations to run (fleet mode, 1-1000); the id needs an index placeholder such as CP-{n:03}
-    #[arg(global = true,
+    #[arg(help_heading = "Fleet", global = true,
         long, env = "OCPP_COUNT", value_name = "COUNT", default_value_t = 1,
         value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_COUNT))
     )]
     pub count: u32,
 
     /// Charge point id template, e.g. CP-{n:03} (default: the --id value)
-    #[arg(global = true, long, env = "OCPP_ID_TEMPLATE", value_name = "TEMPLATE", value_parser = non_empty)]
+    #[arg(help_heading = "Fleet", global = true, long, env = "OCPP_ID_TEMPLATE", value_name = "TEMPLATE", value_parser = non_empty)]
     pub id_template: Option<String>,
 
     /// Index of the first station of a fleet (the value its id placeholder gets)
     #[arg(
+        help_heading = "Fleet",
         global = true,
         long,
         env = "OCPP_FIRST_INDEX",
@@ -82,6 +84,7 @@ pub struct Cli {
 
     /// Delay between starting two stations of a fleet in milliseconds
     #[arg(
+        help_heading = "Fleet",
         global = true,
         long,
         env = "OCPP_STAGGER_MS",
@@ -91,117 +94,117 @@ pub struct Cli {
     pub stagger_ms: u64,
 
     /// Charge point vendor
-    #[arg(global = true,
+    #[arg(help_heading = "Identity", global = true,
         long, env = "OCPP_VENDOR", value_name = "VENDOR",
         default_value = defaults::VENDOR, value_parser = non_empty
     )]
     pub vendor: String,
 
     /// Charge point model
-    #[arg(global = true,
+    #[arg(help_heading = "Identity", global = true,
         long, env = "OCPP_MODEL", value_name = "MODEL",
         default_value = defaults::MODEL, value_parser = non_empty
     )]
     pub model: String,
 
     /// Charge point serial number reported in BootNotification (at most 25 characters)
-    #[arg(global = true, long, env = "OCPP_SERIAL", value_name = "SERIAL", value_parser = non_empty)]
+    #[arg(help_heading = "Identity", global = true, long, env = "OCPP_SERIAL", value_name = "SERIAL", value_parser = non_empty)]
     pub serial: Option<String>,
 
     /// Firmware version reported in BootNotification (at most 50 characters)
-    #[arg(global = true,
+    #[arg(help_heading = "Identity", global = true,
         long = "firmware-version", env = "OCPP_FIRMWARE_VERSION", value_name = "VERSION",
         value_parser = non_empty
     )]
     pub firmware_version: Option<String>,
 
     /// Initial connector id
-    #[arg(global = true,
+    #[arg(help_heading = "Station", global = true,
         short, long, value_name = "ID", default_value_t = 1,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub connector: u32,
 
     /// Number of station connectors (raised to --connector if smaller)
-    #[arg(global = true,
+    #[arg(help_heading = "Station", global = true,
         long, value_name = "COUNT", default_value_t = 1,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub connectors: u32,
 
     /// Fallback heartbeat interval in seconds
-    #[arg(global = true,
+    #[arg(help_heading = "Station", global = true,
         long, value_name = "SECONDS", default_value_t = defaults::HEARTBEAT_INTERVAL_SECS,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub heartbeat: u32,
 
     /// Nominal charging power of each connector in watts
-    #[arg(global = true,
+    #[arg(help_heading = "Station", global = true,
         long, value_name = "WATTS", default_value_t = defaults::NOMINAL_POWER_W,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub nominal_power_w: u32,
 
     /// Supply voltage per phase in volts
-    #[arg(global = true,
+    #[arg(help_heading = "Station", global = true,
         long, value_name = "VOLTS", default_value_t = defaults::VOLTAGE_V,
         value_parser = clap::value_parser!(u32).range(1..)
     )]
     pub voltage_v: u32,
 
     /// Number of charging phases (1-3)
-    #[arg(global = true,
+    #[arg(help_heading = "Station", global = true,
         long, value_name = "COUNT", default_value_t = defaults::PHASES,
         value_parser = clap::value_parser!(u8).range(1..=3)
     )]
     pub phases: u8,
 
     /// Do not save station state such as local auth list and charging profiles
-    #[arg(global = true,
+    #[arg(help_heading = "Station", global = true,
         long, env = "KIRBY_OCPP_NO_PERSIST", action = ArgAction::SetTrue,
         value_parser = BoolishValueParser::new()
     )]
     pub no_persist: bool,
 
     /// Directory for persisted station state
-    #[arg(global = true, long, env = "KIRBY_OCPP_STATE_DIR", value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "Station", global = true, long, env = "KIRBY_OCPP_STATE_DIR", value_name = "PATH", value_parser = non_empty_path)]
     pub state_dir: Option<PathBuf>,
 
     /// WebSocket subprotocol to request
-    #[arg(global = true,
+    #[arg(help_heading = "Connection", global = true,
         long, env = "OCPP_WS_SUBPROTOCOL", value_name = "PROTOCOL",
         default_value = defaults::WS_SUBPROTOCOL, value_parser = non_empty
     )]
     pub ws_subprotocol: String,
 
     /// WebSocket ping interval in seconds, 0 disables pings
-    #[arg(global = true,
+    #[arg(help_heading = "Connection", global = true,
         long, env = "OCPP_WS_PING_INTERVAL", value_name = "SECONDS",
         default_value_t = defaults::WS_PING_INTERVAL_SECS
     )]
     pub ws_ping: u32,
 
     /// Enable or disable automatic reconnect after an unexpected disconnect
-    #[arg(global = true,
+    #[arg(help_heading = "Reconnect", global = true,
         long, env = "OCPP_RECONNECT", value_name = "BOOL", default_value_t = true,
         action = ArgAction::Set, value_parser = BoolishValueParser::new()
     )]
     pub reconnect: bool,
 
     /// Do not automatically reconnect (wins over --reconnect and OCPP_RECONNECT)
-    #[arg(global = true, long)]
+    #[arg(help_heading = "Reconnect", global = true, long)]
     pub no_reconnect: bool,
 
     /// Initial automatic reconnect delay in milliseconds
-    #[arg(global = true,
+    #[arg(help_heading = "Reconnect", global = true,
         long, env = "OCPP_RECONNECT_INITIAL_MS", value_name = "MILLISECONDS",
         default_value_t = defaults::RECONNECT_INITIAL_MS
     )]
     pub reconnect_initial_ms: u64,
 
     /// Maximum automatic reconnect delay in milliseconds
-    #[arg(global = true,
+    #[arg(help_heading = "Reconnect", global = true,
         long, env = "OCPP_RECONNECT_MAX_MS", value_name = "MILLISECONDS",
         default_value_t = defaults::RECONNECT_MAX_MS
     )]
@@ -209,6 +212,7 @@ pub struct Cli {
 
     /// Maximum automatic reconnect attempts, 0 means unlimited
     #[arg(
+        help_heading = "Reconnect",
         global = true,
         long,
         env = "OCPP_RECONNECT_MAX_ATTEMPTS",
@@ -218,7 +222,7 @@ pub struct Cli {
     pub reconnect_max_attempts: u32,
 
     /// OCPP CALL response timeout in milliseconds
-    #[arg(global = true,
+    #[arg(help_heading = "Connection", global = true,
         long, env = "OCPP_CALL_TIMEOUT_MS", value_name = "MILLISECONDS",
         default_value_t = defaults::CALL_TIMEOUT_MS,
         value_parser = clap::value_parser!(u64).range(1..=86_400_000)
@@ -226,44 +230,44 @@ pub struct Cli {
     pub call_timeout_ms: u64,
 
     /// CA certificate bundle for wss:// connections
-    #[arg(global = true, long, env = "OCPP_TLS_CA_FILE", value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "TLS", global = true, long, env = "OCPP_TLS_CA_FILE", value_name = "PATH", value_parser = non_empty_path)]
     pub tls_ca: Option<PathBuf>,
 
     /// Client certificate for wss:// mutual TLS
-    #[arg(global = true, long, env = "OCPP_TLS_CERT_FILE", value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "TLS", global = true, long, env = "OCPP_TLS_CERT_FILE", value_name = "PATH", value_parser = non_empty_path)]
     pub tls_cert: Option<PathBuf>,
 
     /// Client private key for wss:// mutual TLS
-    #[arg(global = true, long, env = "OCPP_TLS_KEY_FILE", value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "TLS", global = true, long, env = "OCPP_TLS_KEY_FILE", value_name = "PATH", value_parser = non_empty_path)]
     pub tls_key: Option<PathBuf>,
 
     /// TLS server name override for wss:// connections
-    #[arg(global = true, long, env = "OCPP_TLS_SERVER_NAME", value_name = "NAME", value_parser = non_empty)]
+    #[arg(help_heading = "TLS", global = true, long, env = "OCPP_TLS_SERVER_NAME", value_name = "NAME", value_parser = non_empty)]
     pub tls_server_name: Option<String>,
 
     /// Disable TLS certificate verification for local/self-signed wss:// testing
-    #[arg(global = true,
+    #[arg(help_heading = "TLS", global = true,
         long, env = "OCPP_TLS_SKIP_VERIFY", action = ArgAction::SetTrue,
         value_parser = BoolishValueParser::new()
     )]
     pub tls_skip_verify: bool,
 
     /// Show AuthorizationKey values in frame logs (by default they are replaced by ***)
-    #[arg(global = true,
+    #[arg(help_heading = "Output", global = true,
         long, env = "OCPP_SHOW_SECRETS", action = ArgAction::SetTrue,
         value_parser = BoolishValueParser::new()
     )]
     pub show_secrets: bool,
 
     /// Set the read-only AdditionalRootCertificateCheck key: a new Central System root must be signed by the installed one
-    #[arg(global = true,
+    #[arg(help_heading = "TLS", global = true,
         long, env = "OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK", action = ArgAction::SetTrue,
         value_parser = BoolishValueParser::new()
     )]
     pub additional_root_certificate_check: bool,
 
     /// Go back to the previous SecurityProfile when the Central System cannot be reached with a newly set one
-    #[arg(global = true,
+    #[arg(help_heading = "TLS", global = true,
         long, env = "OCPP_SECURITY_PROFILE_FALLBACK", value_name = "BOOL", default_value_t = true,
         action = ArgAction::Set, value_parser = BoolishValueParser::new()
     )]
@@ -271,6 +275,7 @@ pub struct Cli {
 
     /// Misbehave on purpose when the CSMS sends a command: ACTION=BEHAVIOR[*COUNT]. Repeatable
     #[arg(
+        help_heading = "Faults",
         global = true,
         long = "rule",
         env = "KIRBY_OCPP_RULES",
@@ -289,27 +294,63 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
     pub rule: Vec<ResponseRule>,
 
     /// Print the effective configuration as JSON and exit
-    #[arg(global = true, long)]
+    #[arg(help_heading = "Output", global = true, long)]
     pub print_config: bool,
 
     /// Never start the terminal UI; log to stdout instead (automatic when stdout is not a terminal)
-    #[arg(global = true, long)]
+    #[arg(help_heading = "Output", global = true, long)]
     pub no_tui: bool,
 
     /// Machine-readable output: one JSON object per line (events, and the report of `run`); never opens the terminal UI
-    #[arg(global = true, long)]
+    #[arg(help_heading = "Output", global = true, long)]
     pub json: bool,
 
     /// Also append the event log to this file (with the terminal UI too)
-    #[arg(global = true, long, value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "Output", global = true, long, value_name = "PATH", value_parser = non_empty_path)]
     pub log_file: Option<PathBuf>,
 
+    /// Show the event and frame lines of `run` and `suite` too (plain headless mode always prints them)
+    #[arg(
+        help_heading = "Output",
+        global = true,
+        short,
+        long,
+        conflicts_with = "quiet"
+    )]
+    pub verbose: bool,
+
+    /// Print only errors and the final verdict line in `run` and `suite`
+    #[arg(help_heading = "Output", global = true, short, long)]
+    pub quiet: bool,
+
+    /// Colorize PASS, FAIL and warnings in human output: auto (only on a terminal and without NO_COLOR), always or never
+    #[arg(
+        help_heading = "Output",
+        global = true,
+        long,
+        value_name = "WHEN",
+        value_enum,
+        default_value = "auto"
+    )]
+    pub color: ColorChoice,
+
     /// Print the third-party licence notices and exit
-    #[arg(long)]
+    #[arg(help_heading = "Output", long)]
     pub licenses: bool,
 
     #[command(subcommand)]
     pub command: Option<Cmd>,
+}
+
+/// `--color` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ColorChoice {
+    /// Only when stdout is a terminal and `NO_COLOR` is not set.
+    Auto,
+    /// Always, even in a pipe.
+    Always,
+    /// Never.
+    Never,
 }
 
 /// Subcommands. Without one, the UI (or the headless logger) runs.
@@ -319,42 +360,55 @@ pub enum Cmd {
     Run(RunArgs),
     /// Run several scenarios one after another, each on a fresh station; exit code 1 if any fails
     Suite(SuiteArgs),
-    /// Built-in scenarios
+    /// Built-in scenarios, and checking scenario files
     Scenarios {
         #[command(subcommand)]
         action: ScenariosCmd,
+    },
+    /// Print the version, git commit, build date, target and supported protocols (with --json as a JSON object)
+    Version,
+    /// Print a shell completion script to stdout
+    Completions {
+        /// Shell to generate the script for
+        #[arg(value_enum, value_name = "SHELL")]
+        shell: clap_complete::Shell,
     },
 }
 
 #[derive(Debug, Args)]
 pub struct RunArgs {
     /// Scenario: a built-in name (see `scenarios list`) or a TOML file
-    #[arg(long, value_name = "FILE|NAME")]
+    #[arg(help_heading = "Scenarios", long, value_name = "FILE|NAME")]
     pub scenario: String,
 
     /// Write the report as JSON to this file
-    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "Scenarios", long, value_name = "PATH", value_parser = non_empty_path)]
     pub report: Option<PathBuf>,
 
     /// Write a JUnit XML report to this file (one file; one test suite per station in a fleet)
-    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "Scenarios", long, value_name = "PATH", value_parser = non_empty_path)]
     pub junit: Option<PathBuf>,
+
+    /// Keep station state between runs: read and write the state file (a `run` is ephemeral by default)
+    #[arg(help_heading = "Scenarios", long, conflicts_with = "no_persist")]
+    pub persist: bool,
 
     /// Give up (and fail) after this many seconds, connecting included
     #[arg(
+        help_heading = "Scenarios",
         long, value_name = "SECONDS", default_value_t = 60,
         value_parser = clap::value_parser!(u64).range(1..=86_400)
     )]
     pub timeout: u64,
 
     /// Replace the idTag of the scenario's authorize / start_tx / stop_tx steps
-    #[arg(long, value_name = "IDTAG", value_parser = non_empty)]
+    #[arg(help_heading = "Scenarios", long, value_name = "IDTAG", value_parser = non_empty)]
     pub id_tag: Option<String>,
 
     /// Set a scenario variable (repeatable): `${NAME}` in the scenario becomes VALUE.
     /// Overrides `[vars]`; `true`/`false`/numbers keep their type. `station_id` and `index`
     /// are built in and cannot be set.
-    #[arg(long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
+    #[arg(help_heading = "Scenarios", long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
     pub vars: Vec<(String, serde_json::Value)>,
 }
 
@@ -366,31 +420,47 @@ pub struct SuiteArgs {
     pub sources: Vec<String>,
 
     /// Also run every built-in scenario except `finish-session`, which needs a transaction left by an earlier run
-    #[arg(long)]
+    #[arg(help_heading = "Scenarios", long)]
     pub all_builtins: bool,
 
     /// Write the suite summary as JSON to this file
-    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "Scenarios", long, value_name = "PATH", value_parser = non_empty_path)]
     pub report: Option<PathBuf>,
 
     /// Write one JUnit XML report to this file (one test suite per scenario)
-    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    #[arg(help_heading = "Scenarios", long, value_name = "PATH", value_parser = non_empty_path)]
     pub junit: Option<PathBuf>,
 
     /// Give up on a scenario (and fail it) after this many seconds, connecting included
     #[arg(
+        help_heading = "Scenarios",
         long, value_name = "SECONDS", default_value_t = 60,
         value_parser = clap::value_parser!(u64).range(1..=86_400)
     )]
     pub timeout: u64,
 
     /// Stop after the first scenario that fails; the rest are reported as SKIP
-    #[arg(long)]
+    #[arg(help_heading = "Scenarios", long)]
     pub fail_fast: bool,
 
     /// Set a scenario variable for every scenario (repeatable), see `run --var`
-    #[arg(long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
+    #[arg(help_heading = "Scenarios", long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
     pub vars: Vec<(String, serde_json::Value)>,
+}
+
+impl SuiteArgs {
+    /// The arguments of a suite over `sources` with every option at its default.
+    pub fn for_sources(sources: Vec<String>) -> Self {
+        Self {
+            sources,
+            all_builtins: false,
+            report: None,
+            junit: None,
+            timeout: 60,
+            fail_fast: false,
+            vars: Vec::new(),
+        }
+    }
 }
 
 /// Parses a `--var` argument.
@@ -408,6 +478,12 @@ pub enum ScenariosCmd {
     List,
     /// Print a built-in scenario as TOML
     Show { name: String },
+    /// Check scenario files, directories or built-in names without connecting; exit 2 if any is invalid
+    Validate {
+        /// Scenario file, directory (`*.toml` directly inside) or built-in name
+        #[arg(required = true, value_name = "FILE|DIR|NAME", value_hint = clap::ValueHint::AnyPath)]
+        paths: Vec<String>,
+    },
 }
 
 impl Cli {
@@ -429,7 +505,10 @@ impl Cli {
     /// both ways to set it, which clap's generic "required argument" error does not do.
     pub fn into_config(self) -> Result<StationConfig, String> {
         let url = self.url.ok_or_else(|| {
-            "the Central System URL is required: use --url or set OCPP_URL".to_owned()
+            "the Central System URL is required: use --url or set OCPP_URL, for example \
+             `kirby-ocpp --url ws://localhost:9000/ocpp`; for a local peer to connect to, run \
+             `kirby-csms --listen 127.0.0.1:9000`"
+                .to_owned()
         })?;
         Ok(StationConfig {
             url,

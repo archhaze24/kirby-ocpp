@@ -24,6 +24,7 @@ kirby-ocpp-testkit = { path = "crates/kirby-ocpp-testkit" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
+clap_complete = "4.6.11"
 base64 = "0.22.1"
 crossterm = "0.29.0"
 hyper = { version = "1.12.0", default-features = false, features = ["http1", "server"] }

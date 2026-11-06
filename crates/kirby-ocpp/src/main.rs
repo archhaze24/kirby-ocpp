@@ -5,13 +5,14 @@ mod fleet;
 mod headless;
 mod suite;
 
+use std::fmt::Write as _;
 use std::io::IsTerminal;
 use std::path::Path;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use kirby_ocpp_core::fleet::Fleet;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::scenario::{
@@ -23,8 +24,8 @@ use kirby_ocpp_tui::stdout_pump::print_lossy;
 use kirby_ocpp_tui::{TuiError, TuiOptions};
 use tokio::task::JoinHandle;
 
-use crate::cli::{Cli, Cmd, RunArgs, ScenariosCmd};
-use crate::headless::Sink;
+use crate::cli::{Cli, Cmd, RunArgs, ScenariosCmd, SuiteArgs};
+use crate::headless::{Level, LinkWatch, Sink};
 
 /// Project licence line and third-party notices (`--licenses`).
 const LICENSES: &str = concat!(
@@ -45,6 +46,7 @@ async fn main() -> ExitCode {
     code
 }
 
+#[allow(clippy::too_many_lines)]
 async fn real_main() -> ExitCode {
     let mut cli = Cli::parse();
     if cli.licenses {
@@ -52,9 +54,23 @@ async fn real_main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     headless::init_stdout(cli.json);
+    let level = if cli.quiet {
+        Level::Quiet
+    } else if cli.verbose {
+        Level::Verbose
+    } else {
+        Level::Normal
+    };
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+    let color =
+        !cli.json && headless::resolve_color(cli.color, std::io::stdout().is_terminal(), no_color);
+    headless::init_style(level, color);
     let command = cli.command.take();
-    if let Some(Cmd::Scenarios { action }) = &command {
-        return scenarios(action);
+    match &command {
+        Some(Cmd::Scenarios { action }) => return scenarios(action),
+        Some(Cmd::Version) => return print_version(cli.json),
+        Some(Cmd::Completions { shell }) => return print_completions(*shell),
+        _ => {}
     }
     let (print_config, no_tui, json) = (cli.print_config, cli.no_tui, cli.json);
     let spec = cli.fleet_spec();
@@ -74,10 +90,17 @@ async fn real_main() -> ExitCode {
             Err(error) => return usage_error(&error.to_string()),
         }
     }
+    // A scenario run is deterministic: no state file is read or written unless `--persist`.
+    if let Some(Cmd::Run(args)) = &command
+        && !args.persist
+    {
+        config.persist = false;
+    }
     config.normalize();
     if let Err(error) = config.validate() {
         return usage_error(&error.to_string());
     }
+    headless::init_connect_context(&config.url, &config.ws_subprotocol);
     if is_fleet && let Err(error) = Fleet::configs(&config, &spec) {
         return usage_error(&error.to_string());
     }
@@ -122,7 +145,9 @@ async fn real_main() -> ExitCode {
         Some(Cmd::Suite(args)) => {
             suite::run(config, &args, connector, json, log_file.as_deref()).await
         }
-        Some(Cmd::Scenarios { .. }) => unreachable!("handled above"),
+        Some(Cmd::Scenarios { .. } | Cmd::Version | Cmd::Completions { .. }) => {
+            unreachable!("handled above")
+        }
         None => {
             // `--json` is for machines: it never opens the terminal UI.
             let tui = !no_tui && !json && std::io::stdout().is_terminal();
@@ -156,7 +181,130 @@ fn scenarios(action: &ScenariosCmd) -> ExitCode {
                 "no built-in scenario `{name}` (try `kirby-ocpp scenarios list`)"
             )),
         },
+        ScenariosCmd::Validate { paths } => validate_scenarios(paths),
     }
+}
+
+/// `scenarios validate`: parses every scenario without connecting.
+fn validate_scenarios(paths: &[String]) -> ExitCode {
+    let mut failed = false;
+    let mut fail = |message: &str| {
+        eprintln!("error: {}", kirby_ocpp_tui::text::sanitize(message));
+        failed = true;
+    };
+    for spec in paths {
+        let mut sources = Vec::new();
+        if names_a_path(spec) && Path::new(spec).is_dir() {
+            match suite::toml_files(Path::new(spec)) {
+                Ok(files) if files.is_empty() => {
+                    fail(&format!("no `*.toml` scenario files in `{spec}`"));
+                }
+                Ok(files) => sources.extend(files.iter().map(|file| file.display().to_string())),
+                Err(error) => fail(&error),
+            }
+        } else if !names_a_path(spec) && builtin::get(spec).is_none() {
+            fail(&unknown_scenario_message(spec));
+        } else {
+            sources.push(spec.clone());
+        }
+        for source in sources {
+            let args = SuiteArgs::for_sources(vec![source.clone()]);
+            match suite::load_entries(&args, ConnectorId::new(1)) {
+                Ok(entries) => {
+                    for entry in entries {
+                        headless::stdout_line(
+                            &format!(
+                                "ok {} ({} steps)",
+                                entry.source,
+                                entry.scenario.expanded_len()
+                            ),
+                            false,
+                        );
+                    }
+                }
+                Err(error) if error.contains(&source) => fail(&error),
+                Err(error) => fail(&format!("{source}: {error}")),
+            }
+        }
+    }
+    if failed {
+        ExitCode::from(EXIT_USAGE)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// `version`: the tool version and how it was built.
+fn print_version(json: bool) -> ExitCode {
+    let version = env!("CARGO_PKG_VERSION");
+    let commit = env!("KIRBY_OCPP_GIT_COMMIT");
+    let date = env!("KIRBY_OCPP_BUILD_DATE");
+    let target = env!("KIRBY_OCPP_TARGET");
+    let protocols = ["OCPP 1.6J"];
+    if json {
+        let value = serde_json::json!({
+            "name": "kirby-ocpp",
+            "version": version,
+            "commit": commit,
+            "build_date": date,
+            "target": target,
+            "protocols": protocols,
+        });
+        headless::stdout_line(&value.to_string(), true);
+    } else {
+        print_lossy(&format!(
+            "kirby-ocpp {version}\ncommit: {commit}\nbuilt: {date}\ntarget: {target}\nprotocols: {}\n",
+            protocols.join(", ")
+        ));
+    }
+    ExitCode::SUCCESS
+}
+
+/// `completions SHELL`: the completion script on stdout.
+fn print_completions(shell: clap_complete::Shell) -> ExitCode {
+    let mut script = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "kirby-ocpp", &mut script);
+    print_lossy(&String::from_utf8_lossy(&script));
+    ExitCode::SUCCESS
+}
+
+/// The error for a scenario name that is neither a built-in nor an existing file, with the
+/// closest built-in name when one is near.
+pub(crate) fn unknown_scenario_message(name: &str) -> String {
+    let mut message =
+        format!("no built-in scenario `{name}` and no such file; see `kirby-ocpp scenarios list`");
+    let wanted = name.to_ascii_lowercase().replace('_', "-");
+    let closest = builtin::all()
+        .into_iter()
+        .map(|scenario| {
+            let distance = edit_distance(&wanted, &scenario.name.to_ascii_lowercase());
+            (distance, scenario.name)
+        })
+        .min();
+    if let Some((distance, candidate)) = closest
+        && distance <= 2.max(wanted.len() / 4)
+    {
+        let _ = write!(message, " (did you mean `{candidate}`?)");
+    }
+    message
+}
+
+/// Levenshtein distance of two short strings.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (diagonal + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(above + 1);
+            diagonal = above;
+        }
+    }
+    row[b.len()]
 }
 
 /// Does a scenario SOURCE argument name a file or directory rather than a built-in: it has a
@@ -186,6 +334,9 @@ fn load_scenario(
     } else {
         builtin::get(spec)
     };
+    if builtin.is_none() && !names_a_path(spec) {
+        return Err(unknown_scenario_message(spec));
+    }
     let (mut scenario, is_builtin) = match builtin {
         Some(scenario) => (scenario, true),
         None => (
@@ -347,12 +498,21 @@ async fn interactive(
             }
         },
     };
+    let mut link = LinkWatch::new(&handle);
     if !tui && let Err(error) = handle.connect().await {
         eprintln!("error: {error}");
     }
-    let _ = shutdown_signal().await;
+    // A station that gave up reconnecting ends the process.
+    let dead = tokio::select! {
+        _ = shutdown_signal() => None,
+        dead = link.dead() => Some(dead),
+    };
     stop_station(&handle, join).await;
     sink.finish().await;
+    if let Some(dead) = dead {
+        eprintln!("error: {}", kirby_ocpp_tui::text::sanitize(&dead));
+        return ExitCode::FAILURE;
+    }
     ExitCode::SUCCESS
 }
 
@@ -373,7 +533,7 @@ async fn run(
         Err(error) => return usage_error(&error),
     };
     let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
-    let sink = match spawn_sink(&handle, json, log_file, true) {
+    let sink = match spawn_sink(&handle, json, log_file, headless::events_on_stdout(json)) {
         Ok(sink) => sink,
         Err(code) => {
             stop_station(&handle, join).await;
@@ -410,7 +570,7 @@ async fn run(
         Err(error) => (None, Some(error)),
     };
     if let Some(error) = &setup_error {
-        eprintln!("error: {error}");
+        eprintln!("error: {}", kirby_ocpp_tui::text::sanitize(error));
     }
     let mut write_failed = false;
     // Files first: a closed stdout must not cost the machine-readable reports.
@@ -455,14 +615,24 @@ pub(crate) async fn connect_and_run(
     overrides: &Vars,
     index: u64,
 ) -> Result<ScenarioReport, String> {
+    // Subscribed before connecting: a connection that fails at once must not be missed.
+    let mut link = LinkWatch::new(handle);
     handle.connect().await.map_err(|e| e.to_string())?;
     let mut snapshots = handle.watch_snapshot();
     tokio::select! {
         registered = snapshots.wait_for(kirby_ocpp_core::station::Snapshot::booted) => {
             registered.map_err(|_| "the station stopped".to_owned())?;
         }
+        // No reconnect left (`--no-reconnect`, attempts used up): fail now, not at the timeout.
+        dead = link.dead() => return Err(dead),
         () = cancel.cancelled() => {
-            return Err("timed out waiting for the central system to accept the BootNotification".to_owned());
+            let mut message =
+                "timed out waiting for the central system to accept the BootNotification".to_owned();
+            if let Some(last) = link.last_error() {
+                message.push_str("; last error: ");
+                message.push_str(&last);
+            }
+            return Err(message);
         }
     }
     Ok(run_scenario_with_vars(handle, scenario, cancel, None, overrides, index).await)
@@ -492,6 +662,18 @@ pub(crate) fn print_report(report: &ScenarioReport, json: bool, station: Option<
         return;
     }
     let say = |line: String| headless::stdout_line(&headless::tagged(&line, station), false);
+    let verdict = format!(
+        "{} in {} ms",
+        if report.passed { "PASSED" } else { "FAILED" },
+        report.duration_ms
+    );
+    if headless::level() == Level::Quiet {
+        // Only the final line; a fleet prints its aggregate line instead.
+        if station.is_none() {
+            say(verdict);
+        }
+        return;
+    }
     say(format!("scenario {}", report.scenario));
     for step in &report.steps {
         let (mark, detail) = match &step.status {
@@ -506,11 +688,7 @@ pub(crate) fn print_report(report: &ScenarioReport, json: bool, station: Option<
             step.duration_ms
         ));
     }
-    say(format!(
-        "{} in {} ms",
-        if report.passed { "PASSED" } else { "FAILED" },
-        report.duration_ms
-    ));
+    say(verdict);
 }
 
 pub(crate) fn write_junit(path: &Path, suites: &[JunitSuite<'_>]) -> std::io::Result<()> {

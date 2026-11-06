@@ -144,6 +144,27 @@ async fn fail_fast_skips_the_rest_and_json_summary_has_its_shape() {
     assert_eq!(summary["scenarios"][0]["status"], "failed");
     assert_eq!(summary["scenarios"][1]["status"], "skipped");
     assert!(summary["duration_ms"].is_u64());
+    assert_eq!(summary["schema"], 1);
+    assert_eq!(summary["status"], "failed");
+    assert_eq!(summary["tool_version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        summary["started_at"]
+            .as_str()
+            .is_some_and(|t| t.ends_with('Z'))
+    );
+    assert_eq!(
+        summary["counts"],
+        serde_json::json!({"passed": 0, "failed": 1, "error": 0, "skipped": 1})
+    );
+    assert_eq!(summary["scenarios"][0]["ocpp_version"], "1.6");
+    assert!(
+        summary["scenarios"][0]["source"]
+            .as_str()
+            .is_some_and(|s| s.ends_with("bad.toml"))
+    );
+    assert!(summary["scenarios"][0]["station"].is_string());
+    assert_eq!(summary["scenarios"][0]["report"]["schema"], 1);
+    assert_eq!(summary["scenarios"][0]["report"]["status"], "failed");
     assert!(
         lines
             .iter()

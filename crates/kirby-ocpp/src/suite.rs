@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::scenario::{
-    CancelToken, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin,
+    CancelToken, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, Scenario, ScenarioReport, StepStatus,
+    TOOL_VERSION, Vars, builtin, now_rfc3339,
 };
 use kirby_ocpp_core::{Station, StationConfig, SystemClock};
 use serde_json::{Value, json};
@@ -23,7 +24,7 @@ use crate::cli::SuiteArgs;
 use crate::headless::stdout_line;
 use crate::{
     EXIT_INTERRUPTED, Shutdown, connect_and_run, names_a_path, override_vars, print_report,
-    spawn_sink, stop_station, usage_error, write_junit,
+    spawn_sink, stop_station, unknown_scenario_message, usage_error, write_junit,
 };
 
 /// Built-ins that need a transaction left by an earlier run; they cannot pass on a fresh
@@ -31,10 +32,10 @@ use crate::{
 const STATEFUL_BUILTINS: &[&str] = &["finish-session"];
 
 /// One scenario of the suite and where it came from.
-struct Entry {
-    scenario: Scenario,
+pub(crate) struct Entry {
+    pub(crate) scenario: Scenario,
     /// Built-in name or file path, used to tell apart equal scenario names.
-    source: String,
+    pub(crate) source: String,
 }
 
 /// How one scenario ended.
@@ -49,6 +50,8 @@ enum Outcome {
 
 struct Row {
     name: String,
+    /// File path or `builtin:NAME` of the scenario.
+    source: Option<String>,
     outcome: Outcome,
     duration_ms: u64,
 }
@@ -73,7 +76,7 @@ impl Row {
 }
 
 /// Expands the SOURCE arguments into scenarios (files of a directory sorted by name).
-fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<Vec<Entry>, String> {
+pub(crate) fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<Vec<Entry>, String> {
     let mut entries: Vec<Entry> = Vec::new();
     let add_builtin = |scenario: Scenario, entries: &mut Vec<Entry>| {
         let source = format!("built-in {}", scenario.name);
@@ -107,7 +110,9 @@ fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<Vec<Entry>, 
             Ok(meta) if !meta.is_file() => {
                 return Err(format!("`{spec}` is not a regular file or a directory"));
             }
-            // A missing file is reported by `Scenario::load`.
+            // Not a built-in, not path-like and not on disk: most likely a mistyped name.
+            Err(_) if !names_a_path(spec) => return Err(unknown_scenario_message(spec)),
+            // Any other missing file is reported by `Scenario::load`.
             _ => vec![path.to_path_buf()],
         };
         for file in files {
@@ -135,7 +140,7 @@ fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<Vec<Entry>, 
 }
 
 /// The `*.toml` files directly inside `dir`, sorted by file name.
-fn toml_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+pub(crate) fn toml_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let read =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?;
     let mut files = Vec::new();
@@ -195,9 +200,10 @@ async fn run_one(
     log_file: Option<&Path>,
 ) -> (Result<Outcome, ExitCode>, Signal) {
     let (handle, join) = Station::spawn(config.clone(), Arc::new(SystemClock));
-    // Events go to stdout only in JSON mode (like `run`); the human form is the summary.
-    let sink = if json || log_file.is_some() {
-        match spawn_sink(&handle, json, log_file, json) {
+    // Events go to stdout only in JSON mode or with `-v` (like `run`); the human form is the summary.
+    let stdout = crate::headless::events_on_stdout(json);
+    let sink = if stdout || log_file.is_some() {
+        match spawn_sink(&handle, json, log_file, stdout) {
             Ok(sink) => Some(sink),
             Err(code) => {
                 stop_station(&handle, join).await;
@@ -274,6 +280,7 @@ pub async fn run(
         }
     }
     let started = Instant::now();
+    let started_at = now_rfc3339();
     // Created once: a signal between two scenarios is kept for the next check.
     let mut shutdown = Shutdown::new();
 
@@ -295,6 +302,7 @@ pub async fn run(
         if stop {
             rows.push(Row {
                 name: name.clone(),
+                source: entry.scenario.source.clone(),
                 outcome: Outcome::Skipped,
                 duration_ms: 0,
             });
@@ -321,18 +329,19 @@ pub async fn run(
             Ok(outcome) => outcome,
             Err(code) => return code,
         };
-        if !json {
+        if !json && crate::headless::level() != crate::headless::Level::Quiet {
             stdout_line(&human_line(name, &outcome, duration_ms), false);
         }
         rows.push(Row {
             name: name.clone(),
+            source: entry.scenario.source.clone(),
             outcome,
             duration_ms,
         });
     }
     let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let summary = summary_json(&rows, total_ms);
+    let summary = summary_json(&rows, total_ms, &started_at);
     let mut write_failed = false;
     {
         // Files first: a closed stdout must not cost the machine-readable reports. They are
@@ -438,7 +447,7 @@ fn summary_line(rows: &[Row]) -> String {
     line
 }
 
-fn summary_json(rows: &[Row], duration_ms: u64) -> Value {
+fn summary_json(rows: &[Row], duration_ms: u64, started_at: &str) -> Value {
     let passed_count = rows.iter().filter(|r| r.status() == "passed").count();
     let failed = names_with(rows, Row::failed);
     let skipped = names_with(rows, |r| matches!(r.outcome, Outcome::Skipped));
@@ -448,10 +457,15 @@ fn summary_json(rows: &[Row], duration_ms: u64) -> Value {
             let mut value = json!({
                 "name": row.name,
                 "status": row.status(),
+                "ocpp_version": OCPP_VERSION,
                 "duration_ms": row.duration_ms,
             });
+            if let Some(source) = &row.source {
+                value["source"] = json!(source);
+            }
             match &row.outcome {
                 Outcome::Done(report) => {
+                    value["station"] = json!(report.station);
                     value["report"] = serde_json::to_value(report).unwrap_or_default();
                 }
                 Outcome::Error(error) => value["error"] = json!(error),
@@ -460,9 +474,28 @@ fn summary_json(rows: &[Row], duration_ms: u64) -> Value {
             value
         })
         .collect();
+    let count = |status: &str| rows.iter().filter(|r| r.status() == status).count();
+    let passed = failed.is_empty() && skipped.is_empty();
+    let status = if passed {
+        "passed"
+    } else if failed.is_empty() {
+        "skipped"
+    } else {
+        "failed"
+    };
     json!({
         "type": "suite_report",
-        "passed": failed.is_empty() && skipped.is_empty(),
+        "schema": SCHEMA_VERSION,
+        "tool_version": TOOL_VERSION,
+        "started_at": started_at,
+        "status": status,
+        "counts": {
+            "passed": count("passed"),
+            "failed": count("failed"),
+            "error": count("error"),
+            "skipped": count("skipped"),
+        },
+        "passed": passed,
         "total": rows.len(),
         "passed_count": passed_count,
         "failed": failed,

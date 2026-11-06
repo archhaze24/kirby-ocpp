@@ -263,8 +263,15 @@ async fn single_station_output_stays_untagged() {
     .await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let lines = jsonl(&output);
-    assert!(lines.iter().all(|l| l.get("station").is_none()));
+    // Only the report names its station (report metadata); event lines stay untagged.
+    assert!(
+        lines
+            .iter()
+            .filter(|l| l["type"] != "report")
+            .all(|l| l.get("station").is_none())
+    );
     assert_eq!(lines.last().unwrap()["type"], "report");
+    assert_eq!(lines.last().unwrap()["station"], "ONLY");
     assert_eq!(connected_ids(&csms), BTreeSet::from(["ONLY".to_owned()]));
 
     // An explicit template is expanded even for one station.
