@@ -163,7 +163,7 @@ impl StationActor {
                 );
                 let fell_back = self.report_connect_failure(&error);
                 self.state.connection = ConnectionState::Disconnected;
-                if fell_back && self.link.wanted && self.config.reconnect.enabled {
+                if fell_back && self.link.wanted {
                     // A05.FR.08: the previous profile is in force again; try it at once.
                     self.link.attempts = 0;
                     self.timers.cancel(&TimerKey::Reconnect);

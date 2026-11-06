@@ -185,6 +185,10 @@ pub(crate) struct StationActor {
     /// Consecutive failed attempts with a renewed client certificate pending its first
     /// successful connection (runtime only, `A02.FR.28`).
     pub(super) cert_failures: u32,
+    /// The server refused the NEW client certificate at least once while it waited for its
+    /// first connection (runtime only; a success with the previous one discards the new one
+    /// only then).
+    pub(super) new_cert_refused: bool,
     /// Which stored client certificate the connection attempt in progress presents.
     pub(super) connect_identity: super::secure::StoredIdentity,
     /// The `SignCertificate` back-off series in progress.
@@ -273,6 +277,7 @@ impl StationActor {
             pending_profile_switch: None,
         };
         persistence.restore(&mut state, &mut parts, &mut startup_logs, clock.now_utc());
+        sanitize_restored_security(&config, &mut parts, &mut persistence, &mut startup_logs);
         // Profiles saved before store version 3 have no install time: count it from now.
         parts.profiles.backfill_installed_at(clock.now_utc());
         state.heartbeat_interval_secs = parts.registry.heartbeat_interval_secs();
@@ -317,6 +322,7 @@ impl StationActor {
             failure_series: std::collections::HashSet::new(),
             use_previous_cert: false,
             cert_failures: 0,
+            new_cert_refused: false,
             connect_identity: super::secure::StoredIdentity::None,
             sign_series: None,
             next_sign_series: 0,
@@ -584,5 +590,35 @@ async fn next_link_event(events: &mut Option<mpsc::Receiver<ConnectionEvent>>) -
                 by_us: false,
             }),
         None => std::future::pending().await,
+    }
+}
+
+/// `A05.FR.08` records: only meaningful with the flag on and a valid previous profile; an old
+/// `AuthorizationKey` is kept only while a switch is pending or a profile uses the key.
+fn sanitize_restored_security(
+    config: &StationConfig,
+    parts: &mut RestoredParts,
+    persistence: &mut Persistence,
+    startup_logs: &mut Vec<(LogLevel, String)>,
+) {
+    if let Some(pending) = parts.pending_profile_switch
+        && (!config.security_profile_fallback || pending.previous_profile > 3)
+    {
+        parts.pending_profile_switch = None;
+        if config.security_profile_fallback {
+            startup_logs.push((
+                LogLevel::Warn,
+                format!(
+                    "dropped the pending security profile switch: invalid previous profile {}",
+                    pending.previous_profile
+                ),
+            ));
+        }
+    }
+    if parts.pending_profile_switch.is_none()
+        && parts.registry.security_profile() == 0
+        && parts.secrets.previous_authorization_key.take().is_some()
+    {
+        persistence.secrets_dirty = true;
     }
 }

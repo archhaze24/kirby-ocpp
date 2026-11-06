@@ -104,6 +104,22 @@ pub(super) fn classify_tls_failure(text: &str) -> Option<TlsFailure> {
 /// 401/403 upgrade answer; a close or reset right after the handshake).
 /// `HandshakeFailure` is deliberately not counted here.
 fn is_client_certificate_refusal(error: &ConnectError) -> bool {
+    if is_client_certificate_alert(error) {
+        return true;
+    }
+    // The server completed the TLS handshake and then closed or reset the connection
+    // before answering the upgrade request (see `ws::handshake::read_head`).
+    matches!(error, ConnectError::Handshake(text)
+        if !text.contains("received fatal alert")
+            && (text.contains("closed before the upgrade response")
+                || text.contains("cannot read the upgrade response")))
+}
+
+/// The strict form used by the profile fallback (`A05.FR.08`): an HTTP 401/403 upgrade answer
+/// or a TLS alert that says the server refused OUR client certificate. Closes, resets,
+/// server-certificate errors and generic TLS errors are not evidence about the profile and
+/// can be forged by a man in the middle (downgrade resistance).
+fn is_client_certificate_alert(error: &ConnectError) -> bool {
     const ALERTS: &[&str] = &[
         "BadCertificate",
         "UnsupportedCertificate",
@@ -123,18 +139,31 @@ fn is_client_certificate_refusal(error: &ConnectError) -> bool {
         ConnectError::HttpStatus {
             status: 401 | 403, ..
         } => true,
-        // The server completed the TLS handshake and then closed or reset the connection
-        // before answering the upgrade request (see `ws::handshake::read_head`).
-        ConnectError::Handshake(text) => {
-            if text.contains("received fatal alert") {
-                has_alert(text)
-            } else {
-                text.contains("closed before the upgrade response")
-                    || text.contains("cannot read the upgrade response")
-            }
+        ConnectError::Handshake(text) | ConnectError::Tls(text) | ConnectError::Network(text) => {
+            has_alert(text)
         }
-        ConnectError::Tls(text) | ConnectError::Network(text) => has_alert(text),
         _ => false,
+    }
+}
+
+/// Which dimension of the next attempt a failure speaks about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureClass {
+    /// The server certificate was not accepted (root dimension).
+    ServerCertificate,
+    /// The server refused our client certificate (client certificate dimension).
+    ClientRefusal,
+    /// Anything else.
+    Other,
+}
+
+fn classify_failure(error: &ConnectError) -> FailureClass {
+    if matches!(error, ConnectError::Tls(text) if text.contains("invalid peer certificate")) {
+        FailureClass::ServerCertificate
+    } else if is_client_certificate_refusal(error) {
+        FailureClass::ClientRefusal
+    } else {
+        FailureClass::Other
     }
 }
 
@@ -145,13 +174,6 @@ const ALTERNATE_AFTER_FAILURES: u32 = 3;
 /// `A05.FR.08`: profile-attributable connection failures after a `SecurityProfile` change
 /// that make the station go back to the previous profile.
 pub(super) const PROFILE_FALLBACK_AFTER_FAILURES: u32 = 3;
-
-/// A failure the security profile can explain: HTTP 401/403, a TLS error, or a refusal right
-/// after the TLS handshake. Timeouts, refused TCP and DNS errors only say the Central System
-/// may be offline.
-fn is_profile_failure(error: &ConnectError) -> bool {
-    matches!(error, ConnectError::Tls(_)) || is_client_certificate_refusal(error)
-}
 
 impl StationActor {
     /// Reports a security event: queued, then sent as soon as the station is registered.
@@ -412,6 +434,7 @@ impl StationActor {
         self.secrets.pending_key_pem = None;
         self.use_previous_cert = false;
         self.cert_failures = 0;
+        self.new_cert_refused = false;
     }
 
     /// A connection with a stored client certificate succeeded. The new certificate working
@@ -422,6 +445,14 @@ impl StationActor {
         let has_previous = self.certs.previous_charge_point_chain.is_some();
         self.use_previous_cert = false;
         self.cert_failures = 0;
+        let refused = std::mem::take(&mut self.new_cert_refused);
+        if used == StoredIdentity::Previous && has_previous && !refused {
+            self.log(
+                LogLevel::Info,
+                "connected with the previous client certificate; the new one was not refused and stays".to_owned(),
+            );
+            return;
+        }
         match used {
             StoredIdentity::Current if has_previous => {
                 self.certs.previous_charge_point_chain = None;
@@ -568,8 +599,16 @@ impl StationActor {
             self.cert_failures = 0;
             return;
         }
+        let class = classify_failure(error);
+        if class == FailureClass::ServerCertificate {
+            // Says nothing about the client certificate: the root dimension handles it.
+            return;
+        }
         self.cert_failures += 1;
-        let refused = is_client_certificate_refusal(error);
+        let refused = class == FailureClass::ClientRefusal;
+        if refused && self.connect_identity == StoredIdentity::Current {
+            self.new_cert_refused = true;
+        }
         if !refused && self.cert_failures < ALTERNATE_AFTER_FAILURES {
             return;
         }
@@ -600,8 +639,7 @@ impl StationActor {
     /// Returns `true` when the failure made the station fall back to the previous security
     /// profile (`A05.FR.08`): the caller reconnects at once.
     pub(super) fn report_connect_failure(&mut self, error: &ConnectError) -> bool {
-        let certificate_error =
-            matches!(error, ConnectError::Tls(text) if text.contains("invalid peer certificate"));
+        let certificate_error = classify_failure(error) == FailureClass::ServerCertificate;
         let wildcard = matches!(error, ConnectError::Tls(text) if text.contains(WILDCARD_REFUSED));
         if certificate_error && !wildcard && self.certs.has_fallback() {
             self.use_fallback_root = !self.use_fallback_root;
@@ -632,12 +670,24 @@ impl StationActor {
     /// `A05.FR.08`: counts a profile-attributable failure while a profile change waits for its
     /// first successful connection; at the threshold the previous profile is restored.
     fn count_profile_failure(&mut self, error: &ConnectError) -> bool {
-        if !self.config.security_profile_fallback || !is_profile_failure(error) {
-            return false;
-        }
         let Some(mut pending) = self.pending_profile_switch else {
             return false;
         };
+        if !self.config.security_profile_fallback {
+            self.pending_profile_switch = None;
+            self.mark_dirty();
+            return false;
+        }
+        if !is_client_certificate_alert(error) {
+            // "In a row": anything else (offline, timeout, close, server certificate) restarts
+            // the count.
+            if pending.failures != 0 {
+                pending.failures = 0;
+                self.pending_profile_switch = Some(pending);
+                self.mark_dirty();
+            }
+            return false;
+        }
         pending.failures += 1;
         if pending.failures < PROFILE_FALLBACK_AFTER_FAILURES {
             self.pending_profile_switch = Some(pending);
@@ -653,12 +703,31 @@ impl StationActor {
     /// bars lowering after a connection with it).
     fn fall_back_to_previous_profile(&mut self, previous: u8) {
         let current = self.registry.security_profile();
-        self.registry.set_security_profile_unchecked(previous);
         self.pending_profile_switch = None;
+        self.mark_dirty();
+        if previous > 3 {
+            self.log(
+                LogLevel::Warn,
+                format!(
+                    "profile fallback dropped: the recorded previous profile {previous} is invalid"
+                ),
+            );
+            return;
+        }
+        self.registry.set_security_profile_unchecked(previous);
+        // Profile 3 does not use the key; only 1 and 2 get the previous credential back.
+        let restore = matches!(previous, 1 | 2);
         if let Some(key) = self.secrets.previous_authorization_key.take() {
-            if previous >= 1 {
+            if restore {
                 self.registry.set_authorization_key(&key);
                 self.secrets.authorization_key = Some(key);
+            }
+            if self.persistence_secrets_locked() {
+                self.log(
+                    LogLevel::Warn,
+                    "the secrets file is locked: the restored AuthorizationKey is not saved during this run"
+                        .to_owned(),
+                );
             }
             self.mark_secrets_dirty();
         }
@@ -729,7 +798,10 @@ impl StationActor {
         if key == AUTHORIZATION_KEY {
             let new = self.registry.authorization_key().map(str::to_owned);
             // The oldest unproven key is the one to go back to (`A05.FR.08`).
-            if self.secrets.previous_authorization_key.is_none()
+            if self.registry.security_profile() == 0 {
+                // Nothing uses the key at profile 0 and no switch is pending: keep no old one.
+                self.secrets.previous_authorization_key = None;
+            } else if self.secrets.previous_authorization_key.is_none()
                 && self.secrets.authorization_key != new
             {
                 self.secrets.previous_authorization_key = self
@@ -741,10 +813,11 @@ impl StationActor {
             self.secrets.authorization_key = new;
             self.mark_secrets_dirty();
         }
-        if key == SECURITY_PROFILE
-            && self.config.security_profile_fallback
-            && self.registry.security_profile() != previous_profile
-        {
+        if key == SECURITY_PROFILE && !self.config.security_profile_fallback {
+            if self.pending_profile_switch.take().is_some() {
+                self.mark_dirty();
+            }
+        } else if key == SECURITY_PROFILE && self.registry.security_profile() != previous_profile {
             let before = self
                 .pending_profile_switch
                 .map_or(previous_profile, |p| p.previous_profile);

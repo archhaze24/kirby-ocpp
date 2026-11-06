@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use crate::station_support::{Rig, STEP, t0, wait_state};
 use kirby_ocpp_core::Station;
 use kirby_ocpp_core::ocpp::types::RegistrationStatus;
+use kirby_ocpp_core::station::ConnectionState;
 use kirby_ocpp_testkit::{CsmsOptions, Reply};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -20,6 +21,10 @@ use tokio::net::{TcpListener, TcpStream};
 const FORWARD: u8 = 0;
 const REFUSE: u8 = 1;
 const SILENT: u8 = 2;
+/// 401 once, then close every authenticated upgrade request without an answer.
+const REFUSE_ONCE: u8 = 3;
+/// Close every authenticated upgrade request without an answer.
+const CLOSE: u8 = 4;
 
 struct Gate {
     url: String,
@@ -91,12 +96,26 @@ async fn serve(
     let authenticated = String::from_utf8_lossy(&request)
         .to_ascii_lowercase()
         .contains("\r\nauthorization:");
-    let mode = mode.load(Ordering::SeqCst);
+    let mode_cell = mode;
+    let mode = mode_cell.load(Ordering::SeqCst);
     if authenticated && mode == REFUSE {
         refused.fetch_add(1, Ordering::SeqCst);
         let _ = socket
             .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
             .await;
+        return;
+    }
+    if authenticated && mode == REFUSE_ONCE {
+        refused.fetch_add(1, Ordering::SeqCst);
+        // Later attempts are closes (counted as `held`).
+        mode_cell.store(CLOSE, Ordering::SeqCst);
+        let _ = socket
+            .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
+            .await;
+        return;
+    }
+    if authenticated && mode == CLOSE {
+        held.fetch_add(1, Ordering::SeqCst);
         return;
     }
     if authenticated && mode == SILENT {
@@ -275,5 +294,175 @@ async fn with_the_flag_off_the_station_stays_on_the_new_profile() {
     rig.station.shutdown().await.unwrap();
     assert!(state_file(&rig)["pending_profile_switch"].is_null());
     rig.join.take().unwrap().await.unwrap();
+    rig.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn closes_never_fall_back() {
+    let gate = Gate::start(CLOSE).await;
+    let mut rig = rig(&gate, true).await;
+    switch_to_profile_one(&rig).await;
+    wait_state(&rig.station, "five closed attempts", |_| gate.held() >= 5).await;
+    assert_eq!(rig.station.snapshot().security_profile, 1);
+    rig.station.shutdown().await.unwrap();
+    assert_eq!(state_file(&rig)["pending_profile_switch"]["failures"], 0);
+    rig.join.take().unwrap().await.unwrap();
+    rig.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failure_that_is_not_a_refusal_restarts_the_count() {
+    let gate = Gate::start(FORWARD).await;
+    let mut rig = rig(&gate, true).await;
+    // The first authenticated attempt is refused (counted), the following ones are closed.
+    gate.set_mode(REFUSE_ONCE);
+    rig.cfg("AuthorizationKey", "0123456789abcdef").await;
+    rig.csms
+        .wait_for_connection_count(2, STEP)
+        .await
+        .expect("reconnect after the key");
+    rig.wait_registration(RegistrationStatus::Accepted).await;
+    rig.cfg("SecurityProfile", "1").await;
+    wait_state(&rig.station, "a refusal and then closes", |_| {
+        gate.refused() == 1 && gate.held() >= 2
+    })
+    .await;
+    assert_eq!(rig.station.snapshot().security_profile, 1);
+    rig.station.shutdown().await.unwrap();
+    assert_eq!(
+        state_file(&rig)["pending_profile_switch"]["failures"],
+        0,
+        "the close reset the count"
+    );
+    rig.join.take().unwrap().await.unwrap();
+    rig.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_fallback_works_with_reconnect_disabled() {
+    let gate = Gate::start(REFUSE).await;
+    let url = gate.url.clone();
+    let mut rig = Rig::with(CsmsOptions::default(), move |mut config| {
+        config.url = url;
+        config.call_timeout_ms = 300;
+        config.reconnect.enabled = false;
+        config
+    })
+    .await;
+    gate.set_upstream(rig.csms.addr());
+    rig.csms
+        .respond("SecurityEventNotification", |_| Reply::Result(json!({})));
+    rig.connect_booted().await;
+    gate.set_mode(FORWARD);
+    switch_to_profile_one(&rig).await;
+    gate.set_mode(REFUSE);
+    // Every failed attempt stops the station; a manual connect makes the next one.
+    for expected in 1..=2_usize {
+        wait_state(&rig.station, "a refused attempt", |s| {
+            gate.refused() >= expected && s.connection == ConnectionState::Disconnected
+        })
+        .await;
+        rig.station.connect().await.unwrap();
+    }
+    wait_state(&rig.station, "fallback to profile 0", |s| {
+        s.security_profile == 0 && s.registration == Some(RegistrationStatus::Accepted)
+    })
+    .await;
+    rig.station.shutdown().await.unwrap();
+    rig.join.take().unwrap().await.unwrap();
+    rig.csms.shutdown().await;
+}
+
+/// Rewrites the state file of a stopped rig.
+fn edit_state(rig: &Rig, edit: impl FnOnce(&mut Value)) {
+    let name = format!("{}.station.json", rig.station.config().charge_point_id);
+    let path = rig.dir.path().join(name);
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    edit(&mut value);
+    std::fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn a_stale_pending_switch_is_dropped_with_the_flag_off() {
+    let gate = Gate::start(FORWARD).await;
+    let mut rig = rig(&gate, true).await;
+    rig.station.shutdown().await.unwrap();
+    rig.join.take().unwrap().await.unwrap();
+    edit_state(&rig, |v| {
+        v["pending_profile_switch"] = json!({"previous_profile": 0, "failures": 1});
+    });
+    let mut config = rig.station.config().clone();
+    config.security_profile_fallback = false;
+    let (station, join) = Station::spawn(config, Arc::new(kirby_ocpp_core::ManualClock::new(t0())));
+    station.connect().await.unwrap();
+    wait_state(&station, "registered", |s| {
+        s.registration == Some(RegistrationStatus::Accepted)
+    })
+    .await;
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    assert!(state_file(&rig)["pending_profile_switch"].is_null());
+    rig.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_invalid_previous_profile_in_the_state_file_is_dropped() {
+    let gate = Gate::start(REFUSE).await;
+    let mut rig = rig(&gate, true).await;
+    rig.station.shutdown().await.unwrap();
+    rig.join.take().unwrap().await.unwrap();
+    edit_state(&rig, |v| {
+        v["pending_profile_switch"] = json!({"previous_profile": 9, "failures": 2});
+        v["configuration"]["SecurityProfile"] = json!("1");
+    });
+    let secrets = format!(
+        "{}.station.secrets.json",
+        rig.station.config().charge_point_id
+    );
+    std::fs::write(
+        rig.dir.path().join(secrets),
+        r#"{"version":9,"authorization_key":"0123456789abcdef"}"#,
+    )
+    .unwrap();
+    let (station, join) = Station::spawn(
+        rig.station.config().clone(),
+        Arc::new(kirby_ocpp_core::ManualClock::new(t0())),
+    );
+    // Nothing pending: refusals do not move the profile.
+    gate.set_mode(REFUSE);
+    station.connect().await.unwrap();
+    wait_state(&station, "refusals", |_| gate.refused() >= 4).await;
+    assert_eq!(station.snapshot().security_profile, 1);
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    rig.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_key_change_at_profile_zero_keeps_no_previous_key_on_disk() {
+    let gate = Gate::start(FORWARD).await;
+    let mut rig = rig(&gate, true).await;
+    rig.cfg("AuthorizationKey", "0123456789abcdef").await;
+    rig.csms
+        .wait_for_connection_count(2, STEP)
+        .await
+        .expect("reconnect after the first key");
+    rig.wait_registration(RegistrationStatus::Accepted).await;
+    rig.cfg("AuthorizationKey", "fedcba9876543210").await;
+    rig.csms
+        .wait_for_connection_count(3, STEP)
+        .await
+        .expect("reconnect after the second key");
+    rig.wait_registration(RegistrationStatus::Accepted).await;
+    rig.station.shutdown().await.unwrap();
+    rig.join.take().unwrap().await.unwrap();
+    let name = format!(
+        "{}.station.secrets.json",
+        rig.station.config().charge_point_id
+    );
+    let secrets: Value =
+        serde_json::from_slice(&std::fs::read(rig.dir.path().join(name)).unwrap()).unwrap();
+    assert_eq!(secrets["authorization_key"], "fedcba9876543210");
+    assert!(secrets["previous_authorization_key"].is_null());
     rig.csms.shutdown().await;
 }

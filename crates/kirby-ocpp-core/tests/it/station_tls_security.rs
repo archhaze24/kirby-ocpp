@@ -899,6 +899,83 @@ async fn an_outage_alternates_at_most_once_per_three_failures_and_discards_nothi
     case.csms.shutdown().await;
 }
 
+/// A server that accepts both certificates but is unreachable for the first three attempts:
+/// the choice flips to the previous certificate, which then connects. The new certificate was
+/// never refused, so it must not be discarded.
+#[tokio::test]
+async fn a_short_outage_does_not_discard_a_new_certificate_that_was_never_refused() {
+    let upstream = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    upstream.respond("SecurityEventNotification", |_| Reply::Result(json!({})));
+    let ca = ca("Client CA");
+    let new = client_pair(&ca, true);
+    let previous = client_pair(&ca, true);
+    let upstream_addr: SocketAddr = upstream
+        .url()
+        .trim_start_matches("ws://")
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    // Nothing matches the "refused" certificate: the gate accepts both.
+    let (gate_url, ca_pem, _) = certificate_gate(upstream_addr, vec![0], Refusal::Close).await;
+    let gate_addr: SocketAddr = gate_url
+        .trim_start_matches("wss://")
+        .split('/')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let front = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let front_url = format!(
+        "wss://127.0.0.1:{}/ocpp",
+        front.local_addr().unwrap().port()
+    );
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&accepted);
+    tokio::spawn(async move {
+        while let Ok((mut tcp, _)) = front.accept().await {
+            if counter.fetch_add(1, Ordering::SeqCst) < 3 {
+                drop(tcp);
+                continue;
+            }
+            tokio::spawn(async move {
+                if let Ok(mut onward) = tokio::net::TcpStream::connect(gate_addr).await {
+                    let _ = tokio::io::copy_bidirectional(&mut tcp, &mut onward).await;
+                }
+            });
+        }
+    });
+    let case = mtls_case_at(upstream, &front_url, &ca_pem, new.clone(), previous.clone());
+    let (state, secrets, logs, case) = run_mtls(case, None).await;
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("the next attempt uses the previous")),
+        "the outage flipped the choice: {logs:?}"
+    );
+    assert_eq!(
+        state.certificates.charge_point_chain.as_deref(),
+        Some(new.0.trim())
+    );
+    assert_eq!(
+        state.certificates.previous_charge_point_chain.as_deref(),
+        Some(previous.0.trim())
+    );
+    assert_eq!(
+        secrets.charge_point_key_pem.as_deref(),
+        Some(new.1.as_str())
+    );
+    assert!(
+        !case
+            .csms
+            .received()
+            .iter()
+            .any(|r| r.payload["type"] == "DiscardedRenewedClientCertificate"),
+        "nothing to report"
+    );
+    case.csms.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Expired client certificate (A00.FR.407, A00.FR.429 to A00.FR.431)
 // ---------------------------------------------------------------------------------------------

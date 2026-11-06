@@ -374,6 +374,10 @@ impl StationActor {
         dirty && !self.persistence.secrets_locked
     }
 
+    pub(super) fn persistence_secrets_locked(&self) -> bool {
+        self.persistence.secrets_locked
+    }
+
     pub(super) fn mark_secrets_dirty(&mut self) {
         self.persistence.secrets_dirty = true;
         self.mark_dirty();
