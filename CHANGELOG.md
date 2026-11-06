@@ -20,6 +20,9 @@ tag as the GitHub release notes.
 - `kirby-csms` scripts have variables too: a top-level `[vars]` table, `${name}` substitution in `station`, `expect_status` and the JSON payloads of steps, `capture` on `call` (CALLRESULT payload) and `wait_call` (matched CALL payload), and `kirby-csms --script FILE --var NAME=VALUE`.
 - `call` steps in `kirby-csms` scripts take `expect_payload = { ... }`, a JSON subset the CALLRESULT payload must contain (used with `expect_status`, not with `expect_error`).
 - `kirby_ocpp_core::scenario::vars` is a public helper (`Vars`, `substitute`, `substitute_str`, `capture`) for other tools.
+- Scenario and script files accept the optional top-level keys `ocpp_version` (only `"1.6"`), `schema` (only `1`) and `tags` (a list of strings, kept but not used for filtering). Other values are load errors. `evse` and `id_token` are reserved step keys.
+- Every JSON report carries `schema`, `ocpp_version`, `tool_version`, `station` (not for CSMS scripts), `source`, `started_at` and a `status` string (`passed`, `failed`, `error`, `skipped`); suite and fleet reports add `counts`. Failed steps carry `action`, `params` (secrets redacted) and, for failed assertions, `expected` and `actual`. Existing fields are unchanged.
+- Load errors name the file and, where the parser knows it, `path:line:column`, and suggest the closest name for an unknown action or field.
 
 #### Control API
 
@@ -29,6 +32,10 @@ tag as the GitHub release notes.
 - `--api-token` / `--api-token-file` (env `KIRBY_CSMS_API_TOKEN`, `KIRBY_CSMS_API_TOKEN_FILE`) require a bearer token. A non-loopback address needs one. Without a token, requests with an `Origin` header, `Sec-Fetch-Site: cross-site` or a non-loopback `Host` (DNS rebinding) are refused. See `docs/api.md`.
 - The API caps connections (512) and the request data held by calls in flight (32 MiB), times out slow request heads and bodies (10 s), limits the writing of a response (60 s total, 30 s without progress; event streams end after 1 hour with a note), enables TCP keepalive, closes every connection after one response, bounds injected faults (1000 faults, `times` up to 1000000, 8 MiB) and ends event streams after the shutdown events.
 - New dependency: `axum` (HTTP/1 only) with `hyper` and `tower` crates.
+- The API shapes are a versioned contract (`api_version` 1, in `GET /v1` and `GET /v1/health`; breaking changes will ship as `/v2`). `GET /v1` lists every route, `OPTIONS` on a known path answers `204` with `Allow` (no CORS headers by design), and every SSE message has an `id:` line (`Last-Event-ID` is ignored). Station objects and `connected` events carry `protocol` (the negotiated subprotocol, `null` if none) and `connected` events carry `remote_addr`; the same fields appear in `kirby-csms --json` and `{"cmd":"stations"}` output, and the text line reads `CP-1 connected from 10.0.0.5:4242 (ocpp1.6, profile 2)`.
+- API errors have the body `{"error":{"code":"...","message":"..."}}` with stable snake_case codes (table in `docs/api.md`). A call to a station that was never seen is `404` `unknown_station`; to a known one that is disconnected, `409` `station_not_connected`.
+- `POST /v1/stations/{id}/calls` answers `{"outcome":"result"|"call_error"|"timeout","ok":...,...}` without `type`, `station` and `action`; CALLERROR and timeout stay HTTP `200`. The stdin answers are unchanged.
+- Transaction ids (`active_transactions[].id`, `state.transactions[].id`) are strings in the API (OCPP 2.x ids are strings); the stdin answers and `--json` lines keep numbers.
 
 #### Whitepaper and offline behavior
 
@@ -42,12 +49,33 @@ tag as the GitHub release notes.
 - Multi-arch container image `ghcr.io/archhaze24/kirby-ocpp` (`linux/amd64`, `linux/arm64`) built by the release workflow from the static musl binaries: non-root user, state volume `/data`, port 9000, both binaries (`kirby-csms` as the first argument starts the CSMS). `Dockerfile.dev` builds it from a source checkout.
 - Homebrew formula and Scoop manifest templates under `packaging/` plus `.github/scripts/render-packaging.sh`; the release workflow renders them with the real checksums into the workflow artifact `packaging`.
 
+#### Emulator CLI
+
+- `kirby-ocpp version` prints the tool version, git commit, build date, target triple and supported protocols (`--json` gives one JSON object); `--version` stays one line. A `build.rs` embeds the commit and the date (`SOURCE_DATE_EPOCH` is honored).
+- `kirby-ocpp completions <bash|zsh|fish|powershell|elvish>` prints a shell completion script (new dependency `clap_complete`).
+- `kirby-ocpp scenarios validate FILE|DIR|NAME...` parses scenarios without connecting: `ok PATH (N steps)` or the load error with the path, exit 0 or 2.
+- `-v/--verbose`, `-q/--quiet` and `--color auto|always|never` (`NO_COLOR` is honored) for `run` and `suite` output, and `run --persist`.
+- Connection errors carry a one-line hint: connection refused, TLS against a plain server, unknown CA, HTTP 400/401/403/404 and subprotocol refusals (with the offered subprotocol).
+- `--help` groups the flags under Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Output and Scenarios.
+
 #### Documentation
 
 - `README.md` is a landing page; detailed pages live under `docs/` (index in `docs/README.md`): architecture, emulator, CSMS, scenarios and scripts, security, configuration reference, testing, development, distribution and the HTTP control API (`docs/api.md`).
 
 ### 🔧 Changed
 
+- `kirby-csms` scripts reject unknown top-level keys (they were ignored before), like emulator scenarios. The allowed keys are `name`, `description`, `vars`, `steps`, `ocpp_version`, `schema` and `tags`.
+- JUnit test case names are the step's stable label (`expect_call Heartbeat out`, `start_tx c1 TAG`) instead of `<number>. <name>`, `classname` is `ocpp1.6.<scenario>`, the position moves to a test case property and each suite has properties (`ocpp_version`, `station`, `tool_version`, `source`). Duplicate labels in a suite get ` #2`.
+- `StepReport` and `ScenarioReport` in `kirby-ocpp-core` have new fields; build them with `StepReport::new` and `ScenarioReport::new`.
+- Headless mode, `run` and `suite` exit with code 1 when the station gives up reconnecting (`--no-reconnect`, or `--reconnect-max-attempts` used up), printing `reconnect stopped (...)` with the last connect error; before, the process idled until interrupted or timed out. A fleet exits 1 when every station gave up.
+- `run` and `suite` print only the report by default; the frame and log lines need `-v` (`--json` still prints events). `-q` prints only errors and the verdict line.
+- `run` is ephemeral like `suite`: it neither reads nor writes the state file unless `--persist` is given.
+- A missing `--url` shows an example and names `kirby-csms --listen 127.0.0.1:9000`; an unknown `--scenario` name says so and suggests the closest built-in.
+- Emulator TUI: `q` and `Ctrl-C` ask for confirmation (default No) while a scenario is running, a connector has an active transaction or the fleet has more than one station; a second `Ctrl-C` quits at once. Otherwise they quit immediately.
+- Both TUIs: the footer always keeps the `? help` and `: palette` (`: actions` in the CSMS) hints, and the help popups start with a "First steps" paragraph.
+- `kirby-csms` TUI: the empty state shows the listen address, a station URL to copy and, at security profile 0, a note that any peer can connect.
+- `kirby-csms` prints `stations connect to ws://<host>:<port>/<prefix>/<station id>` and, for security profile 0 on a non-loopback address, a warning, both on stderr after the `listening on ...` line (the hint is omitted with `--json`).
+- Emulator TUI: the footer shows `waiting... <action>` while a command is waiting for the CSMS.
 - `kirby-csms-core`: the per-station call queue limit (1024) is reserved when `call()` is made, so `QueueFull` is returned at once even when the session is blocked writing to a station that does not read. `try_inject` keeps a running byte total instead of re-serializing all faults. New `forget_if_disconnected` and `history_tail`.
 - Control API connections are served by hyper itself (`hyper` and `hyper-util` are now direct dependencies, already part of the axum tree). The request-head timeout is hyper's `header_read_timeout`, so blank lines or odd line endings no longer confuse it. `Host` also accepts `localhost.`, `[0:0:0:0:0:0:0:1]` and the bound address, and `limit=+5` is `400`.
 - `kirby-csms-core`: the timeout of `CsmsHandle::call` counts from the call and so covers the time spent queued (a call that waited longer fails with `Timeout` without being written), and a call whose caller is gone (its future was dropped) no longer holds the station's queue until its own timeout: the session waits at most the default call timeout for the abandoned CALL, then writes the next one; a late answer to the abandoned one is ignored. `CsmsHandle::clear_responder` returns whether a responder was removed.

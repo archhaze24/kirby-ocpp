@@ -13,7 +13,7 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 
 ## kirby-ocpp
 
-`kirby-ocpp [OPTIONS] [COMMAND]`. Options marked global are also accepted after the subcommand (`run`, `scenarios`). `--url` (or `OCPP_URL`) is the only required value for a real connection.
+`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand (`run`, `suite`), so `--help` of a subcommand lists them again. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Output and Scenarios; the tables below follow the same grouping.
 
 ### Station and connection
 
@@ -73,7 +73,7 @@ Profiles and certificates are explained in [Security](security.md).
 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
-| `--no-persist` | `KIRBY_OCPP_NO_PERSIST` | off | Do not load or save station state |
+| `--no-persist` | `KIRBY_OCPP_NO_PERSIST` | off | Do not load or save station state. `run` and `suite` never persist unless `run --persist` is given |
 | `--state-dir <PATH>` | `KIRBY_OCPP_STATE_DIR` | `~/.kirby-ocpp/stations` (`%USERPROFILE%` on Windows) | Directory for persisted state, see [State directory](#state-directory-and-files) |
 | `--rule <ACTION=BEHAVIOR>` | `KIRBY_OCPP_RULES` | none | Response rule, repeatable; in the variable separate rules with `;`. See [Response rules](#response-rules---rule) |
 
@@ -83,20 +83,38 @@ Profiles and certificates are explained in [Security](security.md).
 | --- | --- | --- | --- |
 | `--print-config` | | | Print the effective configuration as JSON and exit. With `--count` above 1 it prints `{"fleet": {...}, "config": {...}}`, `config` being the first station |
 | `--no-tui` | | | Never start the terminal UI; log to stdout (automatic when stdout is not a terminal) |
-| `--json` | | | One JSON object per line (events and the `run` report); never opens the UI |
+| `--json` | | | One JSON object per line (events and the `run` report); never opens the UI. Never colored |
+| `-v, --verbose` | | off | `run` and `suite` also print the event and frame lines (see [Output levels](#output-levels)); excludes `--quiet` |
+| `-q, --quiet` | | off | `run` and `suite` print only errors and the final verdict line (see [Output levels](#output-levels)) |
+| `--color <WHEN>` | | `auto` | Colorize PASS (green), FAIL (red), SKIP and warnings (yellow) in human output: `auto` (only when stdout is a terminal and `NO_COLOR` is unset or empty), `always`, `never`. Explicit `always` or `never` wins over `NO_COLOR`; the terminal UI is unchanged |
 | `--log-file <PATH>` | | none | Also append the event log to this file, with the UI too. A new file is created `0600` on unix (frames hold idTags); an existing file keeps its mode. A helper thread writes it; lines that cannot be written in time are dropped and a `note` line reports the count |
 | `--licenses` | | | Print third-party licence notices and exit |
-| `-V, --version`, `-h, --help` | | | |
+| `-V, --version`, `-h, --help` | | | `--version` prints one line; `kirby-ocpp version` prints the build details |
+
+### Output levels
+
+What `run` and `suite` write to stdout (errors always go to stderr):
+
+| Level | `run` | `suite` |
+| --- | --- | --- |
+| default | The report: `scenario NAME`, one `PASS`/`FAIL`/`SKIP` line per step, `PASSED in N ms` or `FAILED in N ms` (a fleet: one tagged report per station and the aggregate line) | One `PASS`/`FAIL`/`SKIP` line per scenario and the summary line |
+| `-v, --verbose` | The event lines (frames and log) as they happen, then the report | The event lines of every scenario between the result lines |
+| `-q, --quiet` | Only the verdict line `PASSED in N ms`/`FAILED in N ms` (a fleet: only the aggregate line) | Only the summary line |
+| `--json` | Event lines and the report as JSON lines, as before | Event lines, one report per scenario and the suite summary, as before |
+| `--json -q` | The report only | The suite summary and the reports, no events |
+
+Plain headless mode (no subcommand) prints every event at any level. `--log-file` always receives the full event log, whatever the level.
 
 ## kirby-ocpp subcommands
 
-`kirby-ocpp run --scenario <FILE|NAME>` connects, waits for an accepted BootNotification, runs the scenario and prints the report. It accepts every option above plus:
+`kirby-ocpp run --scenario <FILE|NAME>` connects, waits for an accepted BootNotification, runs the scenario and prints the report. A `run` is ephemeral: it neither reads nor writes a state file, so a scenario starts from a clean station every time (`--state-dir` has no effect without `--persist`). It accepts every option above plus:
 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `--scenario <FILE\|NAME>` | | required | Built-in scenario name or a TOML file |
 | `--report <PATH>` | | none | Write the report as JSON. In fleet mode one file per station: `out.CP-001.json` (characters of the id other than letters, digits, `-`, `_` become `_`) |
 | `--junit <PATH>` | | none | Write a JUnit XML report; one file, one test suite per station in a fleet |
+| `--persist` | | off | Read and write the station state file like a plain station; excludes `--no-persist` (usage error, exit 2) |
 | `--timeout <SECONDS>` | | `60` | Give up and fail after this long, connecting included; 1 to 86400. In fleet mode it covers the whole fleet, stagger included |
 | `--id-tag <IDTAG>` | | none | Replace the `idTag` of the scenario's `authorize`, `start_tx`, `stop_tx` steps (non-empty) |
 | `--var <NAME=VALUE>` | | none | Set a scenario variable (repeatable); overrides `[vars]`; `true`/`false`/numbers keep their type; `station_id` and `index` are built in and cannot be set. See [Scenarios](scenarios.md#variables) |
@@ -116,6 +134,12 @@ Profiles and certificates are explained in [Security](security.md).
 Exit codes of `suite`: 0 all scenarios passed; 1 any failed, timed out or could not boot, or a report file could not be written; 2 usage error; 130 SIGINT (both signals still write `--report`/`--junit` for what finished; SIGTERM exits 1). See [Scenarios](scenarios.md#suite-runs).
 
 `kirby-ocpp scenarios list` lists the built-in scenarios; `kirby-ocpp scenarios show <NAME>` prints one as TOML. Scenario format: [Scenarios](scenarios.md).
+
+`kirby-ocpp scenarios validate <FILE|DIR|NAME>...` parses scenarios without connecting (no `--url` needed). It prints `ok PATH (N steps)` per scenario (built-ins as `ok built-in NAME (N steps)`) and `error: PATH: reason` per failure, scanning directories like `suite` does (every `*.toml` directly inside, sorted). Exit 0 when all are valid, 2 when any is not.
+
+`kirby-ocpp version` prints the tool version, the git commit, the build date, the target triple and the supported protocols (`OCPP 1.6J`); with `--json` one JSON object with the keys `name`, `version`, `commit`, `build_date`, `target` and `protocols`. The commit is `unknown` in a build without git. `kirby-ocpp --version` stays a single line.
+
+`kirby-ocpp completions <bash|zsh|fish|powershell|elvish>` prints a shell completion script to stdout; installation hints are in [emulator.md](emulator.md#shell-completions).
 
 ## Id templates
 
@@ -214,7 +238,7 @@ CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md). Th
 | Code | `kirby-ocpp` | `kirby-csms` |
 | --- | --- | --- |
 | 0 | Success (scenario passed, normal shutdown) | Success or clean shutdown |
-| 1 | Scenario step failed or timed out, or runtime error; in fleet mode, any station failed | Script failed or timed out, or runtime error |
+| 1 | Scenario step failed or timed out, or runtime error; the connection was lost for good (`--no-reconnect`, or `--reconnect-max-attempts` used up: the process prints `reconnect stopped (...)` with the last connect error and a hint, then exits; in a fleet when every station gave up); in fleet mode, any station failed | Script failed or timed out, or runtime error |
 | 2 | Usage or configuration error | Usage or configuration error |
 | 130 | `run` or `suite` interrupted by SIGINT (SIGTERM still ends with 1; `suite` writes its reports on both signals) | Script interrupted by SIGINT |
 

@@ -37,11 +37,13 @@ listening on ws://127.0.0.1:41234
 
 Under the TUI the `listening on ...` line goes to stderr before the screen opens.
 
+After it, on stderr only, come up to two more lines. With security profile 0 on a non-loopback listen address: `warning: security profile 0 on a non-loopback address: any peer can connect and take over a station id; see docs/security.md` (also with `--json`). Without `--json`: `stations connect to ws://<host>:<port>/<prefix>/<station id>`, where an unspecified listen host (`0.0.0.0`, `::`) is shown as `<this-host>`. Stdout, including the first `listening on ...` line, is unchanged.
+
 Then one line per event:
 
 | Event (`"type"`) | Text line | Notes |
 | --- | --- | --- |
-| `connected` | `HH:MM:SS.mmm CP-1 connected` | |
+| `connected` | `HH:MM:SS.mmm CP-1 connected from 10.0.0.5:4242 (ocpp1.6, profile 2)` | JSON adds `remote_addr` and `protocol` (the negotiated WebSocket subprotocol, `null` when none was selected); the text shows `no subprotocol` then, and the security profile number |
 | `disconnected` | `... CP-1 disconnected (reason)` | `reason` field in JSON, for example `ping_timeout` |
 | `frame` | `... CP-1 <- [2,"id","Heartbeat",{}]` | `<-` from the station, `->` to it; JSON has `direction` `in` / `out` |
 | `state` | `... CP-1 state: connectors [1=Available] active transactions [123]` | only when connector statuses or active transactions changed |
@@ -63,6 +65,7 @@ Layout:
 - Left: the stations (dot: green connected, dim disconnected, yellow replaced by a newer connection; vendor and model; `txN` active transactions). The header shows the listen address, connected/total stations and frame counters.
 - Right, top: details of the selected station (boot info, remote address, subprotocol, connectors, transactions with energy and power, last heartbeat, firmware and diagnostics status, counters).
 - Right, bottom: the frame log of that station with CALL/RESULT correlation and round-trip times.
+- Before any station has connected the details pane shows the listen address, a station URL to copy (`ws://<this-host>:9000/<station id>` for an unspecified listen host; a path prefix before the id is accepted) and, at security profile 0, a dim note that any peer can connect. The footer always ends with the `? help` and `: actions` hints, even in a narrow terminal, and the help popup opens with a short "First steps" paragraph.
 - Header chips: `security profile N`, `N auth failures` (refused connections also show as a status-line notice, at most one per second), `N pending` commands, and the pending fault count and rule actions while any is active.
 
 Navigation:
@@ -123,7 +126,7 @@ Without `--script`, when stdin is not a terminal (or with `--stdin`), each input
 -> {"type":"result","station":"CP-1","action":"ChangeConfiguration","ok":true,"result":{"status":"Accepted"},"id":"my-tag"}
 -> {"type":"result","station":"CP-1","action":"Reset","ok":false,"error":"CALLERROR NotSupported: ..."}
 {"cmd":"stations"}
--> {"type":"stations","stations":[{"id":"CP-1","connected":true,"vendor":"...","model":"...","connectors":{"1":"Available"},"active_transactions":[]}]}
+-> {"type":"stations","stations":[{"id":"CP-1","connected":true,"protocol":"ocpp1.6","vendor":"...","model":"...","connectors":{"1":"Available"},"active_transactions":[]}]}
 ```
 
 | Field | Meaning |
@@ -144,8 +147,8 @@ Rules:
 ## HTTP API
 
 `--api-listen 127.0.0.1:9100` starts a local JSON HTTP API next to the server (off by default; works with the TUI, headless and `--script`): list stations, read state and frame history, send CALLs, forget stations, stream events (SSE) and manage response rules and faults.
-- Calls share the 256-command limit with stdin and return the same result object. After the `listening` line the server prints `api listening on http://ADDR` (`{"type":"api_listening","addr":..,"url":..}` with `--json`).
-- A non-loopback address needs `--api-token` / `--api-token-file`; without a token browser-like requests (`Origin`, cross-site, non-loopback `Host`) are refused. Plain HTTP only. Endpoints, auth model and examples: [api.md](api.md).
+- Calls share the 256-command limit with stdin. The answer is the stdin result object without `type`, `station` and `action`, plus an `outcome` field; stdin answers are unchanged. After the `listening` line the server prints `api listening on http://ADDR` (`{"type":"api_listening","addr":..,"url":..}` with `--json`).
+- A non-loopback address needs `--api-token` / `--api-token-file`; without a token browser-like requests (`Origin`, cross-site, non-loopback `Host`) are refused. Plain HTTP only. The shapes are a versioned contract (`/v1`, `api_version` 1; a release that serves OCPP 2.0.1 or 2.1 on the same listener keeps them). Endpoints, error codes, auth model and examples: [api.md](api.md).
 
 ## Response rules and fault injection
 

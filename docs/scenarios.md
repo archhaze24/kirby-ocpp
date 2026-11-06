@@ -11,7 +11,21 @@ Contents: [Emulator scenarios](#emulator-scenarios) · [Running scenarios](#runn
 
 ## Emulator scenarios
 
-A scenario file has a `name`, an optional `description` and a list of `[[steps]]`. Unknown fields anywhere are rejected when the file is loaded, with the step number in the message (`step 3: ...`). A scenario needs at least one step.
+A scenario file has a `name`, an optional `description` and a list of `[[steps]]`. Unknown fields anywhere are rejected when the file is loaded, with the step number, the file position and, for a likely typo, a suggestion in the message (`scenario.toml:12:1: invalid scenario: step 3: action `heartbeat`: unknown variant `heartbaet`, ...; did you mean `heartbeat`?`). A scenario needs at least one step.
+
+### File header keys
+
+The allowed top-level keys are `name`, `description`, `vars`, `steps` and three keys that describe the file itself:
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `ocpp_version` | string | `"1.6"` | Protocol the file is written for. Any other value is a load error (`this build supports OCPP 1.6 only`, naming the value). |
+| `schema` | integer | `1` | Version of the file format. Any other value is a load error (`unsupported schema N`). |
+| `tags` | array of strings | none | Free-form labels. They are validated and kept, but nothing filters on them yet. |
+
+Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key.
+
+Reserved step keys: `evse` and `id_token` are reserved for scenarios that target OCPP 2.0.1 and later. They are rejected as unknown fields today and are not implemented.
 
 ### Example
 
@@ -151,7 +165,7 @@ Rules:
 
 ### Actions
 
-Every step has `action` plus the fields of that action, and may add `name` (shown in reports; default is the action name) and `expect` (see [Expect](#expect)). Fields without a default are required.
+Every step has `action` plus the fields of that action, and may add `name` (shown in reports; the default report label is derived from the action, see [JUnit XML](#junit-xml---junit)) and `expect` (see [Expect](#expect)). Fields without a default are required.
 
 | Action | Fields | What it does |
 | --- | --- | --- |
@@ -249,7 +263,7 @@ kirby-ocpp [station options] run --scenario NAME_OR_FILE [--report report.json] 
 
 `--scenario` is a file path or a built-in name. An argument with a path separator, ending in `.toml`, or naming an existing file or directory is a path (a built-in only applies when no such path exists). Scenario files must be regular files of at most 1 MiB (FIFOs and devices are refused).
 - A `--var` for a name the scenario neither declares in `[vars]`, uses as a loop counter, nor references as `${name}` is a usage error (exit 2, "unknown variable"). `run` connects, waits for an accepted BootNotification, runs the steps and prints the report.
-- Station events (frames and log lines) are also printed to stdout while it runs; `--log-file` keeps them in a file. The station options (`--url`, `--id`, TLS flags, ...) are in [configuration.md](configuration.md).
+- Frame and log lines are not printed by default (only the report); `-v` prints them as they happen, `-q` leaves only the verdict line, `--json` prints events and the report as JSON lines, and `--log-file` keeps the full log in a file (see [configuration.md](configuration.md#output-levels)). A `run` is ephemeral: it reads and writes no state file unless `--persist` is given. The station options (`--url`, `--id`, TLS flags, ...) are in [configuration.md](configuration.md).
 
 | Option | Meaning |
 | --- | --- |
@@ -259,6 +273,8 @@ kirby-ocpp [station options] run --scenario NAME_OR_FILE [--report report.json] 
 | `--timeout SECONDS` | Overall limit, connecting included (default 60). On expiry the running step fails with `cancelled` and the rest are skipped |
 | `--id-tag TAG` | Replace the idTag in the scenario |
 | `--json` | Print events and the report as JSON lines |
+| `--persist` | Keep station state in the state file (a `run` is ephemeral by default) |
+| `-v`, `-q` | Also print the event lines / print only the verdict line |
 
 A bad scenario file (parse error, unknown field) exits 2 before any connection. If the station cannot connect or the BootNotification is not accepted before `--timeout`, there is no step report: the error goes to stderr, no `--report` file is written, and the JUnit file (if requested) holds one errored `setup` case. The exit code is 1.
 
@@ -302,7 +318,7 @@ kirby-ocpp [station options] suite [SOURCE...] [--all-builtins] [--report suite.
 | `--junit PATH` | Write one JUnit file with a `<testsuite>` per scenario (skipped scenarios are left out; a scenario whose station never booted is one errored `setup` case) |
 | `--json` | Print events and one `report` line per scenario that ran, then the summary |
 
-Output: `PASS name (1.2 s)`, `FAIL name: first failing step - reason` (or the setup error), `SKIP name`, then `suite: 7/8 scenarios passed, FAILED: a, b` (`, SKIPPED: ...` when some were skipped). The JSON summary (`--report`, and the last line under `--json`) is `{"type":"suite_report","passed":false,"total":8,"passed_count":7,"failed":["a"],"skipped":[],"scenarios":[{"name":"a","status":"failed","duration_ms":1200,"report":{...}}],"duration_ms":9000}`. `status` is `passed`, `failed`, `error` (never booted, or cut short; carries `error` instead of `report`) or `skipped`.
+Output: `PASS name (1.2 s)`, `FAIL name: first failing step - reason` (or the setup error), `SKIP name`, then `suite: 7/8 scenarios passed, FAILED: a, b` (`, SKIPPED: ...` when some were skipped). The JSON summary (`--report`, and the last line under `--json`) is `{"type":"suite_report","schema":1,"tool_version":"0.5.0","started_at":"...","status":"failed","counts":{"passed":7,"failed":1,"error":0,"skipped":0},"passed":false,"total":8,"passed_count":7,"failed":["a"],"skipped":[],"scenarios":[{"name":"a","status":"failed","ocpp_version":"1.6","source":"a.toml","station":"CP-001","duration_ms":1200,"report":{...}}],"duration_ms":9000}`. `status` is `passed`, `failed`, `error` (never booted, or cut short; carries `error` instead of `report`) or `skipped`.
 
 Exit codes: 0 only if every scenario passes; 1 if any fails, times out or cannot boot, or a report file could not be written; 2 usage error (no source, empty directory, bad file, `--count` above 1); 130 SIGINT. On SIGINT and on SIGTERM the running scenario is stopped (an `error` row, `interrupted`), the rest are `skipped`, and `--report`/`--junit` are written for what finished; SIGTERM exits 1. A signal that arrives between two scenarios is not lost.
 
@@ -327,7 +343,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 --stagger-ms 
 ```
 
 * One report per station, each line tagged `[CP-1] ...` (JSON reports carry a `"station"` field), then one aggregate line: `fleet: 3/3 stations PASSED`, or `fleet: 2/3 stations passed, FAILED: CP-2`.
-* With `--json` the aggregate is `{"type":"fleet_report","passed":true,"total":3,"passed_count":3,"failed":[],"stations":[{"station":"CP-1","passed":true}, ...]}`. A station that never booted has `"passed": false` and an `"error"` text.
+* With `--json` the aggregate is `{"type":"fleet_report","schema":1,"tool_version":"0.5.0","status":"passed","counts":{"passed":3,"failed":0,"error":0,"skipped":0},"passed":true,"total":3,"passed_count":3,"failed":[],"stations":[{"station":"CP-1","schema":1,"ocpp_version":"1.6","tool_version":"0.5.0","status":"passed","passed":true}, ...]}`. A station that never booted has `"status": "error"`, `"passed": false` and an `"error"` text.
 * `--timeout` covers the whole fleet, stagger included.
 * `--report out.json` writes one file per station: `out.CP-1.json`. Characters of the id other than letters, digits, `-` and `_` become `_`, so ids that differ only in such characters would share a file.
 * `--junit fleet.xml` writes one file for the whole fleet, with a suite named `scenario [CP-1]` per station.
@@ -469,28 +485,59 @@ The whole run is bounded by `--timeout` (default 60 s, 1 to 86400): the step run
 
 ## Reports
 
-Both runners produce the same report structure, so tools can read either.
+Both runners produce the same report structure, so tools can read either. Every JSON report carries version metadata and a `status` string, so a consumer can check the format before reading the rest.
 
 ### JSON (`--report`)
 
-`--report PATH` writes pretty-printed JSON. Step `status` is `passed`, `failed` (with a `reason`) or `skipped`; `index` is 0-based; durations are in milliseconds.
+`--report PATH` writes pretty-printed JSON. Durations are in milliseconds, `index` is 0-based.
 
 ```json
 {
-  "scenario": "smoke",
+  "schema": 1,
+  "ocpp_version": "1.6",
+  "tool_version": "0.5.0",
+  "station": "CP-001",
+  "source": "builtin:charge-session",
+  "started_at": "2026-11-06T12:00:00.123Z",
+  "scenario": "charge-session",
+  "status": "failed",
   "passed": false,
   "cancelled": false,
   "steps": [
-    { "index": 0, "name": "respond DataTransfer", "status": "passed", "duration_ms": 0 },
-    { "index": 1, "name": "wait_station CP-1", "status": "passed", "duration_ms": 412 },
-    { "index": 2, "name": "wait_call StartTransaction", "status": "failed", "reason": "no matching StartTransaction CALL within 20000 ms", "duration_ms": 20001 },
-    { "index": 3, "name": "heartbeat interval accepted", "status": "skipped", "duration_ms": 0 }
+    { "index": 0, "name": "boot", "label": "boot", "action": "boot", "status": "passed", "duration_ms": 12 },
+    {
+      "index": 1, "name": "heartbeat", "label": "heartbeat",
+      "action": "heartbeat", "status": "failed",
+      "reason": "heartbeat: response {\"currentTime\":\"2026-11-06T12:00:00Z\"} does not contain {\"currentTime\":\"x\"}",
+      "duration_ms": 31,
+      "params": { "expect": { "payload": { "currentTime": "x" } } },
+      "expected": { "currentTime": "x" },
+      "actual": "{\"currentTime\":\"2026-11-06T12:00:00Z\"}"
+    },
+    { "index": 2, "name": "plug", "label": "plug c1", "action": "plug", "status": "skipped", "duration_ms": 0 }
   ],
-  "duration_ms": 20413
+  "duration_ms": 52
 }
 ```
 
-`cancelled` is true when the run was stopped (timeout or signal). With `--json` the same object is printed on stdout as one line with an extra `"type": "report"` (and `"station"` in fleet runs). Without `--json` the text form is:
+Report fields:
+
+| Field | Level | Meaning |
+| --- | --- | --- |
+| `schema` | run, suite, fleet, station entry | Report format version, currently `1`. |
+| `ocpp_version` | run, suite scenario, station entry | Protocol of the run, currently `"1.6"`. |
+| `tool_version` | run, suite, fleet, station entry | Version of the tool that wrote the report. |
+| `station` | run, suite scenario, fleet entry | Station id. Absent for CSMS script reports. |
+| `source` | run, suite scenario | Scenario file path or `builtin:NAME`; for a CSMS script, its file path. |
+| `started_at` | run, suite | RFC 3339 UTC start time. |
+| `status` | every level | `passed`, `failed`, `error` (the run produced no report) or `skipped`. The older booleans (`passed`, `cancelled`) stay. A step's `status` is `passed`, `failed` or `skipped`. |
+| `counts` | suite, fleet | `{ "passed": n, "failed": n, "error": n, "skipped": n }`. |
+| `label` | step | Stable name of the step: the explicit `name`, else the action plus its main parameters (`expect_call Heartbeat out`, `wait_for tx_active c1`, `start_tx c1 TAG`), with the iteration path appended in loops. |
+| `action` | step | The step's action. |
+| `params` | failed step | The step's resolved parameters. Secrets are redacted like frames: the value of a `ChangeConfiguration` for `AuthorizationKey` is `***`. |
+| `expected`, `actual` | failed assertion | What an `expect`, `expect_call`, `expect_status` or `expect_payload` check wanted and what it saw (`actual` is clipped to about 200 characters). Absent when the runner has nothing to compare, for example a `wait_for` timeout has `expected` (the condition) only. |
+
+`cancelled` is true when the run was stopped (timeout or signal). With `--json` the same object is printed on stdout as one line with an extra `"type": "report"`. Without `--json` the text form is:
 
 ```text
 scenario smoke
@@ -503,21 +550,43 @@ FAILED in 20413 ms
 
 (`kirby-csms` prints `script <name>` as the first line.)
 
+The suite report adds `type: "suite_report"`, `status`, `counts` and per-scenario `status`, `ocpp_version`, `source` and `station`; the fleet report adds `type: "fleet_report"`, `status`, `counts` and, per station entry, `schema`, `ocpp_version`, `tool_version` and `status`. A scenario or station that never booted has status `error` and an `error` text instead of a `report`.
+
 ### JUnit XML (`--junit`)
 
-One `<testsuite>` per run (a fleet run has one per station, named `scenario [CP-1]`), one `<testcase>` per step named `<number>. <step name>` with the suite name as `classname`. A failed step has a `<failure>`, a skipped one `<skipped/>`. A run that never produced a report (the station could not connect or boot) is a suite with one `setup` test case holding an `<error>`.
+One `<testsuite>` per run (a fleet run has one per station, named `scenario [CP-1]`), one `<testcase>` per step. A failed step has a `<failure>`, a skipped one `<skipped/>`. A run that never produced a report (the station could not connect or boot) is a suite with one `setup` test case holding an `<error>`.
+
+Naming:
+
+* `name` of a test case is the step's stable `label`, never its position. Names are unique within a suite: a repeated label gets ` #2`, ` #3`, and steps in loops already carry their ` [n]` suffix.
+* The 1-based position is a `<property name="index">` of the test case, next to `action`.
+* `classname` is `ocpp1.6.<suite name>`, so a fleet run gives `ocpp1.6.scenario [CP-1]`.
+* Each `<testsuite>` has `<properties>` `ocpp_version`, `station` (when known), `tool_version` and `source` (when known).
+* The text of a `<failure>` holds the reason, then `action:`, `params:`, `expected:` and `actual:` lines where the report has them (params and expected are clipped).
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <testsuites tests="4" failures="1" errors="0" skipped="1" time="20.413">
   <testsuite name="smoke" tests="4" failures="1" errors="0" skipped="1" time="20.413">
-    <testcase classname="smoke" name="1. respond DataTransfer" time="0.000"/>
-    <testcase classname="smoke" name="2. wait_station CP-1" time="0.412"/>
-    <testcase classname="smoke" name="3. wait_call StartTransaction" time="20.001">
-      <failure message="no matching StartTransaction CALL within 20000 ms" type="StepFailed">no matching StartTransaction CALL within 20000 ms</failure>
+    <properties>
+      <property name="ocpp_version" value="1.6"/>
+      <property name="tool_version" value="0.5.0"/>
+      <property name="source" value="smoke.toml"/>
+    </properties>
+    <testcase classname="ocpp1.6.smoke" name="respond DataTransfer" time="0.000">
+      <properties>
+        <property name="index" value="1"/>
+        <property name="action" value="respond"/>
+      </properties>
     </testcase>
-    <testcase classname="smoke" name="4. heartbeat interval accepted" time="0.000">
-      <skipped/>
+    <testcase classname="ocpp1.6.smoke" name="wait_call StartTransaction" time="20.001">
+      <properties>
+        <property name="index" value="3"/>
+        <property name="action" value="wait_call"/>
+      </properties>
+      <failure message="no matching StartTransaction CALL within 20000 ms" type="StepFailed">no matching StartTransaction CALL within 20000 ms
+action: wait_call
+params: {"call":"StartTransaction","timeout_ms":20000}</failure>
     </testcase>
   </testsuite>
 </testsuites>
@@ -526,12 +595,21 @@ One `<testsuite>` per run (a fleet run has one per station, named `scenario [CP-
 Setup error:
 
 ```xml
-<testcase classname="charge-session" name="setup" time="0.000">
+<testcase classname="ocpp1.6.charge-session" name="setup" time="0.000">
   <error message="timed out waiting for the central system to accept the BootNotification" type="SetupError">...</error>
 </testcase>
 ```
 
 Text from a station (CALLERROR descriptions) can end up in step names and reasons; it is sanitized for the terminal and escaped for XML.
+
+### Contracts and compatibility
+
+These are public contracts and follow Semantic Versioning:
+
+* The scenario and script file format. New optional keys and actions are minor changes. Removing or renaming a key, or changing what a valid file means, is a major change. The `schema` key names the format version; a build refuses a schema it does not know instead of guessing.
+* The JSON report. Fields are added in minor releases and never renamed or removed within one `schema`. Consumers must ignore fields they do not know. A breaking change increments `schema`.
+* The JUnit layout (suite and case names, properties) is part of the report contract. Test case names are stable labels so that CI history can follow a test across runs.
+* Flag names. A flag is not renamed within a major version. `--ocpp-version`, `--protocol` and `--format` are reserved for future use.
 
 ## Related pages
 

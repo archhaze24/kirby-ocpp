@@ -2,7 +2,7 @@
 
 `kirby-ocpp` is a terminal OCPP 1.6J charge point (station). It connects to a central system (CSMS), answers its commands, and lets you drive the station by hand (terminal UI), log it (headless) or script it ([scenarios](scenarios.md)). The Security Whitepaper messages are supported too.
 
-Contents: [Quick start](#quick-start) · [Modes](#modes) · [Terminal UI](#terminal-ui) · [Headless mode and exit codes](#headless-mode-and-exit-codes) · [Suite mode](#suite-mode) · [Fleet mode](#fleet-mode) · [Response rules](#response-rules) · [State persistence](#state-persistence) · [TLS](#tls) · [Related pages](#related-pages)
+Contents: [Quick start](#quick-start) · [Modes](#modes) · [Terminal UI](#terminal-ui) · [Headless mode and exit codes](#headless-mode-and-exit-codes) · [Connection errors](#connection-errors) · [Output levels and color](#output-levels-and-color) · [Version, completions and validation](#version-completions-and-validation) · [Suite mode](#suite-mode) · [Fleet mode](#fleet-mode) · [Response rules](#response-rules) · [State persistence](#state-persistence) · [TLS](#tls) · [Related pages](#related-pages)
 
 ## Quick start
 
@@ -12,9 +12,9 @@ kirby-ocpp --url ws://localhost:9000/ocpp --no-tui --json       # headless, JSON
 kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 ```
 
-`--url` (or `OCPP_URL`) is the only required option; the station id defaults to `CP-001`. Precedence is flag, then environment variable, then default. Booleans accept `true/false/t/f/yes/no/y/n/on/off/1/0`, case-insensitive; anything else is a usage error (exit 2). The full flag and environment table is in [configuration.md](configuration.md); `kirby-ocpp --help` always matches the binary. `--print-config` prints the effective configuration as JSON and exits (URL credentials are redacted).
+`--url` (or `OCPP_URL`) is the only required option (without it the error shows this example and suggests `kirby-csms --listen 127.0.0.1:9000` as a local peer); the station id defaults to `CP-001`. Precedence is flag, then environment variable, then default. Booleans accept `true/false/t/f/yes/no/y/n/on/off/1/0`, case-insensitive; anything else is a usage error (exit 2). The full flag and environment table is in [configuration.md](configuration.md); `kirby-ocpp --help` always matches the binary. `--print-config` prints the effective configuration as JSON and exits (URL credentials are redacted).
 
-The station connects at startup in every mode (`--print-config` and `scenarios` exit before connecting). If the first connect fails, the error is printed and the reconnect loop keeps trying (backoff `--reconnect-initial-ms` to `--reconnect-max-ms`, switch off with `--no-reconnect`).
+The station connects at startup in every mode (`--print-config`, `version`, `completions` and `scenarios` exit before connecting). If the first connect fails, the error is printed and the reconnect loop keeps trying (backoff `--reconnect-initial-ms` to `--reconnect-max-ms`). In headless mode, `run` and `suite` the process exits with code 1 once the loop ends for good: with `--no-reconnect`, or when `--reconnect-max-attempts` is used up. See [Connection errors](#connection-errors).
 
 ## Modes
 
@@ -22,8 +22,10 @@ The station connects at startup in every mode (`--print-config` and `scenarios` 
 | --- | --- |
 | no subcommand, stdout is a terminal, no `--json` or `--no-tui` | [Terminal UI](#terminal-ui) |
 | no subcommand, `--no-tui`, `--json`, or stdout is not a terminal | [Headless](#headless-mode-and-exit-codes): connect, print events until SIGINT/SIGTERM |
-| `run --scenario NAME_OR_FILE` | Connect, run one [scenario](scenarios.md), print the report, exit with its verdict |
-| `scenarios list` / `scenarios show NAME` | Built-in scenarios, no network |
+| `run --scenario NAME_OR_FILE` | Connect, run one [scenario](scenarios.md), print the report, exit with its verdict. Ephemeral: no state file unless `--persist` |
+| `suite SOURCE...` | Run several scenarios, each on a fresh station, see [Suite mode](#suite-mode) |
+| `scenarios list` / `show NAME` / `validate FILE\|DIR\|NAME...` | Built-in scenarios and scenario checks, no network |
+| `version`, `completions SHELL` | Build details and shell completion scripts, no network |
 | `--count N` (above 1) | [Fleet](#fleet-mode) of N stations, with any of the above |
 
 `--json` is for machines: it never opens the UI. If the terminal cannot be set up (no usable TTY), the emulator prints `note: ...; running headless` and continues headless. `--log-file PATH` appends every event to a file (also under the UI, where stdout stays free for the screen).
@@ -41,9 +43,13 @@ Seven tabs, switched with `1`-`7` or `Tab`/`Shift-Tab`: Station, Connector, Tran
 | `/`, `:` or `Ctrl-P` | Command palette (fuzzy search over all actions); `/` searches the log when the log pane is focused on the Logs tab |
 | `Esc` | Close a dialog; in the main view, clear the log search |
 | `?` | Help (`Esc`, `?`, `q` or `Enter` closes it) |
-| `q`, `Ctrl-C` | Quit |
+| `q`, `Ctrl-C` | Quit. Asks first (default No) while a scenario is running, a connector has an active transaction, or the fleet has more than one station; a second `Ctrl-C` while the question is open quits at once |
 
-Confirmations (clear log, clear list, ...) accept only `y`/`Y`; any other key cancels.
+Confirmations (quit, clear log, clear list, ...) accept only `y`/`Y`; any other key cancels.
+
+The footer always ends with the `? help` and `: palette` hints, even in a narrow terminal; other hints are dropped first. While a command that waits for the CSMS is in flight (from a key, the palette or a form), the footer shows `waiting... <action>` until the result arrives.
+
+First steps: the station starts offline. On the Station tab press `c` to connect, then `:` and type an action name (BootNotification, Heartbeat, StartTransaction) to run it, or open the Scenarios tab (`7`). Every frame lands in the log. The help popup (`?`) opens with the same hints.
 
 ### Actions by tab
 
@@ -105,14 +111,55 @@ Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints 
 - With `--json` each line is one JSON object with a `type` of `frame` (carries a `payload` field next to the raw `frame`), `log` or `state_changed`. If the stdout reader is too slow, events are dropped and a `note` line says how many.
 - Text that comes from the CSMS is sanitized (control characters replaced or escaped) before it is printed.
 
-`kirby-ocpp run --scenario NAME_OR_FILE` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`). The run options (`--report`, `--junit`, `--timeout`, `--id-tag`), the report shapes and CI use are in [scenarios.md](scenarios.md#running-scenarios).
+If the station gives up reconnecting (`--no-reconnect`, or `--reconnect-max-attempts` used up), the headless process no longer idles: it closes cleanly, prints `error: reconnect stopped (REASON); last error: ...` to stderr and exits 1. A fleet exits 1 when every station has given up. The terminal UI keeps running (it shows the state itself).
+
+`kirby-ocpp run --scenario NAME_OR_FILE` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`). Frame and log lines are not printed unless you pass `-v` (see [Output levels and color](#output-levels-and-color)). A `run` does not read or write a state file, so it is repeatable; `--persist` keeps state like a plain station. A connection that cannot be established (or is lost for good) ends the run at once with exit 1 and the same message as in headless mode; with reconnect enabled the run waits until `--timeout` and the timeout message names the last connection error. The run options (`--report`, `--junit`, `--timeout`, `--id-tag`), the report shapes and CI use are in [scenarios.md](scenarios.md#running-scenarios).
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Success (scenario passed, normal shutdown) |
-| 1 | Scenario failed or timed out, a runtime error, or a report file could not be written |
-| 2 | Usage or configuration error |
+| 1 | Scenario failed or timed out, a runtime error, the connection was lost for good (reconnect stopped), or a report file could not be written |
+| 2 | Usage or configuration error (including a bad scenario file, an unknown scenario name, `--persist` with `--no-persist`) |
 | 130 | `run` or `suite` interrupted by SIGINT (Ctrl-C); SIGTERM still ends it with 1. `suite` writes `--report` and `--junit` for the finished scenarios on both signals (the interrupted one is an `error` row, the rest `skipped`) |
+
+## Connection errors
+
+A failed connection prints the error plus one line of advice for its class:
+
+| Error | Hint |
+| --- | --- |
+| connection refused | check the host and port and that the CSMS is running |
+| TLS handshake EOF or garbage against a `wss://` URL | the server may speak plain ws:// |
+| unknown certificate authority | use `--tls-ca` or `--tls-skip-verify` |
+| HTTP 400, 401, 403 or 404 on the upgrade, or no subprotocol agreed | the status and the offered subprotocol (from `--ws-subprotocol`) are repeated with: check the URL path and `--ws-subprotocol` |
+
+The text is `error. Hint: ...` on one line, in the stderr message, the `suite` row and the timeout message of `run`. The log events keep the plain error text.
+
+## Output levels and color
+
+`run` and `suite` print the report only. `-v, --verbose` adds the frame and log lines as they happen (what plain headless mode always prints); `-q, --quiet` leaves only errors (stderr) and the final verdict line. `--json` keeps printing events as before. The exact output of each level is in the [configuration reference](configuration.md#output-levels). `--log-file` always gets the full event log.
+
+Human output (not `--json`, not the terminal UI) colors PASS green, FAIL red and SKIP and warnings yellow when `--color auto` (the default) finds a terminal and no `NO_COLOR` variable (set and not empty). `--color always` and `--color never` decide explicitly, also over `NO_COLOR`. Text from the CSMS is sanitized before it is colored, so it cannot add escape sequences.
+
+## Version, completions and validation
+
+* `kirby-ocpp --version` prints one line. `kirby-ocpp version` prints the version, git commit, build date, target triple and supported protocols (`OCPP 1.6J`); `kirby-ocpp version --json` prints them as one JSON object.
+* `kirby-ocpp scenarios validate FILE|DIR|NAME...` parses scenarios without connecting and without `--url`: `ok PATH (N steps)` per valid scenario, the load error with the path otherwise, exit 0 or 2. A directory is scanned like `suite` does.
+
+### Shell completions
+
+`kirby-ocpp completions <bash|zsh|fish|powershell|elvish>` prints the script to stdout. Install it once:
+
+```bash
+# bash (a user-level completion directory; or source it from ~/.bashrc)
+kirby-ocpp completions bash > ~/.local/share/bash-completion/completions/kirby-ocpp
+# zsh (any directory in $fpath, before compinit)
+kirby-ocpp completions zsh > ~/.zfunc/_kirby-ocpp
+# fish
+kirby-ocpp completions fish > ~/.config/fish/completions/kirby-ocpp.fish
+```
+
+Restart the shell afterwards. PowerShell: `kirby-ocpp completions powershell | Out-String | Invoke-Expression` in the profile.
 
 ## Suite mode
 
@@ -122,7 +169,7 @@ Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints 
 kirby-ocpp --url ws://localhost:9000/ocpp suite scenarios/ charge-session --junit junit.xml --report suite.json
 ```
 
-Every scenario runs on its own new station (same URL, id and station options as `run`), never in parallel. Persistence is switched off for suite runs (`--state-dir` and `--no-persist` are ignored), so no state carries over from one scenario to the next and nothing is written to disk. Human output is one line per scenario, then a summary:
+Every scenario runs on its own new station (same URL, id and station options as `run`), never in parallel. A scenario whose station cannot connect (or gives up reconnecting) fails at once with the connection error. Persistence is switched off for suite runs (`--state-dir` and `--no-persist` are ignored), so no state carries over from one scenario to the next and nothing is written to disk. Human output is one line per scenario, then a summary:
 
 ```text
 PASS charge-session (1.2 s)
