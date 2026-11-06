@@ -41,6 +41,8 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 const CLOSE_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 /// Longest timeout of a CALL; larger ones are clamped (keeps the deadline arithmetic safe).
 const MAX_CALL_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+/// Most CALLs that may wait for one station (it answers one at a time); more are refused.
+const MAX_QUEUED_CALLS: usize = 1024;
 /// Most distinct actions counted per station; further ones are counted as `other`.
 const MAX_ACTION_KEYS: usize = 64;
 /// Bucket of `received_by_action` for actions beyond [`MAX_ACTION_KEYS`].
@@ -973,7 +975,17 @@ where
                 } => self.watchdog_fired().await,
                 command = commands.recv() => match command {
                     Some(SessionCmd::Call(call)) => {
-                        self.queue.push_back(call);
+                        if self.queue.len() >= MAX_QUEUED_CALLS {
+                            // Callers that gave up still hold a slot until they are popped.
+                            self.queue.retain(|queued| !queued.reply.is_closed());
+                        }
+                        if self.queue.len() >= MAX_QUEUED_CALLS {
+                            let _ = call.reply.send(Err(CsmsError::QueueFull {
+                                station: self.station.clone(),
+                            }));
+                        } else {
+                            self.queue.push_back(call);
+                        }
                         None
                     }
                     Some(SessionCmd::Close { code, reason }) => {

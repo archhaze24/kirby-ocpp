@@ -21,6 +21,9 @@ pub enum CsmsError {
     /// The station is in the registry but has no open connection.
     #[error("station {station} is not connected")]
     NotConnected { station: String },
+    /// Too many CALLs are already waiting for this station (it answers one at a time).
+    #[error("too many calls are waiting for station {station}")]
+    QueueFull { station: String },
     /// The station did not answer a CALL in time.
     #[error("station {station} did not answer {action} within {timeout:?}")]
     Timeout {

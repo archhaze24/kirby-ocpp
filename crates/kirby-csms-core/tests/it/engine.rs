@@ -1249,3 +1249,40 @@ async fn sockets_beyond_the_pending_handshake_limit_are_closed() {
     }
     csms.shutdown().await;
 }
+
+#[tokio::test]
+async fn calls_beyond_the_per_station_queue_limit_are_refused() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    // A station that never answers: the first CALL is written, the rest queue up behind it.
+    let _silent = raw_connect(&csms, "/ocpp/CP-QUEUE").await;
+    wait_event(&mut events, "queue station", connected("CP-QUEUE")).await;
+
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = Vec::new();
+    for _ in 0..1100 {
+        let (csms, done_tx) = (csms.clone(), done_tx.clone());
+        tasks.push(tokio::spawn(async move {
+            let result = csms
+                .call_timeout(
+                    "CP-QUEUE",
+                    "Reset",
+                    json!({"type": "Soft"}),
+                    Duration::from_secs(3600),
+                )
+                .await;
+            let _ = done_tx.send(result);
+        }));
+    }
+    // Only the refused ones finish: 1100 calls minus one in flight minus a full queue.
+    for _ in 0..10 {
+        match timeout(STEP, done_rx.recv()).await {
+            Ok(Some(Err(CsmsError::QueueFull { station }))) => assert_eq!(station, "CP-QUEUE"),
+            other => panic!("expected QueueFull, got {other:?}"),
+        }
+    }
+    for task in tasks {
+        task.abort();
+    }
+    csms.shutdown().await;
+}

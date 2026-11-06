@@ -95,7 +95,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 ## CSMS internals
 
 * `CsmsServer` accepts any number of stations on `ws(s)://host:port/<any prefix>/<station id>`; the id is the last non-empty percent-decoded path segment. A second connection with the same id replaces the first (`Disconnected{Replaced}`).
-* Outbound CALLs are serialized per station (one outstanding); the timeout counts from the write; a late reply after a timeout is recorded but ignored.
+* Outbound CALLs are serialized per station (one outstanding); at most 1024 more wait behind it, further `call()`s fail with `CsmsError::QueueFull` (entries whose caller gave up are dropped first); the timeout counts from the write; a late reply after a timeout is recorded but ignored.
 * Inbound CALLs: schema-validated if `validate_inbound`; then a `Fault` (global, counted), a responder, or the canned `default_reply`; known non-CP actions get `NotSupported`, unknown `NotImplemented`; malformed frames with a readable id get `FormationViolation`.
 * State tracking (`state.rs`) is built from the actual reply payload of CALLs answered with `Reply::Result`. Stopped transactions are capped (`transaction_history_cap`), active ones at 256.
 * Security profiles 0-3 (`auth.rs`, `tls.rs`): Basic Auth checked in the handshake callback (constant-time, user must equal the URL id), TLS, mTLS with client CN equal to the station id; refusals emit `CsmsEvent::AuthFailed`.
