@@ -41,7 +41,7 @@ uuid.workspace = true
 kirby-ocpp-testkit.workspace = true
 proptest.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "rt-multi-thread"] }
 
 [lints]
 workspace = true

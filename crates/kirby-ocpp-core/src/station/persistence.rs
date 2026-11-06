@@ -232,15 +232,6 @@ impl Persistence {
         parts.queue = persisted.offline_queue;
         parts.samples = persisted.offline_samples;
         parts.samples.renumber();
-        {
-            let queue = &parts.queue;
-            parts.samples.retain_local(|c, t| {
-                queue
-                    .entries()
-                    .iter()
-                    .any(|e| e.connector == c && e.tx_id == t)
-            });
-        }
         // An online start whose CALL was in flight at a crash left no queue entry: nobody
         // would ever resolve it, so the connector would stay blocked. It never happened.
         for connector in &mut state.connectors {
@@ -292,6 +283,20 @@ impl Persistence {
                     stop: Some(stop),
                 });
             }
+        }
+
+        {
+            // A sample is kept only while its transaction is running on the connector or has an
+            // offline queue entry; anything else is an orphan that would be re-sent forever.
+            let queue = &parts.queue;
+            let connectors = &state.connectors;
+            parts.samples.retain_known(|c, t| {
+                queue
+                    .entries()
+                    .iter()
+                    .any(|e| e.connector == c && e.tx_id == t)
+                    || connectors.iter().any(|k| k.id == c && k.tx_id() == Some(t))
+            });
         }
 
         // A change that waited for a transaction which no longer exists (reset above) has

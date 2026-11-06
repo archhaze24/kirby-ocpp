@@ -200,6 +200,19 @@ pub struct Connection {
     default_timeout: Duration,
 }
 
+/// The answer of a CALL queued with [`Connection::enqueue`].
+#[derive(Debug)]
+pub struct PendingReply(oneshot::Receiver<Result<Value, CallError>>);
+
+impl PendingReply {
+    /// Waits for the CALLRESULT payload (or the failure).
+    pub async fn wait(self) -> Result<Value, CallError> {
+        self.0
+            .await
+            .unwrap_or(Err(CallError::Closed { code: None }))
+    }
+}
+
 impl Connection {
     /// Opens a connection to `<url>/<charge_point_id>` requesting `subprotocol`.
     ///
@@ -284,6 +297,27 @@ impl Connection {
         timeout: Option<Duration>,
         validate: bool,
     ) -> Result<Value, CallError> {
+        self.enqueue(action, payload, timeout, validate)?
+            .wait()
+            .await
+    }
+
+    /// Validates and queues a CALL **synchronously** and returns the handle to wait for its
+    /// answer. Callers that need an order between several CALLs enqueue them in that order
+    /// (the connection task sends its queue front to back) and only then spawn the waiters;
+    /// awaiting [`Connection::call`] from separate tasks leaves the order to the scheduler.
+    /// Dropping the handle withdraws the CALL while it is still queued.
+    ///
+    /// # Errors
+    /// [`CallError::NotConnected`] when the socket is closed, [`CallError::Schema`] when
+    /// `validate` is set and the request violates its schema.
+    pub fn enqueue(
+        &self,
+        action: &str,
+        payload: Value,
+        timeout: Option<Duration>,
+        validate: bool,
+    ) -> Result<PendingReply, CallError> {
         if !self.is_open() {
             return Err(CallError::NotConnected);
         }
@@ -301,9 +335,7 @@ impl Connection {
         self.commands
             .send(task::Command::Call(call))
             .map_err(|_| CallError::NotConnected)?;
-        response
-            .await
-            .unwrap_or(Err(CallError::Closed { code: None }))
+        Ok(PendingReply(response))
     }
 
     /// Typed variant of [`Connection::call`] for charge-point-initiated actions.

@@ -484,9 +484,11 @@ impl StationActor {
     pub(super) fn publish(&mut self) {
         self.state.pending_offline_messages = self.queue.pending_messages();
         self.state.security_profile = self.registry.security_profile();
-        self.state.pending_security_events =
-            u32::try_from(self.security_events.len() + self.security_in_flight.len())
-                .unwrap_or(u32::MAX);
+        self.state.pending_security_events = u32::try_from(
+            (self.security_events.len() + self.security_in_flight.len())
+                .min(super::security::MAX_QUEUED_EVENTS),
+        )
+        .unwrap_or(u32::MAX);
         self.state.certificate_request_pending = self.secrets.pending_key_pem.is_some();
         if std::mem::take(&mut self.certs_dirty) {
             self.state.certificates = self.certs.summaries();

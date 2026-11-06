@@ -134,12 +134,22 @@ impl StationActor {
         let results = self.internal_tx.clone();
         let name = action.to_owned();
 
+        // The first attempt is queued on the connection right here, in call order: spawned
+        // tasks are polled in scheduler order, which would reorder CALLs made back to back
+        // (offline samples followed by their StopTransaction).
+        let first = connection.enqueue(&name, payload.clone(), Some(timeout), validate);
         let task = tokio::spawn({
             let name = name.clone();
             async move {
                 let mut attempt = 1;
+                let mut first = Some(first);
                 let result = loop {
-                    let outcome = if validate {
+                    let outcome = if let Some(first) = first.take() {
+                        match first {
+                            Ok(pending) => pending.wait().await,
+                            Err(error) => Err(error),
+                        }
+                    } else if validate {
                         connection.call(&name, payload.clone(), Some(timeout)).await
                     } else {
                         connection

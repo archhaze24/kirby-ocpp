@@ -801,6 +801,42 @@ async fn offline_meter_values_follow_their_start_and_precede_their_stop() {
     rig.shutdown().await;
 }
 
+/// Many queued samples and a stop reach the wire in the order taken, also on a multi-thread
+/// runtime (the enqueue on the connection happens in call order, not in task-poll order).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn offline_meter_values_keep_their_order_on_a_multi_thread_runtime() {
+    const SAMPLES: usize = 40;
+    let mut rig = Rig::with(incrementing(), |c| c).await;
+    rig.connect_booted().await;
+    allow_offline(&rig).await;
+    rig.station.disconnect().await.unwrap();
+    rig.csms.wait_for_disconnect(STEP).await.unwrap();
+    rig.begin(1, "OFFTAG").await;
+    for i in 0..SAMPLES {
+        offline_sample(&rig, 10 + i as u64).await;
+    }
+    rig.stop(1, StopReason::Local).await;
+
+    let mark = rig.csms.mark();
+    rig.station.connect().await.unwrap();
+    rig.csms
+        .wait_for_call_after(mark, "StopTransaction", |_| true, STEP)
+        .await
+        .unwrap();
+    let messages = tx_messages(&rig, mark);
+    assert_eq!(messages.len(), SAMPLES + 2, "{messages:?}");
+    assert_eq!(messages.last().unwrap().0, "StopTransaction");
+    let samples = rig.calls("MeterValues", mark);
+    let stamps: Vec<String> = samples
+        .iter()
+        .map(|v| v["meterValue"][0]["timestamp"].as_str().unwrap().to_owned())
+        .collect();
+    let mut sorted = stamps.clone();
+    sorted.sort();
+    assert_eq!(stamps, sorted, "samples out of order");
+    rig.shutdown().await;
+}
+
 #[tokio::test]
 async fn offline_meter_values_of_an_online_transaction_survive_a_restart() {
     let mut rig = Rig::with(incrementing(), |c| c).await;
@@ -864,6 +900,53 @@ async fn offline_meter_values_of_an_online_transaction_survive_a_restart() {
         0
     );
     rig.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn restored_samples_of_a_vanished_transaction_are_dropped() {
+    let mut rig = Rig::with(incrementing(), |c| c).await;
+    rig.connect_booted().await;
+    rig.begin(1, "TAG1").await;
+    wait_state(&rig.station, "active", |s| {
+        s.connector(C1).unwrap().tx_id() == Some(TxId::Csms(100))
+    })
+    .await;
+    rig.station.disconnect().await.unwrap();
+    rig.csms.wait_for_disconnect(STEP).await.unwrap();
+    offline_sample(&rig, 10).await;
+    offline_sample(&rig, 20).await;
+    rig.station.shutdown().await.unwrap();
+    rig.join.take().unwrap().await.unwrap();
+
+    // The state file keeps both samples but no connector runs transaction 100 any more.
+    let path = std::fs::read_dir(rig.dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".station.json"))
+        .unwrap();
+    let mut value: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        value["offline_samples"]["items"].as_array().unwrap().len(),
+        2
+    );
+    for connector in value["connectors"].as_array_mut().unwrap() {
+        connector["transaction"] = serde_json::json!({ "state": "idle" });
+    }
+    std::fs::write(&path, serde_json::to_string(&value).unwrap()).unwrap();
+
+    let config = test_config(rig.csms.url(), &rig.dir);
+    let (station, join) = Station::spawn(config, Arc::new(rig.clock.clone()));
+    let mark = rig.csms.mark();
+    station.connect().await.unwrap();
+    rig.csms
+        .wait_for_call_after(mark, "StatusNotification", |_| true, STEP)
+        .await
+        .unwrap();
+    let sent = tx_messages(&rig, mark);
+    assert_eq!(sent.len(), 0, "{sent:?}");
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
 }
 
 #[tokio::test]

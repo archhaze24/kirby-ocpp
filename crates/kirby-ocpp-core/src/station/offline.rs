@@ -150,10 +150,10 @@ impl SampleQueue {
             .retain(|s| !(s.connector == connector && s.tx_id == tx));
     }
 
-    /// Forgets samples with a local id for which `known` is false (no queue entry any more).
-    pub fn retain_local(&mut self, known: impl Fn(ConnectorId, TxId) -> bool) {
-        self.items
-            .retain(|s| !s.tx_id.is_local() || known(s.connector, s.tx_id));
+    /// Forgets samples for which `known` is false (their transaction is neither running nor
+    /// in the offline queue any more).
+    pub fn retain_known(&mut self, known: impl Fn(ConnectorId, TxId) -> bool) {
+        self.items.retain(|s| known(s.connector, s.tx_id));
     }
 
     /// Marks the sendable samples (real transaction id, not in flight, and of `only` when
