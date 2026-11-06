@@ -19,7 +19,19 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl && key.code == KeyCode::Char('c') {
-        app.quit = true;
+        // A second Ctrl-C while the quit question is open means yes.
+        let asked = matches!(
+            &app.mode,
+            Mode::Confirm(Confirm {
+                action: ConfirmAction::Quit,
+                ..
+            })
+        );
+        if asked {
+            app.quit = true;
+        } else {
+            app.request_quit();
+        }
         return;
     }
     match std::mem::replace(&mut app.mode, Mode::Normal) {
@@ -59,6 +71,7 @@ fn confirmed(app: &mut App, action: ConfirmAction, fx: &mut Vec<Effect>) {
         });
     };
     match action {
+        ConfirmAction::Quit => app.quit = true,
         ConfirmAction::ClearLog => {
             app.log.clear();
             app.notify(NoticeLevel::Info, "log cleared");
@@ -257,7 +270,7 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
     match key.code {
         KeyCode::Char('p') if ctrl => open_palette(app),
         _ if ctrl || alt => {}
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => app.request_quit(),
         KeyCode::Char('?') => app.mode = Mode::Help,
         KeyCode::Char(':') => open_palette(app),
         KeyCode::Char('/') => {

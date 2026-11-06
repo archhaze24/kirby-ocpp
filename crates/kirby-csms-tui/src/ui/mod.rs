@@ -5,7 +5,7 @@ mod panes;
 
 use kirby_ocpp_tui::app::NoticeLevel;
 use kirby_ocpp_tui::text::{sanitize, truncate};
-use kirby_ocpp_tui::ui::{dim, hint_line};
+use kirby_ocpp_tui::ui::{dim, hint_line_pinned};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -67,6 +67,25 @@ fn draw_body(f: &mut Frame<'_>, app: &App, area: Rect) {
         panes::details(f, app, details);
         panes::log(f, app, log);
     }
+}
+
+/// The URL a station connects to, from the listen URL: an unspecified listen host
+/// (`0.0.0.0`, `[::]`) becomes `<this-host>`; `prefix` adds a path-prefix placeholder.
+pub fn station_url_example(listen_url: &str, prefix: bool) -> String {
+    let (scheme, rest) = listen_url.split_once("://").unwrap_or(("ws", listen_url));
+    let rest = rest.trim_end_matches('/');
+    let (host, port) = rest.rsplit_once(':').unwrap_or((rest, ""));
+    let host = match host {
+        "0.0.0.0" | "[::]" | "::" | "" => "<this-host>",
+        h => h,
+    };
+    let port = if port.is_empty() {
+        String::new()
+    } else {
+        format!(":{port}")
+    };
+    let prefix = if prefix { "/<prefix>" } else { "" };
+    format!("{scheme}://{host}{port}{prefix}/<station id>")
 }
 
 fn chip(text: &str, color: Color) -> Span<'static> {
@@ -153,8 +172,16 @@ fn draw_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         Line::raw("")
     };
-    f.render_widget(Paragraph::new(vec![first, hint_line(&hints(app), w)]), area);
+    let line = if matches!(app.mode, Mode::Normal) {
+        hint_line_pinned(&hints(app), PINNED_HINTS, w)
+    } else {
+        kirby_ocpp_tui::ui::hint_line(&hints(app), w)
+    };
+    f.render_widget(Paragraph::new(vec![first, line]), area);
 }
+
+/// Always on the footer in normal mode; the last hints to go in a narrow terminal.
+const PINNED_HINTS: &[(&str, &str)] = &[("?", "help"), (":", "actions")];
 
 /// `(key, label)` pairs, most important first.
 fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
@@ -174,9 +201,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 ("↑↓", "move"),
                 ("←→", "pane"),
                 ("/", "filter"),
-                (":", "actions"),
                 ("a", "all stations"),
-                ("?", "help"),
                 ("q", "quit"),
             ]);
             v

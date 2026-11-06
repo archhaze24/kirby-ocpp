@@ -488,3 +488,47 @@ fn notices_with_bidi_and_line_separators_are_drawn_inert() {
     let t = render(&a, 120, 40);
     assert!(t.contains("evil") && !t.contains('\u{202e}') && !t.contains('\u{2028}'));
 }
+
+#[test]
+fn empty_state_shows_url_example_and_profile_zero_note() {
+    let mut app = App::new("ws://0.0.0.0:9000", at(0));
+    let text = render(&app, 120, 30);
+    assert!(text.contains("Listening on ws://0.0.0.0:9000"), "{text}");
+    assert!(
+        text.contains("ws://<this-host>:9000/<station id>"),
+        "{text}"
+    );
+    assert!(text.contains("any peer can connect"), "{text}");
+    app.security_profile = 2;
+    assert!(!render(&app, 120, 30).contains("any peer can connect"));
+}
+
+#[test]
+fn station_url_example_keeps_specific_hosts() {
+    assert_eq!(
+        station_url_example("ws://192.168.1.5:9000", false),
+        "ws://192.168.1.5:9000/<station id>"
+    );
+    assert_eq!(
+        station_url_example("wss://[::]:9443", true),
+        "wss://<this-host>:9443/<prefix>/<station id>"
+    );
+}
+
+#[test]
+fn footer_keeps_help_and_palette_hints_in_narrow_terminals() {
+    let (app, _) = app_with(&["CP-1"]);
+    for w in [40_u16, 30, 24] {
+        let text = render(&app, w, 12);
+        let footer = text.lines().last().unwrap().to_owned();
+        assert!(
+            footer.contains("? help") && footer.contains(": actions"),
+            "w={w}: {footer:?}"
+        );
+    }
+}
+
+#[test]
+fn help_starts_with_first_steps() {
+    assert!(crate::keys::HELP[0].starts_with("First steps"));
+}

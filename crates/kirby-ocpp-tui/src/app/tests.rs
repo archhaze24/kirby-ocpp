@@ -7,7 +7,7 @@ use chrono::{TimeZone, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::scenario::{ScenarioProgress, ScenarioReport, StepReport, StepStatus};
-use kirby_ocpp_core::station::{Command, Direction, Event, FrameRecord, Snapshot};
+use kirby_ocpp_core::station::{Command, Direction, Event, FrameRecord, Outcome, Snapshot};
 use kirby_ocpp_core::ws::ConnectionState;
 use serde_json::json;
 
@@ -351,31 +351,26 @@ fn scenario_runs_one_at_a_time_and_reports_failures() {
     assert!(a.notice.as_ref().unwrap().text.contains("already running"));
     update(
         &mut a,
-        Msg::Scenario(ScenarioProgress::StepStarted {
+        Msg::Scenario(Box::new(ScenarioProgress::StepStarted {
             index: 0,
             name: "boot".into(),
-        }),
+        })),
     );
     assert_eq!(a.scenario.steps[0].1, StepState::Running);
-    let step = StepReport {
-        index: 0,
-        name: "boot".into(),
-        status: StepStatus::Failed("rejected".into()),
-        duration_ms: 5,
-    };
+    let step = StepReport::new(0, "boot".into(), StepStatus::Failed("rejected".into()), 5);
     update(
         &mut a,
-        Msg::Scenario(ScenarioProgress::StepFinished(step.clone())),
+        Msg::Scenario(Box::new(ScenarioProgress::StepFinished(step.clone()))),
     );
     update(
         &mut a,
-        Msg::ScenarioDone(Box::new(ScenarioReport {
-            scenario: "charge-session".into(),
-            passed: false,
-            cancelled: false,
-            steps: vec![step],
-            duration_ms: 5,
-        })),
+        Msg::ScenarioDone(Box::new(ScenarioReport::new(
+            "charge-session".into(),
+            false,
+            false,
+            vec![step],
+            5,
+        ))),
     );
     assert!(!a.scenario.running);
     let n = a.notice.as_ref().unwrap();
@@ -808,4 +803,89 @@ fn certificates_browser_opens_on_y_and_the_fourth_page() {
     assert!(matches!(&a.mode, Mode::Browser(b) if b.page == crate::browser::Page::Config));
     press(&mut a, "4");
     assert!(matches!(&a.mode, Mode::Browser(b) if b.page == crate::browser::Page::Certificates));
+}
+
+fn ctrl_c(a: &mut App) -> Vec<Effect> {
+    update(
+        a,
+        Msg::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+    )
+}
+
+fn confirm_text(a: &App) -> String {
+    match &a.mode {
+        Mode::Confirm(c) => c.message.clone(),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn quit_is_immediate_when_nothing_would_be_lost() {
+    let mut a = app();
+    press(&mut a, "q");
+    assert!(a.quit);
+    let mut a = app();
+    ctrl_c(&mut a);
+    assert!(a.quit);
+}
+
+#[test]
+fn quit_asks_while_a_scenario_runs() {
+    let mut a = app();
+    a.scenario.running = true;
+    press(&mut a, "q");
+    assert!(!a.quit);
+    assert!(confirm_text(&a).contains("scenario"));
+    press(&mut a, "n");
+    assert!(!a.quit && matches!(a.mode, Mode::Normal));
+    press(&mut a, "q");
+    press(&mut a, "y");
+    assert!(a.quit);
+}
+
+#[test]
+fn quit_asks_during_a_transaction() {
+    use kirby_ocpp_core::station::transaction::{ActiveTransaction, TransactionState};
+    let mut a = app();
+    let tx = a.snapshot.connectors[0].tx_id();
+    assert!(tx.is_none());
+    a.snapshot.connectors[0].transaction = TransactionState::Active(ActiveTransaction {
+        tx_id: kirby_ocpp_core::ids::TxId::Local(1),
+        id_tag: "ABC".parse().unwrap(),
+        started_at: Utc.timestamp_millis_opt(0).unwrap(),
+        meter_start_wh: 0,
+    });
+    press(&mut a, "q");
+    assert!(!a.quit);
+    assert!(confirm_text(&a).contains("transaction"));
+}
+
+#[test]
+fn quit_asks_in_a_fleet_and_double_ctrl_c_quits() {
+    let mut a = app();
+    a.in_fleet = true;
+    ctrl_c(&mut a);
+    assert!(!a.quit);
+    assert!(confirm_text(&a).contains("stations"));
+    ctrl_c(&mut a);
+    assert!(a.quit, "a second Ctrl-C quits without asking");
+}
+
+#[test]
+fn pending_commands_are_tracked_until_done() {
+    let mut a = app();
+    let fx = press(&mut a, "c");
+    assert_eq!(sent(&fx), [&Command::Connect]);
+    assert_eq!(a.pending.len(), 1);
+    let label = a.pending[0].clone();
+    let fx = update(
+        &mut a,
+        Msg::CommandDone {
+            label,
+            show_response: false,
+            result: Ok(Outcome::Done),
+        },
+    );
+    assert!(fx.is_empty());
+    assert!(a.pending.is_empty());
 }

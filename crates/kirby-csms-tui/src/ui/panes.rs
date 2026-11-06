@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Paragraph, Row, Table, Wrap};
 
 use crate::app::{App, Focus, LogView, Summary, filter_label};
 
@@ -126,12 +126,42 @@ pub fn stations(f: &mut Frame<'_>, app: &App, area: Rect) {
     );
 }
 
+/// What the details pane shows before any station has connected.
+fn empty_state(app: &App) -> Vec<Line<'static>> {
+    let url = sanitize(&app.url);
+    let mut lines = vec![
+        Line::raw(format!("Listening on {url}")),
+        Line::raw("Point a charge point at:"),
+        Line::styled(
+            format!("  {}", super::station_url_example(&url, false)),
+            Style::new().fg(Color::Cyan),
+        ),
+        Line::styled(
+            "A path prefix before the station id is accepted (ws://host:port/prefix/id).",
+            dim(),
+        ),
+    ];
+    if app.security_profile == 0 {
+        lines.push(Line::styled(
+            "Security profile 0: any peer can connect.",
+            dim(),
+        ));
+    }
+    lines
+}
+
 // ---- details --------------------------------------------------------------------------
 
 pub fn details(f: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(id) = app.selected.as_deref() else {
+        let lines = if app.stations.is_empty() {
+            empty_state(app)
+        } else {
+            vec![Line::styled("no station selected", dim())]
+        };
         f.render_widget(
-            Paragraph::new(Line::styled("no station selected", dim()))
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
                 .block(block("Station".to_owned(), false)),
             area,
         );

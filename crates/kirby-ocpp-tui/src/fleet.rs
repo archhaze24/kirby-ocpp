@@ -475,6 +475,9 @@ mod tests {
         update_fleet(&mut fleet, chr('>'));
         assert!(!fleet.quit);
         update_fleet(&mut fleet, chr('q'));
+        assert!(!fleet.quit, "a fleet asks before quitting");
+        assert!(matches!(fleet.current().mode, Mode::Confirm(_)));
+        update_fleet(&mut fleet, chr('y'));
         assert!(fleet.quit);
 
         let mut fleet = fleet_of(2);

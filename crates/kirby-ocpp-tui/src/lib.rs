@@ -415,7 +415,7 @@ fn spawn_scenario(scenario: Scenario, runner: ScenarioRunner, out: Out, cancel: 
     let relay = out.clone();
     tokio::spawn(async move {
         while let Some(p) = progress_rx.recv().await {
-            relay.send(Msg::Scenario(p));
+            relay.send(Msg::Scenario(Box::new(p)));
         }
     });
     tokio::spawn(async move {

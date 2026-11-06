@@ -194,6 +194,10 @@ fn choice(f: &mut Frame<'_>, c: &Choice, area: Rect) {
 }
 
 const HELP: &[&str] = &[
+    "First steps: the station starts offline. Press c on the Station tab to connect (the",
+    "     footer shows the state), then press : and type a name (BootNotification, Heartbeat,",
+    "     StartTransaction) to run it; tab 7 runs scenarios. Everything lands in the log.",
+    "",
     "1-7 / Tab / Shift-Tab   switch tab",
     "Up Down j k             move in the focused pane",
     "Left Right              change focused pane (connectors, actions, log)",
@@ -203,7 +207,7 @@ const HELP: &[&str] = &[
     "/ or :                  command palette (search log when in the log pane)",
     "Esc                     close dialog / clear log search",
     "?                       this help",
-    "q or Ctrl-C             quit",
+    "q or Ctrl-C             quit (asks while a scenario or transaction runs, or in a fleet)",
     "",
     "Station tab: K config keys, L local auth list, P charging profiles, Y certificates",
     "     (data browser: Tab/1-4 page, / filter, Enter edit; a add, i install, d delete,",

@@ -283,6 +283,10 @@ fn results_mode(app: &mut App, mut list: ResultsList, key: KeyEvent) {
 
 /// The key reference shown by `?`.
 pub const HELP: &[&str] = &[
+    "First steps: point a charge point at ws://<host>:<port>/<prefix>/<station id> (the prefix",
+    "     is optional, the last path segment is the station id; the header shows the listen",
+    "     address). Stations appear in the list on connect; select one and press : to act.",
+    "",
     "Up Down j k             move in the focused pane",
     "PgUp PgDn Home End      page / first / last (log: oldest / newest)",
     "Left Right Tab          change focused pane (stations, log)",

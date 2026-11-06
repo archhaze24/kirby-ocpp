@@ -86,6 +86,7 @@ async fn main() -> ExitCode {
         if let Some(plan) = &api_plan {
             eprintln!("api listening on http://{}", plan.addr);
         }
+        startup_notes(&handle, cli.json);
         match kirby_csms_tui::Session::enter() {
             Ok(session) => Some(session),
             Err(error) => {
@@ -108,6 +109,7 @@ async fn main() -> ExitCode {
     if let Some(plan) = &api_plan {
         headless::announce_api(&out, plan.addr);
     }
+    startup_notes(&handle, cli.json);
     let slots = commands::new_slots();
     let api =
         api_plan.map(|plan| api::spawn(plan.listener, handle.clone(), slots.clone(), plan.token));
@@ -213,6 +215,29 @@ fn merge_auth_keys_file(config: &mut CsmsConfig, path: &Path) -> Result<(), Stri
         config.security.keys.entry(id).or_insert(key);
     }
     Ok(())
+}
+
+/// Extra startup lines on stderr, after the `listening` line: a warning for an open profile 0
+/// listener on a non-loopback address, and how stations connect (omitted with `--json`).
+/// Printed once, whichever path reaches it first (the TUI path prints before the screen opens).
+fn startup_notes(handle: &kirby_csms_core::CsmsHandle, json: bool) {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| print_startup_notes(handle, json));
+}
+
+fn print_startup_notes(handle: &kirby_csms_core::CsmsHandle, json: bool) {
+    let addr = handle.local_addr();
+    if handle.security_profile().number() == 0 && !addr.ip().is_loopback() {
+        eprintln!(
+            "warning: security profile 0 on a non-loopback address: any peer can connect and take over a station id; see docs/security.md"
+        );
+    }
+    if !json {
+        eprintln!(
+            "stations connect to {}",
+            kirby_csms_tui::ui::station_url_example(&handle.url(), true)
+        );
+    }
 }
 
 fn usage_error(error: &str) -> ExitCode {

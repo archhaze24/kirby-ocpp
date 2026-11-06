@@ -57,6 +57,7 @@ pub enum ConfirmAction {
     RemoveLocalEntry(IdTag),
     ClearProfiles,
     RemoveProfile(i32),
+    Quit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,7 +144,7 @@ pub enum Msg {
     Tick,
     Snapshot(Box<Snapshot>),
     Event(Event),
-    Scenario(ScenarioProgress),
+    Scenario(Box<ScenarioProgress>),
     ScenarioDone(Box<ScenarioReport>),
     /// A scenario could not start (already running, unreadable file, ...).
     ScenarioError(String),
@@ -180,6 +181,8 @@ pub struct App {
     pub quit: bool,
     /// One of several stations (the help mentions the station selector keys).
     pub in_fleet: bool,
+    /// Labels of commands sent to the station that have not completed yet, oldest first.
+    pub pending: Vec<String>,
 }
 
 impl App {
@@ -208,6 +211,38 @@ impl App {
             dirty: true,
             quit: false,
             in_fleet: false,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Why quitting should be confirmed, if it should.
+    pub fn quit_reason(&self) -> Option<&'static str> {
+        if self.scenario.running {
+            Some("a scenario is running")
+        } else if self
+            .snapshot
+            .connectors
+            .iter()
+            .any(|c| !c.transaction.is_idle() || c.tx_id().is_some())
+        {
+            Some("a transaction is active")
+        } else if self.in_fleet {
+            Some("several stations are running")
+        } else {
+            None
+        }
+    }
+
+    /// Quits at once, or opens the confirmation when something would be lost.
+    pub fn request_quit(&mut self) {
+        match self.quit_reason() {
+            Some(why) => {
+                self.mode = Mode::Confirm(Confirm {
+                    message: format!("Quit? {}", capitalize(why)),
+                    action: ConfirmAction::Quit,
+                });
+            }
+            None => self.quit = true,
         }
     }
 
@@ -638,6 +673,13 @@ pub fn event_line(e: &LogEntry) -> String {
     serde_json::to_string(&e.event).unwrap_or_default()
 }
 
+fn capitalize(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
 /// Folds one message into the model and returns what the loop must do.
 pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
     let mut fx = Vec::new();
@@ -682,7 +724,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
         }
         Msg::Event(ev) => app.log.push(ev),
-        Msg::Scenario(p) => apply_progress(&mut app.scenario, p),
+        Msg::Scenario(p) => apply_progress(&mut app.scenario, *p),
         Msg::ScenarioDone(report) => {
             app.scenario.running = false;
             let (level, text) = if report.passed {
@@ -722,9 +764,19 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             label,
             show_response,
             result,
-        } => command_done(app, &label, show_response, result),
+        } => {
+            if let Some(i) = app.pending.iter().position(|l| *l == label) {
+                app.pending.remove(i);
+            }
+            command_done(app, &label, show_response, result);
+        }
         Msg::Notice(level, text) => app.notify(level, text),
         Msg::Signal => app.quit = true,
+    }
+    for e in &fx {
+        if let Effect::Send { label, .. } = e {
+            app.pending.push(label.clone());
+        }
     }
     app.dirty = true;
     fx
@@ -754,6 +806,7 @@ fn apply_progress(view: &mut ScenarioView, p: ScenarioProgress) {
             name,
             status,
             duration_ms,
+            ..
         }) => {
             if view.steps.len() <= index {
                 view.steps

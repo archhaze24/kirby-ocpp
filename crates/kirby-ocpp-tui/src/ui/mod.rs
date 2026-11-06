@@ -15,7 +15,7 @@ use ratatui::widgets::Paragraph;
 use crate::actions::Tab;
 use crate::app::{App, Mode, NoticeLevel};
 use crate::fleet::{FleetApp, station_marks, visible_range};
-use crate::text::{truncate, width};
+use crate::text::{sanitize, truncate, width};
 
 /// Width from which the three-column layout is used.
 pub const WIDE: u16 = 110;
@@ -228,7 +228,16 @@ fn tab_line(app: &App, w: usize) -> Line<'static> {
 
 fn draw_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
     let w = usize::from(area.width);
-    let first = if let Some(n) = &app.notice {
+    let first = if let Some(label) = app.pending.first() {
+        let more = match app.pending.len() {
+            0 | 1 => String::new(),
+            n => format!(" (+{})", n - 1),
+        };
+        Line::styled(
+            truncate(&format!(" waiting... {}{more}", sanitize(label)), w),
+            Style::new().fg(Color::Yellow),
+        )
+    } else if let Some(n) = &app.notice {
         let color = match n.level {
             NoticeLevel::Info => Color::Cyan,
             NoticeLevel::Success => Color::Green,
@@ -246,8 +255,16 @@ fn draw_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         Line::raw("")
     };
-    f.render_widget(Paragraph::new(vec![first, hint_line(&hints(app), w)]), area);
+    let line = if matches!(app.mode, Mode::Normal) {
+        hint_line_pinned(&hints(app), PINNED_HINTS, w)
+    } else {
+        hint_line(&hints(app), w)
+    };
+    f.render_widget(Paragraph::new(vec![first, line]), area);
 }
+
+/// Always on the footer in normal mode; the last hints to go in a narrow terminal.
+const PINNED_HINTS: &[(&str, &str)] = &[("?", "help"), (":", "palette")];
 
 /// `(key, label)` pairs, most important first.
 fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
@@ -270,9 +287,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 ("↑↓", "move"),
                 ("←→", "pane"),
                 ("1-7", "tab"),
-                ("/", "palette"),
                 ("[ ]", "connector"),
-                ("?", "help"),
                 ("q", "quit"),
             ]);
             v
@@ -324,21 +339,52 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
 
 /// As many hints as fit in `w` cells; later ones (lower priority) are dropped, never clipped.
 pub fn hint_line(hints: &[(&str, &str)], w: usize) -> Line<'static> {
-    let mut spans = vec![Span::raw(" ")];
+    hint_line_pinned(hints, &[], w)
+}
+
+fn hint_cost(k: &str, label: &str) -> usize {
+    width(k) + 1 + width(label) + 2
+}
+
+/// Like [`hint_line`], with `pinned` hints (most important first) that go last on the line and
+/// are the last to be dropped: they are reserved room before the regular hints are placed.
+pub fn hint_line_pinned(
+    hints: &[(&str, &str)],
+    pinned: &[(&str, &str)],
+    w: usize,
+) -> Line<'static> {
     let mut used = 1;
-    for (k, label) in hints {
-        let need = width(k) + 1 + width(label) + 2;
+    let mut keep = 0;
+    for (k, label) in pinned {
+        let need = hint_cost(k, label);
         if used + need > w + 1 {
             break;
         }
-        spans.push(Span::styled(
-            (*k).to_owned(),
-            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(format!(" {label}  "), dim()));
         used += need;
+        keep += 1;
+    }
+    let mut room = w + 1 - used.min(w + 1);
+    let mut spans = vec![Span::raw(" ")];
+    for (k, label) in hints {
+        let need = hint_cost(k, label);
+        if need > room {
+            break;
+        }
+        room -= need;
+        push_hint(&mut spans, k, label);
+    }
+    for (k, label) in pinned.iter().take(keep) {
+        push_hint(&mut spans, k, label);
     }
     Line::from(spans)
+}
+
+fn push_hint(spans: &mut Vec<Span<'static>>, k: &str, label: &str) {
+    spans.push(Span::styled(
+        k.to_owned(),
+        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(format!(" {label}  "), dim()));
 }
 
 #[cfg(test)]

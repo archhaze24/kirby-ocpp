@@ -428,3 +428,32 @@ fn notices_with_bidi_and_line_separators_are_drawn_inert() {
     let t = render(&a, 110, 40);
     assert!(t.contains("evil") && !t.contains('\u{202e}') && !t.contains('\u{2028}'));
 }
+
+#[test]
+fn footer_keeps_help_and_palette_hints_in_narrow_terminals() {
+    let a = app();
+    for w in [40_u16, 30, 24] {
+        let text = render(&a, w, 30);
+        let footer = text.lines().last().unwrap().to_owned();
+        assert!(
+            footer.contains("? help") && footer.contains(": palette"),
+            "w={w}: {footer:?}"
+        );
+    }
+}
+
+#[test]
+fn pending_command_shows_waiting_marker() {
+    let mut a = app();
+    a.pending.push("Heartbeat".into());
+    let text = render(&a, 100, 30);
+    assert!(text.contains("waiting... Heartbeat"), "{text}");
+    a.pending.clear();
+    assert!(!render(&a, 100, 30).contains("waiting..."));
+}
+
+#[test]
+fn help_has_first_steps() {
+    let lines = help_lines(false);
+    assert!(lines[0].starts_with("First steps"));
+}
