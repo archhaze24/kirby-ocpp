@@ -12,10 +12,10 @@ const path = require("node:path");
 const NAME = path.basename(__filename, ".js");
 
 // Candidate packages per platform, in order of preference. The musl build is fully static,
-// so on Linux x64 it is also a valid fallback when the glibc package was not installed.
+// so on Linux (x64 and arm64) it is also a valid fallback when the glibc package was not installed.
 const PLATFORMS = {
   "linux-x64": ["@archhaze24/kirby-ocpp-linux-x64", "@archhaze24/kirby-ocpp-linux-x64-musl"],
-  "linux-arm64": ["@archhaze24/kirby-ocpp-linux-arm64"],
+  "linux-arm64": ["@archhaze24/kirby-ocpp-linux-arm64", "@archhaze24/kirby-ocpp-linux-arm64-musl"],
   "darwin-x64": ["@archhaze24/kirby-ocpp-darwin-x64"],
   "darwin-arm64": ["@archhaze24/kirby-ocpp-darwin-arm64"],
   "win32-x64": ["@archhaze24/kirby-ocpp-win32-x64"],
@@ -47,7 +47,7 @@ function binaryPath() {
         `Build from source instead: cargo install ${NAME}`,
     );
   }
-  const ordered = key === "linux-x64" && isMusl() ? [...candidates].reverse() : candidates;
+  const ordered = key.startsWith("linux-") && isMusl() ? [...candidates].reverse() : candidates;
   const exe = process.platform === "win32" ? `${NAME}.exe` : NAME;
   for (const pkg of ordered) {
     try {
