@@ -10,23 +10,18 @@
 
 use std::io::BufRead;
 use std::sync::Arc;
-use std::time::Duration;
 
-use kirby_csms_core::{CsmsHandle, Frame};
+use kirby_csms_core::CsmsHandle;
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, mpsc};
 
-use crate::headless::{Output, station_summary};
-
-/// Longest `timeout_ms` accepted: one day.
-const MAX_TIMEOUT_MS: u64 = 86_400_000;
+use crate::commands;
+use crate::headless::Output;
 
 /// Longest input line accepted, bytes; a longer one is answered with an error and discarded.
 const MAX_LINE_BYTES: usize = 1024 * 1024;
 /// Lines buffered between the reader thread and the dispatcher.
 const QUEUE_LINES: usize = 256;
-/// Most commands in flight at once; the reader waits while all slots are busy.
-const MAX_IN_FLIGHT: usize = 256;
 
 /// One unit of input from the reader thread.
 #[derive(Debug, PartialEq, Eq)]
@@ -88,7 +83,7 @@ fn read_lines(mut reader: impl BufRead, limit: usize, mut send: impl FnMut(Input
 /// Starts reading stdin on a plain thread (a blocked tokio stdin read would hold up the
 /// runtime shutdown) and answers every line in its own task, so one slow command does not
 /// delay the others. End of input just ends the reader; the server keeps running.
-pub fn spawn(handle: CsmsHandle, out: Arc<Output>) {
+pub fn spawn(handle: CsmsHandle, out: Arc<Output>, slots: Arc<Semaphore>) {
     let (tx, mut rx) = mpsc::channel::<Input>(QUEUE_LINES);
     std::thread::spawn(move || {
         read_lines(std::io::stdin().lock(), MAX_LINE_BYTES, |item| {
@@ -96,7 +91,6 @@ pub fn spawn(handle: CsmsHandle, out: Arc<Output>) {
         });
     });
     tokio::spawn(async move {
-        let slots = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
         while let Some(input) = rx.recv().await {
             let bytes = match input {
                 Input::Line(bytes) => bytes,
@@ -168,70 +162,25 @@ pub async fn handle_line(handle: &CsmsHandle, line: &str) -> Value {
         );
     };
     let payload = object.get("payload").cloned().unwrap_or_else(|| json!({}));
-    let timeout = match object.get("timeout_ms") {
-        None => None,
-        Some(value) => match value
-            .as_u64()
-            .filter(|ms| (1..=MAX_TIMEOUT_MS).contains(ms))
-        {
-            Some(ms) => Some(Duration::from_millis(ms)),
-            None => {
-                return failure(
-                    tag,
-                    Some(station),
-                    Some(action),
-                    "`timeout_ms` must be 1..=86400000",
-                );
-            }
-        },
+    let timeout = match commands::parse_timeout(object.get("timeout_ms")) {
+        Ok(timeout) => timeout,
+        Err(message) => return failure(tag, Some(station), Some(action), message),
     };
-    let result = match timeout {
-        Some(timeout) => handle.call_timeout(station, action, payload, timeout).await,
-        None => handle.call(station, action, payload).await,
-    };
-    let mut answer = match result {
-        Ok(Frame::CallResult { payload, .. }) => {
-            json!({"type": "result", "station": station, "action": action, "ok": true, "result": payload})
-        }
-        Ok(Frame::CallError {
-            code,
-            description,
-            details,
-            ..
-        }) => json!({
-            "type": "result", "station": station, "action": action, "ok": false,
-            "error": format!("CALLERROR {}: {description}", code.as_str()),
-            "code": code.as_str(), "details": details,
-        }),
-        Ok(Frame::Call { .. }) => {
-            return failure(
-                tag,
-                Some(station),
-                Some(action),
-                "unexpected CALL as an answer",
-            );
-        }
-        Err(error) => return failure(tag, Some(station), Some(action), &error.to_string()),
-    };
+    let mut answer = commands::call(handle, station, action, payload, timeout)
+        .await
+        .value;
     add_tag(&mut answer, tag);
     answer
 }
 
 fn stations(handle: &CsmsHandle, tag: Option<Value>) -> Value {
-    let list: Vec<Value> = handle
-        .stations()
-        .iter()
-        .map(|info| station_summary(info, handle.state(&info.id).as_ref()))
-        .collect();
-    let mut answer = json!({"type": "stations", "stations": list});
+    let mut answer = json!({"type": "stations", "stations": commands::stations(handle)});
     add_tag(&mut answer, tag);
     answer
 }
 
 fn failure(tag: Option<Value>, station: Option<&str>, action: Option<&str>, error: &str) -> Value {
-    let mut answer = json!({
-        "type": "result", "station": station, "action": action, "ok": false, "error": error
-    });
+    let mut answer = commands::failure(station, action, error);
     add_tag(&mut answer, tag);
     answer
 }

@@ -1,7 +1,9 @@
 //! `kirby-csms`: terminal OCPP 1.6J central system for charge point firmware development and
 //! load tests. A terminal UI on an interactive terminal, headless otherwise.
 
+mod api;
 mod cli;
+mod commands;
 mod headless;
 mod script;
 mod stdin_cmd;
@@ -54,28 +56,14 @@ async fn main() -> ExitCode {
             }
         }
     }
-    if let Err(error) =
-        cli.apply_env_auth_keys(std::env::var("KIRBY_CSMS_AUTH_KEY").ok().as_deref())
-    {
-        return usage_error(&error);
-    }
-    if let Err(error) = cli.validate_security() {
-        return usage_error(&error);
-    }
-    let mut config = cli.csms_config();
-    if let Some(path) = &cli.auth_keys_file
-        && let Err(error) = merge_auth_keys_file(&mut config, path)
-    {
-        return usage_error(&error);
-    }
-    if let Err(error) = cli.require_keys(&config) {
-        return usage_error(&error);
-    }
-    if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key)
-        && let Err(error) = load_tls(&mut config, cert, key, cli.tls_client_ca.as_deref())
-    {
-        return usage_error(&error);
-    }
+    let config = match build_config(&mut cli) {
+        Ok(config) => config,
+        Err(error) => return usage_error(&error),
+    };
+    let api_plan = match prepare_api(&cli).await {
+        Ok(plan) => plan,
+        Err(code) => return code,
+    };
     let out = match Output::open(cli.json, cli.log_file.as_deref()) {
         Ok(out) => out,
         Err(error) => return usage_error(&format!("cannot open the log file: {error}")),
@@ -95,6 +83,9 @@ async fn main() -> ExitCode {
         std::io::stdout().is_terminal(),
     ) {
         eprintln!("listening on {}", handle.url());
+        if let Some(plan) = &api_plan {
+            eprintln!("api listening on http://{}", plan.addr);
+        }
         match kirby_csms_tui::Session::enter() {
             Ok(session) => Some(session),
             Err(error) => {
@@ -114,6 +105,12 @@ async fn main() -> ExitCode {
     let sink_events = handle.subscribe();
     let script_events = script.is_some().then(|| handle.subscribe());
     headless::announce(&out, &handle);
+    if let Some(plan) = &api_plan {
+        headless::announce_api(&out, plan.addr);
+    }
+    let slots = commands::new_slots();
+    let api =
+        api_plan.map(|plan| api::spawn(plan.listener, handle.clone(), slots.clone(), plan.token));
     let sink = (session.is_none() || cli.log_file.is_some())
         .then(|| Sink::spawn(&handle, sink_events, out.clone()));
 
@@ -121,7 +118,7 @@ async fn main() -> ExitCode {
     // is running. Never on a terminal by default (nobody types JSON lines unasked).
     let stdin = cli.stdin || (script.is_none() && !std::io::stdin().is_terminal());
     if stdin {
-        stdin_cmd::spawn(handle.clone(), out.clone());
+        stdin_cmd::spawn(handle.clone(), out.clone(), slots);
     }
 
     let code = if let Some(session) = session {
@@ -141,12 +138,56 @@ async fn main() -> ExitCode {
         let _ = shutdown_signal().await;
         ExitCode::SUCCESS
     };
+    if let Some(api) = api {
+        api.finish().await;
+    }
     handle.shutdown().await;
     if let Some(sink) = sink {
         sink.finish().await;
     }
     out.finish();
     code
+}
+
+/// Applies the security flags and builds the engine configuration.
+fn build_config(cli: &mut Cli) -> Result<CsmsConfig, String> {
+    cli.apply_env_auth_keys(std::env::var("KIRBY_CSMS_AUTH_KEY").ok().as_deref())?;
+    cli.validate_security()?;
+    let mut config = cli.csms_config();
+    if let Some(path) = &cli.auth_keys_file {
+        merge_auth_keys_file(&mut config, path)?;
+    }
+    cli.require_keys(&config)?;
+    if let (Some(cert), Some(key)) = (&cli.tls_cert, &cli.tls_key) {
+        load_tls(&mut config, cert, key, cli.tls_client_ca.as_deref())?;
+    }
+    Ok(config)
+}
+
+/// The bound API listener with its address and token.
+struct ApiPlan {
+    listener: tokio::net::TcpListener,
+    addr: std::net::SocketAddr,
+    token: Option<String>,
+}
+
+/// Validates the API flags and binds its listener (before the CSMS starts, so a busy port
+/// fails early). `None` when `--api-listen` is not given.
+async fn prepare_api(cli: &Cli) -> Result<Option<ApiPlan>, ExitCode> {
+    let token = cli.api_token().map_err(|error| usage_error(&error))?;
+    let Some(addr) = cli.api_listen else {
+        return Ok(None);
+    };
+    let listener = api::bind(addr).await.map_err(|error| {
+        eprintln!("error: cannot bind the API listener {addr}: {error}");
+        ExitCode::FAILURE
+    })?;
+    let addr = listener.local_addr().unwrap_or(addr);
+    Ok(Some(ApiPlan {
+        listener,
+        addr,
+        token,
+    }))
 }
 
 /// Adds the keys of an `--auth-keys-file`; entries given on the command line win.

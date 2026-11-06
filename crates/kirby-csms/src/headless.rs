@@ -121,6 +121,15 @@ pub fn announce(out: &Output, handle: &CsmsHandle) {
     );
 }
 
+/// Prints the `api listening` line.
+pub fn announce_api(out: &Output, addr: std::net::SocketAddr) {
+    let url = format!("http://{addr}");
+    out.event(
+        &json!({"type": "api_listening", "addr": addr.to_string(), "url": url}),
+        &format!("api listening on {url}"),
+    );
+}
+
 /// A compact JSON view of one station: connection, boot info, connector statuses, transactions.
 pub fn station_summary(info: &StationInfo, state: Option<&StationState>) -> Value {
     let mut value = json!({

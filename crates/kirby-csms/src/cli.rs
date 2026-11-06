@@ -42,6 +42,27 @@ pub struct Cli {
     )]
     pub listen: SocketAddr,
 
+    /// Address of the local HTTP control API (off by default); port 0 picks a free port. A
+    /// non-loopback address needs --api-token or --api-token-file
+    #[arg(long, env = "KIRBY_CSMS_API_LISTEN", value_name = "ADDR")]
+    pub api_listen: Option<SocketAddr>,
+
+    /// Bearer token the API requires (visible in `ps`: prefer the environment variable or
+    /// --api-token-file); needs --api-listen
+    #[arg(
+        long, env = "KIRBY_CSMS_API_TOKEN", value_name = "TOKEN", hide_env_values = true,
+        value_parser = non_empty_secret, requires = "api_listen", conflicts_with = "api_token_file"
+    )]
+    pub api_token: Option<String>,
+
+    /// File holding the API bearer token (read once; a trailing newline is dropped); needs
+    /// --api-listen
+    #[arg(
+        long, env = "KIRBY_CSMS_API_TOKEN_FILE", value_name = "FILE", value_parser = non_empty_path,
+        requires = "api_listen"
+    )]
+    pub api_token_file: Option<PathBuf>,
+
     /// Server certificate chain (PEM) for wss://; needs --tls-key
     #[arg(long, env = "KIRBY_CSMS_TLS_CERT", value_name = "FILE", value_parser = non_empty_path, requires = "tls_key")]
     pub tls_cert: Option<PathBuf>,
@@ -227,6 +248,31 @@ fn script_var(text: &str) -> Result<(String, serde_json::Value), String> {
 }
 
 impl Cli {
+    /// The API token (`--api-token`, or the content of `--api-token-file`), checked against
+    /// the listen address: a non-loopback address needs a token.
+    pub fn api_token(&self) -> Result<Option<String>, String> {
+        let token = if let Some(path) = &self.api_token_file {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            let token = text.trim_end_matches(['\n', '\r']);
+            if token.is_empty() {
+                return Err(format!("{} is empty", path.display()));
+            }
+            Some(token.to_owned())
+        } else {
+            self.api_token.clone()
+        };
+        if let Some(addr) = self.api_listen
+            && token.is_none()
+            && !addr.ip().is_loopback()
+        {
+            return Err(format!(
+                "--api-listen {addr} is not a loopback address: set --api-token or --api-token-file"
+            ));
+        }
+        Ok(token)
+    }
+
     /// Whether the terminal UI should be tried: only for an interactive run.
     pub fn wants_tui(&self, stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
         !self.no_tui

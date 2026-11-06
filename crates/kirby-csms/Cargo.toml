@@ -20,12 +20,13 @@ kirby-csms-core.workspace = true
 kirby-csms-tui.workspace = true
 kirby-ocpp-core.workspace = true
 kirby-ocpp-tui.workspace = true
+axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
 
 [dev-dependencies]
 kirby-ocpp-core.workspace = true
