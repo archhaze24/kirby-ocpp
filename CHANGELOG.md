@@ -12,6 +12,7 @@ Work in progress after 0.4.0.
 ### Whitepaper and offline leftovers
 
 - Transaction-related `MeterValues` samples taken while the station is offline (or while the transaction still has a local id) are queued instead of dropped: bounded (1000, oldest first), persisted, sent with the real `transactionId` after the start was synchronised and before the stop. State file format 8 (`offline_samples`; older files load).
+- Client certificate alternation (`A02.FR.28`) no longer depends on a TLS alert: an HTTP 401/403 upgrade answer or a close/reset right after the TLS handshake switches between the new and the previous certificate at once, any other failure after 3 in a row, so a bad renewed certificate cannot strand the station.
 - Security events stay in the persisted queue until the CSMS answered, so a restart with events in flight no longer loses them.
 
 ### Scenarios

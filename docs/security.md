@@ -114,7 +114,7 @@ Charge point certificate (profile 3, or any time a CSMS wants a new one):
 3. Send `CertificateSigned` (`X` in the TUI, PEM chain). The station answers `Accepted` only if a request is pending, the chain parses, fits `CertificateSignedMaxChainSize` (default 10 000 bytes), is linked (each certificate signed by the next), every certificate is currently valid and the leaf carries the pending public key. Otherwise `Rejected` plus an `InvalidChargePointCertificate` security event. Chain trust and the leaf Common Name are not verified.
 4. After `Accepted` the station reconnects and, under profile 3, presents the new certificate.
 5. Back-off: if no `CertificateSigned` arrives within `CertSigningWaitMinimum` seconds the same CSR is sent again, then after twice, four times, ... that wait, at most `CertSigningRepeatTimes` repeats, then the station gives up until a new request. The series is runtime state and a restart forgets it.
-6. Renewal: the old chain and key are kept. Under profile 3 the new certificate is tried first; if the CSMS rejects it with a TLS client-certificate alert, the next attempt uses the other one, alternating. The first successful connection discards the other certificate; falling back to the old one queues `DiscardedRenewedClientCertificate`.
+6. Renewal: the old chain and key are kept. Under profile 3 the new certificate is tried first; a failed attempt switches to the other certificate, alternating without end (`A02.FR.28`): at once after a refusal (TLS client-certificate alert, HTTP 401/403 upgrade answer, connection closed or reset right after the TLS handshake), after 3 failed attempts in a row for anything else (timeout, refused TCP, DNS), so a short outage does not flip the choice constantly. The first successful connection discards the other certificate; falling back to the old one queues `DiscardedRenewedClientCertificate`.
 
 Root certificates:
 
@@ -168,7 +168,7 @@ Intentional or open points; see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE
 | A05.FR.08 | Fallback to the previous profile when the connection with the new one fails is not implemented |
 | A05.FR.03 | An installed Central System root is not required for profile 2 or 3 (public CA setups are legitimate) |
 | Leaf CN | No Common Name check on the `CertificateSigned` leaf (the whitepaper CN is the serial number, the CSR uses the station id) |
-| A02.FR.28 and neighbours | Old/new certificate alternation covers TLS client-certificate alerts only; edge cases are open |
+| A02.FR.28 and neighbours | Old/new certificate alternation: refusals switch at once, other failures after 3 in a row; a flapping server that accepts both certificates is not handled |
 | Store full | `InstallCertificate` answers `Rejected` (as OCPP 2.0.1), the whitepaper text is ambiguous |
 | Last root | `DeleteCertificate` of the last Central System root is `Failed` only under profile 2 or 3 |
 | Profile 2 | The station does not require TLS verification to be on (`--tls-skip-verify` still works) |
