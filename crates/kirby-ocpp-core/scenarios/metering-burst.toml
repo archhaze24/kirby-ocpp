@@ -1,0 +1,62 @@
+name = "metering-burst"
+description = "Plug in, start a transaction on connector 1 and send three MeterValues, checking each one reached the CSMS, then stop the transaction and unplug."
+
+[[steps]]
+action = "plug"
+connector = 1
+
+[[steps]]
+action = "start_tx"
+connector = 1
+id_tag = "KIRBY-TAG"
+
+[[steps]]
+action = "meter"
+connector = 1
+wh_delta = 250
+
+[[steps]]
+action = "expect_call"
+call = "MeterValues"
+direction = "out"
+match = { connectorId = 1 }
+timeout_ms = 3000
+
+[[steps]]
+action = "meter"
+connector = 1
+wh_delta = 500
+
+[[steps]]
+action = "expect_call"
+call = "MeterValues"
+direction = "out"
+match = { connectorId = 1 }
+timeout_ms = 3000
+
+[[steps]]
+action = "meter"
+connector = 1
+wh_delta = 1000
+
+[[steps]]
+action = "expect_call"
+call = "MeterValues"
+direction = "out"
+match = { connectorId = 1 }
+timeout_ms = 3000
+
+[[steps]]
+action = "stop_tx"
+connector = 1
+reason = "Local"
+
+[[steps]]
+action = "expect_call"
+call = "StopTransaction"
+direction = "out"
+timeout_ms = 3000
+
+[[steps]]
+action = "unplug"
+connector = 1

@@ -33,6 +33,24 @@ async fn all_builtins_pass_in_sequence() {
 }
 
 #[tokio::test]
+async fn each_new_builtin_passes_alone_on_a_fresh_station() {
+    for name in [
+        "heartbeat-and-status",
+        "metering-burst",
+        "data-transfer",
+        "security-event",
+        "reconnect",
+    ] {
+        let rig = booted_rig().await;
+        let scenario = builtin::get(name).expect("built-in");
+        let report = run_scenario(&rig.station, &scenario, &CancelToken::new(), None).await;
+        assert!(report.passed, "{name}: {report:#?}");
+        assert_eq!(report.steps.len(), scenario.steps.len(), "{name}");
+        rig.shutdown().await;
+    }
+}
+
+#[tokio::test]
 async fn rejected_authorize_stops_the_scenario() {
     let rig = booted_rig().await;
     let s = scenario(

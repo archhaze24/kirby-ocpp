@@ -503,7 +503,8 @@ mod tests {
 
     #[test]
     fn accelerators_are_unique_per_tab_and_never_reserved() {
-        let cat = catalog(&builtin::all());
+        let builtins = builtin::all();
+        let cat = catalog(&builtins);
         let mut seen = HashSet::new();
         for a in &cat {
             if let Some(k) = a.key {
@@ -511,7 +512,11 @@ mod tests {
                 assert!(seen.insert((a.tab, k)), "duplicate {k} in {:?}", a.tab);
             }
         }
-        assert_eq!(cat.iter().filter(|a| a.tab == Tab::Scenarios).count(), 6);
+        // One run action per built-in plus load and cancel; only the first four have a key.
+        assert_eq!(
+            cat.iter().filter(|a| a.tab == Tab::Scenarios).count(),
+            builtins.len() + 2
+        );
     }
 
     #[test]

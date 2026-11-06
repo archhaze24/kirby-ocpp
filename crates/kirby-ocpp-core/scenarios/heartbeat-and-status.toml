@@ -1,0 +1,57 @@
+name = "heartbeat-and-status"
+description = "Send a Heartbeat, take connector 1 Unavailable and back, plug and unplug the EV, and check each StatusNotification the CSMS received (needs connector 1 Available)."
+
+[[steps]]
+action = "heartbeat"
+
+[[steps]]
+action = "expect_call"
+call = "Heartbeat"
+direction = "out"
+timeout_ms = 3000
+
+[[steps]]
+action = "status"
+connector = 1
+status = "Unavailable"
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { connectorId = 1, status = "Unavailable" }
+timeout_ms = 3000
+
+[[steps]]
+action = "status"
+connector = 1
+status = "Available"
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { connectorId = 1, status = "Available" }
+timeout_ms = 3000
+
+[[steps]]
+action = "plug"
+connector = 1
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { connectorId = 1, status = "Preparing" }
+timeout_ms = 3000
+
+[[steps]]
+action = "unplug"
+connector = 1
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { connectorId = 1, status = "Available" }
+timeout_ms = 3000

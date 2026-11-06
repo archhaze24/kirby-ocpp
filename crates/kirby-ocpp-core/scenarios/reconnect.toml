@@ -1,0 +1,32 @@
+name = "reconnect"
+description = "Drop the WebSocket, wait until it is down, connect again, wait for an accepted registration and prove the link with a Heartbeat."
+
+[[steps]]
+action = "disconnect"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "disconnected" }
+timeout_ms = 3000
+
+[[steps]]
+action = "connect"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connected" }
+timeout_ms = 8000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 8000
+
+[[steps]]
+action = "heartbeat"
+
+[[steps]]
+action = "expect_call"
+call = "Heartbeat"
+direction = "out"
+timeout_ms = 3000

@@ -1,0 +1,14 @@
+name = "security-event"
+description = "Send a SecurityEventNotification (StartupOfTheDevice) and check the CALL went out (Security Whitepaper)."
+
+[[steps]]
+action = "security_event"
+event_type = "StartupOfTheDevice"
+tech_info = "kirby scenario"
+
+[[steps]]
+action = "expect_call"
+call = "SecurityEventNotification"
+direction = "out"
+match = { type = "StartupOfTheDevice" }
+timeout_ms = 3000

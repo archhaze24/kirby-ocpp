@@ -1,5 +1,7 @@
 //! The built-in scenarios, ported from the TS TUI (`chargeSessionScenario`,
 //! `finishSessionScenario`, `offlineSyncScenario`, `faultRecoveryScenario`).
+//! `heartbeat-and-status`, `metering-burst`, `data-transfer`, `security-event`
+//! and `reconnect` are new in 0.5.
 //! They are embedded TOML files, so `scenarios show` prints exactly what runs.
 
 use super::Scenario;
@@ -22,6 +24,23 @@ pub const SOURCES: &[(&str, &str)] = &[
         "fault-recovery",
         include_str!("../../scenarios/fault-recovery.toml"),
     ),
+    (
+        "heartbeat-and-status",
+        include_str!("../../scenarios/heartbeat-and-status.toml"),
+    ),
+    (
+        "metering-burst",
+        include_str!("../../scenarios/metering-burst.toml"),
+    ),
+    (
+        "data-transfer",
+        include_str!("../../scenarios/data-transfer.toml"),
+    ),
+    (
+        "security-event",
+        include_str!("../../scenarios/security-event.toml"),
+    ),
+    ("reconnect", include_str!("../../scenarios/reconnect.toml")),
 ];
 
 /// All built-in scenarios, parsed.
@@ -59,7 +78,7 @@ mod tests {
     #[test]
     fn builtins_parse_and_are_named_after_their_key() {
         let all = all();
-        assert_eq!(all.len(), 4);
+        assert_eq!(all.len(), 9);
         for (scenario, (name, _)) in all.iter().zip(SOURCES) {
             assert_eq!(scenario.name, *name);
             assert_ne!(scenario.description, "");

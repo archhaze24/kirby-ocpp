@@ -76,6 +76,11 @@ fn scenarios_list_and_show() {
         "finish-session",
         "offline-sync",
         "fault-recovery",
+        "heartbeat-and-status",
+        "metering-burst",
+        "data-transfer",
+        "security-event",
+        "reconnect",
     ] {
         assert!(text.contains(name), "{text}");
     }
