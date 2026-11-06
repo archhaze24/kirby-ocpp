@@ -7,6 +7,7 @@ pub mod builtin;
 mod junit;
 mod model;
 mod runner;
+pub mod vars;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,8 +19,9 @@ pub use self::junit::{JunitSuite, junit_xml};
 pub use self::model::{Action, Condition, DEFAULT_TIMEOUT_MS, Expect, Scenario, Step};
 pub use self::runner::{
     ScenarioProgress, ScenarioReport, ScenarioRunner, StepReport, StepStatus, run_scenario,
-    run_scenario_with_events,
+    run_scenario_with_events, run_scenario_with_vars,
 };
+pub use self::vars::Vars;
 
 /// Why a scenario could not be loaded or started.
 #[derive(Debug, Error)]

@@ -11,8 +11,10 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::time::{sleep, sleep_until, timeout};
 
 use super::model::{Action, Expect, Step};
+use super::vars::{self, Vars};
 use super::{CancelToken, Scenario, ScenarioError};
 use crate::error::StationError;
+use crate::station::ResponseRule;
 use crate::station::{Command, Event, FrameRecord, Outcome, StationHandle};
 
 /// How one step ended.
@@ -114,6 +116,40 @@ pub async fn run_scenario(
     run_scenario_with_events(handle, scenario, cancel, progress, handle.subscribe()).await
 }
 
+/// [`run_scenario`] with variables: `overrides` (for example from `--var`) replace the
+/// scenario's `[vars]`, and `index` is the value of the built-in `${index}` (the station's
+/// place in a fleet, 1 for a single station). `${station_id}` is the station's id.
+///
+/// Names in `overrides` that are built-ins are ignored (the built-ins always win).
+pub async fn run_scenario_with_vars(
+    handle: &StationHandle,
+    scenario: &Scenario,
+    cancel: &CancelToken,
+    progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
+    overrides: &Vars,
+    index: u64,
+) -> ScenarioReport {
+    run_inner(
+        handle,
+        scenario,
+        cancel,
+        progress,
+        handle.subscribe(),
+        initial_vars(handle, scenario, overrides, index),
+    )
+    .await
+}
+
+fn initial_vars(handle: &StationHandle, scenario: &Scenario, overrides: &Vars, index: u64) -> Vars {
+    let mut vars = scenario.vars.clone();
+    for (name, value) in overrides.iter() {
+        let _ = vars.insert(name, value.clone());
+    }
+    let _ = vars.insert("station_id", handle.snapshot().charge_point_id.into());
+    let _ = vars.insert("index", index.into());
+    vars
+}
+
 /// [`run_scenario`] with an explicit event subscription (tests use a tiny channel to force lag).
 #[doc(hidden)]
 pub async fn run_scenario_with_events(
@@ -122,6 +158,18 @@ pub async fn run_scenario_with_events(
     cancel: &CancelToken,
     progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
     events: broadcast::Receiver<Event>,
+) -> ScenarioReport {
+    let vars = initial_vars(handle, scenario, &Vars::new(), 1);
+    run_inner(handle, scenario, cancel, progress, events, vars).await
+}
+
+async fn run_inner(
+    handle: &StationHandle,
+    scenario: &Scenario,
+    cancel: &CancelToken,
+    progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
+    events: broadcast::Receiver<Event>,
+    vars: Vars,
 ) -> ScenarioReport {
     let started = Instant::now();
     let mut ctx = Ctx {
@@ -133,6 +181,7 @@ pub async fn run_scenario_with_events(
         frames: VecDeque::new(),
         frame_bytes: 0,
         cancel,
+        vars,
     };
     let mut steps = Vec::with_capacity(scenario.steps.len());
     let mut failed = false;
@@ -208,12 +257,18 @@ const FRAME_CAP: usize = 10_000;
 /// Approximate bytes of kept frames at most.
 const FRAME_BYTES: usize = 16 * 1024 * 1024;
 
+/// `wanted` key for an `expect_call` whose call name is a placeholder.
+const ANY_CALL: &str = "*";
+
 /// The action names some `expect_call` waits for -> whether any of them matches on the payload.
 fn wanted_calls(scenario: &Scenario) -> HashMap<String, bool> {
     let mut wanted: HashMap<String, bool> = HashMap::new();
     for step in &scenario.steps {
         if let Action::ExpectCall { call, matches, .. } = &step.action {
-            *wanted.entry(call.clone()).or_default() |= matches.is_some();
+            // A call name with a placeholder is only known when the step runs: keep every CALL.
+            let key = if call.contains("${") { ANY_CALL } else { call };
+            *wanted.entry(key.to_owned()).or_default() |=
+                matches.is_some() || !step.capture.is_empty();
         }
     }
     wanted
@@ -237,6 +292,7 @@ struct Ctx<'a> {
     frames: VecDeque<(FrameRecord, usize)>,
     frame_bytes: usize,
     cancel: &'a CancelToken,
+    vars: Vars,
 }
 
 impl Ctx<'_> {
@@ -247,14 +303,14 @@ impl Ctx<'_> {
         if record.frame.get(0).and_then(Value::as_u64) != Some(2) {
             return;
         }
-        let Some(&needs_payload) = record
-            .frame
-            .get(2)
-            .and_then(Value::as_str)
-            .and_then(|call| self.wanted.get(call))
-        else {
+        let Some(call) = record.frame.get(2).and_then(Value::as_str) else {
             return;
         };
+        let (specific, any) = (self.wanted.get(call), self.wanted.get(ANY_CALL));
+        if specific.is_none() && any.is_none() {
+            return;
+        }
+        let needs_payload = specific.copied().unwrap_or(false) | any.copied().unwrap_or(false);
         let bytes = if needs_payload {
             record.frame.to_string().len()
         } else {
@@ -303,10 +359,11 @@ impl Ctx<'_> {
 
     async fn run_step(&mut self, step: &Step) -> Result<(), String> {
         self.pump();
-        match &step.action {
+        let step = &substitute_step(step, &self.vars)?;
+        let answer = match &step.action {
             Action::Sleep { ms } => {
                 sleep(Duration::from_millis(*ms)).await;
-                Ok(())
+                None
             }
             Action::WaitFor {
                 condition,
@@ -319,11 +376,13 @@ impl Ctx<'_> {
                 )
                 .await
                 {
-                    Ok(Ok(_)) => Ok(()),
-                    Ok(Err(_)) => Err("station stopped".to_owned()),
-                    Err(_) => Err(format!(
-                        "timed out after {timeout_ms} ms waiting for {condition:?}"
-                    )),
+                    Ok(Ok(_)) => None,
+                    Ok(Err(_)) => return Err("station stopped".to_owned()),
+                    Err(_) => {
+                        return Err(format!(
+                            "timed out after {timeout_ms} ms waiting for {condition:?}"
+                        ));
+                    }
                 }
             }
             Action::ExpectCall {
@@ -331,16 +390,27 @@ impl Ctx<'_> {
                 direction,
                 matches,
                 timeout_ms,
-            } => {
+            } => Some(
                 self.expect_call(call, *direction, matches.as_ref(), *timeout_ms)
-                    .await
-            }
+                    .await?,
+            ),
             action => {
-                let command = to_command(action).ok_or("not a command")?;
+                let command = to_command(action)?;
                 let result = self.handle.send(command).await;
-                check(step, action, result)
+                check(step, action, result)?
             }
+        };
+        for (name, pointer) in &step.capture {
+            let answer = answer
+                .as_ref()
+                .ok_or_else(|| format!("capture `{name}`: the step has no answer to read"))?;
+            let value =
+                vars::capture(answer, pointer).map_err(|e| format!("capture `{name}`: {e}"))?;
+            self.vars
+                .insert(name, value)
+                .map_err(|e| format!("capture `{name}`: {e}"))?;
         }
+        Ok(())
     }
 
     async fn expect_call(
@@ -349,7 +419,7 @@ impl Ctx<'_> {
         direction: Option<crate::station::Direction>,
         matches: Option<&Value>,
         timeout_ms: u64,
-    ) -> Result<(), String> {
+    ) -> Result<Value, String> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         loop {
             self.pump();
@@ -364,8 +434,14 @@ impl Ctx<'_> {
             if let Some(index) = found
                 && self.loss_at.is_none_or(|at| index < at)
             {
+                let payload = self.frames[index]
+                    .0
+                    .frame
+                    .get(3)
+                    .cloned()
+                    .unwrap_or(Value::Null);
                 self.drop_front(index + 1);
-                return Ok(());
+                return Ok(payload);
             }
             if self.loss_at.is_some() {
                 let lost = std::mem::take(&mut self.lagged);
@@ -392,8 +468,8 @@ impl Ctx<'_> {
     }
 }
 
-fn to_command(action: &Action) -> Option<Command> {
-    Some(match action.clone() {
+fn to_command(action: &Action) -> Result<Command, String> {
+    Ok(match action.clone() {
         Action::Connect {} => Command::Connect,
         Action::Disconnect {} => Command::Disconnect,
         Action::Reconnect {} => Command::Reconnect,
@@ -458,11 +534,17 @@ fn to_command(action: &Action) -> Option<Command> {
             event_type,
             tech_info,
         },
-        Action::SetRule { rule } => Command::SetResponseRule { rule: rule.clone() },
+        Action::SetRule { rule } => Command::SetResponseRule {
+            rule: rule
+                .parse::<ResponseRule>()
+                .map_err(|e| format!("set_rule: {e}"))?,
+        },
         Action::ClearRules { call } => Command::ClearResponseRules {
             action: call.clone(),
         },
-        Action::Sleep { .. } | Action::WaitFor { .. } | Action::ExpectCall { .. } => return None,
+        Action::Sleep { .. } | Action::WaitFor { .. } | Action::ExpectCall { .. } => {
+            return Err("not a command".to_owned());
+        }
     })
 }
 
@@ -484,13 +566,13 @@ fn check(
     step: &Step,
     action: &Action,
     result: Result<Outcome, StationError>,
-) -> Result<(), String> {
+) -> Result<Option<Value>, String> {
     let default = Expect::default();
     let expect = step.expect.as_ref().unwrap_or(&default);
     let outcome = match result {
         Err(error) if expect.error => {
             let _ = error;
-            return Ok(());
+            return Ok(None);
         }
         Err(error) => return Err(format!("{}: {error}", action.name())),
         Ok(_) if expect.error => {
@@ -541,7 +623,42 @@ fn check(
             }
         }
     }
-    Ok(())
+    Ok(match outcome {
+        Outcome::Response { payload } => Some(payload),
+        _ => None,
+    })
+}
+
+/// Applies the variables to the step's strings: the JSON of `payload` / `match` (typed
+/// substitution), the other string fields (text), and `expect`. Fields with another type
+/// (`connector`, `reason`, `wh_delta`, `ms`, `timeout_ms`, ...) are never substituted.
+fn substitute_step(step: &Step, vars: &Vars) -> Result<Step, String> {
+    let mut action = serde_json::to_value(&step.action).map_err(|e| e.to_string())?;
+    let mut out = step.clone();
+    if action.to_string().contains('$')
+        && let Value::Object(fields) = &mut action
+    {
+        for (key, value) in fields.iter_mut() {
+            if key == "payload" || key == "match" {
+                *value = vars::substitute(value, vars).map_err(|e| format!("{key}: {e}"))?;
+            } else if let Value::String(text) = value {
+                *text = vars::substitute_str(text, vars).map_err(|e| format!("{key}: {e}"))?;
+            }
+        }
+        out.action = serde_json::from_value(action)
+            .map_err(|e| format!("{} after substituting variables: {e}", step.action.name()))?;
+    }
+    if let Some(expect) = &mut out.expect {
+        if let Some(status) = &mut expect.status {
+            *status =
+                vars::substitute_str(status, vars).map_err(|e| format!("expect.status: {e}"))?;
+        }
+        if let Some(payload) = &mut expect.payload {
+            *payload =
+                vars::substitute(payload, vars).map_err(|e| format!("expect.payload: {e}"))?;
+        }
+    }
+    Ok(out)
 }
 
 /// `true` if every part of `expected` is present in `actual` (objects are matched by key,
@@ -611,6 +728,7 @@ mod tests {
                 frames: VecDeque::new(),
                 frame_bytes: 0,
                 cancel: &cancel,
+                vars: Vars::new(),
             };
             let out = f(&mut ctx).await;
             drop(ctx);

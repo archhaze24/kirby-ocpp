@@ -1,11 +1,13 @@
 //! Scenarios as data: parsing and validation (no I/O against a station).
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::ScenarioError;
+use super::vars::{self, Vars};
 use crate::ids::{ConnectorId, IdTag};
 use crate::ocpp::types::{ChargePointErrorCode, ConnectorStatus, RegistrationStatus, StopReason};
 use crate::station::response_rules::canonical_action;
@@ -44,6 +46,9 @@ fn default_payload() -> Value {
 pub struct Scenario {
     pub name: String,
     pub description: String,
+    /// Variables declared in the `[vars]` table (strings, numbers, booleans).
+    #[serde(skip_serializing_if = "Vars::is_empty")]
+    pub vars: Vars,
     pub steps: Vec<Step>,
 }
 
@@ -54,6 +59,10 @@ pub struct Step {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expect: Option<Expect>,
+    /// Variable name -> JSON pointer into the step's raw answer, stored after the step ran
+    /// (`send_raw`, `data_transfer`, `expect_call` only).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub capture: BTreeMap<String, String>,
     #[serde(flatten)]
     pub action: Action,
 }
@@ -163,8 +172,9 @@ pub enum Action {
     /// Misbehave on purpose when the CSMS sends a command, e.g. `rule = "Reset=reject*2"`
     /// (see `station::response_rules` for the syntax). Replaces the rule of the same action.
     SetRule {
-        #[serde(with = "rule_text")]
-        rule: ResponseRule,
+        /// Rule text; validated at load time unless it has `${...}` placeholders, parsed
+        /// when the step runs.
+        rule: String,
     },
     /// Create a key pair and a CSR and send `SignCertificate` (Security Whitepaper).
     RequestCertificate {},
@@ -180,23 +190,6 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call: Option<String>,
     },
-}
-
-/// A response rule written as its compact text form in TOML.
-mod rule_text {
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    use crate::station::ResponseRule;
-
-    pub fn serialize<S: Serializer>(rule: &ResponseRule, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(rule)
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<ResponseRule, D::Error> {
-        String::deserialize(d)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
 }
 
 /// A condition on the station snapshot, for `wait_for`.
@@ -291,6 +284,8 @@ struct RawScenario {
     #[serde(default)]
     description: String,
     #[serde(default)]
+    vars: toml::Table,
+    #[serde(default)]
     steps: Vec<toml::Table>,
 }
 
@@ -311,6 +306,7 @@ impl Scenario {
                 "a scenario needs at least one `[[steps]]`",
             ));
         }
+        let vars = parse_vars(raw.vars)?;
         let steps = raw
             .steps
             .into_iter()
@@ -320,6 +316,7 @@ impl Scenario {
         let scenario = Self {
             name: raw.name,
             description: raw.description,
+            vars,
             steps,
         };
         scenario.validate()?;
@@ -369,11 +366,12 @@ impl Scenario {
                     return bad("`call` must not be empty");
                 }
                 Action::SecurityEvent { event_type, .. }
-                    if canonical_event_type(event_type).is_none() =>
+                    if !has_placeholder(event_type)
+                        && canonical_event_type(event_type).is_none() =>
                 {
                     return bad(&format!("unknown security event type `{event_type}`"));
                 }
-                Action::ClearRules { call: Some(call) } => {
+                Action::ClearRules { call: Some(call) } if !has_placeholder(call) => {
                     if let Err(error) = canonical_action(call) {
                         return bad(&error.to_string());
                     }
@@ -438,6 +436,56 @@ fn retarget_connector(slot: &mut ConnectorId, to: Option<ConnectorId>) {
     }
 }
 
+/// Does `text` contain a `${` (a placeholder or an escape)? Such text is checked when it runs.
+fn has_placeholder(text: &str) -> bool {
+    text.contains("${")
+}
+
+fn parse_vars(table: toml::Table) -> Result<Vars, ScenarioError> {
+    let mut out = Vars::new();
+    for (name, value) in table {
+        let bad = |msg: &str| ScenarioError::invalid(format!("`[vars]` `{name}`: {msg}"));
+        if !vars::is_valid_name(&name) {
+            return Err(bad("not a valid variable name"));
+        }
+        if vars::is_builtin(&name) {
+            return Err(bad("is a built-in variable and cannot be redefined"));
+        }
+        let json = match value {
+            toml::Value::String(s) => Value::String(s),
+            toml::Value::Integer(i) => Value::from(i),
+            toml::Value::Float(f) => serde_json::Number::from_f64(f)
+                .map(Value::Number)
+                .ok_or_else(|| bad("must be a finite number"))?,
+            toml::Value::Boolean(b) => Value::Bool(b),
+            _ => return Err(bad("must be a string, a number or a boolean")),
+        };
+        out.insert(&name, json).map_err(|e| bad(&e))?;
+    }
+    Ok(out)
+}
+
+fn parse_capture(value: toml::Value) -> Result<BTreeMap<String, String>, String> {
+    let toml::Value::Table(table) = value else {
+        return Err("`capture` must be a table of name = \"/json/pointer\"".to_owned());
+    };
+    let mut out = BTreeMap::new();
+    for (name, pointer) in table {
+        if !vars::is_valid_name(&name) {
+            return Err(format!("`capture`: `{name}` is not a valid variable name"));
+        }
+        if vars::is_builtin(&name) {
+            return Err(format!("`capture`: `{name}` is a built-in variable"));
+        }
+        let toml::Value::String(pointer) = pointer else {
+            return Err(format!("`capture`: `{name}` must be a JSON pointer string"));
+        };
+        vars::check_pointer(&pointer).map_err(|e| format!("`capture` `{name}`: {e}"))?;
+        out.insert(name, pointer);
+    }
+    Ok(out)
+}
+
 fn parse_step(mut table: toml::Table) -> Result<Step, String> {
     let name = match table.remove("name") {
         None => None,
@@ -452,6 +500,10 @@ fn parse_step(mut table: toml::Table) -> Result<Step, String> {
                 .map_err(|e| format!("`expect`: {}", e.message()))?,
         ),
     };
+    let capture = match table.remove("capture") {
+        None => BTreeMap::new(),
+        Some(value) => parse_capture(value)?,
+    };
     let tag = match table.get("action") {
         None => return Err("missing field `action`".to_owned()),
         Some(toml::Value::String(s)) => s.clone(),
@@ -460,9 +512,29 @@ fn parse_step(mut table: toml::Table) -> Result<Step, String> {
     let action = toml::Value::Table(table)
         .try_into::<Action>()
         .map_err(|e| format!("action `{tag}`: {}", e.message()))?;
+    let mut action = action;
+    if !capture.is_empty()
+        && !matches!(
+            action,
+            Action::SendRaw { .. } | Action::DataTransfer { .. } | Action::ExpectCall { .. }
+        )
+    {
+        return Err(format!(
+            "action `{tag}`: `capture` is only valid on send_raw, data_transfer and expect_call steps"
+        ));
+    }
+    if let Action::SetRule { rule } = &mut action
+        && !has_placeholder(rule)
+    {
+        *rule = rule
+            .parse::<ResponseRule>()
+            .map_err(|e| format!("action `{tag}`: {e}"))?
+            .to_string();
+    }
     Ok(Step {
         name,
         expect,
+        capture,
         action,
     })
 }
@@ -613,7 +685,7 @@ call = "Heartbeat"
         .unwrap();
         assert!(matches!(
             &s.steps[0].action,
-            Action::SetRule { rule } if rule.to_string() == "Reset=reject*2"
+            Action::SetRule { rule } if rule == "Reset=reject*2"
         ));
         let action = &s.steps[0].action;
         let back: Action = serde_json::from_str(&serde_json::to_string(action).unwrap()).unwrap();
@@ -650,6 +722,67 @@ call = "Heartbeat"
         assert!(err("[[steps]]\naction = \"connect\"\n").contains("name"));
         assert!(err(HEAD).contains("at least one"));
         assert!(err("name = \" \"\n[[steps]]\naction = \"connect\"\n").contains("empty"));
+    }
+
+    #[test]
+    fn vars_and_capture_parse() {
+        let s = Scenario::from_toml(
+            "name = \"t\"\n[vars]\na = \"x\"\nn = 5\nf = 1.5\nb = true\n[[steps]]\naction = \"data_transfer\"\nvendor_id = \"${a}\"\ncapture = { tok = \"/data/t\", all = \"\" }\n[[steps]]\naction = \"set_rule\"\nrule = \"reset=delay:${n}\"\n[[steps]]\naction = \"set_rule\"\nrule = \"reset=reject\"\n"
+        )
+        .unwrap();
+        assert_eq!(s.vars.len(), 4);
+        assert_eq!(s.vars.get("n"), Some(&serde_json::json!(5)));
+        assert_eq!(s.steps[0].capture["tok"], "/data/t");
+        assert_eq!(s.steps[0].capture["all"], "");
+        assert!(
+            matches!(&s.steps[1].action, Action::SetRule { rule } if rule == "reset=delay:${n}")
+        );
+        assert!(matches!(&s.steps[2].action, Action::SetRule { rule } if rule == "Reset=reject"));
+    }
+
+    #[test]
+    fn bad_vars_and_capture_are_rejected() {
+        let step = "[[steps]]\naction = \"connect\"\n";
+        for (vars, needle) in [
+            ("[vars]\nx = [1]\n", "string, a number"),
+            ("[vars]\nx = {a = 1}\n", "string, a number"),
+            ("[vars]\nx = 1979-05-27\n", "string, a number"),
+            ("[vars]\n\"a-b\" = 1\n", "valid variable name"),
+            ("[vars]\nindex = 1\n", "built-in"),
+            ("[vars]\nstation_id = \"x\"\n", "built-in"),
+        ] {
+            let e = err(&format!("{HEAD}{vars}{step}"));
+            assert!(e.contains(needle), "{vars}: {e}");
+        }
+        for (capture, action, needle) in [
+            ("x = \"/a\"", "connect", "only valid on"),
+            ("x = \"/a\"", "heartbeat", "only valid on"),
+            (
+                "\"a b\" = \"/a\"",
+                "send_raw\"\ncall = \"Heartbeat",
+                "valid variable name",
+            ),
+            (
+                "index = \"/a\"",
+                "send_raw\"\ncall = \"Heartbeat",
+                "built-in",
+            ),
+            (
+                "x = \"a\"",
+                "send_raw\"\ncall = \"Heartbeat",
+                "JSON pointer",
+            ),
+            ("x = 1", "send_raw\"\ncall = \"Heartbeat", "pointer string"),
+        ] {
+            let e = err(&format!(
+                "{HEAD}[[steps]]\naction = \"{action}\"\ncapture = {{ {capture} }}\n"
+            ));
+            assert!(e.contains(needle) && e.contains("step 1"), "{capture}: {e}");
+        }
+        let e = err(&format!(
+            "{HEAD}[[steps]]\naction = \"connect\"\ncapture = 3\n"
+        ));
+        assert!(e.contains("capture"), "{e}");
     }
 
     #[test]

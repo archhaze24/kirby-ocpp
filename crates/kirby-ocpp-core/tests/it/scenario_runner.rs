@@ -172,6 +172,7 @@ async fn a_cancel_after_the_last_step_does_not_mark_the_report_cancelled() {
     let done = Scenario {
         name: "t".to_owned(),
         description: String::new(),
+        vars: kirby_ocpp_core::scenario::Vars::default(),
         steps: Vec::new(),
     };
     let cancel = CancelToken::new();
@@ -347,5 +348,96 @@ tech_info = "lid opened"
         )
         .await
         .unwrap();
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn variables_substitute_and_capture_across_steps() {
+    use kirby_ocpp_core::scenario::{Vars, run_scenario_with_vars};
+
+    let rig = booted_rig().await;
+    let id = rig.station.snapshot().charge_point_id;
+    let s = scenario(
+        r#"
+[vars]
+n = 3
+who = "me"
+[[steps]]
+action = "send_raw"
+call = "Heartbeat"
+capture = { ct = "/currentTime" }
+[[steps]]
+action = "data_transfer"
+vendor_id = "v-${station_id}-${index}-${who}"
+data = "${ct}"
+[[steps]]
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "v-${station_id}-7-you", data = "${ct}" }
+capture = { seen = "/data" }
+[[steps]]
+action = "send_raw"
+call = "StatusNotification"
+payload = { connectorId = "${n}", status = "Available", errorCode = "NoError", info = "${seen}" }
+"#,
+    );
+    let mut overrides = Vars::new();
+    overrides.insert("who", "you".into()).unwrap();
+    let report =
+        run_scenario_with_vars(&rig.station, &s, &CancelToken::new(), None, &overrides, 7).await;
+    assert!(report.passed, "{report:#?}");
+    let sent = rig.calls("StatusNotification", 0);
+    let last = sent.last().expect("StatusNotification sent");
+    // The exact `${n}` kept its number type, the captured text went into `info`.
+    assert_eq!(last["connectorId"], 3, "{last}");
+    assert!(
+        last["info"].as_str().is_some_and(|t| t.contains('T')),
+        "{last}"
+    );
+    let transfers = rig.calls("DataTransfer", 0);
+    assert_eq!(transfers[0]["vendorId"], format!("v-{id}-7-you"));
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn substitution_and_capture_failures_fail_the_step() {
+    let rig = booted_rig().await;
+    let s = scenario(
+        r#"
+[[steps]]
+action = "data_transfer"
+vendor_id = "x"
+data = "${nope}"
+"#,
+    );
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    match &report.steps[0].status {
+        StepStatus::Failed(reason) => assert!(reason.contains("nope"), "{reason}"),
+        other => panic!("{other:?}"),
+    }
+    rig.assert_no_calls("DataTransfer", 0);
+
+    let s = scenario(
+        r#"
+[[steps]]
+action = "send_raw"
+call = "Heartbeat"
+capture = { x = "/missing" }
+[[steps]]
+action = "heartbeat"
+"#,
+    );
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    match &report.steps[0].status {
+        StepStatus::Failed(reason) => {
+            assert!(
+                reason.contains("capture `x`") && reason.contains("/missing"),
+                "{reason}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(report.steps[1].status, StepStatus::Skipped);
     rig.shutdown().await;
 }
