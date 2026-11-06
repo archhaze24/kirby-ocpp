@@ -66,6 +66,7 @@ Start at the [documentation index](https://github.com/archhaze24/kirby-ocpp/blob
 | Use the charge point emulator (TUI keys, headless, fleet, state, response rules) | [docs/emulator.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/emulator.md) |
 | Use the central system (TUI, stdin commands, rules, faults) | [docs/csms.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/csms.md) |
 | Write scenarios or CSMS scripts, get JSON or JUnit reports | [docs/scenarios.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/scenarios.md) |
+| Drive `kirby-csms` over HTTP from any language or CI (local control API) | [docs/api.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/api.md) |
 | Test TLS, mTLS, Basic Auth, certificates, security events | [docs/security.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/security.md) |
 | Look up a flag or environment variable | [docs/configuration.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/configuration.md) |
 | See which parts of the spec are covered and where we deviate | [docs/OCPP_1.6J_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_1.6J_CONFORMANCE.md) |

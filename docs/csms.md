@@ -2,7 +2,7 @@
 
 `kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware development and load tests. It accepts any number of stations, answers their CALLs with canned replies, prints everything that happens and sends commands to stations. On an interactive terminal it opens a terminal UI; otherwise it runs headless.
 
-Contents: [Quick start](#quick-start) · [Connecting stations](#connecting-stations) · [Output](#output) · [Terminal UI](#terminal-ui) · [Commands on stdin](#commands-on-stdin) · [Response rules and fault injection](#response-rules-and-fault-injection) · [Headless behaviour](#headless-behaviour) · [Exit codes](#exit-codes) · [Use as a library](#use-as-a-library) · [Related pages](#related-pages)
+Contents: [Quick start](#quick-start) · [Connecting stations](#connecting-stations) · [Output](#output) · [Terminal UI](#terminal-ui) · [Commands on stdin](#commands-on-stdin) · [HTTP API](#http-api) · [Response rules and fault injection](#response-rules-and-fault-injection) · [Headless behaviour](#headless-behaviour) · [Exit codes](#exit-codes) · [Use as a library](#use-as-a-library) · [Related pages](#related-pages)
 
 ## Quick start
 
@@ -141,6 +141,10 @@ Rules:
 - At most 256 commands are in flight; the reader waits while all slots are busy.
 - Response rules and faults are not available over stdin; use the TUI or a [script](scenarios.md).
 
+## HTTP API
+
+`--api-listen 127.0.0.1:9100` starts a local JSON HTTP API next to the server (off by default; works with the TUI, headless and `--script`): list stations, read state and frame history, send CALLs, forget stations. Calls share the 256-command limit with stdin and return the same result object. After the `listening` line the server prints `api listening on http://ADDR` (`{"type":"api_listening","addr":..,"url":..}` with `--json`). A non-loopback address needs `--api-token` / `--api-token-file`. Plain HTTP only. Endpoints, auth model and examples: [api.md](api.md).
+
 ## Response rules and fault injection
 
 Both apply to all stations, not to the selected one, and to CALLs sent by stations (not to commands sent by the CSMS).
@@ -211,6 +215,7 @@ async fn run() -> Result<(), CsmsError> {
 ## Related pages
 
 - [configuration.md](configuration.md): every flag and environment variable
+- [api.md](api.md): the local HTTP control API
 - [security.md](security.md): profiles, TLS, certificates
 - [scenarios.md](scenarios.md): TOML scripts and scenarios
 - [emulator.md](emulator.md): the charge point side

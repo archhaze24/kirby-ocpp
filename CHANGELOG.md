@@ -21,8 +21,14 @@ Work in progress after 0.4.0.
 - Five new built-in scenarios: `heartbeat-and-status`, `metering-burst`, `data-transfer`, `security-event` and `reconnect` (see `kirby-ocpp scenarios list`).
 - `kirby-ocpp suite [SOURCE...]` runs many scenarios (files, directories of `*.toml`, built-in names, `--all-builtins`) one after another, each on a fresh station, with a per-scenario PASS/FAIL line, a summary, `--report` (suite JSON), one `--junit` file with a test suite per scenario, `--fail-fast`, `--var` and a per-scenario `--timeout`.
 
+### Control API
+
+- `kirby-csms --api-listen ADDR` starts a local HTTP control API (JSON, plain HTTP, off by default) with `GET /v1/health`, `GET /v1/stations`, `GET /v1/stations/{id}`, `GET /v1/stations/{id}/history?limit=N`, `POST /v1/stations/{id}/calls` (same result object as the stdin commands, shared 256-command limit, 429 when full) and `DELETE /v1/stations/{id}` (forget a disconnected station). `--api-token` / `--api-token-file` (env `KIRBY_CSMS_API_TOKEN`, `KIRBY_CSMS_API_TOKEN_FILE`) require a bearer token; a non-loopback address needs one; without a token requests with an `Origin` header are refused. See `docs/api.md`.
+- New dependency: `axum` (HTTP/1 only) with `hyper` and `tower` crates.
+
 ### Documentation
 
+- New page `docs/api.md` for the HTTP control API.
 - `README.md` is now a landing page; detailed pages live under `docs/` (index in `docs/README.md`): architecture, emulator, CSMS, scenarios and scripts, security, configuration reference, testing, development.
 
 ## [0.4.0] - 2026-11-05

@@ -164,6 +164,9 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `--listen <ADDR>` | `KIRBY_CSMS_LISTEN` | `0.0.0.0:9000` | Address to listen on; port `0` picks a free port (the real address is printed first) |
+| `--api-listen <ADDR>` | `KIRBY_CSMS_API_LISTEN` | off | Address of the local HTTP control API; port `0` picks a free port. A non-loopback address needs a token (exit 2 otherwise). See [api.md](api.md) |
+| `--api-token <TOKEN>` | `KIRBY_CSMS_API_TOKEN` | none | Bearer token the API requires (visible in `ps`: prefer the environment variable or `--api-token-file`); needs `--api-listen`, excludes `--api-token-file` |
+| `--api-token-file <FILE>` | `KIRBY_CSMS_API_TOKEN_FILE` | none | File holding the API bearer token (read once, trailing newline dropped, must not be empty); needs `--api-listen` |
 | `--tls-cert <FILE>` | `KIRBY_CSMS_TLS_CERT` | none | Server certificate chain (PEM) for `wss://`; needs `--tls-key` |
 | `--tls-key <FILE>` | `KIRBY_CSMS_TLS_KEY` | none | Server private key (PEM); needs `--tls-cert` |
 | `--tls-client-ca <FILE>` | `KIRBY_CSMS_TLS_CLIENT_CA` | none | Trusted CA(s) for client certificates; with `--tls-cert` every client must present one (mutual TLS); needs `--tls-cert` |
@@ -203,7 +206,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--licenses` | | | Print third-party licence notices and exit |
 | `-V, --version`, `-h, --help` | | | |
 
-CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md).
+CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md). The HTTP API: [api.md](api.md).
 
 ## Exit codes
 

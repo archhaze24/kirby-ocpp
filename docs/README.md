@@ -9,7 +9,7 @@ Contents: [Start here](#start-here) · [Pages](#pages)
 | You are | Read in this order |
 | --- | --- |
 | A user of the emulator (`kirby-ocpp`) | [README](../README.md) quick start, [Emulator](emulator.md), [Scenarios](scenarios.md), [Configuration](configuration.md) |
-| A user of the CSMS (`kirby-csms`) | [README](../README.md), [CSMS](csms.md), [Scenarios](scenarios.md) (scripts), [Security](security.md), [Configuration](configuration.md) |
+| A user of the CSMS (`kirby-csms`) | [README](../README.md), [CSMS](csms.md), [HTTP API](api.md), [Scenarios](scenarios.md) (scripts), [Security](security.md), [Configuration](configuration.md) |
 | Testing TLS, Basic Auth or certificates | [Security](security.md), then [Configuration](configuration.md) |
 | A contributor | [Architecture](architecture.md), [Development](development.md), [Testing](testing.md), then the topic page you change |
 | A maintainer cutting a release | [Releasing](../RELEASING.md), [Changelog](../CHANGELOG.md) |
@@ -21,6 +21,7 @@ Contents: [Start here](#start-here) · [Pages](#pages)
 | [architecture.md](architecture.md) | Crate map, layer contracts, data flow, invariants, where each concern lives, test layout |
 | [emulator.md](emulator.md) | Using the charge point emulator: TUI, headless mode, fleet, state |
 | [csms.md](csms.md) | Using the central system: TUI, stdin commands, rules, fault injection, scripts |
+| [api.md](api.md) | Local HTTP control API of `kirby-csms`: endpoints, auth model, curl examples |
 | [scenarios.md](scenarios.md) | TOML scenarios and CSMS scripts, built-ins, reports, JUnit |
 | [security.md](security.md) | Security profiles 0-3, TLS and mTLS, certificates, security events |
 | [configuration.md](configuration.md) | Every flag and environment variable of both binaries, precedence, id templates, `--rule`, exit codes, state files |
