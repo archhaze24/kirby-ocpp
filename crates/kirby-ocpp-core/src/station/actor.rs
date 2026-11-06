@@ -41,7 +41,7 @@ use crate::station::certificates::CertificateStore;
 use crate::station::charging_profiles::ChargingProfileStore;
 use crate::station::config_registry::ConfigRegistry;
 use crate::station::local_auth_list::LocalAuthList;
-use crate::station::offline::OfflineQueue;
+use crate::station::offline::{OfflineQueue, SampleQueue};
 use crate::station::security::PendingSecurityEvent;
 use crate::store::{StationSecrets, StoreError};
 use crate::ws::{ConnectError, Connection, ConnectionEvent, ConnectionState};
@@ -135,6 +135,7 @@ pub(super) struct RestoredParts {
     pub(super) auth_cache: AuthorizationCache,
     pub(super) profiles: ChargingProfileStore,
     pub(super) queue: OfflineQueue,
+    pub(super) samples: SampleQueue,
     pub(super) certs: CertificateStore,
     pub(super) secrets: StationSecrets,
     pub(super) security_events: Vec<PendingSecurityEvent>,
@@ -157,12 +158,18 @@ pub(crate) struct StationActor {
     pub(super) auth_cache: AuthorizationCache,
     pub(super) profiles: ChargingProfileStore,
     pub(super) queue: OfflineQueue,
+    /// Transaction-related `MeterValues` samples taken while they could not be sent.
+    pub(super) samples: SampleQueue,
     /// Installed root certificates and the station's own chain.
     pub(super) certs: CertificateStore,
     /// Secrets kept in their own file: authorization key, private keys.
     pub(super) secrets: StationSecrets,
     /// Security events that could not be sent yet (bounded).
     pub(super) security_events: Vec<PendingSecurityEvent>,
+    /// Security events sent and not answered yet (runtime only, keyed by a sequence number).
+    /// They stay in the persisted queue until the CSMS answered.
+    pub(super) security_in_flight: Vec<(u64, PendingSecurityEvent)>,
+    pub(super) security_seq: u64,
     /// The certificate summaries of the snapshot are out of date.
     pub(super) certs_dirty: bool,
     /// The next connection trusts the fallback Central System root (runtime only).
@@ -253,6 +260,7 @@ impl StationActor {
             auth_cache: AuthorizationCache::default(),
             profiles: ChargingProfileStore::default(),
             queue: OfflineQueue::default(),
+            samples: SampleQueue::default(),
             certs: CertificateStore::default(),
             secrets: StationSecrets::default(),
             security_events: Vec::new(),
@@ -290,9 +298,12 @@ impl StationActor {
             auth_cache: parts.auth_cache,
             profiles: parts.profiles,
             queue: parts.queue,
+            samples: parts.samples,
             certs: parts.certs,
             secrets: parts.secrets,
             security_events: parts.security_events,
+            security_in_flight: Vec::new(),
+            security_seq: 0,
             certs_dirty: false,
             use_fallback_root: false,
             failure_series: std::collections::HashSet::new(),
@@ -470,7 +481,8 @@ impl StationActor {
         self.state.pending_offline_messages = self.queue.pending_messages();
         self.state.security_profile = self.registry.security_profile();
         self.state.pending_security_events =
-            u32::try_from(self.security_events.len()).unwrap_or(u32::MAX);
+            u32::try_from(self.security_events.len() + self.security_in_flight.len())
+                .unwrap_or(u32::MAX);
         self.state.certificate_request_pending = self.secrets.pending_key_pem.is_some();
         if std::mem::take(&mut self.certs_dirty) {
             self.state.certificates = self.certs.summaries();

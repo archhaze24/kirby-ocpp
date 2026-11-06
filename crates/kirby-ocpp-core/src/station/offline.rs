@@ -18,7 +18,10 @@
 //! failure never aborts the others. An entry the CSMS fails to process is tried again while the
 //! link is up (`TransactionMessageRetryInterval`, at most `TransactionMessageAttempts` retry rounds);
 //! then a stop-only entry is dropped and a start stays queued for the next boot. The queue is
-//! bounded ([`MAX_QUEUED_TRANSACTIONS`]). A start whose idTag the CSMS rejects drops the
+//! bounded ([`MAX_QUEUED_TRANSACTIONS`]). Transaction-related `MeterValues` samples taken while
+//! they cannot be sent wait in a separate [`SampleQueue`] (bounded by [`MAX_QUEUED_SAMPLES`], oldest
+//! sample dropped first, so a start or stop entry is never displaced by a sample); they are sent
+//! after the start of their transaction was delivered and before its stop. A start whose idTag the CSMS rejects drops the
 //! transaction and sends a `StopTransaction` with `DeAuthorized` (with
 //! `StopTransactionOnInvalidId=false` it goes on instead). Retry policy for the CALLs themselves
 //! lives in `calls.rs`.
@@ -57,6 +60,127 @@ pub struct OfflineTx {
     pub reservation_id: Option<ReservationId>,
     pub start_pending: bool,
     pub stop: Option<StopInfo>,
+}
+
+/// Most `MeterValues` samples the offline sample queue keeps; beyond that the oldest sample is
+/// dropped (start and stop entries live in the [`OfflineQueue`] and are never touched).
+pub const MAX_QUEUED_SAMPLES: usize = 1_000;
+
+/// A transaction-related `MeterValues` sample taken while it could not be sent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueuedSample {
+    /// Runtime handle (not persisted; renumbered on load).
+    #[serde(skip)]
+    pub id: u64,
+    pub connector: ConnectorId,
+    /// `Local` until the start of the transaction was delivered, then `Csms`.
+    pub tx_id: TxId,
+    pub sample: MeterValue,
+    /// A CALL carrying this sample is awaiting its answer (runtime only).
+    #[serde(skip)]
+    pub in_flight: bool,
+}
+
+/// Samples in the order they were taken (persisted with the station state).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SampleQueue {
+    items: Vec<QueuedSample>,
+    #[serde(skip)]
+    next_id: u64,
+}
+
+impl SampleQueue {
+    /// Gives every sample a fresh runtime id (after loading).
+    pub fn renumber(&mut self) {
+        for item in &mut self.items {
+            self.next_id += 1;
+            item.id = self.next_id;
+            item.in_flight = false;
+        }
+    }
+
+    /// Appends a sample; over [`MAX_QUEUED_SAMPLES`] the oldest sample (one not in flight
+    /// first) is dropped and returned.
+    pub fn push(
+        &mut self,
+        connector: ConnectorId,
+        tx_id: TxId,
+        sample: MeterValue,
+    ) -> Option<QueuedSample> {
+        self.next_id += 1;
+        self.items.push(QueuedSample {
+            id: self.next_id,
+            connector,
+            tx_id,
+            sample,
+            in_flight: false,
+        });
+        if self.items.len() > MAX_QUEUED_SAMPLES {
+            let at = self.items.iter().position(|s| !s.in_flight).unwrap_or(0);
+            return Some(self.items.remove(at));
+        }
+        None
+    }
+
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn items(&self) -> &[QueuedSample] {
+        &self.items
+    }
+
+    /// The start of `from` was delivered: its samples now belong to `to`.
+    pub fn retarget(&mut self, connector: ConnectorId, from: TxId, to: TxId) {
+        for item in &mut self.items {
+            if item.connector == connector && item.tx_id == from {
+                item.tx_id = to;
+            }
+        }
+    }
+
+    /// Forgets the samples of a transaction that will never be reported.
+    pub fn remove_tx(&mut self, connector: ConnectorId, tx: TxId) {
+        self.items
+            .retain(|s| !(s.connector == connector && s.tx_id == tx));
+    }
+
+    /// Forgets samples with a local id for which `known` is false (no queue entry any more).
+    pub fn retain_local(&mut self, known: impl Fn(ConnectorId, TxId) -> bool) {
+        self.items
+            .retain(|s| !s.tx_id.is_local() || known(s.connector, s.tx_id));
+    }
+
+    /// Marks the sendable samples (real transaction id, not in flight, and of `only` when
+    /// given) as in flight and returns them in order.
+    pub fn take_ready(&mut self, only: Option<(ConnectorId, TxId)>) -> Vec<QueuedSample> {
+        let mut out = Vec::new();
+        for item in &mut self.items {
+            let wanted = only.is_none_or(|(c, t)| item.connector == c && item.tx_id == t);
+            if wanted && !item.in_flight && !item.tx_id.is_local() {
+                item.in_flight = true;
+                out.push(item.clone());
+            }
+        }
+        out
+    }
+
+    /// The CALL of sample `id` ended: it is removed, or (`keep`: the link was lost) becomes
+    /// sendable again.
+    pub fn finish(&mut self, id: u64, keep: bool) {
+        if keep {
+            if let Some(item) = self.items.iter_mut().find(|s| s.id == id) {
+                item.in_flight = false;
+            }
+        } else {
+            self.items.retain(|s| s.id != id);
+        }
+    }
 }
 
 /// The queue (persisted with the station state).
@@ -212,6 +336,48 @@ mod tests {
             assert_eq!(dropped.is_some(), key == MAX_QUEUED_TRANSACTIONS as u64);
         }
         assert!(starts.get(0).is_none());
+    }
+
+    fn sample(second: i64) -> MeterValue {
+        MeterValue {
+            timestamp: DateTime::from_timestamp(second, 0).unwrap(),
+            sampled_value: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_sample_queue_is_bounded_and_drops_the_oldest_sample() {
+        let c = ConnectorId::new(1);
+        let mut queue = SampleQueue::default();
+        for n in 0..MAX_QUEUED_SAMPLES {
+            assert!(
+                queue
+                    .push(c, TxId::Csms(5), sample(i64::try_from(n).unwrap()))
+                    .is_none()
+            );
+        }
+        let dropped = queue.push(c, TxId::Csms(5), sample(-1)).unwrap();
+        assert_eq!(dropped.sample.timestamp.timestamp(), 0);
+        assert_eq!(queue.len(), MAX_QUEUED_SAMPLES);
+        assert_eq!(queue.items()[0].sample.timestamp.timestamp(), 1);
+    }
+
+    #[test]
+    fn local_samples_are_retargeted_and_only_real_ones_are_ready() {
+        let c = ConnectorId::new(1);
+        let mut queue = SampleQueue::default();
+        queue.push(c, TxId::Local(1), sample(1));
+        queue.push(c, TxId::Csms(9), sample(2));
+        assert_eq!(queue.take_ready(None).len(), 1);
+        assert!(
+            queue.take_ready(None).is_empty(),
+            "in flight is not sent twice"
+        );
+        queue.retarget(c, TxId::Local(1), TxId::Csms(7));
+        let ready = queue.take_ready(Some((c, TxId::Csms(7))));
+        assert_eq!(ready.len(), 1);
+        queue.finish(ready[0].id, false);
+        assert_eq!(queue.len(), 1);
     }
 
     #[test]

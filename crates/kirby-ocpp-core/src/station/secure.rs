@@ -155,6 +155,9 @@ impl StationActor {
         }
         self.mark_dirty();
         for event in events {
+            self.security_seq += 1;
+            let seq = self.security_seq;
+            self.security_in_flight.push((seq, event.clone()));
             let request = SecurityEventNotificationRequest {
                 event_type: event.event_type.clone(),
                 timestamp: event.timestamp,
@@ -163,21 +166,25 @@ impl StationActor {
             self.call::<SecurityEventNotification>(
                 Origin::Station,
                 &request,
-                move |actor, result| match result {
-                    Ok(_) => {}
-                    Err(
-                        CallError::NotConnected
-                        | CallError::Closed { .. }
-                        | CallError::NotRegistered { .. },
-                    ) => {
-                        push_bounded(&mut actor.security_events, event);
-                        actor.security_events.sort_by_key(|e| e.timestamp);
-                        actor.mark_dirty();
+                move |actor, result| {
+                    actor.security_in_flight.retain(|(s, _)| *s != seq);
+                    actor.mark_dirty();
+                    match result {
+                        Ok(_) => {}
+                        Err(
+                            CallError::NotConnected
+                            | CallError::Closed { .. }
+                            | CallError::NotRegistered { .. },
+                        ) => {
+                            push_bounded(&mut actor.security_events, event);
+                            actor.security_events.sort_by_key(|e| e.timestamp);
+                            actor.mark_dirty();
+                        }
+                        Err(error) => actor.log(
+                            LogLevel::Warn,
+                            format!("security event {} dropped: {error}", event.event_type),
+                        ),
                     }
-                    Err(error) => actor.log(
-                        LogLevel::Warn,
-                        format!("security event {} dropped: {error}", event.event_type),
-                    ),
                 },
             );
         }

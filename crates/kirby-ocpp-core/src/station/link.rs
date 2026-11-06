@@ -397,6 +397,7 @@ impl StationActor {
     /// (`finish_boot_accepted`).
     fn after_boot_accepted(&mut self) {
         self.reset_retries = None;
+        self.flush_offline_samples(None);
         if self.start_offline_sync(true) == 0 {
             self.finish_boot_accepted();
         }

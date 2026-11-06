@@ -34,7 +34,7 @@ use crate::station::authorization::AuthorizationCache;
 use crate::station::certificates::CertificateStore;
 use crate::station::charging_profiles::ChargingProfileStore;
 use crate::station::local_auth_list::LocalAuthList;
-use crate::station::offline::OfflineQueue;
+use crate::station::offline::{OfflineQueue, SampleQueue};
 use crate::station::reservation::Reservation;
 use crate::station::security::PendingSecurityEvent;
 use crate::station::transaction::TransactionState;
@@ -49,7 +49,10 @@ use crate::station::transaction::TransactionState;
 /// load without them and use the restore time).
 /// Version 7 added the previous charge point certificate chain and its key (the old/new
 /// certificate alternation, `A02.FR.28`; older files load without them).
-pub const STORE_VERSION: u32 = 7;
+///
+/// Version 8 added the queue of transaction-related `MeterValues` samples taken while offline
+/// (`offline_samples`; older files load with it empty).
+pub const STORE_VERSION: u32 = 8;
 
 /// Everything that survives a restart.
 ///
@@ -71,6 +74,8 @@ pub struct PersistedStation {
     pub charging_profiles: ChargingProfileStore,
     /// Transactions whose start and/or stop still has to reach the CSMS.
     pub offline_queue: OfflineQueue,
+    /// `MeterValues` samples of those transactions taken while offline (added in version 8).
+    pub offline_samples: SampleQueue,
     /// Mutable configuration key values.
     pub configuration: BTreeMap<String, String>,
     /// Installed root certificates and the station's own chain (public data; added in version 4).
@@ -102,6 +107,7 @@ impl Default for PersistedStation {
             authorization_cache: AuthorizationCache::default(),
             charging_profiles: ChargingProfileStore::default(),
             offline_queue: OfflineQueue::default(),
+            offline_samples: SampleQueue::default(),
             configuration: BTreeMap::new(),
             certificates: CertificateStore::default(),
             security_events: Vec::new(),
@@ -600,6 +606,18 @@ mod tests {
         .unwrap();
         let state = loaded(store.load().unwrap());
         assert_eq!(state, PersistedStation::new("CP-1"));
+    }
+
+    #[test]
+    fn version_7_file_without_offline_samples_loads_with_an_empty_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        let mut value = serde_json::to_value(sample()).unwrap();
+        value["version"] = 7.into();
+        value.as_object_mut().unwrap().remove("offline_samples");
+        fs::write(store.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+        let state = loaded(store.load().unwrap());
+        assert!(state.offline_samples.is_empty());
     }
 
     #[test]

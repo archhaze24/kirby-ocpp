@@ -33,6 +33,7 @@ use super::snapshot::Snapshot;
 use crate::config::StationConfig;
 use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
 use crate::station::config_registry::ConfigSnapshot;
+use crate::station::security::{MAX_QUEUED_EVENTS, PendingSecurityEvent};
 use crate::store::{
     LoadOutcome, PersistedConnector, PersistedStation, StationSecrets, StationStore, StoreError,
 };
@@ -229,6 +230,17 @@ impl Persistence {
             }
         }
         parts.queue = persisted.offline_queue;
+        parts.samples = persisted.offline_samples;
+        parts.samples.renumber();
+        {
+            let queue = &parts.queue;
+            parts.samples.retain_local(|c, t| {
+                queue
+                    .entries()
+                    .iter()
+                    .any(|e| e.connector == c && e.tx_id == t)
+            });
+        }
         // An online start whose CALL was in flight at a crash left no queue entry: nobody
         // would ever resolve it, so the connector would stay blocked. It never happened.
         for connector in &mut state.connectors {
@@ -327,11 +339,25 @@ impl StationActor {
             authorization_cache: self.auth_cache.clone(),
             charging_profiles: self.profiles.clone(),
             offline_queue: self.queue.clone(),
+            offline_samples: self.samples.clone(),
             configuration: self.registry.snapshot().values,
             certificates: self.certs.clone(),
-            security_events: self.security_events.clone(),
+            security_events: self.persisted_security_events(),
             ..PersistedStation::default()
         }
+    }
+
+    /// Events in flight come first (they are older), then the queue; bounded like the queue.
+    fn persisted_security_events(&self) -> Vec<PendingSecurityEvent> {
+        let mut events: Vec<PendingSecurityEvent> = self
+            .security_in_flight
+            .iter()
+            .map(|(_, e)| e.clone())
+            .chain(self.security_events.iter().cloned())
+            .collect();
+        let excess = events.len().saturating_sub(MAX_QUEUED_EVENTS);
+        events.drain(..excess);
+        events
     }
 
     /// A secret (authorization key, private key) changed: write the secrets file soon.

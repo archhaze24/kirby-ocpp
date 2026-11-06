@@ -743,3 +743,144 @@ async fn a_full_offline_queue_never_drops_the_entry_of_a_running_transaction() {
     station.shutdown().await.unwrap();
     join.await.unwrap();
 }
+
+/// The CSMS-side order of transaction messages after `mark`: `(action, transactionId)`.
+fn tx_messages(rig: &Rig, mark: usize) -> Vec<(String, Option<i64>)> {
+    rig.csms
+        .calls_since(mark)
+        .into_iter()
+        .filter(|c| {
+            ["StartTransaction", "MeterValues", "StopTransaction"].contains(&c.action.as_str())
+        })
+        .map(|c| (c.action, c.payload["transactionId"].as_i64()))
+        .collect()
+}
+
+async fn offline_sample(rig: &Rig, wh: u64) {
+    rig.clock.advance(chrono::TimeDelta::seconds(1));
+    rig.send(Command::MeterValues {
+        connector: C1,
+        wh_delta: wh,
+        measurands: None,
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn offline_meter_values_follow_their_start_and_precede_their_stop() {
+    let mut rig = Rig::with(incrementing(), |c| c).await;
+    rig.connect_booted().await;
+    allow_offline(&rig).await;
+    rig.station.disconnect().await.unwrap();
+    rig.csms.wait_for_disconnect(STEP).await.unwrap();
+    rig.begin(1, "OFFTAG").await;
+    offline_sample(&rig, 10).await;
+    offline_sample(&rig, 20).await;
+    rig.stop(1, StopReason::Local).await;
+
+    let mark = rig.csms.mark();
+    rig.station.connect().await.unwrap();
+    rig.csms
+        .wait_for_call_after(mark, "StopTransaction", |_| true, STEP)
+        .await
+        .unwrap();
+    // Start (real id assigned), the samples under the real id, in the order taken, then stop.
+    assert_eq!(
+        tx_messages(&rig, mark),
+        vec![
+            ("StartTransaction".to_owned(), None),
+            ("MeterValues".to_owned(), Some(100)),
+            ("MeterValues".to_owned(), Some(100)),
+            ("StopTransaction".to_owned(), Some(100)),
+        ]
+    );
+    let samples = rig.calls("MeterValues", mark);
+    let stamp =
+        |v: &serde_json::Value| v["meterValue"][0]["timestamp"].as_str().unwrap().to_owned();
+    assert!(stamp(&samples[0]) < stamp(&samples[1]));
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn offline_meter_values_of_an_online_transaction_survive_a_restart() {
+    let mut rig = Rig::with(incrementing(), |c| c).await;
+    rig.connect_booted().await;
+    rig.begin(1, "TAG1").await;
+    wait_state(&rig.station, "active", |s| {
+        s.connector(C1).unwrap().tx_id() == Some(TxId::Csms(100))
+    })
+    .await;
+    rig.station.disconnect().await.unwrap();
+    rig.csms.wait_for_disconnect(STEP).await.unwrap();
+    offline_sample(&rig, 10).await;
+    offline_sample(&rig, 20).await;
+
+    rig.station.shutdown().await.unwrap();
+    rig.join.take().unwrap().await.unwrap();
+    let config = test_config(rig.csms.url(), &rig.dir);
+    let (station, join) = Station::spawn(config, Arc::new(rig.clock.clone()));
+    let mark = rig.csms.mark();
+    station.connect().await.unwrap();
+    rig.csms
+        .wait_for_call_count_after(mark, "MeterValues", 2, |_| true, STEP)
+        .await
+        .unwrap();
+    assert_eq!(
+        tx_messages(&rig, mark),
+        vec![
+            ("MeterValues".to_owned(), Some(100)),
+            ("MeterValues".to_owned(), Some(100)),
+        ]
+    );
+    // Delivered samples are gone from the persisted queue (the last answer may still be on its
+    // way; the shutdown then keeps its sample, so wait until the CSMS answered both).
+    let read_state = || -> serde_json::Value {
+        let state = std::fs::read_dir(rig.dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().ends_with(".station.json"))
+            .unwrap();
+        serde_json::from_str(&std::fs::read_to_string(state).unwrap()).unwrap()
+    };
+    let deadline = std::time::Instant::now() + STEP;
+    loop {
+        // A flush writes the file once the queue changed.
+        if read_state()["offline_samples"]["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+            || std::time::Instant::now() > deadline
+        {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    let value = read_state();
+    assert_eq!(value["version"], 8);
+    assert_eq!(
+        value["offline_samples"]["items"].as_array().unwrap().len(),
+        0
+    );
+    rig.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn offline_meter_values_without_a_transaction_are_dropped() {
+    let mut rig = Rig::with(incrementing(), |c| c).await;
+    rig.connect_booted().await;
+    rig.station.disconnect().await.unwrap();
+    rig.csms.wait_for_disconnect(STEP).await.unwrap();
+    offline_sample(&rig, 10).await;
+    let mark = rig.csms.mark();
+    rig.station.connect().await.unwrap();
+    rig.wait_registration(RegistrationStatus::Accepted).await;
+    rig.csms
+        .wait_for_call_after(mark, "StatusNotification", |_| true, STEP)
+        .await
+        .unwrap();
+    let sent = tx_messages(&rig, mark);
+    assert_eq!(sent.len(), 0, "{sent:?}");
+    rig.shutdown().await;
+}

@@ -710,3 +710,94 @@ async fn downgrade_from_three_to_two_needs_the_allow_key() {
     station.shutdown().await.unwrap();
     join.await.unwrap();
 }
+
+/// Reads the persisted `security_events` types from the state file in `dir`.
+fn persisted_event_types(dir: &std::path::Path) -> Vec<String> {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(".station.json"))
+        {
+            let value: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            return value["security_events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| e["event_type"].as_str().unwrap().to_owned())
+                .collect();
+        }
+    }
+    panic!("no state file");
+}
+
+#[tokio::test]
+async fn unanswered_security_events_stay_in_the_persisted_queue_until_acknowledged() {
+    let mut rig = rig().await;
+    rig.csms
+        .respond("SecurityEventNotification", |_| Reply::Silence);
+    rig.send(Command::SendSecurityEvent {
+        event_type: "TamperDetectionActivated".into(),
+        tech_info: None,
+    })
+    .await;
+    rig.connect_booted().await;
+    rig.csms
+        .wait_for_call_after(
+            0,
+            "SecurityEventNotification",
+            |p| p["type"] == "TamperDetectionActivated",
+            STEP,
+        )
+        .await
+        .unwrap();
+    // In flight: still counted and persisted.
+    assert!(rig.station.snapshot().pending_security_events >= 1);
+    let dir = rig.dir.path().to_path_buf();
+    let Rig {
+        csms,
+        station,
+        join,
+        dir: tempdir,
+        clock,
+        ..
+    } = rig;
+    station.shutdown().await.unwrap();
+    join.unwrap().await.unwrap();
+    assert!(
+        persisted_event_types(&dir)
+            .iter()
+            .any(|t| t == "TamperDetectionActivated"),
+        "{:?}",
+        persisted_event_types(&dir)
+    );
+    csms.shutdown().await;
+    drop((tempdir, clock));
+}
+
+#[tokio::test]
+async fn acknowledged_security_events_leave_the_persisted_queue() {
+    let mut rig = rig().await;
+    rig.send(Command::SendSecurityEvent {
+        event_type: "TamperDetectionActivated".into(),
+        tech_info: None,
+    })
+    .await;
+    rig.connect_booted().await;
+    crate::station_support::wait_state(&rig.station, "queue drained", |s| {
+        s.pending_security_events == 0
+    })
+    .await;
+    let dir = rig.dir.path().to_path_buf();
+    let Rig {
+        csms,
+        station,
+        join,
+        ..
+    } = rig;
+    station.shutdown().await.unwrap();
+    join.unwrap().await.unwrap();
+    assert_eq!(persisted_event_types(&dir), Vec::<String>::new());
+    csms.shutdown().await;
+}

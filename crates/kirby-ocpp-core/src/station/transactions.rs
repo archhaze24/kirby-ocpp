@@ -622,6 +622,7 @@ impl StationActor {
         };
         if let Some(dropped) = self.queue.push_keeping(entry, live) {
             self.sync_failures.remove(&dropped.key);
+            self.samples.remove_tx(dropped.connector, dropped.tx_id);
             self.log(
                 LogLevel::Warn,
                 format!(
@@ -783,6 +784,7 @@ impl StationActor {
             .collect();
         for key in exhausted {
             if let Some(entry) = self.queue.remove(key) {
+                self.samples.remove_tx(entry.connector, entry.tx_id);
                 self.log(
                     LogLevel::Warn,
                     format!(
@@ -872,6 +874,7 @@ impl StationActor {
                 ),
             );
             self.queue.remove(key);
+            self.samples.remove_tx(entry.connector, local);
             self.drop_local_transaction(entry.connector, local);
             let meter = entry
                 .stop
@@ -901,6 +904,7 @@ impl StationActor {
                 meter_start_wh: entry.meter_start_wh,
             });
         }
+        self.samples.retarget(entry.connector, local, real);
         // The local id is gone: TxProfiles bound to it are no longer valid.
         if self.profiles.on_transaction_ended(local) > 0 {
             self.mark_dirty();
@@ -916,6 +920,7 @@ impl StationActor {
         if entry.stop.is_some() && self.sync_stop(key) {
             return;
         }
+        self.flush_offline_samples(Some((entry.connector, real)));
         self.sync_done();
     }
 
@@ -927,6 +932,8 @@ impl StationActor {
         let (Some(info), Some(wire)) = (entry.stop, entry.tx_id.wire()) else {
             return false;
         };
+        // Samples of the transaction go first (the connection keeps the order of CALLs).
+        self.flush_offline_samples(Some((entry.connector, entry.tx_id)));
         let request = stop_request(&info, wire);
         self.call::<StopTransaction>(Origin::Station, &request, move |actor, result| {
             match result {

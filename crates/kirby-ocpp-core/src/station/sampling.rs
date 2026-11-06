@@ -8,9 +8,10 @@
 //!   double count. The `MeterValues` command additionally adds its `wh_delta` to the register.
 //! * Periodic timers run per connector with a running transaction (`MeterValueSampleInterval`
 //!   applies for the whole transaction, also while it is suspended: the energy values just do
-//!   not advance), **also while offline**: samples are dropped, nothing is queued (see the
-//!   conformance document). A transaction that is still local (`PendingStart` on a local id)
-//!   is not sent either (it has no CSMS id yet).
+//!   not advance), **also while offline**. A sample of a transaction that cannot be reported yet
+//!   (offline, or still on a local id) goes to the bounded, persisted sample queue
+//!   (`offline.rs`) and is sent after the start of its transaction was synchronised, before
+//!   its stop; idle-connector samples are dropped.
 //! * The clock-aligned timer fires at the next multiple of `ClockAlignedDataInterval` and
 //!   samples every connector, idle ones too (without `transactionId`).
 //! * Timer-driven samples in flight are bounded (at least [`MAX_PENDING_SAMPLES`], and never
@@ -28,8 +29,9 @@ use super::command::Outcome;
 use super::commands::call_failure;
 use super::event::LogLevel;
 use super::metering::{clock_aligned_delay, meter_value};
+use super::offline::MAX_QUEUED_SAMPLES;
 use super::transaction::TransactionState;
-use crate::error::StationError;
+use crate::error::{CallError, StationError};
 use crate::ids::ConnectorId;
 use crate::ocpp::messages::{MeterValues, MeterValuesRequest};
 use crate::ocpp::types::{Measurand, ReadingContext};
@@ -137,6 +139,38 @@ impl StationActor {
         }
         let sendable = self.can_talk() && !tx.is_some_and(crate::ids::TxId::is_local);
         if !sendable {
+            // Transaction-related samples wait for their turn: a real id while offline, a local
+            // id while the start sits in the offline queue (an online start still in flight has
+            // no entry; its samples are dropped).
+            let queued_for = tx.filter(|t| {
+                if t.is_local() {
+                    self.queue.entries().iter().any(|e| e.tx_id == *t)
+                } else {
+                    !self.can_talk()
+                }
+            });
+            if let Some(tx) = queued_for {
+                let reading = self.meter_reading(id, true);
+                let sample = meter_value(&self.power_model(), &reading, now, measurands, context);
+                if self.samples.push(id, tx, sample).is_some() {
+                    self.log(
+                        LogLevel::Warn,
+                        format!(
+                            "offline MeterValues queue is full ({MAX_QUEUED_SAMPLES} samples): dropped the oldest sample"
+                        ),
+                    );
+                }
+                self.mark_dirty();
+                self.log(
+                    LogLevel::Info,
+                    format!("MeterValues for connector {id} queued until the transaction is synchronised"),
+                );
+                if let Some(reply) = reply {
+                    let _ = reply.send(Ok(Outcome::Done));
+                }
+                self.check_energy_limit(id);
+                return;
+            }
             self.log(
                 LogLevel::Info,
                 format!("MeterValues for connector {id} not sent (offline or local transaction)"),
@@ -170,6 +204,43 @@ impl StationActor {
         });
         if timer_driven && self.calls.contains_key(&token) {
             self.sample_calls.push_back(token);
+        }
+    }
+
+    /// Sends the queued samples whose transaction has a real id (all of them, or those of
+    /// `only`). The connection serializes CALLs, so they reach the CSMS in the order taken and
+    /// ahead of anything sent afterwards, e.g. the `StopTransaction` of the same transaction.
+    /// A sample stays queued (and persisted) until its CALL ended; a lost link keeps it.
+    pub(super) fn flush_offline_samples(&mut self, only: Option<(ConnectorId, crate::ids::TxId)>) {
+        if !self.can_talk() {
+            return;
+        }
+        for queued in self.samples.take_ready(only) {
+            let Some(wire) = queued.tx_id.wire() else {
+                continue;
+            };
+            let request = MeterValuesRequest {
+                connector_id: queued.connector,
+                transaction_id: Some(wire),
+                meter_value: vec![queued.sample.clone()],
+            };
+            let sample_id = queued.id;
+            self.call::<MeterValues>(Origin::Station, &request, move |actor, result| {
+                let keep = matches!(
+                    result,
+                    Err(CallError::NotConnected
+                        | CallError::Closed { .. }
+                        | CallError::NotRegistered { .. })
+                );
+                if let (false, Err(error)) = (keep, &result) {
+                    actor.log(
+                        LogLevel::Warn,
+                        format!("queued MeterValues dropped: {error}"),
+                    );
+                }
+                actor.samples.finish(sample_id, keep);
+                actor.mark_dirty();
+            });
         }
     }
 
