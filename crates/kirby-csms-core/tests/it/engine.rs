@@ -457,7 +457,8 @@ async fn rules_can_be_listed_and_cleared() {
     assert_eq!(csms.responder_actions(), ["Authorize", "Heartbeat"]);
     assert_eq!(csms.faults_remaining(), 3);
     csms.clear_faults();
-    csms.clear_responder("Authorize");
+    assert!(csms.clear_responder("Authorize"));
+    assert!(!csms.clear_responder("Authorize"));
     assert_eq!(csms.faults_remaining(), 0);
     assert_eq!(csms.responder_actions(), ["Heartbeat"]);
     csms.shutdown().await;
@@ -803,12 +804,22 @@ async fn heartbeat_updates_state_without_an_event() {
 }
 
 #[tokio::test]
-async fn dropped_call_keeps_the_in_flight_slot_until_the_answer() {
-    let csms = start(|_| {}).await;
+async fn dropped_call_frees_the_queue_and_its_late_answer_is_ignored() {
+    // The first call has a one hour timeout; once its caller is gone the session waits at most
+    // the default call timeout (400 ms here) for it.
+    let csms = start(|c| c.call_timeout = Duration::from_millis(400)).await;
     let mut raw = raw_connect(&csms, "/CP-DROP").await;
     let first = tokio::spawn({
         let csms = csms.clone();
-        async move { csms.call("CP-DROP", "Reset", json!({"type": "Soft"})).await }
+        async move {
+            csms.call_timeout(
+                "CP-DROP",
+                "Reset",
+                json!({"type": "Soft"}),
+                Duration::from_secs(3600),
+            )
+            .await
+        }
     });
     let Frame::Call { id: first_id, .. } = raw_recv(&mut raw).await else {
         panic!("expected a CALL");
@@ -817,62 +828,87 @@ async fn dropped_call_keeps_the_in_flight_slot_until_the_answer() {
     let _ = first.await;
     let next = tokio::spawn({
         let csms = csms.clone();
-        async move { csms.call("CP-DROP", "GetConfiguration", json!({})).await }
-    });
-    // One outstanding CALL: the second must not be written before the first is settled.
-    // (A negative check needs a window; a late failure here cannot be a false alarm.)
-    assert!(
-        timeout(Duration::from_millis(300), raw.next())
+        async move {
+            csms.call_timeout(
+                "CP-DROP",
+                "GetConfiguration",
+                json!({}),
+                Duration::from_secs(30),
+            )
             .await
-            .is_err(),
-        "the next CALL was sent before the station answered"
-    );
+        }
+    });
+    // The abandoned CALL stops blocking the queue after the default timeout, though the
+    // station never answered it.
+    let Frame::Call { id, action, .. } = raw_recv(&mut raw).await else {
+        panic!("expected a CALL");
+    };
+    assert_eq!(action, "GetConfiguration");
+    // The late answer to the abandoned CALL does not settle the new one.
     raw_send(
         &mut raw,
         &Frame::call_result(first_id, json!({"status": "Accepted"})).to_json_string(),
     )
     .await;
-    let Frame::Call { id, action, .. } = raw_recv(&mut raw).await else {
-        panic!("expected a CALL");
-    };
-    assert_eq!(action, "GetConfiguration");
     raw_send(
         &mut raw,
-        &Frame::call_result(id, json!({})).to_json_string(),
+        &Frame::call_result(id, json!({"configurationKey": []})).to_json_string(),
     )
     .await;
-    next.await.unwrap().unwrap();
+    let answer = next.await.unwrap().unwrap();
+    assert_eq!(
+        result_payload(answer),
+        json!({"configurationKey": []}),
+        "the late answer settled the wrong call"
+    );
     csms.shutdown().await;
 }
 
 #[tokio::test]
-async fn dropped_call_frees_the_slot_at_its_deadline() {
-    let csms = start(|c| c.call_timeout = Duration::from_millis(300)).await;
-    let mut raw = raw_connect(&csms, "/CP-DEADLINE").await;
+async fn call_timeout_covers_the_time_spent_queued() {
+    let csms = start(|_| {}).await;
+    let mut raw = raw_connect(&csms, "/CP-QTIME").await;
+    // The first call occupies the station for a long time (it is never answered).
     let first = tokio::spawn({
         let csms = csms.clone();
         async move {
-            csms.call("CP-DEADLINE", "Reset", json!({"type": "Soft"}))
-                .await
+            csms.call_timeout(
+                "CP-QTIME",
+                "Reset",
+                json!({"type": "Soft"}),
+                Duration::from_secs(600),
+            )
+            .await
         }
     });
     let Frame::Call { .. } = raw_recv(&mut raw).await else {
         panic!("expected a CALL");
     };
+    let started = tokio::time::Instant::now();
+    let queued = csms
+        .call_timeout(
+            "CP-QTIME",
+            "GetConfiguration",
+            json!({}),
+            Duration::from_millis(300),
+        )
+        .await;
+    assert!(
+        matches!(queued, Err(CsmsError::Timeout { .. })),
+        "{queued:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the queued call waited for the outstanding one"
+    );
+    // The expired call was never written.
+    assert!(
+        timeout(Duration::from_millis(200), raw.next())
+            .await
+            .is_err(),
+        "an expired queued call was written"
+    );
     first.abort();
-    let _ = first.await;
-    let next = tokio::spawn({
-        let csms = csms.clone();
-        async move {
-            csms.call("CP-DEADLINE", "GetConfiguration", json!({}))
-                .await
-        }
-    });
-    let Frame::Call { action, .. } = raw_recv(&mut raw).await else {
-        panic!("expected a CALL");
-    };
-    assert_eq!(action, "GetConfiguration");
-    next.abort();
     csms.shutdown().await;
 }
 

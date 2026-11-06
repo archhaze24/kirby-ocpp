@@ -5,13 +5,14 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
 use axum::body::Body;
 use axum::extract::rejection::PathRejection;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Extension, Path, Request, State};
 use axum::http::{HeaderValue, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -27,11 +28,12 @@ use kirby_ocpp_core::text::is_unsafe_char;
 use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio::time::Sleep;
+use tokio::time::{Instant, Sleep};
 
 use crate::commands;
 use crate::headless::{Renderer, frame_json, station_summary};
@@ -51,6 +53,20 @@ const MAX_CONNECTIONS: usize = 512;
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 /// A write that makes no progress for this long ends the connection.
 const WRITE_STALL: Duration = Duration::from_secs(30);
+/// Most time a response (an event stream excepted) may take to be written, from its first
+/// byte; a client that drains a byte at a time cannot hold a connection longer.
+const RESPONSE_DEADLINE: Duration = Duration::from_secs(60);
+/// An event stream ends after this long; the last event tells the client to reconnect.
+const STREAM_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+/// After a response the connection waits at most this long, and reads at most
+/// [`DRAIN_BYTES`], for the client to finish sending the request before it closes. Closing
+/// with unread request data would reset the connection and could destroy an early error
+/// response (`401`, `403`, `413`) the client has not read yet.
+const DRAIN_TIME: Duration = Duration::from_millis(100);
+const DRAIN_BYTES: usize = 64 * 1024;
+/// Most request-body bytes held by `POST .../calls` requests at once (the body of each, as
+/// received, while its call runs); further requests get `429`.
+const PAYLOAD_BUDGET: usize = 32 * 1024 * 1024;
 /// Time a client gets to send the whole request body.
 const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -63,7 +79,34 @@ struct ApiState {
     stopped: watch::Receiver<bool>,
     /// The address the API listens on.
     bound: IpAddr,
+    /// Request-body bytes still available to in-flight calls, see [`PAYLOAD_BUDGET`].
+    payload: Arc<Semaphore>,
+    /// How long an event stream lasts.
+    stream_max_age: Duration,
 }
+
+/// Timing limits of the server; tests use short ones.
+#[derive(Debug, Clone, Copy)]
+struct Limits {
+    write_stall: Duration,
+    response_deadline: Duration,
+    stream_max_age: Duration,
+    payload_budget: usize,
+}
+
+impl Limits {
+    const DEFAULT: Self = Self {
+        write_stall: WRITE_STALL,
+        response_deadline: RESPONSE_DEADLINE,
+        stream_max_age: STREAM_MAX_AGE,
+        payload_budget: PAYLOAD_BUDGET,
+    };
+}
+
+/// Set by the handler of a response that is meant to last (an event stream): the connection
+/// is then exempt from [`RESPONSE_DEADLINE`].
+#[derive(Clone)]
+struct Streaming(Arc<AtomicBool>);
 
 /// A running API server.
 #[derive(Debug)]
@@ -77,23 +120,60 @@ pub async fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
-/// An accepted connection's socket: gives up when a write makes no progress for
-/// [`WRITE_STALL`] (a client that stopped reading), so stalled streams free their slot.
+/// An accepted connection's socket. It gives up when
+/// - a write makes no progress for `after` (a client that stopped reading),
+/// - the response takes longer than `total` from its first write, unless the handler marked
+///   the connection as [`Streaming`],
+///
+/// and at the end it drains the client's unread request data for a moment (see
+/// [`DRAIN_TIME`]) before the socket is closed.
 struct StallIo<T> {
     inner: T,
     /// How long a write may make no progress.
     after: Duration,
     /// Armed while a write is pending; cleared by any write progress.
     stall: Option<Pin<Box<Sleep>>>,
+    /// How long a response may take to be written.
+    total: Duration,
+    /// Armed by the first write.
+    deadline: Option<Pin<Box<Sleep>>>,
+    streaming: Arc<AtomicBool>,
+    /// The write side was shut down; the drain is running.
+    shut: bool,
+    drain: Option<Pin<Box<Sleep>>>,
+    drained: usize,
 }
 
 impl<T> StallIo<T> {
-    /// Applies the stall rule to the result of a write-side poll.
+    fn new(inner: T, limits: Limits, streaming: Arc<AtomicBool>) -> Self {
+        Self {
+            inner,
+            after: limits.write_stall,
+            stall: None,
+            total: limits.response_deadline,
+            deadline: None,
+            streaming,
+            shut: false,
+            drain: None,
+            drained: 0,
+        }
+    }
+
+    /// Applies the stall and deadline rules to the result of a write-side poll.
     fn guard<R>(
         &mut self,
         cx: &mut Context<'_>,
         polled: Poll<io::Result<R>>,
     ) -> Poll<io::Result<R>> {
+        if !self.streaming.load(Ordering::Acquire) {
+            let total = self.total;
+            let deadline = self
+                .deadline
+                .get_or_insert_with(|| Box::pin(tokio::time::sleep(total)));
+            if deadline.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Err(io::ErrorKind::TimedOut.into()));
+            }
+        }
         match polled {
             Poll::Pending => {
                 let sleep = self
@@ -123,7 +203,7 @@ impl<T: AsyncRead + Unpin> AsyncRead for StallIo<T> {
     }
 }
 
-impl<T: AsyncWrite + Unpin> AsyncWrite for StallIo<T> {
+impl<T: AsyncRead + AsyncWrite + Unpin> AsyncWrite for StallIo<T> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -140,20 +220,63 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for StallIo<T> {
         this.guard(cx, polled)
     }
 
+    /// Shuts the write side down, then reads and discards what the client still sends for up
+    /// to [`DRAIN_TIME`] and [`DRAIN_BYTES`] (or until it closes).
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
-        let polled = Pin::new(&mut this.inner).poll_shutdown(cx);
-        this.guard(cx, polled)
+        if !this.shut {
+            let polled = Pin::new(&mut this.inner).poll_shutdown(cx);
+            match this.guard(cx, polled) {
+                Poll::Ready(Ok(())) => this.shut = true,
+                other => return other,
+            }
+        }
+        let mut scratch = [0_u8; 4096];
+        while this.drained < DRAIN_BYTES {
+            let mut buf = ReadBuf::new(&mut scratch);
+            match Pin::new(&mut this.inner).poll_read(cx, &mut buf) {
+                Poll::Ready(Ok(())) if !buf.filled().is_empty() => {
+                    this.drained += buf.filled().len();
+                }
+                Poll::Ready(_) => return Poll::Ready(Ok(())),
+                Poll::Pending => break,
+            }
+        }
+        if this.drained >= DRAIN_BYTES {
+            return Poll::Ready(Ok(()));
+        }
+        let drain = this
+            .drain
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep(DRAIN_TIME)));
+        if drain.as_mut().poll(cx).is_ready() {
+            Poll::Ready(Ok(()))
+        } else {
+            Poll::Pending
+        }
     }
 }
 
-/// Accepts connections until `stopped`, one task each (tracked in a [`JoinSet`], so dropping
-/// this future closes every connection). A connection holds a slot of the cap, gets
-/// [`HEAD_TIMEOUT`] from hyper for the request head and carries one request.
+/// Turns on TCP keepalive (first probe after 30 s idle, then every 10 s, 3 probes) so that a
+/// vanished peer (half-open connection) is detected and its slot freed. Best effort.
+fn enable_keepalive(stream: &TcpStream) {
+    let params = TcpKeepalive::new().with_time(Duration::from_secs(30));
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    let params = params.with_interval(Duration::from_secs(10));
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    let params = params.with_retries(3);
+    let _ = SockRef::from(stream).set_tcp_keepalive(&params);
+}
+
+/// Accepts connections until `stopped`, one task each (tracked in a [`JoinSet`]). A connection
+/// holds a slot of the cap, gets [`HEAD_TIMEOUT`] from hyper for the request head and carries
+/// one request. After the stop signal the listener is dropped at once, open requests get
+/// [`SHUTDOWN_GRACE`], then every connection is aborted and awaited: nothing outlives this
+/// future.
 async fn serve(
     listener: TcpListener,
     app: Router,
     slots: Arc<Semaphore>,
+    limits: Limits,
     mut stopped: watch::Receiver<bool>,
 ) {
     let mut connections = JoinSet::new();
@@ -163,16 +286,22 @@ async fn serve(
             Some(_) = connections.join_next() => {}
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else {
-                    // Out of descriptors or similar: do not spin.
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                    continue;
+                    // Out of descriptors or similar: do not spin (but do not miss a stop).
+                    tokio::select! {
+                        () = tokio::time::sleep(Duration::from_millis(50)) => continue,
+                        () = wait_stopped(&mut stopped) => break,
+                    }
                 };
                 // Over the cap the socket is dropped (closed) at once.
                 let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
                     continue;
                 };
-                let io = TokioIo::new(StallIo { inner: stream, after: WRITE_STALL, stall: None });
-                let service = TowerToHyperService::new(app.clone());
+                enable_keepalive(&stream);
+                let streaming = Arc::new(AtomicBool::new(false));
+                let io = TokioIo::new(StallIo::new(stream, limits, Arc::clone(&streaming)));
+                let service = TowerToHyperService::new(
+                    app.clone().layer(Extension(Streaming(streaming))),
+                );
                 let mut stop = stopped.clone();
                 connections.spawn(async move {
                     let _permit = permit;
@@ -193,7 +322,12 @@ async fn serve(
             }
         }
     }
-    while connections.join_next().await.is_some() {}
+    drop(listener);
+    let _ = tokio::time::timeout(SHUTDOWN_GRACE, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    connections.shutdown().await;
 }
 
 /// Serves the API on `listener` until [`Api::finish`].
@@ -202,6 +336,16 @@ pub fn spawn(
     handle: CsmsHandle,
     slots: Arc<Semaphore>,
     token: Option<String>,
+) -> Api {
+    spawn_with(listener, handle, slots, token, Limits::DEFAULT)
+}
+
+fn spawn_with(
+    listener: TcpListener,
+    handle: CsmsHandle,
+    slots: Arc<Semaphore>,
+    token: Option<String>,
+    limits: Limits,
 ) -> Api {
     let (stop, stopped) = watch::channel(false);
     let bound = listener
@@ -214,29 +358,26 @@ pub fn spawn(
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
         stopped: stopped.clone(),
         bound,
+        payload: Arc::new(Semaphore::new(limits.payload_budget)),
+        stream_max_age: limits.stream_max_age,
     };
     let app = router(state);
     let task = tokio::spawn(serve(
         listener,
         app,
         Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        limits,
         stopped,
     ));
     Api { stop, task }
 }
 
 impl Api {
-    /// Stops accepting, waits a bounded time for open requests, then aborts the server task,
-    /// which drops (closes) every connection still open.
-    pub async fn finish(mut self) {
+    /// Stops accepting and closes the listener, waits [`SHUTDOWN_GRACE`] for open requests,
+    /// then drops (closes) every connection still open. No connection outlives the call.
+    pub async fn finish(self) {
         let _ = self.stop.send(true);
-        if tokio::time::timeout(SHUTDOWN_GRACE, &mut self.task)
-            .await
-            .is_err()
-        {
-            self.task.abort();
-            let _ = self.task.await;
-        }
+        let _ = self.task.await;
     }
 }
 
@@ -292,7 +433,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Every response closes its connection (see [`GuardedIo`]).
+/// Every response of a route closes its connection, so one connection serves one request.
 async fn close_connection(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     response
@@ -343,6 +484,9 @@ fn valid_port(text: &str) -> bool {
 /// loopback name (DNS rebinding) is refused.
 async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     let headers = request.headers();
+    if headers.get_all(header::HOST).iter().nth(1).is_some() {
+        return error(StatusCode::BAD_REQUEST, "more than one Host header");
+    }
     if let Some(token) = &state.token {
         let mut values = headers.get_all(header::AUTHORIZATION).iter();
         let given = match (values.next(), values.next()) {
@@ -530,29 +674,39 @@ async fn call(
         Ok(id) => id,
         Err(response) => return *response,
     };
-    let body = match read_json(request).await {
+    let (body, body_bytes) = match read_json(request).await {
         Ok(body) => body,
         Err(response) => return *response,
     };
-    let Some(object) = body.as_object() else {
+    let Value::Object(mut object) = body else {
         return error(StatusCode::BAD_REQUEST, "the body must be a JSON object");
     };
-    let Some(action) = object
-        .get("action")
-        .and_then(Value::as_str)
-        .filter(|action| !action.is_empty())
-    else {
-        return error(StatusCode::BAD_REQUEST, "needs a string field `action`");
+    let action = match object.remove("action") {
+        Some(Value::String(action)) if !action.is_empty() => action,
+        _ => return error(StatusCode::BAD_REQUEST, "needs a string field `action`"),
     };
-    let payload = object.get("payload").cloned().unwrap_or_else(|| json!({}));
+    // Take the payload out of the body and drop the rest, so that only the payload stays
+    // alive while the call runs.
+    let payload = object.remove("payload").unwrap_or_else(|| json!({}));
     let timeout = match commands::parse_timeout(object.get("timeout_ms")) {
         Ok(timeout) => timeout,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
+    drop(object);
     let Ok(_permit) = Arc::clone(&state.slots).try_acquire_owned() else {
         return error(StatusCode::TOO_MANY_REQUESTS, "too many commands in flight");
     };
-    let answer = commands::call(&state.handle, &id, action, payload, timeout).await;
+    let Ok(_bytes) = u32::try_from(body_bytes).map_err(|_| ()).and_then(|bytes| {
+        Arc::clone(&state.payload)
+            .try_acquire_many_owned(bytes)
+            .map_err(|_| ())
+    }) else {
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too much request data held by commands in flight (at most 32 MiB)",
+        );
+    };
+    let answer = commands::call(&state.handle, &id, &action, payload, timeout).await;
     let status = if answer.missing_station {
         StatusCode::NOT_FOUND
     } else {
@@ -562,7 +716,7 @@ async fn call(
 }
 
 /// The request body (at most 1 MiB, read within 10 s) parsed as JSON.
-async fn read_json(request: Request<Body>) -> Result<Value, Box<Response>> {
+async fn read_json(request: Request<Body>) -> Result<(Value, usize), Box<Response>> {
     let too_large = || {
         Box::new(error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -603,12 +757,15 @@ async fn read_json(request: Request<Body>) -> Result<Value, Box<Response>> {
             )));
         }
     };
-    serde_json::from_slice(&bytes).map_err(|e| {
-        Box::new(error(
-            StatusCode::BAD_REQUEST,
-            &format!("invalid JSON: {e}"),
-        ))
-    })
+    let length = bytes.len();
+    serde_json::from_slice(&bytes)
+        .map(|value| (value, length))
+        .map_err(|e| {
+            Box::new(error(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid JSON: {e}"),
+            ))
+        })
 }
 
 /// The station id of an event, if it names one.
@@ -680,6 +837,8 @@ struct StreamState {
     filter: Option<String>,
     queue: std::collections::VecDeque<Event>,
     stopped: watch::Receiver<bool>,
+    /// The stream ends then (see [`STREAM_MAX_AGE`]).
+    ends_at: Instant,
     /// The server stopped: send what is queued and what the channel still holds, then end.
     ending: bool,
     /// Held for the life of the stream: dropping the stream frees the slot.
@@ -715,7 +874,11 @@ impl StreamState {
     }
 }
 
-async fn events(State(state): State<ApiState>, uri: Uri) -> Response {
+async fn events(
+    State(state): State<ApiState>,
+    Extension(Streaming(streaming)): Extension<Streaming>,
+    uri: Uri,
+) -> Response {
     let filter = match query_param(&uri, "station") {
         Ok(filter) => filter,
         Err(message) => return error(StatusCode::BAD_REQUEST, &message),
@@ -726,12 +889,15 @@ async fn events(State(state): State<ApiState>, uri: Uri) -> Response {
             "too many event streams (at most 16)",
         );
     };
+    // The response is meant to last: no total deadline for this connection.
+    streaming.store(true, Ordering::Release);
     let init = StreamState {
         rx: state.handle.subscribe(),
         renderer: Renderer::new(&state.handle),
         filter,
         queue: std::collections::VecDeque::new(),
         stopped: state.stopped.clone(),
+        ends_at: Instant::now() + state.stream_max_age,
         ending: false,
         _permit: permit,
     };
@@ -743,7 +909,15 @@ async fn events(State(state): State<ApiState>, uri: Uri) -> Response {
             if st.ending {
                 return None;
             }
+            let ends_at = st.ends_at;
             tokio::select! {
+                () = tokio::time::sleep_until(ends_at) => {
+                    st.queue.push_back(sse_event(&json!({
+                        "type": "note",
+                        "text": "the stream reached its maximum age; reconnect to continue",
+                    })));
+                    st.ending = true;
+                }
                 received = st.rx.recv() => match received {
                     Ok(event) => st.accept(&event),
                     Err(broadcast::error::RecvError::Lagged(missed)) => st.lagged(missed),
@@ -795,7 +969,7 @@ async fn put_rule(
         Err(response) => return *response,
     };
     let payload = match read_json(request).await {
-        Ok(payload) if payload.is_object() => payload,
+        Ok((payload, _)) if payload.is_object() => payload,
         Ok(_) => return error(StatusCode::BAD_REQUEST, "the body must be a JSON object"),
         Err(response) => return *response,
     };
@@ -813,8 +987,7 @@ async fn delete_rule(
         Ok(action) => action,
         Err(response) => return *response,
     };
-    let existed = state.handle.responder_actions().contains(&action);
-    state.handle.clear_responder(&action);
+    let existed = state.handle.clear_responder(&action);
     reply(
         StatusCode::OK,
         &json!({"action": action, "cleared": existed}),
@@ -838,7 +1011,7 @@ fn one() -> usize {
 
 async fn inject_fault(State(state): State<ApiState>, request: Request<Body>) -> Response {
     let body = match read_json(request).await {
-        Ok(body) => body,
+        Ok((body, _)) => body,
         Err(response) => return *response,
     };
     let fault: FaultRequest = match serde_json::from_value(body) {
@@ -889,15 +1062,216 @@ mod tests {
 
     use super::*;
 
+    /// No limit gets in the way.
+    const LONG: Limits = Limits {
+        write_stall: Duration::from_secs(600),
+        response_deadline: Duration::from_secs(600),
+        stream_max_age: Duration::from_secs(600),
+        payload_budget: PAYLOAD_BUDGET,
+    };
+
+    /// A peer that takes one byte at a time, fast enough never to stall a write, cannot hold
+    /// a response longer than the response deadline; a streaming connection is exempt.
+    async fn slow_drain(streaming: bool) -> io::Result<()> {
+        let (near, mut far) = tokio::io::duplex(1);
+        let flag = Arc::new(AtomicBool::new(streaming));
+        let mut io = StallIo::new(
+            near,
+            Limits {
+                response_deadline: Duration::from_millis(300),
+                ..LONG
+            },
+            flag,
+        );
+        let reader = tokio::spawn(async move {
+            let mut byte = [0_u8; 1];
+            while far.read(&mut byte).await.is_ok_and(|n| n > 0) {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        });
+        let result = io.write_all(&[0_u8; 24]).await;
+        drop(io);
+        reader.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn a_response_has_a_total_write_deadline() {
+        let error = slow_drain(false).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn a_streaming_connection_has_no_total_write_deadline() {
+        slow_drain(true).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_drains_unread_request_data_but_only_so_much() {
+        let (near, mut far) = tokio::io::duplex(8 * 1024);
+        let mut io = StallIo::new(near, LONG, Arc::default());
+        // A client that keeps sending: the server side must not wait for it to finish.
+        let sender = tokio::spawn(async move {
+            let chunk = [1_u8; 1024];
+            let mut sent = 0;
+            while far.write_all(&chunk).await.is_ok() {
+                sent += chunk.len();
+                if sent > 4 * 1024 * 1024 {
+                    break;
+                }
+            }
+            sent
+        });
+        let started = Instant::now();
+        io.shutdown().await.unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(io.drained >= DRAIN_BYTES, "drained {}", io.drained);
+        drop(io);
+        assert!(sender.await.unwrap() < 4 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn shutdown_returns_at_once_when_the_client_is_done() {
+        let (near, far) = tokio::io::duplex(1024);
+        drop(far);
+        let mut io = StallIo::new(near, LONG, Arc::default());
+        let started = Instant::now();
+        io.shutdown().await.unwrap();
+        assert!(started.elapsed() < DRAIN_TIME);
+    }
+
+    /// The bodies of calls in flight count against the budget; beyond it a request gets 429,
+    /// and a finished call gives its share back.
+    #[tokio::test]
+    async fn request_data_held_by_calls_in_flight_is_capped() {
+        let csms = CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let station_addr = csms.local_addr();
+        let mut silent = TcpStream::connect(station_addr).await.unwrap();
+        silent
+            .write_all(
+                format!(
+                    "GET /ocpp/CP-1 HTTP/1.1\r\nHost: {station_addr}\r\nConnection: Upgrade\r\n\
+                     Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\
+                     Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                     Sec-WebSocket-Protocol: ocpp1.6\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut handshake = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !handshake.ends_with(b"\r\n\r\n") {
+            silent.read_exact(&mut byte).await.unwrap();
+            handshake.push(byte[0]);
+        }
+        let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let api = spawn_with(
+            listener,
+            csms.clone(),
+            Arc::new(Semaphore::new(16)),
+            None,
+            Limits {
+                payload_budget: 3000,
+                ..LONG
+            },
+        );
+        let post = move |timeout_ms: u32| async move {
+            let body = json!({
+                "action": "DataTransfer",
+                "payload": {"vendorId": "x", "data": "a".repeat(1000)},
+                "timeout_ms": timeout_ms,
+            })
+            .to_string();
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            let request = format!(
+                "POST /v1/stations/CP-1/calls HTTP/1.1\r\nHost: {addr}\r\n\
+                 Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut raw = Vec::new();
+            let _ = stream.read_to_end(&mut raw).await;
+            String::from_utf8_lossy(&raw).into_owned()
+        };
+        // Two calls fit (about 1.1 KB each); they wait for the silent station.
+        // A held call that loses the race for the budget to a probe tries again.
+        let waiting: Vec<_> = (0..2)
+            .map(|_| {
+                tokio::spawn(async move {
+                    while post(600_000).await.contains(" 429 ") {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+            })
+            .collect();
+        // Probes that slip in before both are held give their share back after 300 ms.
+        let started = Instant::now();
+        loop {
+            let answer = post(300).await;
+            if answer.contains(" 429 ") {
+                assert!(answer.contains("request data"), "{answer}");
+                break;
+            }
+            assert!(answer.contains(" 200 "), "{answer}");
+            assert!(started.elapsed() < Duration::from_secs(20), "never saw 429");
+        }
+        for task in waiting {
+            task.abort();
+        }
+        api.finish().await;
+        csms.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn event_streams_end_at_their_maximum_age_with_a_note() {
+        let csms = CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let api = spawn_with(
+            listener,
+            csms.clone(),
+            Arc::new(Semaphore::new(4)),
+            None,
+            Limits {
+                stream_max_age: Duration::from_millis(300),
+                ..LONG
+            },
+        );
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(format!("GET /v1/events HTTP/1.1\r\nHost: {addr}\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
+        let mut raw = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+            .await
+            .expect("stream did not end")
+            .ok();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("200 OK"), "{text}");
+        assert!(text.contains("maximum age"), "{text}");
+        api.finish().await;
+        csms.shutdown().await;
+    }
+
     #[tokio::test]
     async fn a_write_without_progress_times_out() {
         // The peer end of the pipe is never read: 8 bytes fit, the rest of the write blocks.
         let (near, _far) = tokio::io::duplex(8);
-        let mut io = StallIo {
-            inner: near,
-            after: Duration::from_millis(150),
-            stall: None,
-        };
+        let mut io = StallIo::new(
+            near,
+            Limits {
+                write_stall: Duration::from_millis(150),
+                ..LONG
+            },
+            Arc::default(),
+        );
         let started = Instant::now();
         let error = io.write_all(&[0_u8; 64]).await.unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
@@ -907,11 +1281,14 @@ mod tests {
     #[tokio::test]
     async fn a_slow_but_moving_write_is_left_alone() {
         let (near, mut far) = tokio::io::duplex(8);
-        let mut io = StallIo {
-            inner: near,
-            after: Duration::from_millis(300),
-            stall: None,
-        };
+        let mut io = StallIo::new(
+            near,
+            Limits {
+                write_stall: Duration::from_millis(300),
+                ..LONG
+            },
+            Arc::default(),
+        );
         let reader = tokio::spawn(async move {
             let mut got = 0;
             let mut chunk = [0_u8; 8];
@@ -947,6 +1324,8 @@ mod tests {
         let started = Instant::now();
         api.finish().await;
         assert!(started.elapsed() < Duration::from_secs(6));
+        // The listener is gone with the server.
+        assert!(TcpStream::connect(addr).await.is_err());
         for stream in [&mut idle, &mut stalled] {
             // Closed by the server: end of stream or a reset, not a hang.
             let mut rest = Vec::new();

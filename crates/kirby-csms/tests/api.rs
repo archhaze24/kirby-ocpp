@@ -1238,3 +1238,56 @@ async fn shared_token_file_gets_a_warning_and_the_env_token_conflicts_with_the_f
     .unwrap();
     assert_eq!(output.status.code(), Some(2));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn more_than_one_host_header_is_refused() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let request = format!(
+        "GET /v1/health HTTP/1.1\r\nHost: {addr}\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    );
+    let answer = raw_exchange(addr, &request).await;
+    assert_eq!(status_of(&answer), 400, "{answer}");
+    assert!(answer.contains("Host"), "{answer}");
+    // Also with a token configured.
+    let csms = Csms::start(&["--api-token", "t0ken"]);
+    let addr = &csms.api_addr;
+    let request = format!(
+        "GET /v1/health HTTP/1.1\r\nHost: {addr}\r\nHost: {addr}\r\nAuthorization: Bearer t0ken\r\n\
+         Connection: close\r\n\r\n"
+    );
+    assert_eq!(status_of(&raw_exchange(addr, &request).await), 400);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn early_errors_reach_a_client_that_is_still_sending_its_body() {
+    let csms = Csms::start(&["--api-token", "t0ken"]);
+    let addr = &csms.api_addr;
+    // 401 (no token) and 413 (declared too large) are answered before the body is read.
+    for (headers, want) in [("", 401), ("Authorization: Bearer t0ken\r\n", 413)] {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let declared = if want == 413 {
+            2 * 1024 * 1024
+        } else {
+            64 * 1024
+        };
+        let head = format!(
+            "POST /v1/stations/CP-1/calls HTTP/1.1\r\nHost: {addr}\r\n{headers}\
+             Content-Length: {declared}\r\n\r\n"
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        let chunk = [b'a'; 4096];
+        for _ in 0..16 {
+            if stream.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+        let mut raw = Vec::new();
+        let read = tokio::time::timeout(WAIT, stream.read_to_end(&mut raw))
+            .await
+            .expect("response timeout");
+        let answer = String::from_utf8_lossy(&raw);
+        assert!(read.is_ok(), "reset instead of an answer: {read:?}");
+        assert_eq!(status_of(&answer), want, "{answer}");
+    }
+}

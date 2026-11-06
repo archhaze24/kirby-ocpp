@@ -84,12 +84,13 @@ fn fault_bytes(fault: &Fault) -> usize {
 ///
 /// OCPP-J allows one outstanding CALL per direction per connection. Calls made with
 /// [`CsmsHandle::call`] are queued per station and written one at a time: the next CALL is
-/// sent when the previous one was answered or timed out. The timeout counts from the moment
-/// a CALL is written, not from when it was queued; wrap the future in your own
-/// `tokio::time::timeout` to bound the queueing time too. Dropping the future of a call that
-/// was not sent yet cancels it; dropping it after the CALL was written discards the answer but
-/// keeps the slot until the station answers or the timeout expires, so the next queued CALL
-/// is never written before the outstanding one is settled.
+/// sent when the previous one was answered, timed out or abandoned. The timeout counts from
+/// the moment `call()` is made, so it covers the time spent queued too: a call that waited
+/// longer than its timeout fails with [`CsmsError::Timeout`] without being written. Dropping
+/// the future of a call cancels it. After the CALL was written the answer is discarded and the
+/// session waits at most the default call timeout ([`CsmsConfig::call_timeout`]) more for
+/// it; after that the next queued CALL may be written while the station is still working on the
+/// abandoned one, and a late answer to it is recorded but ignored.
 ///
 /// # Memory and the registry
 ///
@@ -328,6 +329,9 @@ impl CsmsHandle {
     ) -> Result<Frame, CsmsError> {
         let timeout = timeout.min(MAX_CALL_TIMEOUT);
         let tracked_request = (action == "GetInstalledCertificateIds").then(|| payload.clone());
+        let deadline = Instant::now()
+            .checked_add(timeout)
+            .unwrap_or_else(|| Instant::now() + MAX_CALL_TIMEOUT);
         let (reply, receiver) = oneshot::channel();
         {
             let state = self.inner.lock();
@@ -356,6 +360,7 @@ impl CsmsHandle {
                     action: action.to_owned(),
                     payload,
                     timeout,
+                    deadline,
                     reply,
                     _slot: slot,
                 }))
@@ -394,9 +399,9 @@ impl CsmsHandle {
             .insert(action.to_owned(), responder);
     }
 
-    /// Removes the responder for `action`, if any.
-    pub fn clear_responder(&self, action: &str) {
-        self.inner.lock().responders.remove(action);
+    /// Removes the responder for `action`; returns whether there was one.
+    pub fn clear_responder(&self, action: &str) -> bool {
+        self.inner.lock().responders.remove(action).is_some()
     }
 
     /// Scripts a fault for the next occurrences of an action, across all stations. Faults
@@ -410,16 +415,17 @@ impl CsmsHandle {
     }
 
     /// Like [`CsmsHandle::inject`], but refuses a fault that would take the stored faults over
-    /// 1000 entries or 8 MiB of action and payload text.
+    /// 1000 entries or 8 MiB of action and payload text. Only this method enforces the caps:
+    /// [`CsmsHandle::inject`] (used by scripts and stdin commands) stores any fault.
     pub fn try_inject(&self, fault: Fault) -> Result<(), String> {
         if fault.remaining == 0 {
             return Ok(());
         }
+        let added = fault_bytes(&fault);
         let mut state = self.inner.lock();
         if state.faults.len() >= MAX_FAULTS {
             return Err(format!("too many faults stored (at most {MAX_FAULTS})"));
         }
-        let added = fault_bytes(&fault);
         if state.fault_bytes.saturating_add(added) > MAX_FAULT_BYTES {
             return Err(format!(
                 "stored faults would exceed {} MiB",
@@ -570,6 +576,8 @@ struct QueuedCall {
     action: String,
     payload: Value,
     timeout: Duration,
+    /// When the call times out, counted from `call()` (queueing included).
+    deadline: Instant,
     reply: oneshot::Sender<Result<Frame, CsmsError>>,
     /// Freed when the call leaves the queue.
     _slot: CallSlot,
@@ -1050,6 +1058,8 @@ struct InFlight {
     action: String,
     timeout: Duration,
     deadline: Instant,
+    /// The caller dropped its future; the deadline was shortened to the default call timeout.
+    abandoned: bool,
     reply: oneshot::Sender<Result<Frame, CsmsError>>,
 }
 
@@ -1079,7 +1089,7 @@ where
             if let Some(reason) = self.pump().await {
                 return reason;
             }
-            let deadline = self.in_flight.as_ref().map(|flight| flight.deadline);
+            let deadline = self.next_deadline();
             let watchdog = self.watchdog_deadline();
             let ended = tokio::select! {
                 () = async { let _ = stop.wait_for(|stopped| *stopped).await; } => {
@@ -1121,16 +1131,30 @@ where
                     }
                     None => Some(DisconnectReason::Closed),
                 },
-                // A caller that dropped its `call()` future after the CALL was written does
-                // not free the slot: the next CALL waits for the answer or the deadline
-                // (one outstanding CALL). The late answer is discarded in `on_text`.
+                // The caller of the outstanding CALL is gone (its future was dropped): wait at
+                // most the default call timeout more for the station, so an abandoned long
+                // timeout cannot block the queue for hours. The answer, if it comes, is
+                // discarded in `on_text`.
+                () = async {
+                    match self.in_flight.as_mut() {
+                        Some(flight) if !flight.abandoned => flight.reply.closed().await,
+                        _ => std::future::pending().await,
+                    }
+                } => {
+                    let grace = self.inner.config.call_timeout.min(MAX_CALL_TIMEOUT);
+                    if let Some(flight) = self.in_flight.as_mut() {
+                        flight.abandoned = true;
+                        flight.deadline = flight.deadline.min(Instant::now() + grace);
+                    }
+                    None
+                }
                 () = async {
                     match deadline {
                         Some(at) => tokio::time::sleep_until(at).await,
                         None => std::future::pending().await,
                     }
                 } => {
-                    self.expire_in_flight();
+                    self.expire_calls();
                     None
                 }
             };
@@ -1174,6 +1198,10 @@ where
             if call.reply.is_closed() {
                 continue; // The caller gave up before it was sent.
             }
+            if call.deadline <= Instant::now() {
+                self.fail_timeout(call.reply, call.action, call.timeout);
+                continue;
+            }
             let id = self.inner.next_message_id();
             let frame = Frame::call(id.clone(), call.action.clone(), call.payload);
             if let Some(reason) = self.send(&frame).await {
@@ -1184,23 +1212,57 @@ where
                 id,
                 action: call.action,
                 timeout: call.timeout,
-                deadline: Instant::now()
-                    .checked_add(call.timeout)
-                    .unwrap_or_else(|| Instant::now() + MAX_CALL_TIMEOUT),
+                deadline: call.deadline,
+                abandoned: false,
                 reply: call.reply,
             });
         }
         None
     }
 
-    fn expire_in_flight(&mut self) {
-        if let Some(flight) = self.in_flight.take() {
-            let _ = flight.reply.send(Err(CsmsError::Timeout {
-                station: self.station.clone(),
-                action: flight.action,
-                timeout: flight.timeout,
-            }));
+    /// The earliest deadline of the outstanding CALL and of the queued ones.
+    fn next_deadline(&self) -> Option<Instant> {
+        self.in_flight
+            .iter()
+            .map(|flight| flight.deadline)
+            .chain(self.queue.iter().map(|queued| queued.deadline))
+            .min()
+    }
+
+    /// Fails every call (outstanding or queued) whose deadline has passed with a timeout.
+    fn expire_calls(&mut self) {
+        let now = Instant::now();
+        if self
+            .in_flight
+            .as_ref()
+            .is_some_and(|flight| flight.deadline <= now)
+            && let Some(flight) = self.in_flight.take()
+        {
+            self.fail_timeout(flight.reply, flight.action, flight.timeout);
         }
+        let mut index = 0;
+        while let Some(queued) = self.queue.get(index) {
+            if queued.deadline <= now {
+                if let Some(queued) = self.queue.remove(index) {
+                    self.fail_timeout(queued.reply, queued.action, queued.timeout);
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn fail_timeout(
+        &self,
+        reply: oneshot::Sender<Result<Frame, CsmsError>>,
+        action: String,
+        timeout: Duration,
+    ) {
+        let _ = reply.send(Err(CsmsError::Timeout {
+            station: self.station.clone(),
+            action,
+            timeout,
+        }));
     }
 
     async fn on_text(&mut self, text: &str) -> Option<DisconnectReason> {
@@ -1312,14 +1374,16 @@ fn truncated_frame(frame: &Frame, original_bytes: usize) -> Frame {
 const MAX_STATION_ID_LEN: usize = 128;
 
 /// The station id of a URL path: the last non-empty segment, percent-decoded. `None` if
-/// there is none, it is not valid UTF-8 after decoding, it is longer than 128 bytes or it
-/// contains a control character.
+/// there is none, it is not valid UTF-8 after decoding, it is longer than 128 bytes, it is `.`
+/// or `..` (a station could not use them in a URL) or it contains a control character.
 pub fn station_id_from_path(path: &str) -> Option<String> {
     let segment = path.rsplit('/').find(|segment| !segment.is_empty())?;
     let decoded = percent_encoding::percent_decode_str(segment)
         .decode_utf8()
         .ok()?;
     (!decoded.is_empty()
+        && decoded != "."
+        && decoded != ".."
         && decoded.len() <= MAX_STATION_ID_LEN
         && !decoded.chars().any(kirby_ocpp_core::text::is_unsafe_char))
     .then(|| decoded.into_owned())
@@ -1381,7 +1445,14 @@ mod tests {
         assert_eq!(station_id_from_path(&format!("/{}", "a".repeat(129))), None);
         assert_eq!(station_id_from_path("/CP%0A1"), None);
         // Bidi overrides and line separators are refused like controls.
-        for bad in ["/CP%E2%80%AE1", "/CP%E2%80%A81", "/CP%E2%81%A61"] {
+        for bad in [
+            "/CP%E2%80%AE1",
+            "/CP%E2%80%A81",
+            "/CP%E2%81%A61",
+            "/%2E%2E",
+            "/x/%2e",
+            "/..",
+        ] {
             assert_eq!(station_id_from_path(bad), None, "{bad}");
         }
         assert_eq!(station_id_from_path("/CP%001"), None);

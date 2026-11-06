@@ -27,6 +27,7 @@ futures-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
 serde.workspace = true
+socket2.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
