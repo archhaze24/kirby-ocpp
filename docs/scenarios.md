@@ -109,6 +109,42 @@ Rules:
 - `capture = { name = "/json/pointer" }` stores the value at a [JSON pointer](https://www.rfc-editor.org/rfc/rfc6901) of the step's raw answer after the step ran. It is valid on `send_raw`, `data_transfer` (the CALLRESULT payload) and `expect_call` (the payload of the matched CALL) and a load error elsewhere. An empty pointer captures the whole answer. A missing pointer fails the step. The captured value keeps its JSON type and may be an object or array (usable only as a whole `"${name}"` value).
 - `kirby-ocpp run --var NAME=VALUE` (repeatable) overrides `[vars]`. `true`, `false` and numbers keep their type, everything else is a string. Setting `station_id` or `index`, or a bad name, is a usage error (exit 2). In a fleet run every station gets the same `--var` values and its own `index` and `station_id`.
 
+### Loops
+
+`action = "repeat"` runs nested steps several times. Nested steps are written as `[[steps.steps]]` (one more `steps` per nesting level) and are normal steps, including further `repeat` steps.
+
+```toml
+name = "plug-cycles"
+
+[[steps]]
+action = "repeat"
+count = 3
+name = "cycle"
+
+  [[steps.steps]]
+  action = "plug"
+  connector = 1
+
+  [[steps.steps]]
+  action = "data_transfer"
+  vendor_id = "demo"
+  data = "cycle ${i} (${i0})"
+
+  [[steps.steps]]
+  action = "unplug"
+  connector = 1
+```
+
+Rules:
+
+- `count` is an integer from 1 to 1000. `steps` must not be empty. A `repeat` step takes only `action`, `count`, `var`, `steps` and `name`; `expect` and `capture` on it are load errors (put them on the nested steps). Unknown fields are load errors.
+- Loops nest up to 3 levels deep. The scenario may run at most 10000 steps in total after expansion (a `repeat` with `count = 100` around 5 steps is 500); a larger scenario is refused when the file loads, with an error naming the scenario and the limit.
+- Counters: inside a loop `${i}` is the 1-based and `${i0}` the 0-based iteration. A nested loop uses the same names and shadows the outer ones. Set `var = "round"` on a loop to name its counter `${round}` / `${round0}` instead, so an inner loop can still read the outer counter. Counters are ordinary variables, so an exact `"${i}"` keeps its number type; use text like `"TAG-${i}"` for an `id_tag`. Typed fields (`connector`, `ms`, ...) cannot use variables.
+- Counter names are reserved: a `[vars]` entry or a `capture` name equal to a counter name used by any `repeat` of the scenario (`i`, `i0`, or the `var` name and its `0` twin) is a load error. A `var` must be a valid variable name and not `station_id` or `index`.
+- `capture` inside a loop overwrites the variable on every iteration; later steps see the latest value.
+- Report shape: loops are expanded, so the report, `--report` JSON and JUnit stay flat. The `repeat` step itself has no row; every executed step has one, named `<name> [<n>]` with the iteration path (`plug [2]`, in a nested loop `plug [2.3]`). `index` counts the expanded steps from 0, and the TUI Scenarios tab lists them the same way. Steps outside loops keep their plain name.
+- A failing step stops the whole scenario: the rest of the iteration and all later iterations and steps are reported as `skipped` (never more rows than the 10000 step cap). Cancelling and `--timeout` behave as for flat steps: the step in flight fails with `cancelled`, the rest is skipped.
+
 ### Actions
 
 Every step has `action` plus the fields of that action, and may add `name` (shown in reports; default is the action name) and `expect` (see [Expect](#expect)). Fields without a default are required.
@@ -134,6 +170,7 @@ Every step has `action` plus the fields of that action, and may add `name` (show
 | `set_rule` | `rule` | Add a [response rule](emulator.md#response-rules), for example `"Reset=reject*2"` |
 | `clear_rules` | optional `call` | Remove the rule of one command, or all rules when omitted |
 | `request_certificate` | none | Security Whitepaper: key pair, CSR and `SignCertificate` |
+| `repeat` | `count`, optional `var`, nested `steps` | Run the nested steps `count` times, see [Loops](#loops) |
 | `security_event` | `event_type`, optional `tech_info` | Send SecurityEventNotification; the event type (case-insensitive, one of the whitepaper's 21 names) is checked when the file loads |
 
 Value sets:
