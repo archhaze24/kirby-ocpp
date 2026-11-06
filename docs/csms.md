@@ -161,7 +161,7 @@ In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` s
 
 - Events go to stdout (text or `--json`); `--log-file` also gets them.
 - Stdin commands are read when stdin is not a terminal and there is no `--script` (or always with `--stdin`).
-- `--script FILE` runs a TOML script against the stations that connect, prints the report (`--json` for JSON), writes `--report` (JSON) and `--junit` (XML), then exits. `--timeout SECONDS` (default 60) bounds the run. Script syntax: [scenarios.md](scenarios.md).
+- `--script FILE` runs a TOML script against the stations that connect, prints the report (`--json` for JSON), writes `--report` (JSON) and `--junit` (XML), then exits. `--timeout SECONDS` (default 60) bounds the run. Script syntax (steps, `[vars]`, `--var`, `capture`, `expect_payload`): [scenarios.md](scenarios.md#csms-scripts).
 - SIGINT or SIGTERM shuts the server down gracefully. During `--script`, SIGTERM still writes the `--junit` file (one failed suite, `interrupted`) and exits 1; SIGINT exits 130 without a report.
 - `--ping-interval` / `--pong-timeout`: a WebSocket ping goes to each station after this much silence; a station that sends nothing for the timeout after a ping is dropped (disconnect reason `ping_timeout`). A non-zero ping interval below the pong timeout is a usage error.
 

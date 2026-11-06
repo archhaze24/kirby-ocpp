@@ -15,6 +15,9 @@ Work in progress after 0.4.0.
 - `capture = { name = "/json/pointer" }` on `send_raw`, `data_transfer` and `expect_call` steps stores a value of the answer for later steps; a missing pointer fails the step.
 - `kirby-ocpp run --var NAME=VALUE` (repeatable) overrides scenario variables, also in fleet runs.
 - `kirby_ocpp_core::scenario::vars` is a public helper (`Vars`, `substitute`, `substitute_str`, `capture`) for other tools.
+- `kirby-csms` scripts have variables too: a top-level `[vars]` table, `${name}` substitution in `station`, `expect_status` and the JSON payloads of steps, `capture = { name = "/json/pointer" }` on `call` (CALLRESULT payload) and `wait_call` (matched CALL payload), and `kirby-csms --script FILE --var NAME=VALUE`.
+- `call` steps in `kirby-csms` scripts take `expect_payload = { ... }`, a JSON subset the CALLRESULT payload must contain (with `expect_status`; not with `expect_error`).
+- Five new built-in scenarios: `heartbeat-and-status`, `metering-burst`, `data-transfer`, `security-event` and `reconnect` (see `kirby-ocpp scenarios list`).
 
 ### Documentation
 

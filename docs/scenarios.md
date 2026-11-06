@@ -190,6 +190,13 @@ If events were lost because the runner fell behind and the wanted CALL is not am
 | `finish-session` | MeterValues, StopTransaction, unplug (needs a running transaction on connector 1) |
 | `offline-sync` | Go offline, run a whole session, reconnect, wait until the queued transaction messages are delivered, unplug |
 | `fault-recovery` | Inject a fault on connector 1, then clear it |
+| `heartbeat-and-status` | Heartbeat, connector 1 Unavailable and back to Available, plug and unplug; asserts each StatusNotification |
+| `metering-burst` | Plug in, start a transaction, three MeterValues (each asserted), stop, unplug |
+| `data-transfer` | DataTransfer with the variable `vendor_id` (default `kirby`, override with `--var vendor_id=...`); any DataTransfer status passes |
+| `security-event` | SecurityEventNotification `StartupOfTheDevice`, asserts the CALL went out |
+| `reconnect` | Disconnect, wait until down, connect, wait for an accepted registration, Heartbeat |
+
+The new built-ins need no prior state (connector 1 Available) and only assert CALLs sent by the station, so they pass against any CSMS that answers `Accepted` (or any status, for `data-transfer`).
 
 Built-ins target connector 1; `--connector N` retargets every connector-bound step of a built-in (files are never retargeted). `--id-tag TAG` replaces the idTag of `authorize`, `start_tx` and `stop_tx` steps (the latter only where the step sets one) in built-ins and files alike. `offline-sync` works on a stock station: `LocalAuthorizeOffline` and `AllowOfflineTxForUnknownId` default to `true`; switch them off with `ChangeConfiguration` to test the CSMS-side rejection path (the offline start is then rejected and the scenario fails).
 
@@ -250,7 +257,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 --stagger-ms 
 
 ## CSMS scripts
 
-`kirby-csms --script FILE` starts the server, runs the script against the stations that connect, prints the report and exits with its verdict. The stations are external processes (for example `kirby-ocpp`) that connect while the script waits. Steps run in order and the first failing step stops the run (later steps are `SKIP`). Top-level keys are `name` (required, not empty) and `[[steps]]` (at least one); other top-level keys are ignored. Unknown fields inside a step are rejected, naming the step.
+`kirby-csms --script FILE` starts the server, runs the script against the stations that connect, prints the report and exits with its verdict. The stations are external processes (for example `kirby-ocpp`) that connect while the script waits. Steps run in order and the first failing step stops the run (later steps are `SKIP`). Top-level keys are `name` (required, not empty), an optional `[vars]` table (see [Variables, capture and payload checks](#script-variables-capture-and-payload-checks)) and `[[steps]]` (at least one); other top-level keys are ignored. Unknown fields inside a step are rejected, naming the step.
 
 ### Example
 
@@ -305,14 +312,55 @@ Every step takes an optional `name`. `timeout_ms` must be between 1 and 86400000
 | Action | Fields | What it does |
 | --- | --- | --- |
 | `wait_station` | optional `station`, `count`, `booted` (default `false`), `timeout_ms` (default 30000) | Wait until `station` is connected and/or at least `count` stations are (default: 1). `booted = true` also needs the BootNotification, not just the open socket |
-| `wait_call` | `call`, optional `station`, `payload_contains`, `timeout_ms` (default 5000) | Wait for an inbound CALL (from a given station, containing a payload subset) |
-| `call` | `station`, `call`, `payload` (default `{}`), `expect_status`, `expect_error`, `timeout_ms` (default 5000) | Send a CALL to a connected station and check the answer. `expect_status` checks `payload.status`; `expect_error = true` wants a CALLERROR. Both together are a script error. Without either, any CALLRESULT passes and a CALLERROR fails. Payloads are sent as given, not schema-checked |
+| `wait_call` | `call`, optional `station`, `payload_contains`, `capture`, `timeout_ms` (default 5000) | Wait for an inbound CALL (from a given station, containing a payload subset); `capture` stores values of the matched payload |
+| `call` | `station`, `call`, `payload` (default `{}`), `expect_status`, `expect_payload`, `expect_error`, `capture`, `timeout_ms` (default 5000) | Send a CALL to a connected station and check the answer. `expect_status` checks `payload.status`; `expect_payload` checks a payload subset (see below); `expect_error = true` wants a CALLERROR. `expect_error` together with `expect_status`, `expect_payload` or `capture` is a script error. Without either, any CALLRESULT passes and a CALLERROR fails. Payloads are sent as given, not schema-checked |
 | `sleep` | `ms` | Wait (at most 86400000) |
 | `respond` | `call`, `payload` | Answer every inbound CALL of that action with this CALLRESULT payload |
 | `clear_respond` | `call` | Remove that responder |
 | `inject_fault` | `call`, `kind`, `payload`, `times` (default 1) | Make the next `times` CALLs of that action fail; see below |
 
-`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived before the previous wait's match). CALLs that arrive while other steps run are kept (the last 10 000, at most about 16 MiB); only CALLs some `wait_call` of the script names are remembered, and their payload only if a `wait_call` for that action uses `payload_contains`. If the event stream lagged (events were lost), a `wait_call` that finds no match fails at once with a lost-events error instead of waiting out its timeout.
+`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived before the previous wait's match). CALLs that arrive while other steps run are kept (the last 10 000, at most about 16 MiB); only CALLs some `wait_call` of the script names are remembered, and their payload only if a `wait_call` for that action uses `payload_contains` or `capture`. If the event stream lagged (events were lost), a `wait_call` that finds no match fails at once with a lost-events error instead of waiting out its timeout.
+
+### Script variables, capture and payload checks
+
+Scripts have the same variables as [emulator scenarios](#variables), with these differences: only the variables you define exist (no `${station_id}` or `${index}`: a script talks to many stations), and `capture` also feeds later steps.
+
+- `[vars]` at the top level declares variables (strings, numbers, booleans). `kirby-csms --script FILE --var NAME=VALUE` (repeatable, needs `--script`, a bad name is a usage error, exit 2) overrides or adds one; `true`/`false`/numbers keep their type.
+- `${name}` is replaced when the step runs, in `station`, `expect_status` and the JSON of `payload`, `payload_contains`, `expect_payload` and the payloads of `respond` and `inject_fault` (object keys are not substituted). A string that is exactly `"${name}"` keeps the variable's JSON type; `$${` is a literal `${`. Action names (`call`, also in `wait_call`, `respond`, `clear_respond`, `inject_fault`) and typed fields (`ms`, `times`, `count`, `booted`, `timeout_ms`, `expect_error`) are not substituted. An unknown variable fails that step with a reason naming it.
+- `capture = { name = "/json/pointer" }` on `call` stores a value of the CALLRESULT payload, on `wait_call` a value of the matched CALL payload (the payload is then kept even without `payload_contains`). The empty pointer `""` captures the whole payload. A missing pointer fails the step. Names and pointers are checked when the script loads.
+- `expect_payload = { ... }` on `call`: the CALLRESULT payload must contain this JSON, with the same subset rule as `payload_contains` (objects by key, arrays element by element and equal length, anything else equal). It works together with `expect_status`; the order of checks is status, payload, capture.
+
+```toml
+name = "echo the tag"
+
+[vars]
+interval = "60"
+
+[[steps]]
+action = "wait_station"
+station = "CP-1"
+booted = true
+
+[[steps]]
+action = "wait_call"
+call = "Authorize"
+capture = { tag = "/idTag" }
+
+[[steps]]
+action = "call"
+station = "CP-1"
+call = "DataTransfer"
+payload = { vendorId = "acme", data = "tag-${tag}" }
+expect_payload = { status = "UnknownVendorId" }
+
+[[steps]]
+action = "call"
+station = "CP-1"
+call = "ChangeConfiguration"
+payload = { key = "HeartbeatInterval", value = "${interval}" }
+expect_status = "Accepted"
+capture = { result = "/status" }
+```
 
 `inject_fault` kinds:
 

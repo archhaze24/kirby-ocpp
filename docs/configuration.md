@@ -184,6 +184,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--script <FILE>` | `KIRBY_CSMS_SCRIPT` | none | Run a TOML script against connecting stations, print the report, exit |
 | `--report <PATH>` | | none | Script report as JSON; needs `--script` |
 | `--junit <PATH>` | | none | Script report as JUnit XML; needs `--script` |
+| `--var <NAME=VALUE>` | | none | Set a script variable (repeatable): `${NAME}` in the script becomes VALUE. Overrides `[vars]`; `true`/`false`/numbers keep their type; needs `--script` |
 | `--timeout <SECONDS>` | | `60` | Fail the script after this long, 1 to 86400; needs `--script` |
 | `--licenses` | | | Print third-party licence notices and exit |
 | `-V, --version`, `-h, --help` | | | |

@@ -95,7 +95,7 @@ CALL, RESULT and ERROR frames are correlated. The buffer keeps the last 2000 ent
 
 ### Scenarios tab
 
-One `Run: <name>` action per built-in scenario (keys `o`, `w`, `s`, `i` for the first four, in the order of `scenarios list`), `l` to load a scenario file, `x` to cancel the running one. Only one scenario runs per station at a time. The scenario format is in [scenarios.md](scenarios.md).
+One `Run: <name>` action per built-in scenario (keys `o`, `w`, `s`, `i` for the first four, in the order of `scenarios list`; the others are reached with `Enter` or the command palette), `l` to load a scenario file, `x` to cancel the running one. Only one scenario runs per station at a time. The scenario format is in [scenarios.md](scenarios.md).
 
 ## Headless mode and exit codes
 
