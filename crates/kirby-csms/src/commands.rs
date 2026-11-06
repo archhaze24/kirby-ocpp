@@ -4,7 +4,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kirby_csms_core::{CsmsError, CsmsHandle, Frame};
+use kirby_csms_core::{CsmsError, CsmsHandle, Fault, Frame};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
@@ -106,4 +107,44 @@ pub async fn call(
         value,
         missing_station,
     }
+}
+
+/// What an injected fault does instead of the normal answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FaultKind {
+    CallError,
+    Silence,
+    Close,
+    InvalidPayload,
+}
+
+/// Checks the fields of an `inject_fault` request (script step and API alike).
+pub fn check_fault(
+    action: &str,
+    kind: FaultKind,
+    payload: Option<&Value>,
+    times: usize,
+) -> Result<(), String> {
+    if action.is_empty() {
+        return Err("`call` must not be empty".to_owned());
+    }
+    if times == 0 {
+        return Err("`times` must be 1 or more".to_owned());
+    }
+    if kind == FaultKind::InvalidPayload && payload.is_none() {
+        return Err("kind `invalid_payload` needs a `payload`".to_owned());
+    }
+    Ok(())
+}
+
+/// Builds the fault; `payload` is only used by `invalid_payload`.
+pub fn build_fault(action: &str, kind: FaultKind, payload: Option<Value>, times: usize) -> Fault {
+    let fault = match kind {
+        FaultKind::CallError => Fault::call_error(action),
+        FaultKind::Silence => Fault::silence(action),
+        FaultKind::Close => Fault::close(action),
+        FaultKind::InvalidPayload => Fault::invalid_payload(action, payload.unwrap_or_default()),
+    };
+    fault.times(times)
 }

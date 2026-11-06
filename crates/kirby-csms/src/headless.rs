@@ -193,20 +193,20 @@ impl Sink {
         mut rx: broadcast::Receiver<CsmsEvent>,
         out: Arc<Output>,
     ) -> Self {
-        let handle = handle.clone();
         let (stop, mut stopped) = oneshot::channel();
+        let mut printer = Renderer::new(handle);
         let task = tokio::spawn(async move {
-            let mut printer = Printer {
-                handle,
-                out,
-                last_state: HashMap::new(),
+            let print = |printer: &mut Renderer, event: &CsmsEvent| {
+                for (value, human) in printer.render(event) {
+                    out.event(&value, &human);
+                }
             };
             loop {
                 tokio::select! {
                     event = rx.recv() => match event {
-                        Ok(event) => printer.print(&event),
+                        Ok(event) => print(&mut printer, &event),
                         Err(broadcast::error::RecvError::Lagged(missed)) => {
-                            printer.out.note(&format!("{missed} events were dropped"));
+                            out.note(&format!("{missed} events were dropped"));
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     },
@@ -215,7 +215,7 @@ impl Sink {
             }
             // Whatever is still queued (the closing frames of a shutdown).
             while let Ok(event) = rx.try_recv() {
-                printer.print(&event);
+                print(&mut printer, &event);
             }
         });
         Self { stop, task }
@@ -228,28 +228,49 @@ impl Sink {
     }
 }
 
-struct Printer {
+/// Turns engine events into their `--json` objects (and human lines). One per consumer: it
+/// remembers the last state view per station so only changes are rendered. The HTTP event
+/// stream uses the same renderer, so both outputs cannot drift.
+pub struct Renderer {
     handle: CsmsHandle,
-    out: Arc<Output>,
-    /// Last printed state view per station, to print only changes.
+    /// Last rendered state view per station, to render only changes.
     last_state: HashMap<String, Value>,
+    pending: Vec<(Value, String)>,
 }
 
-impl Printer {
+impl Renderer {
+    pub fn new(handle: &CsmsHandle) -> Self {
+        Self {
+            handle: handle.clone(),
+            last_state: HashMap::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: &Value, human: &str) {
+        self.pending.push((value.clone(), human.to_owned()));
+    }
+
+    /// The JSON object and the human line of `event`; empty for an unchanged state view.
+    pub fn render(&mut self, event: &CsmsEvent) -> Vec<(Value, String)> {
+        self.print(event);
+        std::mem::take(&mut self.pending)
+    }
+
     fn print(&mut self, event: &CsmsEvent) {
         let ts = Utc::now();
         let clock = ts.format("%H:%M:%S%.3f");
         let stamp = ts.to_rfc3339_opts(SecondsFormat::Millis, true);
         match event {
             CsmsEvent::Connected { station } => {
-                self.out.event(
+                self.push(
                     &json!({"type": "connected", "ts": stamp, "station": station}),
                     &format!("{clock} {} connected", sanitize(station)),
                 );
             }
             CsmsEvent::Disconnected { station, reason } => {
                 let reason = reason_name(*reason);
-                self.out.event(
+                self.push(
                     &json!({"type": "disconnected", "ts": stamp, "station": station, "reason": reason}),
                     &format!("{clock} {} disconnected ({reason})", sanitize(station)),
                 );
@@ -270,7 +291,7 @@ impl Printer {
                     object.insert("station".to_owned(), station.clone().into());
                     object.insert("direction".to_owned(), name.into());
                 }
-                self.out.event(
+                self.push(
                     &value,
                     &format!(
                         "{clock} {} {arrow} {}",
@@ -280,7 +301,7 @@ impl Printer {
                 );
             }
             CsmsEvent::Malformed { station, text } => {
-                self.out.event(
+                self.push(
                     &json!({"type": "malformed", "ts": stamp, "station": station, "text": text}),
                     &format!(
                         "{clock} {} sent malformed text: {}",
@@ -291,7 +312,7 @@ impl Printer {
             }
             CsmsEvent::Forgotten { station } => {
                 self.last_state.remove(station);
-                self.out.event(
+                self.push(
                     &json!({"type": "forgotten", "ts": stamp, "station": station}),
                     &format!("{clock} {} forgotten", sanitize(station)),
                 );
@@ -307,7 +328,7 @@ impl Printer {
                 let who = station
                     .as_deref()
                     .map_or_else(|| "unknown station".to_owned(), sanitize);
-                self.out.event(
+                self.push(
                     &json!({
                         "type": "auth_failed", "ts": stamp, "station": station,
                         "remote_addr": remote_addr.to_string(), "reason": reason
@@ -359,7 +380,7 @@ impl Printer {
             object.insert("ts".to_owned(), stamp.into());
             object.insert("station".to_owned(), station.into());
         }
-        self.out.event(&value, &human);
+        self.push(&value, &human);
         self.last_state.insert(station.to_owned(), view);
     }
 }

@@ -23,6 +23,7 @@ kirby-ocpp-tui.workspace = true
 axum.workspace = true
 chrono.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

@@ -41,7 +41,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Fault, Frame, Reply};
+use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Frame, Reply};
 use kirby_ocpp_core::scenario::vars::{self, Vars};
 use kirby_ocpp_core::scenario::{ScenarioReport, StepReport, StepStatus};
 use serde::Deserialize;
@@ -51,6 +51,8 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::task::JoinHandle;
 use tokio::time::timeout_at;
+
+use crate::commands;
 
 /// Longest accepted wait or sleep: one day.
 const MAX_WAIT_MS: u64 = 86_400_000;
@@ -89,14 +91,7 @@ pub struct Step {
     pub action: Action,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FaultKind {
-    CallError,
-    Silence,
-    Close,
-    InvalidPayload,
-}
+pub use crate::commands::FaultKind;
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
@@ -319,14 +314,8 @@ fn validate(action: &Action) -> Result<(), String> {
             payload,
             times,
         } => {
-            if call.is_empty() {
-                return bad("`call` must not be empty");
-            }
-            if *times == 0 {
-                return bad("`times` must be 1 or more");
-            }
-            if *kind == FaultKind::InvalidPayload && payload.is_none() {
-                return bad("kind `invalid_payload` needs a `payload`");
+            if let Err(message) = commands::check_fault(call, *kind, payload.as_ref(), *times) {
+                return bad(&message);
             }
         }
     }
@@ -750,15 +739,8 @@ impl Runner<'_> {
                     .as_ref()
                     .map(|v| self.sub("payload", v))
                     .transpose()?;
-                let fault = match (kind, &payload) {
-                    (FaultKind::CallError, _) => Fault::call_error(call),
-                    (FaultKind::Silence, _) => Fault::silence(call),
-                    (FaultKind::Close, _) => Fault::close(call),
-                    (FaultKind::InvalidPayload, payload) => {
-                        Fault::invalid_payload(call, payload.clone().unwrap_or_default())
-                    }
-                };
-                self.handle.inject(fault.times(*times));
+                self.handle
+                    .inject(commands::build_fault(call, *kind, payload, *times));
                 Ok(())
             }
         }
