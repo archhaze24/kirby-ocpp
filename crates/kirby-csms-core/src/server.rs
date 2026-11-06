@@ -11,7 +11,7 @@ use kirby_ocpp_core::ocpp::{ErrorCode, Frame, redact_secrets};
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, timeout};
 use tokio_rustls::TlsAcceptor;
@@ -736,12 +736,23 @@ impl Inner {
 async fn accept_loop(listener: TcpListener, acceptor: Option<TlsAcceptor>, inner: Arc<Inner>) {
     let mut stop = inner.shutdown.subscribe();
     let mut sessions = JoinSet::new();
+    let pending = Arc::new(Semaphore::new(inner.config.max_pending_handshakes));
     loop {
         tokio::select! {
             () = async { let _ = stop.wait_for(|stopped| *stopped).await; } => break,
             accepted = listener.accept() => match accepted {
                 Ok((tcp, peer)) => {
-                    sessions.spawn(serve_tcp(tcp, peer, acceptor.clone(), Arc::clone(&inner)));
+                    // Too many half-open sockets: drop this one (closes it) instead of
+                    // letting a single host exhaust file descriptors.
+                    if let Ok(permit) = Arc::clone(&pending).try_acquire_owned() {
+                        sessions.spawn(serve_tcp(
+                            tcp,
+                            peer,
+                            acceptor.clone(),
+                            Arc::clone(&inner),
+                            permit,
+                        ));
+                    }
                 }
                 // Out of file descriptors and the like: do not spin.
                 Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
@@ -763,6 +774,7 @@ async fn serve_tcp(
     peer: SocketAddr,
     acceptor: Option<TlsAcceptor>,
     inner: Arc<Inner>,
+    handshake: OwnedSemaphorePermit,
 ) {
     let _ = tcp.set_nodelay(true);
     match acceptor {
@@ -777,7 +789,7 @@ async fn serve_tcp(
                         .and_then(|chain| chain.first())
                         .map(AsRef::as_ref);
                     let identity = PeerIdentity::from_leaf(leaf);
-                    run_session(tls, peer, identity, inner).await;
+                    run_session(tls, peer, identity, inner, handshake).await;
                 }
                 // With profile 3 a failed handshake is most likely a missing or untrusted
                 // client certificate; say so (other profiles stay quiet about scanners).
@@ -791,12 +803,17 @@ async fn serve_tcp(
                 _ => {}
             }
         }
-        None => run_session(tcp, peer, PeerIdentity::Plain, inner).await,
+        None => run_session(tcp, peer, PeerIdentity::Plain, inner, handshake).await,
     }
 }
 
-async fn run_session<S>(stream: S, peer: SocketAddr, identity: PeerIdentity, inner: Arc<Inner>)
-where
+async fn run_session<S>(
+    stream: S,
+    peer: SocketAddr,
+    identity: PeerIdentity,
+    inner: Arc<Inner>,
+    handshake: OwnedSemaphorePermit,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let mut target: Option<(String, Option<String>)> = None;
@@ -841,6 +858,8 @@ where
     else {
         return;
     };
+    // The socket is established: it no longer counts as a pending handshake.
+    drop(handshake);
     let Some((station, subprotocol)) = target else {
         return;
     };

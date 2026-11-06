@@ -100,7 +100,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * State tracking (`state.rs`) is built from the actual reply payload of CALLs answered with `Reply::Result`. Stopped transactions are capped (`transaction_history_cap`), active ones at 256.
 * Security profiles 0-3 (`auth.rs`, `tls.rs`): Basic Auth checked in the handshake callback (constant-time, user must equal the URL id), TLS, mTLS with client CN equal to the station id; refusals emit `CsmsEvent::AuthFailed`.
 * One global `std::sync::Mutex` guards engine state; events are emitted under the lock to keep ordering.
-* Limits: frame size 1 MiB, 100 000 stations, per-action counters capped at 64 keys, write timeout 10 s.
+* Limits: frame size 1 MiB, 100 000 stations, 1024 sockets in their TLS/WebSocket handshake at once (`max_pending_handshakes`; extra sockets are closed), per-action counters capped at 64 keys, write timeout 10 s.
 
 ## Data flow
 

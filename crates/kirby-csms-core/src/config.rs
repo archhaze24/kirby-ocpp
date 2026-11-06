@@ -43,6 +43,10 @@ pub struct CsmsConfig {
     /// Most distinct station ids in the registry. A connection with a new id beyond it is
     /// refused with HTTP 503; known ids may still reconnect. Default 100 000.
     pub max_stations: usize,
+    /// Most sockets in their TLS or WebSocket handshake at the same time (each lasts at most
+    /// 10 seconds). A new socket beyond it is closed at once; established sessions are not
+    /// counted. Default 1024.
+    pub max_pending_handshakes: usize,
     /// `Some` serves `wss://` with this rustls configuration; `None` serves plain `ws://`.
     /// Build one from PEM files' contents with [`crate::server_config_from_pem`].
     pub tls: Option<Arc<ServerConfig>>,
@@ -172,6 +176,7 @@ impl Default for CsmsConfig {
             write_timeout: Duration::from_secs(10),
             max_message_size: 1024 * 1024,
             max_stations: 100_000,
+            max_pending_handshakes: 1024,
             tls: None,
             security: SecurityPolicy::default(),
             show_secrets: false,
@@ -197,6 +202,7 @@ impl fmt::Debug for CsmsConfig {
             .field("write_timeout", &self.write_timeout)
             .field("max_message_size", &self.max_message_size)
             .field("max_stations", &self.max_stations)
+            .field("max_pending_handshakes", &self.max_pending_handshakes)
             .field("tls", &self.tls.is_some())
             .field("security", &self.security)
             .field("show_secrets", &self.show_secrets)

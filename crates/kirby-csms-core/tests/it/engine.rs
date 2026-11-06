@@ -1208,3 +1208,44 @@ async fn installed_certificate_ids_are_tracked_and_capped() {
     }
     csms.shutdown().await;
 }
+
+#[tokio::test]
+async fn sockets_beyond_the_pending_handshake_limit_are_closed() {
+    use tokio::io::AsyncReadExt as _;
+    use tokio::net::TcpStream;
+
+    let csms = start(|c| c.max_pending_handshakes = 2).await;
+    // Two sockets that never start a handshake hold both permits.
+    let idle = [
+        TcpStream::connect(csms.local_addr()).await.unwrap(),
+        TcpStream::connect(csms.local_addr()).await.unwrap(),
+    ];
+    let mut third = TcpStream::connect(csms.local_addr()).await.unwrap();
+    let mut buf = [0_u8; 1];
+    // The server closes it at once (EOF or reset) instead of waiting for a handshake.
+    match timeout(STEP, third.read(&mut buf)).await {
+        Ok(Ok(0) | Err(_)) => {}
+        other => panic!("expected the third socket to be closed, got {other:?}"),
+    }
+
+    // Once the idle sockets are gone a real station gets through.
+    drop(idle);
+    let deadline = tokio::time::Instant::now() + STEP;
+    loop {
+        let mut request = format!("{}/CP-LATE", csms.url())
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", "ocpp1.6".parse().unwrap());
+        if tokio_tungstenite::connect_async(request).await.is_ok() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no permit was freed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    csms.shutdown().await;
+}
