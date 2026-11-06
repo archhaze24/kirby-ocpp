@@ -183,12 +183,13 @@ async fn run_inner(
         cancel,
         vars,
     };
-    let mut steps = Vec::with_capacity(scenario.steps.len());
+    let flat = scenario.expanded_steps();
+    let mut steps = Vec::with_capacity(flat.len());
     let mut failed = false;
     // A step was cut short or skipped by the cancel token (not merely: it fired at the end).
     let mut cut_short = false;
-    for (index, step) in scenario.steps.iter().enumerate() {
-        let name = step.label();
+    for (index, flat_step) in flat.iter().enumerate() {
+        let name = flat_step.name.clone();
         if failed || cancel.is_cancelled() {
             let status = if failed {
                 StepStatus::Skipped
@@ -216,8 +217,13 @@ async fn run_inner(
             });
         }
         let step_started = Instant::now();
+        for (counter, iteration) in &flat_step.counters {
+            // Counter names are valid and never built-ins (checked when the scenario loads).
+            let _ = ctx.vars.insert(counter, (iteration + 1).into());
+            let _ = ctx.vars.insert(&format!("{counter}0"), (*iteration).into());
+        }
         let result = tokio::select! {
-            result = ctx.run_step(step) => result,
+            result = ctx.run_step(flat_step.step) => result,
             () = cancel.cancelled() => Err("cancelled".to_owned()),
         };
         let status = match result {
@@ -263,7 +269,8 @@ const ANY_CALL: &str = "*";
 /// The action names some `expect_call` waits for -> whether any of them matches on the payload.
 fn wanted_calls(scenario: &Scenario) -> HashMap<String, bool> {
     let mut wanted: HashMap<String, bool> = HashMap::new();
-    for step in &scenario.steps {
+    for flat in scenario.expanded_steps() {
+        let step = flat.step;
         if let Action::ExpectCall { call, matches, .. } = &step.action {
             // A call name with a placeholder is only known when the step runs: keep every CALL.
             let key = if call.contains("${") { ANY_CALL } else { call };
@@ -542,7 +549,10 @@ fn to_command(action: &Action) -> Result<Command, String> {
         Action::ClearRules { call } => Command::ClearResponseRules {
             action: call.clone(),
         },
-        Action::Sleep { .. } | Action::WaitFor { .. } | Action::ExpectCall { .. } => {
+        Action::Sleep { .. }
+        | Action::WaitFor { .. }
+        | Action::ExpectCall { .. }
+        | Action::Repeat { .. } => {
             return Err("not a command".to_owned());
         }
     })

@@ -1,6 +1,6 @@
 //! Scenarios as data: parsing and validation (no I/O against a station).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,15 @@ use crate::ws::ConnectionState;
 
 /// Default timeout of `wait_for` and `expect_call`.
 pub const DEFAULT_TIMEOUT_MS: u64 = 5_000;
+
+/// Most iterations of one `repeat` step.
+pub const MAX_REPEAT_COUNT: u32 = 1_000;
+
+/// Deepest nesting of `repeat` steps.
+pub const MAX_REPEAT_DEPTH: usize = 3;
+
+/// Most steps a scenario may run in total once its loops are expanded.
+pub const MAX_EXPANDED_STEPS: u64 = 10_000;
 
 /// Longest accepted wait or sleep: one day.
 const MAX_WAIT_MS: u64 = 86_400_000;
@@ -190,6 +199,28 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call: Option<String>,
     },
+    /// Run the nested `steps` `count` times. Inside, `${i}` (1-based) and `${i0}` (0-based)
+    /// hold the iteration, or `${<var>}` / `${<var>0}` when `var` names the counter.
+    /// Built by the TOML parser only (never deserialised through serde).
+    #[serde(skip_deserializing)]
+    Repeat {
+        count: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        var: Option<String>,
+        steps: Vec<Step>,
+    },
+}
+
+/// One executed step of a scenario after its loops are expanded.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlatStep<'a> {
+    /// The step's label with the iteration path appended, e.g. `plug [2.3]`.
+    pub name: String,
+    pub step: &'a Step,
+    /// Loop counters in scope, outermost first (a later entry shadows an earlier one):
+    /// `(variable name, 0-based iteration)`; the 1-based value is bound as `name`, the
+    /// 0-based one as `name0`.
+    pub counters: Vec<(String, u64)>,
 }
 
 /// A condition on the station snapshot, for `wait_for`.
@@ -264,6 +295,7 @@ impl Action {
             Self::ClearRules { .. } => "clear_rules",
             Self::RequestCertificate {} => "request_certificate",
             Self::SecurityEvent { .. } => "security_event",
+            Self::Repeat { .. } => "repeat",
         }
     }
 }
@@ -311,7 +343,7 @@ impl Scenario {
             .steps
             .into_iter()
             .enumerate()
-            .map(|(i, table)| parse_step(table).map_err(|e| ScenarioError::step(i, &e)))
+            .map(|(i, table)| parse_step(table, 0).map_err(|e| ScenarioError::step(i, &e)))
             .collect::<Result<Vec<_>, _>>()?;
         let scenario = Self {
             name: raw.name,
@@ -335,97 +367,207 @@ impl Scenario {
         Self::from_toml(&text)
     }
 
+    /// The steps that actually run, in order: every `repeat` expanded, each name suffixed with
+    /// its iteration path (` [2]`, nested ` [2.3]`). Steps outside loops keep their label.
+    #[must_use]
+    pub fn expanded_steps(&self) -> Vec<FlatStep<'_>> {
+        let mut out = Vec::new();
+        expand(&self.steps, &mut Vec::new(), &mut out);
+        out
+    }
+
+    /// Number of steps that run (the length of [`Scenario::expanded_steps`]).
+    #[must_use]
+    pub fn expanded_len(&self) -> u64 {
+        count_expanded(&self.steps)
+    }
+
     fn validate(&self) -> Result<(), ScenarioError> {
-        for (i, step) in self.steps.iter().enumerate() {
-            let bad = |msg: &str| Err(ScenarioError::step(i, msg));
-            match &step.action {
-                Action::Plug { connector }
-                | Action::Unplug { connector }
-                | Action::StartTx { connector, .. }
-                | Action::StopTx { connector, .. }
-                | Action::Meter { connector, .. }
-                    if connector.is_station() =>
-                {
-                    return bad("`connector` must be 1 or more");
-                }
-                Action::WaitFor { timeout_ms: 0, .. }
-                | Action::ExpectCall { timeout_ms: 0, .. } => {
-                    return bad("`timeout_ms` must be positive");
-                }
-                Action::WaitFor { timeout_ms: ms, .. }
-                | Action::ExpectCall { timeout_ms: ms, .. }
-                | Action::Sleep { ms }
-                    if *ms > MAX_WAIT_MS =>
-                {
-                    // Beyond this `Instant + Duration` could overflow and panic the runner.
-                    return bad("`timeout_ms` / `ms` must be at most 86400000 (one day)");
-                }
-                Action::SendRaw { call, .. } | Action::ExpectCall { call, .. }
-                    if call.is_empty() =>
-                {
-                    return bad("`call` must not be empty");
-                }
-                Action::SecurityEvent { event_type, .. }
-                    if !has_placeholder(event_type)
-                        && canonical_event_type(event_type).is_none() =>
-                {
-                    return bad(&format!("unknown security event type `{event_type}`"));
-                }
-                Action::ClearRules { call: Some(call) } if !has_placeholder(call) => {
-                    if let Err(error) = canonical_action(call) {
-                        return bad(&error.to_string());
-                    }
-                }
-                _ => {}
+        let total = self.expanded_len();
+        if total > MAX_EXPANDED_STEPS {
+            return Err(ScenarioError::invalid(format!(
+                "scenario `{}` expands to {total} steps, the limit is {MAX_EXPANDED_STEPS}",
+                self.name
+            )));
+        }
+        let mut reserved = BTreeSet::new();
+        collect_counter_names(&self.steps, &mut reserved);
+        for name in self.vars.iter().map(|(name, _)| name) {
+            if reserved.contains(name) {
+                return Err(ScenarioError::invalid(format!(
+                    "`[vars]` `{name}`: is a loop counter name used by a `repeat` step"
+                )));
             }
         }
-        Ok(())
+        validate_steps(&self.steps, &mut Vec::new(), &reserved).map_err(ScenarioError::invalid)
     }
 
     /// Points every connector-bound step at `connector` and every idTag at `id_tag`
     /// (when given). Used to adapt the built-ins to the station being tested.
     pub fn retarget(&mut self, connector: Option<ConnectorId>, id_tag: Option<&IdTag>) {
-        for step in &mut self.steps {
-            match &mut step.action {
-                Action::Plug { connector: c }
-                | Action::Unplug { connector: c }
-                | Action::Meter { connector: c, .. }
-                | Action::Fault { connector: c, .. }
-                | Action::ClearFault { connector: c }
-                | Action::Status { connector: c, .. }
-                | Action::WaitFor {
-                    condition:
-                        Condition::ConnectorStatus { connector: c, .. }
-                        | Condition::TxActive { connector: c }
-                        | Condition::TxIdle { connector: c },
-                    ..
-                } => retarget_connector(c, connector),
-                Action::StartTx {
-                    connector: c,
-                    id_tag: t,
-                } => {
-                    retarget_connector(c, connector);
-                    if let Some(tag) = id_tag {
-                        t.clone_from(tag);
-                    }
+        retarget_steps(&mut self.steps, connector, id_tag);
+    }
+}
+
+fn retarget_steps(steps: &mut [Step], connector: Option<ConnectorId>, id_tag: Option<&IdTag>) {
+    for step in steps {
+        match &mut step.action {
+            Action::Repeat { steps, .. } => retarget_steps(steps, connector, id_tag),
+            Action::Plug { connector: c }
+            | Action::Unplug { connector: c }
+            | Action::Meter { connector: c, .. }
+            | Action::Fault { connector: c, .. }
+            | Action::ClearFault { connector: c }
+            | Action::Status { connector: c, .. }
+            | Action::WaitFor {
+                condition:
+                    Condition::ConnectorStatus { connector: c, .. }
+                    | Condition::TxActive { connector: c }
+                    | Condition::TxIdle { connector: c },
+                ..
+            } => retarget_connector(c, connector),
+            Action::StartTx {
+                connector: c,
+                id_tag: t,
+            } => {
+                retarget_connector(c, connector);
+                if let Some(tag) = id_tag {
+                    t.clone_from(tag);
                 }
-                Action::StopTx {
-                    connector: c,
-                    id_tag: t,
-                    ..
-                } => {
-                    retarget_connector(c, connector);
-                    if let (Some(tag), Some(old)) = (id_tag, t.as_mut()) {
-                        old.clone_from(tag);
-                    }
-                }
-                Action::Authorize { id_tag: t } => {
-                    if let Some(tag) = id_tag {
-                        t.clone_from(tag);
-                    }
-                }
-                _ => {}
             }
+            Action::StopTx {
+                connector: c,
+                id_tag: t,
+                ..
+            } => {
+                retarget_connector(c, connector);
+                if let (Some(tag), Some(old)) = (id_tag, t.as_mut()) {
+                    old.clone_from(tag);
+                }
+            }
+            Action::Authorize { id_tag: t } => {
+                if let Some(tag) = id_tag {
+                    t.clone_from(tag);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn validate_steps(
+    steps: &[Step],
+    path: &mut Vec<usize>,
+    reserved: &BTreeSet<String>,
+) -> Result<(), String> {
+    for (i, step) in steps.iter().enumerate() {
+        path.push(i + 1);
+        let label = path
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(".");
+        let bad = |msg: &str| Err(format!("step {label}: {msg}"));
+        if let Some(name) = step.capture.keys().find(|name| reserved.contains(*name)) {
+            return bad(&format!("`capture` `{name}` is a loop counter name"));
+        }
+        match &step.action {
+            Action::Repeat { steps: inner, .. } => {
+                validate_steps(inner, path, reserved)?;
+            }
+            Action::Plug { connector }
+            | Action::Unplug { connector }
+            | Action::StartTx { connector, .. }
+            | Action::StopTx { connector, .. }
+            | Action::Meter { connector, .. }
+                if connector.is_station() =>
+            {
+                return bad("`connector` must be 1 or more");
+            }
+            Action::WaitFor { timeout_ms: 0, .. } | Action::ExpectCall { timeout_ms: 0, .. } => {
+                return bad("`timeout_ms` must be positive");
+            }
+            Action::WaitFor { timeout_ms: ms, .. }
+            | Action::ExpectCall { timeout_ms: ms, .. }
+            | Action::Sleep { ms }
+                if *ms > MAX_WAIT_MS =>
+            {
+                // Beyond this `Instant + Duration` could overflow and panic the runner.
+                return bad("`timeout_ms` / `ms` must be at most 86400000 (one day)");
+            }
+            Action::SendRaw { call, .. } | Action::ExpectCall { call, .. } if call.is_empty() => {
+                return bad("`call` must not be empty");
+            }
+            Action::SecurityEvent { event_type, .. }
+                if !has_placeholder(event_type) && canonical_event_type(event_type).is_none() =>
+            {
+                return bad(&format!("unknown security event type `{event_type}`"));
+            }
+            Action::ClearRules { call: Some(call) } if !has_placeholder(call) => {
+                if let Err(error) = canonical_action(call) {
+                    return bad(&error.to_string());
+                }
+            }
+            _ => {}
+        }
+        path.pop();
+    }
+    Ok(())
+}
+
+/// Counter names (`i`, `i0`, or `<var>`, `<var>0`) of every loop below `steps`.
+fn collect_counter_names(steps: &[Step], out: &mut BTreeSet<String>) {
+    for step in steps {
+        if let Action::Repeat { var, steps, .. } = &step.action {
+            let name = var.as_deref().unwrap_or("i");
+            out.insert(name.to_owned());
+            out.insert(format!("{name}0"));
+            collect_counter_names(steps, out);
+        }
+    }
+}
+
+fn count_expanded(steps: &[Step]) -> u64 {
+    steps
+        .iter()
+        .map(|step| match &step.action {
+            Action::Repeat { count, steps, .. } => {
+                u64::from(*count).saturating_mul(count_expanded(steps))
+            }
+            _ => 1,
+        })
+        .fold(0, u64::saturating_add)
+}
+
+fn expand<'a>(steps: &'a [Step], counters: &mut Vec<(String, u64)>, out: &mut Vec<FlatStep<'a>>) {
+    for step in steps {
+        if let Action::Repeat {
+            count,
+            var,
+            steps: inner,
+        } = &step.action
+        {
+            let name = var.as_deref().unwrap_or("i");
+            for iteration in 0..u64::from(*count) {
+                counters.push((name.to_owned(), iteration));
+                expand(inner, counters, out);
+                counters.pop();
+            }
+        } else {
+            let mut name = step.label();
+            if !counters.is_empty() {
+                let path = counters
+                    .iter()
+                    .map(|(_, iteration)| (iteration + 1).to_string())
+                    .collect::<Vec<_>>()
+                    .join(".");
+                name = format!("{name} [{path}]");
+            }
+            out.push(FlatStep {
+                name,
+                step,
+                counters: counters.clone(),
+            });
         }
     }
 }
@@ -486,12 +628,81 @@ fn parse_capture(value: toml::Value) -> Result<BTreeMap<String, String>, String>
     Ok(out)
 }
 
-fn parse_step(mut table: toml::Table) -> Result<Step, String> {
+fn parse_repeat(
+    mut table: toml::Table,
+    name: Option<String>,
+    open_loops: usize,
+) -> Result<Step, String> {
+    if open_loops >= MAX_REPEAT_DEPTH {
+        return Err(format!(
+            "`repeat` is nested deeper than {MAX_REPEAT_DEPTH} levels"
+        ));
+    }
+    table.remove("action");
+    let count = match table.remove("count") {
+        None => return Err("action `repeat`: missing field `count`".to_owned()),
+        Some(toml::Value::Integer(n)) => u32::try_from(n)
+            .ok()
+            .filter(|n| (1..=MAX_REPEAT_COUNT).contains(n))
+            .ok_or_else(|| {
+                format!("action `repeat`: `count` must be between 1 and {MAX_REPEAT_COUNT}")
+            })?,
+        Some(_) => return Err("action `repeat`: `count` must be an integer".to_owned()),
+    };
+    let var = match table.remove("var") {
+        None => None,
+        Some(toml::Value::String(v)) => {
+            if !vars::is_valid_name(&v) || vars::is_builtin(&v) {
+                return Err(format!(
+                    "action `repeat`: `var` `{v}` is not a valid counter name"
+                ));
+            }
+            Some(v)
+        }
+        Some(_) => return Err("action `repeat`: `var` must be a string".to_owned()),
+    };
+    let raw = match table.remove("steps") {
+        Some(toml::Value::Array(items)) if !items.is_empty() => items,
+        Some(toml::Value::Array(_)) | None => {
+            return Err("action `repeat`: needs at least one nested `[[steps.steps]]`".to_owned());
+        }
+        Some(_) => return Err("action `repeat`: `steps` must be an array of tables".to_owned()),
+    };
+    if let Some(key) = table.keys().next() {
+        return Err(format!("action `repeat`: unknown field `{key}`"));
+    }
+    let mut steps = Vec::with_capacity(raw.len());
+    for (i, item) in raw.into_iter().enumerate() {
+        let toml::Value::Table(inner) = item else {
+            return Err(format!("repeat step {}: must be a table", i + 1));
+        };
+        steps.push(
+            parse_step(inner, open_loops + 1).map_err(|e| format!("repeat step {}: {e}", i + 1))?,
+        );
+    }
+    Ok(Step {
+        name,
+        expect: None,
+        capture: BTreeMap::new(),
+        action: Action::Repeat { count, var, steps },
+    })
+}
+
+/// `open_loops` is the number of `repeat` steps around this one.
+fn parse_step(mut table: toml::Table, open_loops: usize) -> Result<Step, String> {
     let name = match table.remove("name") {
         None => None,
         Some(toml::Value::String(s)) => Some(s),
         Some(_) => return Err("`name` must be a string".to_owned()),
     };
+    if table.get("action").and_then(toml::Value::as_str) == Some("repeat") {
+        if table.contains_key("expect") || table.contains_key("capture") {
+            return Err(
+                "action `repeat`: `expect` and `capture` are not allowed on a loop".to_owned(),
+            );
+        }
+        return parse_repeat(table, name, open_loops);
+    }
     let expect = match table.remove("expect") {
         None => None,
         Some(value) => Some(
@@ -548,6 +759,139 @@ mod tests {
     }
 
     const HEAD: &str = "name = \"t\"\n";
+
+    fn loop_toml(extra: &str, count: &str, inner: &str) -> String {
+        format!("name = \"t\"\n{extra}[[steps]]\naction = \"repeat\"\ncount = {count}\n{inner}")
+    }
+
+    const HEARTBEAT: &str = "[[steps.steps]]\naction = \"heartbeat\"\n";
+
+    #[test]
+    fn repeat_expands_with_names_and_counters() {
+        let s = Scenario::from_toml(&loop_toml(
+            "",
+            "3",
+            &format!("{HEARTBEAT}[[steps.steps]]\naction = \"repeat\"\ncount = 2\nvar = \"k\"\n[[steps.steps.steps]]\naction = \"sleep\"\nms = 1\n"),
+        ))
+        .unwrap();
+        assert_eq!(s.expanded_len(), 3 * (1 + 2));
+        let flat = s.expanded_steps();
+        assert_eq!(flat.len(), 9);
+        assert_eq!(flat[0].name, "heartbeat [1]");
+        assert_eq!(flat[2].name, "sleep [1.2]");
+        assert_eq!(flat[2].counters, [("i".to_owned(), 0), ("k".to_owned(), 1)]);
+        assert_eq!(flat[8].name, "sleep [3.2]");
+    }
+
+    #[test]
+    fn repeat_bad_shapes_are_load_errors() {
+        for (count, inner, needle) in [
+            ("0", HEARTBEAT, "between 1 and 1000"),
+            ("1001", HEARTBEAT, "between 1 and 1000"),
+            ("-1", HEARTBEAT, "between 1 and 1000"),
+            ("\"2\"", HEARTBEAT, "must be an integer"),
+            ("2", "", "at least one nested"),
+            (
+                "2",
+                "bogus = 1\n[[steps.steps]]\naction = \"heartbeat\"\n",
+                "unknown field `bogus`",
+            ),
+            (
+                "2",
+                "[[steps.steps]]\naction = \"heartbeat\"\nbogus = 1\n",
+                "repeat step 1",
+            ),
+            (
+                "2",
+                "capture = { a = \"/x\" }\n[[steps.steps]]\naction = \"heartbeat\"\n",
+                "not allowed on a loop",
+            ),
+            (
+                "2",
+                "expect = { status = \"x\" }\n[[steps.steps]]\naction = \"heartbeat\"\n",
+                "not allowed on a loop",
+            ),
+            (
+                "2",
+                "var = \"1x\"\n[[steps.steps]]\naction = \"heartbeat\"\n",
+                "not a valid counter name",
+            ),
+            (
+                "2",
+                "var = \"index\"\n[[steps.steps]]\naction = \"heartbeat\"\n",
+                "not a valid counter name",
+            ),
+            (
+                "2",
+                "[[steps.steps]]\naction = \"plug\"\nconnector = 0\n",
+                "step 1.1: `connector`",
+            ),
+        ] {
+            let e = err(&loop_toml("", count, inner));
+            assert!(e.contains(needle), "{count} {inner}: {e}");
+        }
+    }
+
+    #[test]
+    fn repeat_nesting_is_capped_at_three_levels() {
+        let leaf = "action = \"heartbeat\"\n";
+        let three = format!(
+            "{HEAD}[[steps]]\naction = \"repeat\"\ncount = 2\n[[steps.steps]]\naction = \"repeat\"\ncount = 2\n[[steps.steps.steps]]\naction = \"repeat\"\ncount = 2\n[[steps.steps.steps.steps]]\n{leaf}"
+        );
+        assert_eq!(Scenario::from_toml(&three).unwrap().expanded_len(), 8);
+        let four = format!(
+            "{HEAD}[[steps]]\naction = \"repeat\"\ncount = 2\n[[steps.steps]]\naction = \"repeat\"\ncount = 2\n[[steps.steps.steps]]\naction = \"repeat\"\ncount = 2\n[[steps.steps.steps.steps]]\naction = \"repeat\"\ncount = 2\n[[steps.steps.steps.steps.steps]]\n{leaf}"
+        );
+        assert!(err(&four).contains("deeper than 3"), "{}", err(&four));
+    }
+
+    #[test]
+    fn expanded_size_is_capped_at_load_time() {
+        let ok = loop_toml("", "1000", &HEARTBEAT.repeat(10));
+        assert_eq!(Scenario::from_toml(&ok).unwrap().expanded_len(), 10_000);
+        let too_many = loop_toml("", "1000", &HEARTBEAT.repeat(11));
+        let e = err(&too_many);
+        assert!(
+            e.contains("`t`") && e.contains("11000") && e.contains("10000"),
+            "{e}"
+        );
+        // Nested loops multiply.
+        let nested = format!(
+            "{HEAD}[[steps]]\naction = \"repeat\"\ncount = 100\n[[steps.steps]]\naction = \"repeat\"\ncount = 101\n[[steps.steps.steps]]\naction = \"heartbeat\"\n"
+        );
+        assert!(err(&nested).contains("10100"), "{}", err(&nested));
+    }
+
+    #[test]
+    fn counter_names_are_reserved_for_vars_and_captures() {
+        let e = err(&loop_toml("[vars]\ni = 1\n", "2", HEARTBEAT));
+        assert!(e.contains("loop counter"), "{e}");
+        let e = err(&loop_toml(
+            "[vars]\nk0 = 1\n",
+            "2",
+            &format!("var = \"k\"\n{HEARTBEAT}"),
+        ));
+        assert!(e.contains("loop counter"), "{e}");
+        let e = err(&loop_toml(
+            "",
+            "2",
+            "[[steps.steps]]\naction = \"send_raw\"\ncall = \"Heartbeat\"\ncapture = { i = \"/currentTime\" }\n",
+        ));
+        assert!(e.contains("loop counter"), "{e}");
+        // Without a loop using the name it stays a normal variable.
+        Scenario::from_toml(&format!(
+            "{HEAD}[vars]\ni = 1\n[[steps]]\naction = \"heartbeat\"\n"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn repeat_cannot_be_deserialised_through_serde() {
+        assert!(
+            serde_json::from_value::<Action>(serde_json::json!({"action": "repeat", "count": 1}))
+                .is_err()
+        );
+    }
 
     #[test]
     fn parses_a_full_scenario() {

@@ -459,3 +459,131 @@ action = "heartbeat"
     assert_eq!(report.steps[1].status, StepStatus::Skipped);
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn repeat_runs_each_iteration_with_counters_and_flat_names() {
+    let rig = booted_rig().await;
+    let s = scenario(
+        r#"
+[[steps]]
+action = "heartbeat"
+[[steps]]
+action = "repeat"
+count = 2
+[[steps.steps]]
+action = "data_transfer"
+vendor_id = "v${i}"
+data = "outer-${i0}"
+[[steps.steps]]
+action = "repeat"
+count = 2
+var = "j"
+[[steps.steps.steps]]
+action = "data_transfer"
+name = "inner"
+vendor_id = "v"
+data = "${i}.${j}.${j0}"
+"#,
+    );
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    assert!(report.passed, "{report:#?}");
+    let names: Vec<_> = report.steps.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "heartbeat",
+            "data_transfer [1]",
+            "inner [1.1]",
+            "inner [1.2]",
+            "data_transfer [2]",
+            "inner [2.1]",
+            "inner [2.2]",
+        ]
+    );
+    assert_eq!(report.steps.len() as u64, s.expanded_len());
+    let data: Vec<_> = rig
+        .calls("DataTransfer", 0)
+        .iter()
+        .map(|c| c["data"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        data,
+        ["outer-0", "1.1.0", "1.2.1", "outer-1", "2.1.0", "2.2.1"]
+    );
+    // JUnit stays a flat list with unique names.
+    let xml = kirby_ocpp_core::scenario::junit_xml(&[kirby_ocpp_core::scenario::JunitSuite {
+        station: None,
+        scenario: &s.name,
+        outcome: Ok(&report),
+    }]);
+    assert_eq!(xml.matches("<testcase ").count(), 7, "{xml}");
+    assert!(xml.contains("name=\"7. inner [2.2]\""), "{xml}");
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failing_iteration_stops_the_loop_and_skips_the_rest() {
+    let rig = booted_rig().await;
+    let s = scenario(
+        r#"
+[[steps]]
+action = "repeat"
+count = 4
+[[steps.steps]]
+action = "data_transfer"
+vendor_id = "v"
+data = "n${i0}"
+[[steps.steps]]
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { data = "n0" }
+timeout_ms = 200
+[[steps]]
+action = "heartbeat"
+"#,
+    );
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    assert!(!report.passed && !report.cancelled, "{report:#?}");
+    assert_eq!(report.steps.len(), 9);
+    let st = statuses(&report);
+    assert_eq!(st[0], &StepStatus::Passed);
+    assert_eq!(st[1], &StepStatus::Passed);
+    assert_eq!(st[2], &StepStatus::Passed);
+    assert!(matches!(st[3], StepStatus::Failed(_)), "{st:?}");
+    assert!(st[4..].iter().all(|s| **s == StepStatus::Skipped), "{st:?}");
+    assert_eq!(report.steps[3].name, "expect_call [2]");
+    assert_eq!(report.steps[8].name, "heartbeat");
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancel_stops_a_loop() {
+    let rig = booted_rig().await;
+    let s = scenario(
+        r#"
+[[steps]]
+action = "repeat"
+count = 1000
+[[steps.steps]]
+action = "sleep"
+ms = 20
+"#,
+    );
+    let cancel = CancelToken::new();
+    let canceller = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        canceller.cancel();
+    });
+    let report = run_scenario(&rig.station, &s, &cancel, None).await;
+    assert!(report.cancelled && !report.passed);
+    assert_eq!(report.steps.len(), 1000);
+    assert!(
+        report
+            .steps
+            .iter()
+            .any(|s| matches!(&s.status, StepStatus::Failed(r) if r == "cancelled"))
+    );
+    rig.shutdown().await;
+}
