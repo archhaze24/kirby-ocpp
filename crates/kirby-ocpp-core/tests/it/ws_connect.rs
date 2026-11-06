@@ -391,3 +391,66 @@ async fn an_absurd_call_timeout_does_not_panic() {
         .await;
     call.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn dot_segment_ids_are_refused_instead_of_dropped_from_the_path() {
+    let server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+    for id in [".", ".."] {
+        let result = Connection::connect(
+            &server.url("/ocpp"),
+            id,
+            &TlsConfig::default(),
+            "ocpp1.6",
+            options(),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ConnectError::InvalidUrl(_))),
+            "{id}: {result:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn non_utf8_userinfo_is_sent_as_raw_bytes() {
+    let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+    let url = format!("ws://cp:%FF%FE@{}/ocpp", server.addr);
+    let (_connection, _events) = connect(&url, options()).await;
+    let peer = server.next_peer().await;
+    let expected = format!("Basic {}", STANDARD.encode(b"cp:\xff\xfe"));
+    assert_eq!(peer.authorization.as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
+async fn the_status_line_in_an_http_error_is_sanitised_and_truncated() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let server = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let (mut tcp, _) = listener.accept().await.expect("accept");
+        let mut buf = [0_u8; 1024];
+        let _ = tcp.read(&mut buf).await;
+        let line = format!(
+            "HTTP/1.1 403 \u{1b}[31m\u{202e}{}\r\n\r\n",
+            "x".repeat(5000)
+        );
+        tcp.write_all(line.as_bytes()).await.expect("write");
+        tcp.flush().await.expect("flush");
+        tokio::time::sleep(STEP).await;
+    });
+    let result = Connection::connect(
+        &format!("ws://{addr}/ocpp"),
+        "CP-001",
+        &TlsConfig::default(),
+        "ocpp1.6",
+        options(),
+    )
+    .await;
+    server.abort();
+    let Err(ConnectError::HttpStatus { status, line }) = result else {
+        panic!("{result:?}");
+    };
+    assert_eq!(status, 403);
+    assert!(line.chars().count() <= 200, "{}", line.len());
+    assert!(!line.chars().any(kirby_ocpp_core::text::is_unsafe_char));
+}

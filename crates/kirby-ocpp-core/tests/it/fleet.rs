@@ -143,4 +143,8 @@ async fn invalid_specs_spawn_nothing() {
     bad.phases = 9;
     let err = Fleet::spawn(&bad, &FleetSpec::new("CP-{n}", 2), &clock()).unwrap_err();
     assert!(matches!(err, FleetError::Config { .. }));
+    for dots in ["..", "."] {
+        let err = Fleet::spawn(&config, &FleetSpec::new(dots, 1), &clock()).unwrap_err();
+        assert!(matches!(err, FleetError::Config { .. }), "{dots}: {err:?}");
+    }
 }

@@ -214,6 +214,10 @@ impl Default for StationConfig {
 pub enum ConfigError {
     #[error("url: {0}")]
     InvalidUrl(String),
+    #[error("charge point id `{0}` cannot be used as a URL path segment")]
+    InvalidChargePointId(String),
+    #[error("ws_subprotocol `{0}` must consist of RFC 6455 token characters")]
+    InvalidSubprotocol(String),
     #[error("{field} must not be empty")]
     Empty { field: &'static str },
     #[error("{field} must be greater than zero")]
@@ -325,6 +329,14 @@ impl StationConfig {
                 return Err(ConfigError::Empty { field });
             }
         }
+        if matches!(self.charge_point_id.as_str(), "." | "..") {
+            return Err(ConfigError::InvalidChargePointId(
+                self.charge_point_id.clone(),
+            ));
+        }
+        if !is_http_token(&self.ws_subprotocol) {
+            return Err(ConfigError::InvalidSubprotocol(self.ws_subprotocol.clone()));
+        }
         for (field, value) in [
             ("connector_count", u64::from(self.connector_count)),
             ("initial_connector", u64::from(self.initial_connector.get())),
@@ -379,6 +391,14 @@ impl StationConfig {
     }
 }
 
+/// RFC 7230 token: non-empty, visible ASCII without separators.
+fn is_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
 /// Checks that `value` is an absolute `ws://` or `wss://` URL with a host.
 /// Used by [`StationConfig::validate`] and by CLI value parsers.
 pub fn validate_ws_url(value: &str) -> Result<(), String> {
@@ -408,7 +428,7 @@ fn redact_url(value: &str) -> String {
     }
 }
 
-fn redact_unparsable_url(value: &str) -> String {
+pub(crate) fn redact_unparsable_url(value: &str) -> String {
     let (scheme, rest) = value.split_once("://").unwrap_or(("", value));
     // Everything up to the last `@` is dropped, even past a `/`: a malformed URL may hold a
     // password with raw delimiters.
@@ -558,6 +578,25 @@ mod tests {
             with(|c| c.voltage_v = 0),
             Err(ConfigError::NotPositive { field: "voltage_v" })
         );
+    }
+
+    #[test]
+    fn rejects_dot_ids_and_non_token_subprotocols() {
+        for id in [".", ".."] {
+            assert_eq!(
+                valid().with_charge_point_id(id).validate(),
+                Err(ConfigError::InvalidChargePointId(id.to_owned()))
+            );
+        }
+        for protocol in ["ocpp 1.6", "ocpp1.6\r\nX: y", "a,b", "\"q\"", "ocpp1.6é"] {
+            let mut config = valid();
+            config.ws_subprotocol = protocol.to_owned();
+            assert!(
+                matches!(config.validate(), Err(ConfigError::InvalidSubprotocol(_))),
+                "{protocol:?}"
+            );
+        }
+        assert!(valid().validate().is_ok());
     }
 
     #[test]

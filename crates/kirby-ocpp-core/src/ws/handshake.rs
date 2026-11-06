@@ -47,7 +47,12 @@ where
     if head.status != 101 {
         return Err(ConnectError::HttpStatus {
             status: head.status,
-            line: head.status_line,
+            line: head
+                .status_line
+                .chars()
+                .filter(|c| !crate::text::is_unsafe_char(*c))
+                .take(200)
+                .collect(),
         });
     }
     let upgrades = head
@@ -132,12 +137,11 @@ fn authorization(url: &Url) -> Option<String> {
     if url.username().is_empty() && url.password().is_none() {
         return None;
     }
-    let user = percent_decode_str(url.username()).decode_utf8_lossy();
-    let password = percent_decode_str(url.password().unwrap_or_default()).decode_utf8_lossy();
-    Some(format!(
-        "Basic {}",
-        STANDARD.encode(format!("{user}:{password}"))
-    ))
+    // Basic credentials are bytes: invalid UTF-8 after decoding is passed through as is.
+    let mut credentials: Vec<u8> = percent_decode_str(url.username()).collect();
+    credentials.push(b':');
+    credentials.extend(percent_decode_str(url.password().unwrap_or_default()));
+    Some(format!("Basic {}", STANDARD.encode(credentials)))
 }
 
 /// Reads the response head byte by byte, so no WebSocket frame that follows it

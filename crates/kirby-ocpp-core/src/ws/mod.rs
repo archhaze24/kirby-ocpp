@@ -406,6 +406,13 @@ pub fn charge_point_url(base: &str, charge_point_id: &str) -> Result<Url, Connec
             redact(&url)
         )));
     }
+    // The url crate drops `.` and `..` segments (also as `%2E`), so the id would never
+    // reach the server.
+    if matches!(charge_point_id, "." | "..") {
+        return Err(ConnectError::InvalidUrl(format!(
+            "charge point id `{charge_point_id}` cannot be used as a URL path segment"
+        )));
+    }
     let mut encoded = Url::parse("ws://h/").expect("static URL is valid");
     encoded
         .path_segments_mut()
@@ -428,15 +435,9 @@ pub fn charge_point_url(base: &str, charge_point_id: &str) -> Result<Url, Connec
     Ok(url)
 }
 
-/// Parse errors have no parsed URL; drop anything before `@` in the authority.
+/// Parse errors have no parsed URL; everything before the last `@` is dropped.
 fn redact_text(base: &str) -> String {
-    match base.split_once("://") {
-        Some((scheme, rest)) => match rest.split_once('@') {
-            Some((_, after)) => format!("{scheme}://<redacted>@{after}"),
-            None => base.to_owned(),
-        },
-        None => base.to_owned(),
-    }
+    crate::config::redact_unparsable_url(base)
 }
 
 #[cfg(test)]
@@ -445,6 +446,13 @@ mod tests {
 
     fn url(base: &str, id: &str) -> String {
         charge_point_url(base, id).unwrap().to_string()
+    }
+
+    #[test]
+    fn unparsable_urls_lose_everything_before_the_last_at() {
+        let shown = redact_text("ws://cp:pa@ss@[bad/x");
+        assert_eq!(shown, "ws://[bad/x");
+        assert!(!shown.contains("ss"));
     }
 
     #[test]
