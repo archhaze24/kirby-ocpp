@@ -43,7 +43,10 @@ use std::time::{Duration, Instant};
 
 use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Frame, Reply};
 use kirby_ocpp_core::scenario::vars::{self, Vars};
-use kirby_ocpp_core::scenario::{ScenarioReport, StepReport, StepStatus};
+use kirby_ocpp_core::scenario::{
+    ScenarioReport, StepReport, StepStatus, check_contract_keys, line_col, now_rfc3339,
+    redact_params, with_suggestion,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::Notify;
@@ -83,12 +86,18 @@ pub struct Script {
     /// Declared `[vars]`; `--var` overrides are added with [`Script::set_var`].
     pub vars: Vars,
     pub steps: Vec<Step>,
+    /// Labels from the reserved `tags` key (kept, not used for filtering yet).
+    pub tags: Vec<String>,
+    /// The file the script was loaded from.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Step {
     pub name: Option<String>,
     pub action: Action,
+    /// The step's fields as written (without `name` and `action`), for failure reports.
+    pub params: Value,
 }
 
 pub use crate::commands::FaultKind;
@@ -162,12 +171,37 @@ pub enum Action {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawScript {
     name: String,
     #[serde(default)]
+    #[allow(dead_code, reason = "documentation only")]
+    description: String,
+    #[serde(default)]
+    ocpp_version: Option<String>,
+    #[serde(default)]
+    schema: Option<i64>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
     vars: toml::Table,
     #[serde(default)]
-    steps: Vec<toml::Table>,
+    steps: Vec<toml::Spanned<toml::Table>>,
+}
+
+/// A load failure with the byte offset it points at, when known.
+struct Located {
+    message: String,
+    offset: Option<usize>,
+}
+
+impl Located {
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            offset: None,
+        }
+    }
 }
 
 impl Script {
@@ -176,35 +210,58 @@ impl Script {
     /// # Errors
     /// A message naming the offending step for unknown actions, missing or unknown fields and
     /// bad values.
+    #[cfg(test)]
     pub fn from_toml(text: &str) -> Result<Self, String> {
-        let raw: RawScript =
-            toml::from_str(text).map_err(|e| format!("invalid script: {}", e.message()))?;
+        Self::parse(text).map_err(|e| match e.offset {
+            Some(offset) => {
+                let (line, column) = line_col(text, offset);
+                format!(
+                    "invalid script: {} (line {line}, column {column})",
+                    e.message
+                )
+            }
+            None => format!("invalid script: {}", e.message),
+        })
+    }
+
+    fn parse(text: &str) -> Result<Self, Located> {
+        let raw: RawScript = toml::from_str(text).map_err(|e| Located {
+            message: with_suggestion(e.message().to_owned()),
+            offset: e.span().map(|span| span.start),
+        })?;
+        check_contract_keys(raw.ocpp_version.as_deref(), raw.schema).map_err(Located::plain)?;
         if raw.name.trim().is_empty() {
-            return Err("invalid script: `name` must not be empty".to_owned());
+            return Err(Located::plain("`name` must not be empty"));
         }
         if raw.steps.is_empty() {
-            return Err("invalid script: a script needs at least one `[[steps]]`".to_owned());
+            return Err(Located::plain("a script needs at least one `[[steps]]`"));
         }
         let mut script_vars = Vars::new();
         for (name, value) in raw.vars {
             let value = serde_json::to_value(&value)
-                .map_err(|e| format!("invalid script: [vars] `{name}`: {e}"))?;
+                .map_err(|e| Located::plain(format!("[vars] `{name}`: {e}")))?;
             vars::check_scalar(&value)
                 .and_then(|()| script_vars.insert(&name, value))
-                .map_err(|e| format!("invalid script: [vars] `{name}`: {e}"))?;
+                .map_err(|e| Located::plain(format!("[vars] `{name}`: {e}")))?;
         }
         let steps = raw
             .steps
             .into_iter()
             .enumerate()
             .map(|(i, table)| {
-                parse_step(table).map_err(|e| format!("invalid script: step {}: {e}", i + 1))
+                let offset = table.span().start;
+                parse_step(table.into_inner()).map_err(|e| Located {
+                    message: format!("step {}: {e}", i + 1),
+                    offset: Some(offset),
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             name: raw.name,
             vars: script_vars,
             steps,
+            tags: raw.tags,
+            source: None,
         })
     }
 
@@ -223,7 +280,23 @@ impl Script {
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read script file {}: {e}", path.display()))?;
-        Self::from_toml(&text)
+        match Self::parse(&text) {
+            Ok(mut script) => {
+                script.source = Some(path.display().to_string());
+                Ok(script)
+            }
+            Err(e) => Err(match e.offset {
+                Some(offset) => {
+                    let (line, column) = line_col(&text, offset);
+                    format!(
+                        "{}:{line}:{column}: invalid script: {}",
+                        path.display(),
+                        e.message
+                    )
+                }
+                None => format!("{}: invalid script: {}", path.display(), e.message),
+            }),
+        }
     }
 }
 
@@ -238,11 +311,23 @@ fn parse_step(mut table: toml::Table) -> Result<Step, String> {
         Some(toml::Value::String(s)) => s.clone(),
         Some(_) => return Err("`action` must be a string".to_owned()),
     };
+    let mut params = table.clone();
+    params.remove("action");
+    let params = serde_json::to_value(&params).unwrap_or(Value::Null);
     let action = toml::Value::Table(table)
         .try_into::<Action>()
-        .map_err(|e| format!("action `{tag}`: {}", e.message()))?;
+        .map_err(|e| {
+            format!(
+                "action `{tag}`: {}",
+                with_suggestion(e.message().to_owned())
+            )
+        })?;
     validate(&action)?;
-    Ok(Step { name, action })
+    Ok(Step {
+        name,
+        action,
+        params,
+    })
 }
 
 fn validate(action: &Action) -> Result<(), String> {
@@ -333,6 +418,19 @@ fn check_captures(capture: &BTreeMap<String, String>) -> Result<(), String> {
 }
 
 impl Step {
+    /// The action's snake_case name.
+    pub fn action_name(&self) -> &'static str {
+        match &self.action {
+            Action::WaitStation { .. } => "wait_station",
+            Action::WaitCall { .. } => "wait_call",
+            Action::Call { .. } => "call",
+            Action::Sleep { .. } => "sleep",
+            Action::Respond { .. } => "respond",
+            Action::ClearRespond { .. } => "clear_respond",
+            Action::InjectFault { .. } => "inject_fault",
+        }
+    }
+
     /// The display name: the given one, or a description of the action.
     pub fn title(&self) -> String {
         if let Some(name) = &self.name {
@@ -561,7 +659,15 @@ impl Backlog {
     }
 }
 
+/// What a failed step can tell beyond its reason text.
+#[derive(Debug, Default)]
+struct Evidence {
+    expected: Option<Value>,
+    actual: Option<String>,
+}
+
 struct Runner<'a> {
+    evidence: Evidence,
     handle: &'a CsmsHandle,
     backlog: Arc<Backlog>,
     vars: Vars,
@@ -573,6 +679,7 @@ struct Runner<'a> {
 ///
 /// `events` should come from a `subscribe()` made before any station can connect, so no CALL
 /// is missed by `wait_call`.
+#[allow(clippy::too_many_lines, reason = "one report per run")]
 pub async fn run(
     script: &Script,
     handle: &CsmsHandle,
@@ -580,8 +687,10 @@ pub async fn run(
     deadline: Instant,
 ) -> ScenarioReport {
     let started = Instant::now();
+    let started_at = now_rfc3339();
     let backlog = Arc::new(Backlog::new(script));
     let mut runner = Runner {
+        evidence: Evidence::default(),
         handle,
         vars: script.vars.clone(),
         _pump: Pump::spawn(events, Arc::clone(&backlog)),
@@ -592,6 +701,7 @@ pub async fn run(
     for (index, step) in script.steps.iter().enumerate() {
         let name = step.title();
         let began = Instant::now();
+        runner.evidence = Evidence::default();
         let status = if failed {
             StepStatus::Skipped
         } else {
@@ -606,21 +716,30 @@ pub async fn run(
                 Err(_) => StepStatus::Failed("the script --timeout was reached".to_owned()),
             }
         };
-        failed |= matches!(status, StepStatus::Failed(_));
-        steps.push(StepReport {
-            index,
-            name,
-            status,
-            duration_ms: millis(began.elapsed()),
-        });
+        let step_failed = matches!(status, StepStatus::Failed(_));
+        failed |= step_failed;
+        let mut report = StepReport::new(index, name, status, millis(began.elapsed()));
+        step.action_name().clone_into(&mut report.detail.action);
+        if step_failed {
+            let mut params = step.params.clone();
+            redact_params(&mut params);
+            report.detail.params = Some(params);
+            report.detail.expected = runner.evidence.expected.take();
+            report.detail.actual = runner.evidence.actual.take();
+        }
+        steps.push(report);
     }
-    ScenarioReport {
-        scenario: script.name.clone(),
-        passed: !failed,
-        cancelled: false,
+    let mut report = ScenarioReport::new(
+        script.name.clone(),
+        !failed,
+        false,
         steps,
-        duration_ms: millis(started.elapsed()),
-    }
+        millis(started.elapsed()),
+    );
+    env!("CARGO_PKG_VERSION").clone_into(&mut report.tool_version);
+    report.started_at = started_at;
+    report.source.clone_from(&script.source);
+    report
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -714,10 +833,18 @@ impl Runner<'_> {
                 else {
                     return Err(format!("{call} was still queued after {timeout_ms} ms"));
                 };
-                let answer = check_answer(result, call, expect_status.as_deref(), *expect_error)?;
+                let answer = check_answer(
+                    result,
+                    call,
+                    expect_status.as_deref(),
+                    *expect_error,
+                    &mut self.evidence,
+                )?;
                 if let Some(expected) = &expect_payload
                     && !json_subset(expected, &answer)
                 {
+                    self.evidence.expected = Some(expected.clone());
+                    self.evidence.actual = Some(vars::clip_json(&answer));
                     return Err(format!(
                         "{call}: payload {} does not contain {}",
                         vars::clip_json(&answer),
@@ -828,6 +955,7 @@ fn check_answer(
     call: &str,
     expect_status: Option<&str>,
     expect_error: bool,
+    evidence: &mut Evidence,
 ) -> Result<Value, String> {
     match result {
         Ok(Frame::CallResult { payload, .. }) => {
@@ -841,6 +969,9 @@ fn check_answer(
                     if actual == Some(expected) {
                         Ok(payload)
                     } else {
+                        evidence.expected = Some(Value::String(expected.to_owned()));
+                        evidence.actual =
+                            Some(actual.map_or_else(|| vars::clip_json(&payload), vars::clip_text));
                         Err(format!(
                             "{call}: expected status {expected}, got {}",
                             actual.map_or_else(
@@ -965,9 +1096,27 @@ times = 2
                 serde_json::json!({"status": status}),
             ))
         };
-        assert!(check_answer(ok("Accepted"), "X", Some("Accepted"), false).is_ok());
-        assert!(check_answer(ok("Rejected"), "X", Some("Accepted"), false).is_err());
-        assert!(check_answer(ok("Accepted"), "X", None, true).is_err());
+        assert!(
+            check_answer(
+                ok("Accepted"),
+                "X",
+                Some("Accepted"),
+                false,
+                &mut Evidence::default()
+            )
+            .is_ok()
+        );
+        assert!(
+            check_answer(
+                ok("Rejected"),
+                "X",
+                Some("Accepted"),
+                false,
+                &mut Evidence::default()
+            )
+            .is_err()
+        );
+        assert!(check_answer(ok("Accepted"), "X", None, true, &mut Evidence::default()).is_err());
     }
 
     #[test]
@@ -1010,7 +1159,8 @@ times = 2
             "1",
             serde_json::json!({"status": "Accepted", "n": 1}),
         ));
-        let payload = check_answer(ok, "X", Some("Accepted"), false).unwrap();
+        let payload =
+            check_answer(ok, "X", Some("Accepted"), false, &mut Evidence::default()).unwrap();
         assert_eq!(payload["n"], 1);
     }
 
@@ -1179,9 +1329,54 @@ call = "Heartbeat"
             "X",
             Some("Accepted"),
             false,
+            &mut Evidence::default(),
         )
         .unwrap_err();
         assert!(reason.len() < 400, "{}", reason.len());
         assert!(reason.contains("..."));
+    }
+
+    #[test]
+    fn contract_keys_are_accepted_and_unknown_keys_rejected() {
+        let step = "[[steps]]\naction = \"sleep\"\nms = 1\n";
+        let script = Script::from_toml(&format!(
+            "name = \"t\"\ndescription = \"d\"\nocpp_version = \"1.6\"\nschema = 1\ntags = [\"x\"]\n{step}"
+        ))
+        .unwrap();
+        assert_eq!(script.tags, ["x"]);
+        let e = err(&format!("name = \"t\"\nocpp_version = \"2.1\"\n{step}"));
+        assert!(e.contains("OCPP 1.6 only") && e.contains("2.1"), "{e}");
+        let e = err(&format!("name = \"t\"\nschema = 7\n{step}"));
+        assert!(e.contains("unsupported schema 7"), "{e}");
+        let e = err(&format!("name = \"t\"\ntimeout = 5\n{step}"));
+        assert!(e.contains("unknown field `timeout`"), "{e}");
+        let e = err(&format!("name = \"t\"\nstpes = []\n{step}"));
+        assert!(e.contains("did you mean `steps`"), "{e}");
+    }
+
+    #[test]
+    fn errors_carry_a_position_and_a_suggestion() {
+        let e = err("name = \"t\"\n[[steps]]\naction = \"slepe\"\nms = 1\n");
+        assert!(e.contains("did you mean `sleep`"), "{e}");
+        assert!(e.contains("line 2, column 1"), "{e}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.toml");
+        std::fs::write(&path, "name = \"t\"\nbogus = 1\n").unwrap();
+        let e = Script::load(&path).unwrap_err();
+        assert!(
+            e.starts_with(&format!("{}:2:1: invalid script", path.display())),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn step_reports_name_the_action_and_params() {
+        let script = Script::from_toml(
+            "name = \"t\"\n[[steps]]\naction = \"call\"\nstation = \"CP\"\ncall = \"ChangeConfiguration\"\npayload = { key = \"AuthorizationKey\", value = \"secretsecret\" }\n",
+        )
+        .unwrap();
+        assert_eq!(script.steps[0].action_name(), "call");
+        assert_eq!(script.steps[0].params["station"], "CP");
+        assert!(script.steps[0].params.get("action").is_none());
     }
 }

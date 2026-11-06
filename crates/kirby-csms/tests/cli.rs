@@ -360,6 +360,15 @@ expect_error = true
     let saved: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
     assert_eq!(saved["scenario"], "smoke");
     assert_eq!(saved["steps"].as_array().unwrap().len(), 7);
+    assert_eq!(saved["schema"], 1);
+    assert_eq!(saved["status"], "passed");
+    assert_eq!(saved["tool_version"], env!("CARGO_PKG_VERSION"));
+    assert!(
+        saved["started_at"]
+            .as_str()
+            .is_some_and(|t| t.ends_with('Z'))
+    );
+    assert!(saved["steps"][0]["action"].is_string());
     let xml = std::fs::read_to_string(&junit).unwrap();
     assert!(
         xml.contains("<testsuites") && xml.contains("tests=\"7\""),
