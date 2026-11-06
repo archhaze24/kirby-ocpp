@@ -50,6 +50,7 @@ More forms:
 ```bash
 kirby-ocpp --url ws://localhost:9000/ocpp --no-tui --json         # headless, JSON lines
 kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session   # CI scenario, exit code 0/1
+kirby-ocpp --url ws://localhost:9000/ocpp suite --all-builtins --junit junit.xml   # many scenarios, fresh station each
 kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n:03}' --count 50 --no-tui   # fleet of 50
 kirby-csms --script suite.toml --junit junit.xml --timeout 120     # scripted CSMS test
 ```

@@ -2,7 +2,7 @@
 
 `kirby-ocpp` is a terminal OCPP 1.6J charge point (station). It connects to a central system (CSMS), answers its commands, and lets you drive the station by hand (terminal UI), log it (headless) or script it ([scenarios](scenarios.md)). The Security Whitepaper messages are supported too.
 
-Contents: [Quick start](#quick-start) · [Modes](#modes) · [Terminal UI](#terminal-ui) · [Headless mode and exit codes](#headless-mode-and-exit-codes) · [Fleet mode](#fleet-mode) · [Response rules](#response-rules) · [State persistence](#state-persistence) · [TLS](#tls) · [Related pages](#related-pages)
+Contents: [Quick start](#quick-start) · [Modes](#modes) · [Terminal UI](#terminal-ui) · [Headless mode and exit codes](#headless-mode-and-exit-codes) · [Suite mode](#suite-mode) · [Fleet mode](#fleet-mode) · [Response rules](#response-rules) · [State persistence](#state-persistence) · [TLS](#tls) · [Related pages](#related-pages)
 
 ## Quick start
 
@@ -108,7 +108,26 @@ Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints 
 | 0 | Success (scenario passed, normal shutdown) |
 | 1 | Scenario failed or timed out, a runtime error, or a report file could not be written |
 | 2 | Usage or configuration error |
-| 130 | `run` interrupted by SIGINT (Ctrl-C); SIGTERM still ends it with 1 |
+| 130 | `run` or `suite` interrupted by SIGINT (Ctrl-C); SIGTERM still ends it with 1 |
+
+## Suite mode
+
+`kirby-ocpp suite [SOURCE...]` runs several scenarios one after another against the same CSMS, for conformance-style runs and CI. A SOURCE is a scenario file, a directory (every `*.toml` directly inside, sorted by name, not recursive) or a built-in name; `--all-builtins` adds every built-in except `finish-session` (it needs a transaction left by an earlier run, which a fresh station never has; name it explicitly to run it anyway).
+
+```bash
+kirby-ocpp --url ws://localhost:9000/ocpp suite scenarios/ charge-session --junit junit.xml --report suite.json
+```
+
+Every scenario runs on its own new station (same URL, id and station options as `run`), never in parallel. Persistence is switched off for suite runs (`--state-dir` and `--no-persist` are ignored), so no state carries over from one scenario to the next and nothing is written to disk. Human output is one line per scenario, then a summary:
+
+```
+PASS charge-session (1.2 s)
+FAIL my-auth: authorize - Blocked
+SKIP last-one
+suite: 1/3 scenarios passed, FAILED: my-auth, SKIPPED: last-one
+```
+
+`--fail-fast` skips the rest after the first failure. `--count` above 1 is a usage error (exit 2). Options, JSON and JUnit shapes and exit codes: [scenarios.md](scenarios.md#suite-runs).
 
 ## Fleet mode
 

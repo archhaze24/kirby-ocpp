@@ -19,6 +19,7 @@ Work in progress after 0.4.0.
 - `call` steps in `kirby-csms` scripts take `expect_payload = { ... }`, a JSON subset the CALLRESULT payload must contain (with `expect_status`; not with `expect_error`).
 - Emulator scenarios have loops: `action = "repeat"` with `count` (1..=1000) and nested `[[steps.steps]]`, up to 3 levels, counters `${i}` / `${i0}` (or a custom `var`), at most 10000 expanded steps (checked at load time). Reports and JUnit list every executed step as `name [n]` (`name [2.3]` when nested).
 - Five new built-in scenarios: `heartbeat-and-status`, `metering-burst`, `data-transfer`, `security-event` and `reconnect` (see `kirby-ocpp scenarios list`).
+- `kirby-ocpp suite [SOURCE...]` runs many scenarios (files, directories of `*.toml`, built-in names, `--all-builtins`) one after another, each on a fresh station, with a per-scenario PASS/FAIL line, a summary, `--report` (suite JSON), one `--junit` file with a test suite per scenario, `--fail-fast`, `--var` and a per-scenario `--timeout`.
 
 ### Documentation
 

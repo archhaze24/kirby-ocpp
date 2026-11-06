@@ -100,6 +100,20 @@ Profiles and certificates are explained in [Security](security.md).
 | `--id-tag <IDTAG>` | | none | Replace the `idTag` of the scenario's `authorize`, `start_tx`, `stop_tx` steps (non-empty) |
 | `--var <NAME=VALUE>` | | none | Set a scenario variable (repeatable); overrides `[vars]`; `true`/`false`/numbers keep their type; `station_id` and `index` are built in and cannot be set. See [Scenarios](scenarios.md#variables) |
 
+`kirby-ocpp suite [SOURCE]...` runs several scenarios one after another, each on a fresh station with persistence off (`--state-dir` and `--no-persist` are ignored). It accepts every station option above except a fleet (`--count` above 1 exits 2) plus:
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `[SOURCE]...` | | none | Scenario file, directory (`*.toml` directly inside, sorted) or built-in name; at least one SOURCE or `--all-builtins` is required |
+| `--all-builtins` | | off | Also run every built-in scenario except `finish-session` (needs a transaction left by an earlier run) |
+| `--report <PATH>` | | none | Write the suite summary as JSON (`"type": "suite_report"`) |
+| `--junit <PATH>` | | none | Write one JUnit XML file with one test suite per scenario |
+| `--timeout <SECONDS>` | | `60` | Per scenario, connecting included; 1 to 86400 |
+| `--fail-fast` | | off | Stop after the first failed scenario; the rest are reported as SKIP |
+| `--var <NAME=VALUE>` | | none | Scenario variable for every scenario (repeatable), as for `run` |
+
+Exit codes of `suite`: 0 all scenarios passed; 1 any failed, timed out or could not boot, or a report file could not be written; 2 usage error; 130 SIGINT. See [Scenarios](scenarios.md#suite-runs).
+
 `kirby-ocpp scenarios list` lists the built-in scenarios; `kirby-ocpp scenarios show <NAME>` prints one as TOML. Scenario format: [Scenarios](scenarios.md).
 
 ## Id templates
@@ -198,7 +212,7 @@ CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md).
 | 0 | Success (scenario passed, normal shutdown) | Success or clean shutdown |
 | 1 | Scenario step failed or timed out, or runtime error; in fleet mode, any station failed | Script failed or timed out, or runtime error |
 | 2 | Usage or configuration error | Usage or configuration error |
-| 130 | `run` interrupted by SIGINT (SIGTERM still ends with 1) | Script interrupted by SIGINT |
+| 130 | `run` or `suite` interrupted by SIGINT (SIGTERM still ends with 1) | Script interrupted by SIGINT |
 
 ## Related pages
 

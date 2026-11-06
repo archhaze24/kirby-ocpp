@@ -7,7 +7,7 @@ Two TOML formats drive a test run without a human:
 
 Both stop at the first failing step, print a PASS/FAIL/SKIP report, can write a JSON report and a JUnit XML file, and use the same exit codes ([Reports](#reports)).
 
-Contents: [Emulator scenarios](#emulator-scenarios) · [Running scenarios](#running-scenarios) · [Fleet runs](#fleet-runs) · [CSMS scripts](#csms-scripts) · [Reports](#reports) · [Related pages](#related-pages)
+Contents: [Emulator scenarios](#emulator-scenarios) · [Running scenarios](#running-scenarios) · [Suite runs](#suite-runs) · [Fleet runs](#fleet-runs) · [CSMS scripts](#csms-scripts) · [Reports](#reports) · [Related pages](#related-pages)
 
 ## Emulator scenarios
 
@@ -275,6 +275,38 @@ exit $status
 ```
 
 Point `--junit` at the path your CI reads test reports from.
+
+## Suite runs
+
+```
+kirby-ocpp [station options] suite [SOURCE...] [--all-builtins] [--report suite.json] [--junit junit.xml] [--timeout 60] [--fail-fast] [--var NAME=VALUE]
+```
+
+`suite` runs many scenarios one after another, each on a fresh station (see [Suite mode](emulator.md#suite-mode)). SOURCE is a file, a directory (`*.toml` directly inside, sorted by name; an empty directory is a usage error) or a built-in name; at least one SOURCE or `--all-builtins` is required. `--all-builtins` skips `finish-session`, which needs a running transaction. Scenario names that appear twice get their source appended in the output and the reports (`name (path)`). All scenarios are loaded first: a bad file exits 2 before any connection.
+
+| Option | Meaning |
+| --- | --- |
+| `--timeout SECONDS` | Per scenario, connecting included (default 60) |
+| `--fail-fast` | Stop after the first failed scenario; the rest are reported as SKIP |
+| `--var NAME=VALUE` | Variable for every scenario, as in `run` |
+| `--report PATH` | Write the suite summary as JSON |
+| `--junit PATH` | Write one JUnit file with a `<testsuite>` per scenario (skipped scenarios are left out; a scenario whose station never booted is one errored `setup` case) |
+| `--json` | Print events and one `report` line per scenario that ran, then the summary |
+
+Output: `PASS name (1.2 s)`, `FAIL name: first failing step - reason` (or the setup error), `SKIP name`, then `suite: 7/8 scenarios passed, FAILED: a, b` (`, SKIPPED: ...` when some were skipped). The JSON summary (`--report`, and the last line under `--json`) is `{"type":"suite_report","passed":false,"total":8,"passed_count":7,"failed":["a"],"skipped":[],"scenarios":[{"name":"a","status":"failed","duration_ms":1200,"report":{...}}],"duration_ms":9000}`. `status` is `passed`, `failed`, `error` (never booted, or cut short; carries `error` instead of `report`) or `skipped`.
+
+Exit codes: 0 only if every scenario passes; 1 if any fails, times out or cannot boot, or a report file could not be written; 2 usage error (no source, empty directory, bad file, `--count` above 1); 130 SIGINT (no report files). SIGTERM stops the running scenario, skips the rest, writes the reports and exits 1.
+
+A CI job that tests the CSMS under test with the emulator, and the emulator with a scripted CSMS:
+
+```bash
+kirby-csms --listen 127.0.0.1:9000 --no-tui --script csms-script.toml --junit csms-junit.xml &
+CSMS=$!
+kirby-ocpp --url ws://127.0.0.1:9000/ocpp suite scenarios/ --junit junit.xml --report suite.json
+status=$?
+wait $CSMS || status=1
+exit $status
+```
 
 ## Fleet runs
 
