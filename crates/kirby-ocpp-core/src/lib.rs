@@ -15,6 +15,7 @@ pub mod ocpp;
 pub mod scenario;
 pub mod station;
 pub mod store;
+pub mod text;
 pub mod ws;
 
 pub use clock::{Clock, ManualClock, SystemClock};

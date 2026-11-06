@@ -1194,7 +1194,7 @@ pub fn station_id_from_path(path: &str) -> Option<String> {
         .ok()?;
     (!decoded.is_empty()
         && decoded.len() <= MAX_STATION_ID_LEN
-        && !decoded.chars().any(char::is_control))
+        && !decoded.chars().any(kirby_ocpp_core::text::is_unsafe_char))
     .then(|| decoded.into_owned())
 }
 
@@ -1253,6 +1253,10 @@ mod tests {
         assert!(station_id_from_path(&format!("/{}", "a".repeat(128))).is_some());
         assert_eq!(station_id_from_path(&format!("/{}", "a".repeat(129))), None);
         assert_eq!(station_id_from_path("/CP%0A1"), None);
+        // Bidi overrides and line separators are refused like controls.
+        for bad in ["/CP%E2%80%AE1", "/CP%E2%80%A81", "/CP%E2%81%A61"] {
+            assert_eq!(station_id_from_path(bad), None, "{bad}");
+        }
         assert_eq!(station_id_from_path("/CP%001"), None);
         assert_eq!(station_id_from_path("/CP%1B%5B1"), None);
     }

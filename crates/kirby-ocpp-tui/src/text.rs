@@ -10,15 +10,7 @@ pub fn width(s: &str) -> usize {
     UnicodeWidthStr::width(s)
 }
 
-/// Characters that must not reach a terminal or a log line: C0/C1 controls (escape sequences,
-/// newlines), the Unicode line and paragraph separators and the bidirectional overrides.
-pub fn is_unsafe_char(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{2028}' | '\u{2029}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
-        )
-}
+pub use kirby_ocpp_core::text::is_unsafe_char;
 
 /// Replaces unsafe characters (see [`is_unsafe_char`]) with a visible dot.
 pub fn sanitize(s: &str) -> String {

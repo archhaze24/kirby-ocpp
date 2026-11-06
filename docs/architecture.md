@@ -94,7 +94,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 
 ## CSMS internals
 
-* `CsmsServer` accepts any number of stations on `ws(s)://host:port/<any prefix>/<station id>`; the id is the last non-empty percent-decoded path segment. A second connection with the same id replaces the first (`Disconnected{Replaced}`).
+* `CsmsServer` accepts any number of stations on `ws(s)://host:port/<any prefix>/<station id>`; the id is the last non-empty percent-decoded path segment. Ids with control, line-separator or bidi characters (`kirby_ocpp_core::text::is_unsafe_char`) or over 128 bytes are refused with HTTP 400. A second connection with the same id replaces the first (`Disconnected{Replaced}`).
 * Outbound CALLs are serialized per station (one outstanding); at most 1024 more wait behind it, further `call()`s fail with `CsmsError::QueueFull` (entries whose caller gave up are dropped first); the timeout counts from the write; a late reply after a timeout is recorded but ignored.
 * Inbound CALLs: schema-validated if `validate_inbound`; then a `Fault` (global, counted), a responder, or the canned `default_reply`; known non-CP actions get `NotSupported`, unknown `NotImplemented`; malformed frames with a readable id get `FormationViolation`.
 * State tracking (`state.rs`) is built from the actual reply payload of CALLs answered with `Reply::Result`. Stopped transactions are capped (`transaction_history_cap`), active ones at 256. Free text from stations (boot fields, connector `info`/vendor codes, security events) is cut to the schema maximum (255 characters at most).
