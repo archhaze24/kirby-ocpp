@@ -36,18 +36,127 @@ pub struct StepReport {
     #[serde(flatten)]
     pub status: StepStatus,
     pub duration_ms: u64,
+    /// Label, action and failure evidence (boxed to keep the type small).
+    #[serde(flatten)]
+    pub detail: Box<StepDetail>,
+}
+
+/// The machine-readable part of a [`StepReport`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct StepDetail {
+    /// Stable label for machine-readable reports (see [`Step::stable_label`]).
+    pub label: String,
+    /// The step's action name (empty when the producer does not know it).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub action: String,
+    /// Failed steps only: the resolved parameters (secrets redacted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub params: Option<Value>,
+    /// Failed assertions only: what was expected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<Value>,
+    /// Failed assertions only: what was seen, clipped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual: Option<String>,
+}
+
+impl StepReport {
+    /// A report without failure evidence; the label is the name.
+    #[must_use]
+    pub fn new(index: usize, name: String, status: StepStatus, duration_ms: u64) -> Self {
+        Self {
+            index,
+            detail: Box::new(StepDetail {
+                label: name.clone(),
+                action: String::new(),
+                params: None,
+                expected: None,
+                actual: None,
+            }),
+            name,
+            status,
+            duration_ms,
+        }
+    }
+}
+
+/// Overall outcome of a run, in the vocabulary shared by every report level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Passed,
+    Failed,
+    /// The run produced no report (the station could not connect or boot).
+    Error,
+    Skipped,
+}
+
+impl RunStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::Error => "error",
+            Self::Skipped => "skipped",
+        }
+    }
 }
 
 /// Result of a whole run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ScenarioReport {
+    /// Report format version ([`super::SCHEMA_VERSION`]).
+    pub schema: u32,
+    pub ocpp_version: String,
+    pub tool_version: String,
+    /// Station id; `None` for runs without a station (CSMS scripts).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub station: Option<String>,
+    /// File path or `builtin:NAME` of the scenario.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// RFC 3339 UTC time the run started.
+    pub started_at: String,
     pub scenario: String,
+    pub status: RunStatus,
     /// Every step passed.
     pub passed: bool,
     /// The run was stopped through its [`CancelToken`].
     pub cancelled: bool,
     pub steps: Vec<StepReport>,
     pub duration_ms: u64,
+}
+
+impl ScenarioReport {
+    /// A report with the current schema and OCPP version, no station or source, started now.
+    #[must_use]
+    pub fn new(
+        scenario: String,
+        passed: bool,
+        cancelled: bool,
+        steps: Vec<StepReport>,
+        duration_ms: u64,
+    ) -> Self {
+        Self {
+            schema: super::SCHEMA_VERSION,
+            ocpp_version: super::OCPP_VERSION.to_owned(),
+            tool_version: super::TOOL_VERSION.to_owned(),
+            station: None,
+            source: None,
+            started_at: super::now_rfc3339(),
+            scenario,
+            status: if passed {
+                RunStatus::Passed
+            } else {
+                RunStatus::Failed
+            },
+            passed,
+            cancelled,
+            steps,
+            duration_ms,
+        }
+    }
 }
 
 /// Live progress, for UIs.
@@ -172,7 +281,9 @@ async fn run_inner(
     vars: Vars,
 ) -> ScenarioReport {
     let started = Instant::now();
+    let started_at = super::now_rfc3339();
     let mut ctx = Ctx {
+        evidence: Evidence::default(),
         handle,
         events,
         lagged: 0,
@@ -190,6 +301,8 @@ async fn run_inner(
     let mut cut_short = false;
     for (index, flat_step) in flat.iter().enumerate() {
         let name = flat_step.name.clone();
+        let label = flat_step.label.clone();
+        let action = flat_step.step.action.name().to_owned();
         if failed || cancel.is_cancelled() {
             let status = if failed {
                 StepStatus::Skipped
@@ -198,12 +311,9 @@ async fn run_inner(
                 cut_short = true;
                 StepStatus::Failed("cancelled".to_owned())
             };
-            let report = StepReport {
-                index,
-                name,
-                status,
-                duration_ms: 0,
-            };
+            let mut report = StepReport::new(index, name, status, 0);
+            report.detail.label = label;
+            report.detail.action = action;
             if let Some(tx) = progress {
                 let _ = tx.send(ScenarioProgress::StepFinished(report.clone()));
             }
@@ -217,6 +327,7 @@ async fn run_inner(
             });
         }
         let step_started = Instant::now();
+        ctx.evidence = Evidence::default();
         for (counter, iteration) in &flat_step.counters {
             // Counter names are valid and never built-ins (checked when the scenario loads).
             let _ = ctx.vars.insert(counter, (iteration + 1).into());
@@ -234,24 +345,53 @@ async fn run_inner(
                 StepStatus::Failed(reason)
             }
         };
-        let report = StepReport {
-            index,
-            name,
-            status,
-            duration_ms: millis(step_started.elapsed()),
-        };
+        let evidence = std::mem::take(&mut ctx.evidence);
+        let mut report = StepReport::new(index, name, status, millis(step_started.elapsed()));
+        report.detail.label = label;
+        report.detail.action = action;
+        if matches!(report.status, StepStatus::Failed(_)) {
+            report.detail.params = evidence.params.or_else(|| step_params(flat_step.step));
+            report.detail.expected = evidence.expected;
+            report.detail.actual = evidence.actual;
+        }
         if let Some(tx) = progress {
             let _ = tx.send(ScenarioProgress::StepFinished(report.clone()));
         }
         steps.push(report);
     }
-    ScenarioReport {
-        scenario: scenario.name.clone(),
-        passed: steps.iter().all(|s| s.status == StepStatus::Passed),
-        cancelled: cut_short,
+    let mut report = ScenarioReport::new(
+        scenario.name.clone(),
+        steps.iter().all(|s| s.status == StepStatus::Passed),
+        cut_short,
         steps,
-        duration_ms: millis(started.elapsed()),
+        millis(started.elapsed()),
+    );
+    report.started_at = started_at;
+    report.station = Some(handle.snapshot().charge_point_id.clone());
+    report.source.clone_from(&scenario.source);
+    report
+}
+
+/// What a failed step can tell about itself beyond the reason text.
+#[derive(Debug, Default)]
+struct Evidence {
+    params: Option<Value>,
+    expected: Option<Value>,
+    actual: Option<String>,
+}
+
+/// The step's parameters as JSON, without the `action` tag, secrets redacted.
+fn step_params(step: &Step) -> Option<Value> {
+    let mut value = serde_json::to_value(&step.action).ok()?;
+    let fields = value.as_object_mut()?;
+    fields.remove("action");
+    if let Some(expect) = &step.expect
+        && let Ok(expect) = serde_json::to_value(expect)
+    {
+        fields.insert("expect".to_owned(), expect);
     }
+    super::redact_params(&mut value);
+    Some(value)
 }
 
 fn millis(duration: Duration) -> u64 {
@@ -282,6 +422,7 @@ fn wanted_calls(scenario: &Scenario) -> HashMap<String, bool> {
 }
 
 struct Ctx<'a> {
+    evidence: Evidence,
     handle: &'a StationHandle,
     events: broadcast::Receiver<Event>,
     /// Events lost since the last report: the subscription dropped them because the runner
@@ -366,7 +507,9 @@ impl Ctx<'_> {
 
     async fn run_step(&mut self, step: &Step) -> Result<(), String> {
         self.pump();
+        self.evidence.params = step_params(step);
         let step = &substitute_step(step, &self.vars)?;
+        self.evidence.params = step_params(step);
         let answer = match &step.action {
             Action::Sleep { ms } => {
                 sleep(Duration::from_millis(*ms)).await;
@@ -386,6 +529,7 @@ impl Ctx<'_> {
                     Ok(Ok(_)) => None,
                     Ok(Err(_)) => return Err("station stopped".to_owned()),
                     Err(_) => {
+                        self.evidence.expected = serde_json::to_value(condition).ok();
                         return Err(format!(
                             "timed out after {timeout_ms} ms waiting for {condition:?}"
                         ));
@@ -404,7 +548,7 @@ impl Ctx<'_> {
             action => {
                 let command = to_command(action)?;
                 let result = self.handle.send(command).await;
-                check(step, action, result)?
+                check(step, action, result, &mut self.evidence)?
             }
         };
         for (name, pointer) in &step.capture {
@@ -467,6 +611,21 @@ impl Ctx<'_> {
                     }
                 },
                 () = sleep_until(deadline) => {
+                    let mut expected = serde_json::json!({"call": call});
+                    if let Some(direction) = direction {
+                        expected["direction"] = serde_json::to_value(direction).unwrap_or_default();
+                    }
+                    if let Some(matches) = matches {
+                        expected["match"] = matches.clone();
+                    }
+                    self.evidence.expected = Some(expected);
+                    // The latest frame of that action that did not match, if any.
+                    self.evidence.actual = self
+                        .frames
+                        .iter()
+                        .rev()
+                        .find(|(record, _)| record.frame.get(2).and_then(Value::as_str) == Some(call))
+                        .map(|(record, _)| vars::clip_json(record.frame.get(3).unwrap_or(&Value::Null)));
                     return Err(format!("timed out after {timeout_ms} ms waiting for a {call} CALL"));
                 }
                 () = self.cancel.cancelled() => return Err("cancelled".to_owned()),
@@ -576,6 +735,7 @@ fn check(
     step: &Step,
     action: &Action,
     result: Result<Outcome, StationError>,
+    evidence: &mut Evidence,
 ) -> Result<Option<Value>, String> {
     let default = Expect::default();
     let expect = step.expect.as_ref().unwrap_or(&default);
@@ -603,6 +763,8 @@ fn check(
         match outcome_status(&outcome) {
             Some(actual) if actual == wanted => {}
             Some(actual) => {
+                evidence.expected = Some(Value::String(wanted.to_owned()));
+                evidence.actual = Some(vars::clip_text(&actual));
                 return Err(format!(
                     "{}: expected status {wanted}, got {}",
                     action.name(),
@@ -610,6 +772,7 @@ fn check(
                 ));
             }
             None => {
+                evidence.expected = Some(Value::String(wanted.to_owned()));
                 return Err(format!(
                     "{}: expected status {wanted}, but the outcome carries none",
                     action.name()
@@ -621,6 +784,8 @@ fn check(
         match &outcome {
             Outcome::Response { payload } if json_subset(wanted, payload) => {}
             Outcome::Response { payload } => {
+                evidence.expected = Some(wanted.clone());
+                evidence.actual = Some(vars::clip_json(payload));
                 return Err(format!(
                     "{}: response {} does not contain {}",
                     action.name(),
@@ -733,6 +898,7 @@ mod tests {
             let (handle, join) = crate::Station::spawn(config, Arc::new(clock));
             let cancel = CancelToken::new();
             let mut ctx = Ctx {
+                evidence: Evidence::default(),
                 handle: &handle,
                 events: handle.subscribe(),
                 lagged: 0,

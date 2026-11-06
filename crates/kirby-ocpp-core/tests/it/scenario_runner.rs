@@ -192,6 +192,8 @@ async fn a_cancel_after_the_last_step_does_not_mark_the_report_cancelled() {
         description: String::new(),
         vars: kirby_ocpp_core::scenario::Vars::default(),
         steps: Vec::new(),
+        tags: Vec::new(),
+        source: None,
     };
     let cancel = CancelToken::new();
     cancel.cancel();
@@ -517,7 +519,7 @@ data = "${i}.${j}.${j0}"
         outcome: Ok(&report),
     }]);
     assert_eq!(xml.matches("<testcase ").count(), 7, "{xml}");
-    assert!(xml.contains("name=\"7. inner [2.2]\""), "{xml}");
+    assert!(xml.contains("name=\"inner [2.2]\""), "{xml}");
     rig.shutdown().await;
 }
 
@@ -585,5 +587,81 @@ ms = 20
             .iter()
             .any(|s| matches!(&s.status, StepStatus::Failed(r) if r == "cancelled"))
     );
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn reports_carry_metadata_and_failure_evidence() {
+    let rig = booted_rig().await;
+    let mut s = scenario(
+        r#"
+[[steps]]
+action = "heartbeat"
+[[steps]]
+action = "heartbeat"
+expect = { payload = { currentTime = "x" } }
+[[steps]]
+action = "send_raw"
+call = "ChangeConfiguration"
+payload = { key = "AuthorizationKey", value = "hunter2hunter2" }
+expect = { status = "Never" }
+"#,
+    );
+    s.source = Some("builtin:t".to_owned());
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    assert_eq!(report.schema, 1);
+    assert_eq!(report.ocpp_version, "1.6");
+    assert_eq!(report.status.as_str(), "failed");
+    assert_eq!(report.source.as_deref(), Some("builtin:t"));
+    assert_eq!(
+        report.station.as_deref(),
+        Some(rig.station.snapshot().charge_point_id.as_str())
+    );
+    assert!(report.started_at.ends_with('Z') && report.started_at.contains('T'));
+
+    let ok = &report.steps[0];
+    assert_eq!(ok.detail.action, "heartbeat");
+    assert_eq!(ok.detail.label, "heartbeat");
+    assert!(ok.detail.params.is_none() && ok.detail.expected.is_none());
+
+    let bad = &report.steps[1];
+    assert!(matches!(bad.status, StepStatus::Failed(_)), "{report:#?}");
+    assert_eq!(
+        bad.detail.expected,
+        Some(serde_json::json!({"currentTime": "x"}))
+    );
+    assert!(
+        bad.detail
+            .actual
+            .as_deref()
+            .is_some_and(|a| a.contains("currentTime"))
+    );
+    let params = bad.detail.params.as_ref().expect("params");
+    assert_eq!(params["expect"]["payload"]["currentTime"], "x");
+    assert!(params.get("action").is_none());
+
+    // Step 3 is skipped (the run stops at the failure); run it alone for the redaction check.
+    let s = scenario(
+        r#"
+[[steps]]
+action = "send_raw"
+call = "ChangeConfiguration"
+payload = { key = "AuthorizationKey", value = "hunter2hunter2" }
+expect = { status = "Never" }
+"#,
+    );
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    let step = &report.steps[0];
+    assert!(matches!(step.status, StepStatus::Failed(_)), "{report:#?}");
+    let text = serde_json::to_string(&report).unwrap();
+    assert!(!text.contains("hunter2hunter2"), "{text}");
+    assert_eq!(
+        step.detail.params.as_ref().unwrap()["payload"]["value"],
+        "***"
+    );
+    assert_eq!(step.detail.label, "send_raw ChangeConfiguration");
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["steps"][0]["action"], "send_raw");
+    assert_eq!(json["steps"][0]["status"], "failed");
     rig.shutdown().await;
 }

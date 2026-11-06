@@ -59,6 +59,13 @@ pub struct Scenario {
     #[serde(skip_serializing_if = "Vars::is_empty")]
     pub vars: Vars,
     pub steps: Vec<Step>,
+    /// Free-form labels from the reserved `tags` key (kept, not used for filtering yet).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Where the scenario came from: a file path or `builtin:NAME`; `None` for text parsed
+    /// with [`Scenario::from_toml`].
+    #[serde(skip)]
+    pub source: Option<String>,
 }
 
 /// One step: an [`Action`] plus an optional display name and outcome assertion.
@@ -216,6 +223,9 @@ pub enum Action {
 pub struct FlatStep<'a> {
     /// The step's label with the iteration path appended, e.g. `plug [2.3]`.
     pub name: String,
+    /// Stable report label: the explicit `name`, else one derived from the action and its
+    /// main parameters (`start_tx c1 TAG`), with the iteration path appended.
+    pub label: String,
     pub step: &'a Step,
     /// Loop counters in scope, outermost first (a later entry shadows an earlier one):
     /// `(variable name, 0-based iteration)`; the 1-based value is bound as `name`, the
@@ -307,6 +317,48 @@ impl Step {
             .clone()
             .unwrap_or_else(|| self.action.name().to_owned())
     }
+
+    /// The stable label used in machine-readable reports: the explicit `name`, else the action
+    /// name plus its main parameters, for example `expect_call Heartbeat out`,
+    /// `wait_for tx_active c1` or `start_tx c1 TAG`. Never just a position.
+    pub fn stable_label(&self) -> String {
+        if let Some(name) = &self.name {
+            return name.clone();
+        }
+        let Ok(Value::Object(fields)) = serde_json::to_value(&self.action) else {
+            return self.action.name().to_owned();
+        };
+        let mut parts = vec![self.action.name().to_owned()];
+        let mut text = |value: Option<&Value>| match value {
+            Some(Value::String(s)) if !s.is_empty() => parts.push(s.clone()),
+            Some(Value::Number(n)) => parts.push(n.to_string()),
+            _ => {}
+        };
+        if let Some(Value::Object(condition)) = fields.get("condition") {
+            text(condition.get("kind"));
+            if let Some(connector) = condition.get("connector").and_then(Value::as_u64) {
+                text(Some(&Value::String(format!("c{connector}"))));
+            }
+            text(condition.get("status"));
+        }
+        for key in ["call", "event_type", "vendor_id", "rule"] {
+            text(fields.get(key));
+        }
+        if let Some(connector) = fields.get("connector").and_then(Value::as_u64) {
+            text(Some(&Value::String(format!("c{connector}"))));
+        }
+        for key in ["direction", "id_tag", "status", "error_code"] {
+            text(fields.get(key));
+        }
+        if let Some(ms) = fields.get("ms").and_then(Value::as_u64) {
+            text(Some(&Value::String(format!("{ms}ms"))));
+        }
+        let label = parts.join(" ");
+        match label.char_indices().nth(80) {
+            Some((at, _)) => format!("{}...", &label[..at]),
+            None => label,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -316,9 +368,47 @@ struct RawScenario {
     #[serde(default)]
     description: String,
     #[serde(default)]
+    ocpp_version: Option<String>,
+    #[serde(default)]
+    schema: Option<i64>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
     vars: toml::Table,
     #[serde(default)]
-    steps: Vec<toml::Table>,
+    steps: Vec<toml::Spanned<toml::Table>>,
+}
+
+/// A load failure with the byte offset it points at, when known.
+struct Located {
+    message: String,
+    offset: Option<usize>,
+}
+
+impl Located {
+    fn at(message: impl Into<String>, offset: usize) -> Self {
+        Self {
+            message: message.into(),
+            offset: Some(offset),
+        }
+    }
+
+    fn plain(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            offset: None,
+        }
+    }
+}
+
+impl From<ScenarioError> for Located {
+    fn from(error: ScenarioError) -> Self {
+        let message = match error {
+            ScenarioError::Invalid(message) => message,
+            other => other.to_string(),
+        };
+        Self::plain(message)
+    }
 }
 
 /// Largest scenario file [`Scenario::load`] reads.
@@ -351,28 +441,48 @@ impl Scenario {
     /// [`ScenarioError::Invalid`] naming the offending step for unknown actions, missing or
     /// unknown fields and bad values.
     pub fn from_toml(text: &str) -> Result<Self, ScenarioError> {
-        let raw: RawScenario =
-            toml::from_str(text).map_err(|e| ScenarioError::invalid(e.message()))?;
+        Self::parse(text).map_err(|e| {
+            ScenarioError::Invalid(match e.offset {
+                Some(offset) => {
+                    let (line, column) = super::line_col(text, offset);
+                    format!("{} (line {line}, column {column})", e.message)
+                }
+                None => e.message,
+            })
+        })
+    }
+
+    fn parse(text: &str) -> Result<Self, Located> {
+        let raw: RawScenario = toml::from_str(text).map_err(|e| Located {
+            message: super::with_suggestion(e.message().to_owned()),
+            offset: e.span().map(|span| span.start),
+        })?;
+        super::check_contract_keys(raw.ocpp_version.as_deref(), raw.schema)
+            .map_err(Located::plain)?;
         if raw.name.trim().is_empty() {
-            return Err(ScenarioError::invalid("`name` must not be empty"));
+            return Err(Located::plain("`name` must not be empty"));
         }
         if raw.steps.is_empty() {
-            return Err(ScenarioError::invalid(
-                "a scenario needs at least one `[[steps]]`",
-            ));
+            return Err(Located::plain("a scenario needs at least one `[[steps]]`"));
         }
         let vars = parse_vars(raw.vars)?;
         let steps = raw
             .steps
             .into_iter()
             .enumerate()
-            .map(|(i, table)| parse_step(table, 0).map_err(|e| ScenarioError::step(i, &e)))
+            .map(|(i, table)| {
+                let offset = table.span().start;
+                parse_step(table.into_inner(), 0)
+                    .map_err(|e| Located::at(format!("step {}: {e}", i + 1), offset))
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let scenario = Self {
             name: raw.name,
             description: raw.description,
             vars,
             steps,
+            tags: raw.tags,
+            source: None,
         };
         scenario.validate()?;
         Ok(scenario)
@@ -387,7 +497,21 @@ impl Scenario {
             path: path.to_path_buf(),
             source,
         })?;
-        Self::from_toml(&text)
+        match Self::parse(&text) {
+            Ok(mut scenario) => {
+                scenario.source = Some(path.display().to_string());
+                Ok(scenario)
+            }
+            Err(e) => {
+                let position = e.offset.map(|offset| super::line_col(&text, offset));
+                Err(ScenarioError::InvalidFile {
+                    path: path.to_path_buf(),
+                    line: position.map(|(line, _)| line),
+                    column: position.map(|(_, column)| column),
+                    message: e.message,
+                })
+            }
+        }
     }
 
     /// The steps that actually run, in order: every `repeat` expanded, each name suffixed with
@@ -600,6 +724,7 @@ fn expand<'a>(steps: &'a [Step], counters: &mut Vec<(String, u64)>, out: &mut Ve
             }
         } else {
             let mut name = step.label();
+            let mut label = step.stable_label();
             if !counters.is_empty() {
                 let path = counters
                     .iter()
@@ -607,9 +732,11 @@ fn expand<'a>(steps: &'a [Step], counters: &mut Vec<(String, u64)>, out: &mut Ve
                     .collect::<Vec<_>>()
                     .join(".");
                 name = format!("{name} [{path}]");
+                label = format!("{label} [{path}]");
             }
             out.push(FlatStep {
                 name,
+                label,
                 step,
                 counters: counters.clone(),
             });
@@ -798,7 +925,12 @@ fn parse_step(mut table: toml::Table, open_loops: usize) -> Result<Step, String>
     };
     let action = toml::Value::Table(table)
         .try_into::<Action>()
-        .map_err(|e| format!("action `{tag}`: {}", e.message()))?;
+        .map_err(|e| {
+            format!(
+                "action `{tag}`: {}",
+                super::with_suggestion(e.message().to_owned())
+            )
+        })?;
     let mut action = action;
     if !capture.is_empty()
         && !matches!(
@@ -1260,6 +1392,96 @@ call = "Heartbeat"
         );
         assert!(
             matches!(&s.steps[1].action, Action::Authorize { id_tag } if id_tag.as_str() == "B")
+        );
+    }
+
+    #[test]
+    fn contract_keys_are_checked() {
+        let step = "[[steps]]\naction = \"heartbeat\"\n";
+        let ok = Scenario::from_toml(&format!(
+            "name = \"t\"\nocpp_version = \"1.6\"\nschema = 1\ntags = [\"a\", \"b\"]\n{step}"
+        ))
+        .unwrap();
+        assert_eq!(ok.tags, ["a", "b"]);
+        let e = err(&format!("name = \"t\"\nocpp_version = \"2.0.1\"\n{step}"));
+        assert!(e.contains("OCPP 1.6 only") && e.contains("2.0.1"), "{e}");
+        let e = err(&format!("name = \"t\"\nschema = 2\n{step}"));
+        assert!(e.contains("unsupported schema 2"), "{e}");
+        let e = err(&format!("name = \"t\"\ntags = [1]\n{step}"));
+        assert!(e.contains("string"), "{e}");
+        let e = err(&format!("name = \"t\"\ncolour = 1\n{step}"));
+        assert!(e.contains("unknown field `colour`"), "{e}");
+    }
+
+    #[test]
+    fn typos_get_a_suggestion_and_errors_a_position() {
+        let e = err("name = \"t\"\n[[steps]]\naction = \"heartbaet\"\n");
+        assert!(e.contains("did you mean `heartbeat`"), "{e}");
+        assert!(
+            e.contains("step 1") && e.contains("line 2, column 1"),
+            "{e}"
+        );
+        let e = err("name = \"t\"\n[[steps]]\naction = \"plug\"\nconnecter = 1\n");
+        assert!(e.contains("step 1"), "{e}");
+        let e = err("nmae = \"t\"\n");
+        assert!(e.contains("did you mean `name`"), "{e}");
+        let e = err("name = \"t\"\n[[steps]]\naction = \"zzzzzzzz\"\n");
+        assert!(!e.contains("did you mean"), "{e}");
+    }
+
+    #[test]
+    fn load_errors_name_the_file_and_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "name = \"t\"\nnmae = 1\n").unwrap();
+        let e = Scenario::load(&path).unwrap_err().to_string();
+        assert!(
+            e.starts_with(&format!("{}:2:1: invalid scenario", path.display())),
+            "{e}"
+        );
+        std::fs::write(&path, "name = \"t\"\n[[steps]]\naction = \"nope\"\n").unwrap();
+        let e = Scenario::load(&path).unwrap_err().to_string();
+        assert!(e.contains(":2:1:") && e.contains("step 1"), "{e}");
+        std::fs::write(&path, "name = \"t\"\n[[steps]]\naction = \"heartbeat\"\n").unwrap();
+        let ok = Scenario::load(&path).unwrap();
+        assert_eq!(ok.source.as_deref(), Some(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn stable_labels_are_derived_from_the_action() {
+        let s = Scenario::from_toml(
+            r#"
+name = "t"
+[[steps]]
+action = "expect_call"
+call = "Heartbeat"
+direction = "out"
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", connector = 1 }
+[[steps]]
+action = "start_tx"
+connector = 1
+id_tag = "TAG"
+[[steps]]
+name = "explicit"
+action = "heartbeat"
+[[steps]]
+action = "sleep"
+ms = 5
+"#,
+        )
+        .unwrap();
+        let labels: Vec<String> = s.steps.iter().map(Step::stable_label).collect();
+        assert_eq!(
+            labels,
+            [
+                "expect_call Heartbeat out",
+                "wait_for tx_active c1",
+                "start_tx c1 TAG",
+                "explicit",
+                "sleep 5ms"
+            ]
         );
     }
 }

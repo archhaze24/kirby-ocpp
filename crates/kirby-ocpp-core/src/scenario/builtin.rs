@@ -43,6 +43,12 @@ pub const SOURCES: &[(&str, &str)] = &[
     ("reconnect", include_str!("../../scenarios/reconnect.toml")),
 ];
 
+fn parse(name: &str, text: &str) -> Result<Scenario, super::ScenarioError> {
+    let mut scenario = Scenario::from_toml(text)?;
+    scenario.source = Some(format!("builtin:{name}"));
+    Ok(scenario)
+}
+
 /// All built-in scenarios, parsed.
 ///
 /// # Panics
@@ -50,9 +56,7 @@ pub const SOURCES: &[(&str, &str)] = &[
 pub fn all() -> Vec<Scenario> {
     SOURCES
         .iter()
-        .map(|(name, text)| {
-            Scenario::from_toml(text).unwrap_or_else(|e| panic!("built-in `{name}`: {e}"))
-        })
+        .map(|(name, text)| parse(name, text).unwrap_or_else(|e| panic!("built-in `{name}`: {e}")))
         .collect()
 }
 
@@ -68,7 +72,11 @@ pub fn source(name: &str) -> Option<&'static str> {
 
 /// A built-in scenario by name.
 pub fn get(name: &str) -> Option<Scenario> {
-    source(name).and_then(|text| Scenario::from_toml(text).ok())
+    let wanted = normalize(name);
+    SOURCES
+        .iter()
+        .find(|(n, _)| *n == wanted)
+        .and_then(|(n, text)| parse(n, text).ok())
 }
 
 #[cfg(test)]
