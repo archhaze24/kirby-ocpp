@@ -143,7 +143,7 @@ Rules:
 
 ## HTTP API
 
-`--api-listen 127.0.0.1:9100` starts a local JSON HTTP API next to the server (off by default; works with the TUI, headless and `--script`): list stations, read state and frame history, send CALLs, forget stations. Calls share the 256-command limit with stdin and return the same result object. After the `listening` line the server prints `api listening on http://ADDR` (`{"type":"api_listening","addr":..,"url":..}` with `--json`). A non-loopback address needs `--api-token` / `--api-token-file`. Plain HTTP only. Endpoints, auth model and examples: [api.md](api.md).
+`--api-listen 127.0.0.1:9100` starts a local JSON HTTP API next to the server (off by default; works with the TUI, headless and `--script`): list stations, read state and frame history, send CALLs, forget stations, stream events (SSE) and manage response rules and faults. Calls share the 256-command limit with stdin and return the same result object. After the `listening` line the server prints `api listening on http://ADDR` (`{"type":"api_listening","addr":..,"url":..}` with `--json`). A non-loopback address needs `--api-token` / `--api-token-file`. Plain HTTP only. Endpoints, auth model and examples: [api.md](api.md).
 
 ## Response rules and fault injection
 

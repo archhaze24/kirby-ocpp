@@ -100,7 +100,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * State tracking (`state.rs`) is built from the actual reply payload of CALLs answered with `Reply::Result`. Stopped transactions are capped (`transaction_history_cap`), active ones at 256. Free text from stations (boot fields, connector `info`/vendor codes, security events) is cut to the schema maximum (255 characters at most).
 * Security profiles 0-3 (`auth.rs`, `tls.rs`): Basic Auth checked in the handshake callback (constant-time, user must equal the URL id), TLS, mTLS with client CN equal to the station id; refusals emit `CsmsEvent::AuthFailed`.
 * One global `std::sync::Mutex` guards engine state; events are emitted under the lock to keep ordering.
-* The `kirby-csms` binary can expose `CsmsHandle` over a local HTTP API (`api.rs`, `axum` with only the `http1` and `tokio` features). It only uses the handle and `commands.rs`, which the stdin handler shares, so result shapes and the 256-command in-flight limit are the same for both. See [api.md](api.md).
+* The `kirby-csms` binary can expose `CsmsHandle` over a local HTTP API (`api.rs`, `axum` with only the `http1` and `tokio` features). It only uses the handle and `commands.rs`, which the stdin handler shares, so result shapes and the 256-command in-flight limit are the same for both. The SSE stream (`/v1/events`, at most 16) uses the `--json` renderer of `headless.rs` (`Renderer`), and fault parsing/validation is shared with the script steps. See [api.md](api.md).
 * Limits: frame size 1 MiB, 100 000 stations, 1024 sockets in their TLS/WebSocket handshake at once (`max_pending_handshakes`; extra sockets are closed), per-action counters capped at 64 keys, write timeout 10 s.
 
 ## Data flow
