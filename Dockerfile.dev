@@ -1,0 +1,27 @@
+# Developer image built from a source checkout (no pre-built binaries needed):
+#   docker build -f Dockerfile.dev -t kirby-ocpp:dev .
+# The release image (Dockerfile) is assembled from the CI-built musl binaries instead.
+FROM rust:1-alpine3.24 AS build
+RUN apk add --no-cache build-base
+WORKDIR /src
+COPY . .
+RUN cargo build --release --locked -p kirby-ocpp -p kirby-csms \
+ && mkdir /out \
+ && cp target/release/kirby-ocpp target/release/kirby-csms /out/
+
+FROM alpine:3.24
+LABEL org.opencontainers.image.source="https://github.com/archhaze24/kirby-ocpp" \
+      org.opencontainers.image.licenses="MIT"
+RUN apk add --no-cache ca-certificates \
+ && adduser -D -u 10001 kirby \
+ && mkdir /data \
+ && chown kirby:kirby /data
+COPY --from=build /out/kirby-ocpp /out/kirby-csms /usr/local/bin/
+COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENV KIRBY_OCPP_STATE_DIR=/data
+USER kirby
+WORKDIR /data
+VOLUME /data
+EXPOSE 9000
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["--help"]

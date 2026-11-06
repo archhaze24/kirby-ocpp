@@ -1,0 +1,11 @@
+# Release image: only dist/ and docker/ are needed. Dockerfile.dev needs the sources.
+.git
+target
+npm/dist
+node_modules
+docs/rewrite
+AGENTS.md
+.github
+.idea
+.vscode
+*.log
