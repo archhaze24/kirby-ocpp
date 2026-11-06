@@ -51,13 +51,48 @@ pub fn failure(station: Option<&str>, action: Option<&str>, error: &str) -> Valu
     })
 }
 
-/// The outcome of [`call`].
+/// What became of a [`call`].
+#[derive(Debug)]
+pub enum Outcome {
+    /// The station answered with a CALLRESULT.
+    Result,
+    /// The station answered with a CALLERROR.
+    CallError,
+    /// The station did not answer in time.
+    Timeout,
+    /// No usable answer and the cause is not a protocol-level outcome: the station is unknown
+    /// or not connected, the queue is full, the connection closed, or an internal failure.
+    Failed(CsmsError),
+}
+
+/// The answer of [`call`].
 #[derive(Debug)]
 pub struct CallAnswer {
-    /// The `result` object.
+    /// The shared `result` object (the stdin framing).
     pub value: Value,
-    /// The station is unknown or not connected (nothing was sent).
-    pub missing_station: bool,
+    /// What happened.
+    pub outcome: Outcome,
+}
+
+impl CallAnswer {
+    /// The body of an API answer for a call that reached the station (or timed out): the
+    /// shared `result` object without `type`, `station` and `action` (the request names
+    /// them), plus `outcome`. `None` when the call failed before any protocol outcome.
+    pub fn api_body(&self) -> Option<Value> {
+        let outcome = match self.outcome {
+            Outcome::Result => "result",
+            Outcome::CallError => "call_error",
+            Outcome::Timeout => "timeout",
+            Outcome::Failed(_) => return None,
+        };
+        let mut body = self.value.clone();
+        let object = body.as_object_mut()?;
+        for key in ["type", "station", "action"] {
+            object.remove(key);
+        }
+        object.insert("outcome".to_owned(), outcome.into());
+        Some(body)
+    }
 }
 
 /// Sends one CALL and builds the `result` object. `timeout` defaults to the server's
@@ -73,10 +108,10 @@ pub async fn call(
         Some(timeout) => handle.call_timeout(station, action, payload, timeout).await,
         None => handle.call(station, action, payload).await,
     };
-    let (value, missing_station) = match result {
+    let (value, outcome) = match result {
         Ok(Frame::CallResult { payload, .. }) => (
             json!({"type": "result", "station": station, "action": action, "ok": true, "result": payload}),
-            false,
+            Outcome::Result,
         ),
         Ok(Frame::CallError {
             code,
@@ -89,24 +124,27 @@ pub async fn call(
                 "error": format!("CALLERROR {}: {description}", code.as_str()),
                 "code": code.as_str(), "details": details,
             }),
-            false,
+            Outcome::CallError,
         ),
         Ok(Frame::Call { .. }) => (
             failure(Some(station), Some(action), "unexpected CALL as an answer"),
-            false,
+            Outcome::Failed(CsmsError::InvalidResponse {
+                station: station.to_owned(),
+                action: action.to_owned(),
+                reason: "unexpected CALL as an answer".to_owned(),
+            }),
         ),
-        Err(error) => (
-            failure(Some(station), Some(action), &error.to_string()),
-            matches!(
-                error,
-                CsmsError::UnknownStation { .. } | CsmsError::NotConnected { .. }
-            ),
-        ),
+        Err(error) => {
+            let value = failure(Some(station), Some(action), &error.to_string());
+            let outcome = if matches!(error, CsmsError::Timeout { .. }) {
+                Outcome::Timeout
+            } else {
+                Outcome::Failed(error)
+            };
+            (value, outcome)
+        }
     };
-    CallAnswer {
-        value,
-        missing_station,
-    }
+    CallAnswer { value, outcome }
 }
 
 /// What an injected fault does instead of the normal answer.

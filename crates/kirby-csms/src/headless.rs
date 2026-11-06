@@ -135,6 +135,7 @@ pub fn station_summary(info: &StationInfo, state: Option<&StationState>) -> Valu
     let mut value = json!({
         "id": info.id,
         "connected": info.connected,
+        "protocol": info.subprotocol,
         "received_calls": info.received_calls,
     });
     let Some(object) = value.as_object_mut() else {
@@ -268,9 +269,27 @@ impl Renderer {
         let stamp = ts.to_rfc3339_opts(SecondsFormat::Millis, true);
         match event {
             CsmsEvent::Connected { station } => {
+                // The registry still holds this connection's data unless another connection
+                // or a forget raced in; then the fields describe that newer state.
+                let info = self.handle.station(station);
+                let remote = info.as_ref().and_then(|info| info.remote_addr);
+                let protocol = info.and_then(|info| info.subprotocol);
+                let profile = self.handle.security_profile().number();
                 self.push(
-                    &json!({"type": "connected", "ts": stamp, "station": station}),
-                    &format!("{clock} {} connected", sanitize(station)),
+                    &json!({
+                        "type": "connected", "ts": stamp, "station": station,
+                        "remote_addr": remote.map(|addr| addr.to_string()),
+                        "protocol": protocol,
+                    }),
+                    &format!(
+                        "{clock} {} connected from {} ({}, profile {profile})",
+                        sanitize(station),
+                        remote
+                            .map_or_else(|| "unknown address".to_owned(), |addr| addr.to_string()),
+                        protocol
+                            .as_deref()
+                            .map_or_else(|| "no subprotocol".to_owned(), sanitize),
+                    ),
                 );
             }
             CsmsEvent::Disconnected { station, reason } => {

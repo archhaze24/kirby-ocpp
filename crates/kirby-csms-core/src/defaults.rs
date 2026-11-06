@@ -27,6 +27,10 @@ pub const CHARGE_POINT_ACTIONS: &[&str] = &[
     "StopTransaction",
 ];
 
+/// The WebSocket subprotocol whose actions [`CHARGE_POINT_ACTIONS`] and
+/// [`is_charge_point_action`] describe.
+pub const ACTIONS_PROTOCOL: &str = "ocpp1.6";
+
 /// Whether `action` is one a charge point may initiate in OCPP 1.6.
 pub fn is_charge_point_action(action: &str) -> bool {
     CHARGE_POINT_ACTIONS.contains(&action)

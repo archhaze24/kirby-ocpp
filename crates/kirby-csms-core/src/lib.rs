@@ -51,7 +51,7 @@ mod tls;
 mod typed;
 
 pub use config::{CsmsConfig, SecurityPolicy, SecurityProfile};
-pub use defaults::{CHARGE_POINT_ACTIONS, default_reply, is_charge_point_action};
+pub use defaults::{ACTIONS_PROTOCOL, CHARGE_POINT_ACTIONS, default_reply, is_charge_point_action};
 pub use error::CsmsError;
 pub use event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
 pub use fault::{Fault, Reply, Responder};

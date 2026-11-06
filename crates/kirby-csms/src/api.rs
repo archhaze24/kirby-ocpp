@@ -5,7 +5,7 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Extension, Path, Request, State};
-use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -23,7 +23,9 @@ use futures_util::{StreamExt, stream};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
-use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Reply, is_charge_point_action};
+use kirby_csms_core::{
+    ACTIONS_PROTOCOL, CsmsError, CsmsEvent, CsmsHandle, Direction, Reply, is_charge_point_action,
+};
 use kirby_ocpp_core::text::is_unsafe_char;
 use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde::Deserialize;
@@ -35,7 +37,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, Sleep};
 
-use crate::commands;
+use crate::commands::{self, Outcome};
 use crate::headless::{Renderer, frame_json, station_summary};
 
 /// Largest request body accepted, bytes.
@@ -83,6 +85,8 @@ struct ApiState {
     payload: Arc<Semaphore>,
     /// How long an event stream lasts.
     stream_max_age: Duration,
+    /// Source of the SSE `id:` values: one counter for the whole server.
+    event_ids: Arc<AtomicU64>,
 }
 
 /// Timing limits of the server; tests use short ones.
@@ -360,6 +364,7 @@ fn spawn_with(
         bound,
         payload: Arc::new(Semaphore::new(limits.payload_budget)),
         stream_max_age: limits.stream_max_age,
+        event_ids: Arc::new(AtomicU64::new(0)),
     };
     let app = router(state);
     let task = tokio::spawn(serve(
@@ -383,6 +388,7 @@ impl Api {
 
 fn router(state: ApiState) -> Router {
     Router::new()
+        .route("/v1", get(index))
         .route("/v1/health", get(health))
         .route("/v1/stations", get(list_stations))
         .route("/v1/stations/{id}", get(get_station).delete(forget_station))
@@ -397,10 +403,15 @@ fn router(state: ApiState) -> Router {
                 .post(inject_fault)
                 .delete(clear_faults),
         )
-        .fallback(|| async { error(StatusCode::NOT_FOUND, "not found") })
+        .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "not found") })
         .method_not_allowed_fallback(|| async {
-            error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
+            error(
+                StatusCode::METHOD_NOT_ALLOWED,
+                "method_not_allowed",
+                "method not allowed",
+            )
         })
+        .layer(middleware::from_fn(options))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(middleware::from_fn(close_connection))
         .with_state(state)
@@ -420,8 +431,93 @@ fn reply(status: StatusCode, value: &Value) -> Response {
         .into_response()
 }
 
-fn error(status: StatusCode, message: &str) -> Response {
-    reply(status, &json!({"error": message}))
+/// The error body of every API error: `{"error": {"code": "snake_case", "message": "text"}}`.
+/// The code is stable; the message is for people.
+fn error(status: StatusCode, code: &str, message: &str) -> Response {
+    reply(
+        status,
+        &json!({"error": {"code": code, "message": message}}),
+    )
+}
+
+/// The version of the API contract (the `/v1` prefix).
+const API_VERSION: u32 = 1;
+
+/// Every route: path pattern and the methods its handlers answer (`HEAD` for a `GET` route and
+/// `OPTIONS` are implied). The index and the `OPTIONS` answers read this table.
+const ROUTES: &[(&str, &[&str])] = &[
+    ("/v1", &["GET"]),
+    ("/v1/health", &["GET"]),
+    ("/v1/stations", &["GET"]),
+    ("/v1/stations/{id}", &["GET", "DELETE"]),
+    ("/v1/stations/{id}/history", &["GET"]),
+    ("/v1/stations/{id}/calls", &["POST"]),
+    ("/v1/events", &["GET"]),
+    ("/v1/rules", &["GET"]),
+    ("/v1/rules/{action}", &["PUT", "DELETE"]),
+    ("/v1/faults", &["GET", "POST", "DELETE"]),
+];
+
+/// The methods of the route that `path` matches (`{name}` matches one non-empty segment).
+fn route_methods(path: &str) -> Option<&'static [&'static str]> {
+    ROUTES.iter().find_map(|(pattern, methods)| {
+        let mut want = pattern.split('/');
+        let mut have = path.split('/');
+        loop {
+            match (want.next(), have.next()) {
+                (None, None) => return Some(*methods),
+                (Some(w), Some(h)) if w.starts_with('{') && !h.is_empty() => {}
+                (Some(w), Some(h)) if w == h => {}
+                _ => return None,
+            }
+        }
+    })
+}
+
+/// `OPTIONS` on a known path: `204` with `Allow`, and no CORS headers (browsers are refused by
+/// design, see docs/api.md). It runs inside [`auth`], so the token and `Host` rules apply.
+async fn options(request: Request, next: Next) -> Response {
+    if request.method() == Method::OPTIONS
+        && let Some(methods) = route_methods(request.uri().path())
+    {
+        let mut allow: Vec<&str> = methods.to_vec();
+        if methods.contains(&"GET") {
+            allow.push("HEAD");
+        }
+        allow.push("OPTIONS");
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        if let Ok(value) = HeaderValue::from_str(&allow.join(", ")) {
+            response.headers_mut().insert(header::ALLOW, value);
+        }
+        return response;
+    }
+    next.run(request).await
+}
+
+/// Turns the integer `id` of every transaction object into a string: transaction ids are
+/// integers in OCPP 1.6 and strings in 2.x, and the API serves strings for both. Applies to
+/// a station object (`active_transactions`, `state.transactions`) and a `state` event.
+fn stringify_transaction_ids(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(Value::Object(state)) = object.get_mut("state") {
+        state.get_mut("transactions").map(stringify_list);
+    }
+    object.get_mut("active_transactions").map(stringify_list);
+}
+
+fn stringify_list(list: &mut Value) {
+    let Value::Array(items) = list else {
+        return;
+    };
+    for item in items {
+        if let Some(Value::Number(id)) = item.get("id").cloned()
+            && let Some(object) = item.as_object_mut()
+        {
+            object.insert("id".to_owned(), id.to_string().into());
+        }
+    }
 }
 
 /// Equality that does not stop at the first differing byte.
@@ -485,7 +581,11 @@ fn valid_port(text: &str) -> bool {
 async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     let headers = request.headers();
     if headers.get_all(header::HOST).iter().nth(1).is_some() {
-        return error(StatusCode::BAD_REQUEST, "more than one Host header");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "more than one Host header",
+        );
     }
     if let Some(token) = &state.token {
         let mut values = headers.get_all(header::AUTHORIZATION).iter();
@@ -499,7 +599,11 @@ async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Re
             _ => None,
         };
         if !given.is_some_and(|given| constant_time_eq(given.as_bytes(), token.as_bytes())) {
-            let mut response = error(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
+            let mut response = error(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "missing or wrong bearer token",
+            );
             response
                 .headers_mut()
                 .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
@@ -508,6 +612,7 @@ async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Re
     } else if headers.contains_key(header::ORIGIN) {
         return error(
             StatusCode::FORBIDDEN,
+            "forbidden",
             "requests with an Origin header are refused without an API token",
         );
     } else if headers
@@ -516,6 +621,7 @@ async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Re
     {
         return error(
             StatusCode::FORBIDDEN,
+            "forbidden",
             "cross-site requests are refused without an API token",
         );
     } else if headers.get(header::HOST).is_some_and(|host| {
@@ -525,6 +631,7 @@ async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Re
     }) {
         return error(
             StatusCode::FORBIDDEN,
+            "forbidden",
             &format!(
                 "without an API token the Host header must be 127.0.0.1, [::1], localhost \
                  (any loopback IP) or the API address {}, with an optional port",
@@ -540,16 +647,33 @@ fn station_id(id: Result<Path<String>, PathRejection>) -> Result<String, Box<Res
     let Ok(Path(id)) = id else {
         return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
+            "bad_request",
             "invalid station id in the path",
         )));
     };
     if id.chars().any(is_unsafe_char) {
         return Err(Box::new(error(
             StatusCode::BAD_REQUEST,
+            "bad_request",
             "station id has control or bidirectional characters",
         )));
     }
     Ok(id)
+}
+
+async fn index() -> Response {
+    let resources: Vec<Value> = ROUTES
+        .iter()
+        .map(|(path, methods)| json!({"path": path, "methods": methods}))
+        .collect();
+    reply(
+        StatusCode::OK,
+        &json!({
+            "api_version": API_VERSION,
+            "version": env!("CARGO_PKG_VERSION"),
+            "resources": resources,
+        }),
+    )
 }
 
 async fn health(State(state): State<ApiState>) -> Response {
@@ -557,6 +681,7 @@ async fn health(State(state): State<ApiState>) -> Response {
         StatusCode::OK,
         &json!({
             "ok": true,
+            "api_version": API_VERSION,
             "version": env!("CARGO_PKG_VERSION"),
             "stations": state.handle.stations().len(),
         }),
@@ -564,10 +689,11 @@ async fn health(State(state): State<ApiState>) -> Response {
 }
 
 async fn list_stations(State(state): State<ApiState>) -> Response {
-    reply(
-        StatusCode::OK,
-        &json!({"stations": commands::stations(&state.handle)}),
-    )
+    let mut stations = commands::stations(&state.handle);
+    if let Value::Array(list) = &mut stations {
+        list.iter_mut().for_each(stringify_transaction_ids);
+    }
+    reply(StatusCode::OK, &json!({"stations": stations}))
 }
 
 async fn get_station(
@@ -579,7 +705,7 @@ async fn get_station(
         Err(response) => return *response,
     };
     let Some(info) = state.handle.station(&id) else {
-        return error(StatusCode::NOT_FOUND, "unknown station");
+        return unknown_station();
     };
     let station_state = state.handle.state(&id);
     let mut value = station_summary(&info, station_state.as_ref());
@@ -589,7 +715,12 @@ async fn get_station(
             serde_json::to_value(station_state).unwrap_or(Value::Null),
         );
     }
+    stringify_transaction_ids(&mut value);
     reply(StatusCode::OK, &value)
+}
+
+fn unknown_station() -> Response {
+    error(StatusCode::NOT_FOUND, "unknown_station", "unknown station")
 }
 
 async fn history(
@@ -611,15 +742,16 @@ async fn history(
             Some(Err(_)) | None => {
                 return error(
                     StatusCode::BAD_REQUEST,
+                    "bad_request",
                     "`limit` must be a non-negative integer",
                 );
             }
         },
         Ok(None) => None,
-        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => return error(StatusCode::BAD_REQUEST, "bad_request", &message),
     };
     let Some(entries) = state.handle.history_tail(&id, limit.unwrap_or(usize::MAX)) else {
-        return error(StatusCode::NOT_FOUND, "unknown station");
+        return unknown_station();
     };
     let frames: Vec<Value> = entries
         .iter()
@@ -656,9 +788,10 @@ async fn forget_station(
         Err(response) => return *response,
     };
     match state.handle.forget_if_disconnected(&id) {
-        None => error(StatusCode::NOT_FOUND, "unknown station"),
+        None => unknown_station(),
         Some(false) => error(
             StatusCode::CONFLICT,
+            "conflict",
             "station is connected; only a disconnected station can be forgotten",
         ),
         Some(true) => reply(StatusCode::OK, &json!({"station": id, "forgotten": true})),
@@ -679,22 +812,36 @@ async fn call(
         Err(response) => return *response,
     };
     let Value::Object(mut object) = body else {
-        return error(StatusCode::BAD_REQUEST, "the body must be a JSON object");
+        return error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "the body must be a JSON object",
+        );
     };
     let action = match object.remove("action") {
         Some(Value::String(action)) if !action.is_empty() => action,
-        _ => return error(StatusCode::BAD_REQUEST, "needs a string field `action`"),
+        _ => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "needs a string field `action`",
+            );
+        }
     };
     // Take the payload out of the body and drop the rest, so that only the payload stays
     // alive while the call runs.
     let payload = object.remove("payload").unwrap_or_else(|| json!({}));
     let timeout = match commands::parse_timeout(object.get("timeout_ms")) {
         Ok(timeout) => timeout,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        Err(message) => return error(StatusCode::BAD_REQUEST, "bad_request", message),
     };
     drop(object);
     let Ok(_permit) = Arc::clone(&state.slots).try_acquire_owned() else {
-        return error(StatusCode::TOO_MANY_REQUESTS, "too many commands in flight");
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "too many commands in flight",
+        );
     };
     let Ok(_bytes) = u32::try_from(body_bytes).map_err(|_| ()).and_then(|bytes| {
         Arc::clone(&state.payload)
@@ -703,16 +850,39 @@ async fn call(
     }) else {
         return error(
             StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
             "too much request data held by commands in flight (at most 32 MiB)",
         );
     };
     let answer = commands::call(&state.handle, &id, &action, payload, timeout).await;
-    let status = if answer.missing_station {
-        StatusCode::NOT_FOUND
-    } else {
-        StatusCode::OK
-    };
-    reply(status, &answer.value)
+    if let Some(body) = answer.api_body() {
+        return reply(StatusCode::OK, &body);
+    }
+    match answer.outcome {
+        Outcome::Failed(CsmsError::UnknownStation { .. }) => unknown_station(),
+        Outcome::Failed(
+            error @ (CsmsError::NotConnected { .. } | CsmsError::ConnectionClosed { .. }),
+        ) => self::error(
+            StatusCode::CONFLICT,
+            "station_not_connected",
+            &error.to_string(),
+        ),
+        Outcome::Failed(error @ CsmsError::QueueFull { .. }) => self::error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            &error.to_string(),
+        ),
+        Outcome::Failed(error) => self::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            &error.to_string(),
+        ),
+        Outcome::Result | Outcome::CallError | Outcome::Timeout => self::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "call outcome without a body",
+        ),
+    }
 }
 
 /// The request body (at most 1 MiB, read within 10 s) parsed as JSON.
@@ -720,6 +890,7 @@ async fn read_json(request: Request<Body>) -> Result<(Value, usize), Box<Respons
     let too_large = || {
         Box::new(error(
             StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
             "request body is larger than 1 MiB",
         ))
     };
@@ -738,6 +909,7 @@ async fn read_json(request: Request<Body>) -> Result<(Value, usize), Box<Respons
             let chunk = chunk.map_err(|_| {
                 Box::new(error(
                     StatusCode::BAD_REQUEST,
+                    "bad_request",
                     "cannot read the request body",
                 ))
             })?;
@@ -753,6 +925,7 @@ async fn read_json(request: Request<Body>) -> Result<(Value, usize), Box<Respons
         Err(_) => {
             return Err(Box::new(error(
                 StatusCode::REQUEST_TIMEOUT,
+                "request_timeout",
                 "the request body did not arrive in 10 s",
             )));
         }
@@ -763,6 +936,7 @@ async fn read_json(request: Request<Body>) -> Result<(Value, usize), Box<Respons
         .map_err(|e| {
             Box::new(error(
                 StatusCode::BAD_REQUEST,
+                "bad_request",
                 &format!("invalid JSON: {e}"),
             ))
         })
@@ -820,13 +994,15 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// One SSE event: `event:` is the `type` of the JSON object in `data:`.
-fn sse_event(value: &Value) -> Event {
+/// One SSE event: `id:` comes from the server-wide counter, `event:` is the `type` of the
+/// JSON object in `data:`.
+fn sse_event(ids: &AtomicU64, value: &Value) -> Event {
     let kind = value
         .get("type")
         .and_then(Value::as_str)
         .unwrap_or("message");
     Event::default()
+        .id((ids.fetch_add(1, Ordering::Relaxed) + 1).to_string())
         .event(kind)
         .data(escape_json_unsafe(&value.to_string()))
 }
@@ -841,6 +1017,7 @@ struct StreamState {
     ends_at: Instant,
     /// The server stopped: send what is queued and what the channel still holds, then end.
     ending: bool,
+    ids: Arc<AtomicU64>,
     /// Held for the life of the stream: dropping the stream frees the slot.
     _permit: OwnedSemaphorePermit,
 }
@@ -858,8 +1035,11 @@ impl StreamState {
             .as_deref()
             .is_none_or(|id| event_station(event) == Some(id))
         {
-            for (value, _) in self.renderer.render(event) {
-                self.queue.push_back(sse_event(&value));
+            for (mut value, _) in self.renderer.render(event) {
+                if value["type"] == "state" {
+                    stringify_transaction_ids(&mut value);
+                }
+                self.queue.push_back(sse_event(&self.ids, &value));
             }
         }
     }
@@ -869,6 +1049,7 @@ impl StreamState {
     fn lagged(&mut self, missed: u64) {
         self.renderer.reset();
         self.queue.push_back(sse_event(
+            &self.ids,
             &json!({"type": "note", "text": format!("{missed} events were dropped")}),
         ));
     }
@@ -881,11 +1062,12 @@ async fn events(
 ) -> Response {
     let filter = match query_param(&uri, "station") {
         Ok(filter) => filter,
-        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
+        Err(message) => return error(StatusCode::BAD_REQUEST, "bad_request", &message),
     };
     let Ok(permit) = Arc::clone(&state.streams).try_acquire_owned() else {
         return error(
             StatusCode::SERVICE_UNAVAILABLE,
+            "too_many_streams",
             "too many event streams (at most 16)",
         );
     };
@@ -899,6 +1081,7 @@ async fn events(
         stopped: state.stopped.clone(),
         ends_at: Instant::now() + state.stream_max_age,
         ending: false,
+        ids: Arc::clone(&state.event_ids),
         _permit: permit,
     };
     let events = stream::unfold(init, |mut st| async move {
@@ -912,7 +1095,7 @@ async fn events(
             let ends_at = st.ends_at;
             tokio::select! {
                 () = tokio::time::sleep_until(ends_at) => {
-                    st.queue.push_back(sse_event(&json!({
+                    st.queue.push_back(sse_event(&st.ids, &json!({
                         "type": "note",
                         "text": "the stream reached its maximum age; reconnect to continue",
                     })));
@@ -952,9 +1135,18 @@ async fn list_rules(State(state): State<ApiState>) -> Response {
 fn rule_action(action: Result<Path<String>, PathRejection>) -> Result<String, Box<Response>> {
     match action {
         Ok(Path(action)) if is_charge_point_action(&action) => Ok(action),
-        _ => Err(Box::new(error(
+        Ok(Path(action)) => Err(Box::new(error(
             StatusCode::BAD_REQUEST,
-            "not an action a charge point can send",
+            "unsupported_action",
+            &format!(
+                "{} is not a known charge-point action for protocol {ACTIONS_PROTOCOL}",
+                kirby_ocpp_tui::text::sanitize(&action)
+            ),
+        ))),
+        Err(_) => Err(Box::new(error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "invalid action in the path",
         ))),
     }
 }
@@ -970,7 +1162,13 @@ async fn put_rule(
     };
     let payload = match read_json(request).await {
         Ok((payload, _)) if payload.is_object() => payload,
-        Ok(_) => return error(StatusCode::BAD_REQUEST, "the body must be a JSON object"),
+        Ok(_) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "the body must be a JSON object",
+            );
+        }
         Err(response) => return *response,
     };
     state
@@ -1016,7 +1214,13 @@ async fn inject_fault(State(state): State<ApiState>, request: Request<Body>) -> 
     };
     let fault: FaultRequest = match serde_json::from_value(body) {
         Ok(fault) => fault,
-        Err(e) => return error(StatusCode::BAD_REQUEST, &format!("invalid fault: {e}")),
+        Err(e) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                &format!("invalid fault: {e}"),
+            );
+        }
     };
     if let Err(message) = commands::check_fault(
         &fault.action,
@@ -1024,7 +1228,7 @@ async fn inject_fault(State(state): State<ApiState>, request: Request<Body>) -> 
         fault.payload.as_ref(),
         fault.times,
     ) {
-        return error(StatusCode::BAD_REQUEST, &message);
+        return error(StatusCode::BAD_REQUEST, "bad_request", &message);
     }
     if let Err(message) = state.handle.try_inject(commands::build_fault(
         &fault.action,
@@ -1032,7 +1236,7 @@ async fn inject_fault(State(state): State<ApiState>, request: Request<Body>) -> 
         fault.payload,
         fault.times,
     )) {
-        return error(StatusCode::CONFLICT, &message);
+        return error(StatusCode::CONFLICT, "conflict", &message);
     }
     reply(
         StatusCode::OK,

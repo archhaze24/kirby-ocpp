@@ -192,23 +192,62 @@ async fn health_and_error_shapes() {
     assert_eq!(status, 200);
     assert_eq!(body["ok"], true);
     assert_eq!(body["stations"], 0);
+    assert_eq!(body["api_version"], 1);
     assert!(body["version"].is_string());
+
+    // The index lists every route; each listed path answers OPTIONS with an Allow header.
+    let (status, body) = csms.get("/v1").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["api_version"], 1);
+    assert!(body["version"].is_string());
+    let resources = body["resources"].as_array().unwrap();
+    assert!(resources.len() >= 10, "{body}");
+    assert!(resources.contains(&json!({"path": "/v1/health", "methods": ["GET"]})));
+    assert!(
+        resources.contains(&json!({"path": "/v1/faults", "methods": ["GET", "POST", "DELETE"]}))
+    );
+    for resource in resources {
+        let path = resource["path"]
+            .as_str()
+            .unwrap()
+            .replace("{id}", "X")
+            .replace("{action}", "Heartbeat");
+        let answer = raw_exchange(
+            &csms.api_addr,
+            &format!("OPTIONS {path} HTTP/1.1\r\nHost: {}\r\n\r\n", csms.api_addr),
+        )
+        .await;
+        assert_eq!(status_of(&answer), 204, "{path}: {answer}");
+        let lower = answer.to_lowercase();
+        for method in resource["methods"].as_array().unwrap() {
+            let allow = lower
+                .lines()
+                .find(|line| line.starts_with("allow:"))
+                .unwrap_or_default();
+            assert!(
+                allow.contains(&method.as_str().unwrap().to_lowercase()),
+                "{path}: {answer}"
+            );
+        }
+        assert!(!lower.contains("access-control-"), "{answer}");
+    }
 
     let (status, body) = csms.get("/v1/stations").await;
     assert_eq!((status, &body), (200, &json!({"stations": []})));
 
     let (status, body) = csms.get("/v1/nope").await;
     assert_eq!(status, 404);
-    assert!(body["error"].is_string());
+    assert_eq!(body["error"]["code"], "not_found");
+    assert!(body["error"]["message"].is_string());
     let (status, body) = csms.get("/v1/stations/NOPE").await;
     assert_eq!(status, 404);
-    assert!(body["error"].is_string());
+    assert_eq!(body["error"]["code"], "unknown_station");
     let (status, _) = csms.get("/v1/stations/NOPE/history").await;
     assert_eq!(status, 404);
 
     let (status, body) = http(&csms.api_addr, "POST", "/v1/health", &[], Some("{}")).await;
     assert_eq!(status, 405);
-    assert!(body["error"].is_string());
+    assert_eq!(body["error"]["code"], "method_not_allowed");
     let (status, _) = http(&csms.api_addr, "GET", "/v1/stations/X/calls", &[], None).await;
     assert_eq!(status, 405);
 
@@ -225,14 +264,17 @@ async fn health_and_error_shapes() {
         let addr = csms.api_addr.clone();
         async move { http(&addr, "POST", "/v1/stations/X/calls", &[], Some(body)).await }
     };
-    assert_eq!(call("not json").await.0, 400);
+    let (status, body) = call("not json").await;
+    assert_eq!(
+        (status, &body["error"]["code"]),
+        (400, &json!("bad_request"))
+    );
     assert_eq!(call("[1]").await.0, 400);
     assert_eq!(call("{}").await.0, 400);
     assert_eq!(call(r#"{"action":"Reset","timeout_ms":0}"#).await.0, 400);
     let (status, body) = call(r#"{"action":"Reset"}"#).await;
     assert_eq!(status, 404);
-    assert_eq!(body["ok"], false);
-    assert_eq!(body["station"], "X");
+    assert_eq!(body["error"]["code"], "unknown_station");
 
     let (status, _, body) = http_raw(
         &csms.api_addr,
@@ -244,7 +286,7 @@ async fn health_and_error_shapes() {
     )
     .await;
     assert_eq!(status, 413);
-    assert!(body["error"].is_string());
+    assert_eq!(body["error"]["code"], "payload_too_large");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -258,13 +300,15 @@ async fn station_calls_history_and_forget() {
     assert_eq!(first["id"], "CP-1");
     assert_eq!(first["connected"], true);
     assert!(first["vendor"].is_string());
+    assert_eq!(first["protocol"], "ocpp1.6");
 
     let (status, body) = csms.get("/v1/stations/CP-1").await;
     assert_eq!(status, 200);
     assert_eq!(body["id"], "CP-1");
+    assert_eq!(body["protocol"], "ocpp1.6");
     assert!(body["state"].is_object(), "{body}");
 
-    // Same result object as the stdin command.
+    // The shared result object without `type`, `station` and `action`, plus `outcome`.
     let (status, body) = csms
         .post_call(
             "CP-1",
@@ -275,8 +319,7 @@ async fn station_calls_history_and_forget() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(
         body,
-        json!({"type": "result", "station": "CP-1", "action": "ChangeConfiguration",
-            "ok": true, "result": {"status": "Accepted"}})
+        json!({"outcome": "result", "ok": true, "result": {"status": "Accepted"}})
     );
 
     // A CALLERROR is a normal result.
@@ -285,12 +328,23 @@ async fn station_calls_history_and_forget() {
         .await;
     assert_eq!(status, 200);
     assert_eq!(body["ok"], false);
+    assert_eq!(body["outcome"], "call_error");
+    assert!(
+        body.get("type").is_none() && body.get("station").is_none() && body.get("action").is_none()
+    );
+    assert!(body["code"].is_string());
     assert!(body["error"].as_str().unwrap().contains("CALLERROR"));
 
-    // Unknown station: 404 with the result object.
+    // Unknown station: 404 with the error body.
     let (status, body) = csms.post_call("GHOST", &json!({"action": "Reset"})).await;
     assert_eq!(status, 404);
-    assert!(body["error"].as_str().unwrap().contains("unknown station"));
+    assert_eq!(body["error"]["code"], "unknown_station");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unknown station")
+    );
 
     // History: oldest first, `limit` keeps the newest.
     let (status, body) = csms.get("/v1/stations/CP-1/history").await;
@@ -311,7 +365,7 @@ async fn station_calls_history_and_forget() {
     // Connected: cannot forget.
     let (status, body) = http(&csms.api_addr, "DELETE", "/v1/stations/CP-1", &[], None).await;
     assert_eq!(status, 409);
-    assert!(body["error"].is_string());
+    assert_eq!(body["error"]["code"], "conflict");
 
     let _ = station.shutdown().await;
     loop {
@@ -321,6 +375,10 @@ async fn station_calls_history_and_forget() {
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    // Known but disconnected: 409.
+    let (status, body) = csms.post_call("CP-1", &json!({"action": "Reset"})).await;
+    assert_eq!(status, 409);
+    assert_eq!(body["error"]["code"], "station_not_connected");
     let (status, body) = http(&csms.api_addr, "DELETE", "/v1/stations/CP-1", &[], None).await;
     assert_eq!(status, 200, "{body}");
     assert_eq!(csms.get("/v1/stations/CP-1").await.0, 404);
@@ -361,7 +419,7 @@ async fn bearer_token_is_required_when_configured() {
     for path in ["/v1/health", "/v1/stations", "/v1/nope"] {
         let (status, body) = http(addr, "GET", path, &[], None).await;
         assert_eq!(status, 401, "{path}");
-        assert!(body["error"].is_string());
+        assert!(body["error"]["code"].is_string());
     }
     let (status, head, _) = http_raw(addr, "GET", "/v1/health", &[], None, None).await;
     assert_eq!(status, 401);
@@ -421,7 +479,7 @@ async fn origin_header_is_refused_without_a_token() {
     )
     .await;
     assert_eq!(status, 403);
-    assert!(body["error"].is_string());
+    assert!(body["error"]["code"].is_string());
     assert_eq!(csms.get("/v1/health").await.0, 200);
 }
 
@@ -681,8 +739,16 @@ async fn rules_round_trip() {
     ] {
         let (status, reply) = http(addr, "PUT", path, &[], Some(body)).await;
         assert_eq!(status, 400, "{path} {body}: {reply}");
-        assert!(reply["error"].is_string());
+        assert!(reply["error"]["code"].is_string());
     }
+    let (_, reply) = http(addr, "PUT", "/v1/rules/Reset", &[], Some("{}")).await;
+    assert_eq!(reply["error"]["code"], "unsupported_action");
+    assert!(
+        reply["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ocpp1.6")
+    );
     assert_eq!(
         http(addr, "DELETE", "/v1/rules/Reset", &[], None).await.0,
         400
@@ -726,7 +792,7 @@ async fn faults_round_trip() {
     ] {
         let (status, reply) = post(body).await;
         assert_eq!(status, 400, "{body}: {reply}");
-        assert!(reply["error"].is_string());
+        assert!(reply["error"]["code"].is_string());
     }
     assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 0}));
 }
@@ -786,7 +852,7 @@ async fn too_many_commands_in_flight_get_429() {
     loop {
         let (status, body) = csms.post_call("GHOST", &json!({"action": "Reset"})).await;
         if status == 429 {
-            assert!(body["error"].is_string());
+            assert!(body["error"]["code"].is_string());
             break;
         }
         assert_eq!(status, 404, "{body}");
@@ -935,7 +1001,11 @@ async fn head_and_options_are_answered() {
         &format!("OPTIONS /v1/health HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
     )
     .await;
-    assert_eq!(status_of(&options), 405, "{options}");
+    assert_eq!(status_of(&options), 204, "{options}");
+    assert!(
+        options.to_lowercase().contains("allow: get, head, options"),
+        "{options}"
+    );
     // Every answer closes the connection.
     assert!(options.to_lowercase().contains("connection: close"));
 }
@@ -981,7 +1051,7 @@ async fn limit_is_percent_decoded_like_station() {
     assert_eq!(status, 400);
     let (status, body) = csms.get("/v1/stations/CP-1/history?station=x").await;
     assert_eq!(status, 400);
-    assert!(body["error"].as_str().unwrap().contains("limit"));
+    assert!(body["error"]["message"].as_str().unwrap().contains("limit"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -997,7 +1067,12 @@ async fn fault_sizes_and_counts_are_bounded() {
         )
         .await;
         assert_eq!(status, 400, "{body}");
-        assert!(body["error"].as_str().unwrap().contains("at most"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("at most")
+        );
     }
     let (status, body) =
         post(r#"{"action":"Heartbeat","kind":"silence","times":1000000}"#.to_owned()).await;
@@ -1011,7 +1086,12 @@ async fn fault_sizes_and_counts_are_bounded() {
     }
     let (status, body) = post(r#"{"action":"Heartbeat","kind":"silence"}"#.to_owned()).await;
     assert_eq!(status, 409, "{body}");
-    assert!(body["error"].as_str().unwrap().contains("too many faults"));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too many faults")
+    );
     assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 1000}));
     http(addr, "DELETE", "/v1/faults", &[], None).await;
 
@@ -1290,4 +1370,57 @@ async fn early_errors_reach_a_client_that_is_still_sending_its_body() {
         assert!(read.is_ok(), "reset instead of an answer: {read:?}");
         assert_eq!(status_of(&answer), want, "{answer}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connected_event_ids_and_string_transaction_ids() {
+    use kirby_ocpp_core::ids::{ConnectorId, IdTag};
+    let csms = Csms::start(&[]);
+    let (_, mut events) = Sse::open(&csms.api_addr, "/v1/events", &[]).await;
+    let station = station(&csms.station_addr, "CP-1").await;
+    station
+        .start_transaction(ConnectorId::new(1), IdTag::new("TAG").unwrap())
+        .await
+        .unwrap();
+    events.read_until("\"active_transactions\":[{").await;
+
+    let data = events.data();
+    let connected = data.iter().find(|e| e["type"] == "connected").unwrap();
+    assert_eq!(connected["protocol"], "ocpp1.6");
+    assert!(
+        connected["remote_addr"]
+            .as_str()
+            .unwrap()
+            .starts_with("127.0.0.1:")
+    );
+    // Every message has an increasing numeric `id:`.
+    let ids: Vec<u64> = events
+        .buf
+        .lines()
+        .filter_map(|line| line.strip_prefix("id: "))
+        .map(|id| id.parse().unwrap())
+        .collect();
+    assert!(ids.len() >= 3, "{}", events.buf);
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "{ids:?}");
+    // The `state` event carries the transaction id as a string.
+    let state = data
+        .iter()
+        .find(|e| e["type"] == "state" && e["active_transactions"][0].is_object())
+        .unwrap();
+    assert!(state["active_transactions"][0]["id"].is_string(), "{state}");
+
+    let (_, list) = csms.get("/v1/stations").await;
+    assert!(
+        list["stations"][0]["active_transactions"][0]["id"].is_string(),
+        "{list}"
+    );
+    let (_, detail) = csms.get("/v1/stations/CP-1").await;
+    assert!(
+        detail["active_transactions"][0]["id"].is_string(),
+        "{detail}"
+    );
+    assert!(
+        detail["state"]["transactions"][0]["id"].is_string(),
+        "{detail}"
+    );
 }
