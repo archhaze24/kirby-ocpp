@@ -131,22 +131,78 @@ impl Vars {
 /// # Errors
 /// An unknown variable, a malformed `${`, or a non-scalar value inside longer text.
 pub fn substitute(value: &Value, vars: &Vars) -> Result<Value, String> {
+    let mut budget = MAX_SUBSTITUTED_BYTES;
+    substitute_in(value, vars, &mut budget)
+}
+
+/// Longest result of one [`substitute`] call (approximate serialized bytes): a variable that
+/// holds a large captured payload must not be multiplied without bound.
+pub const MAX_SUBSTITUTED_BYTES: usize = 1024 * 1024;
+
+/// How many characters of a foreign value a failure reason shows.
+const CLIP_CHARS: usize = 200;
+
+/// `text` cut to about 200 characters with a `...` marker; for values a peer controls that
+/// end up in failure reasons.
+#[must_use]
+pub fn clip_text(text: &str) -> String {
+    match text.char_indices().nth(CLIP_CHARS) {
+        Some((at, _)) => format!("{}... ({} bytes)", &text[..at], text.len()),
+        None => text.to_owned(),
+    }
+}
+
+/// The JSON text of `value`, clipped like [`clip_text`].
+#[must_use]
+pub fn clip_json(value: &Value) -> String {
+    clip_text(&value.to_string())
+}
+
+/// A cheap upper-ish estimate of the serialized size of `value`, without allocating.
+fn approx_size(value: &Value) -> usize {
+    match value {
+        Value::Null => 4,
+        Value::Bool(_) => 5,
+        Value::Number(_) => 24,
+        Value::String(s) => s.len() + 2,
+        Value::Array(items) => 2 + items.iter().map(|v| approx_size(v) + 1).sum::<usize>(),
+        Value::Object(map) => {
+            2 + map
+                .iter()
+                .map(|(k, v)| k.len() + 4 + approx_size(v))
+                .sum::<usize>()
+        }
+    }
+}
+
+fn spend(budget: &mut usize, bytes: usize) -> Result<(), String> {
+    *budget = budget.checked_sub(bytes).ok_or_else(|| {
+        format!("the substituted value is larger than {MAX_SUBSTITUTED_BYTES} bytes")
+    })?;
+    Ok(())
+}
+
+fn substitute_in(value: &Value, vars: &Vars, budget: &mut usize) -> Result<Value, String> {
     Ok(match value {
         Value::String(text) => {
             if let Some(name) = exact_reference(text) {
-                return lookup(vars, name).cloned();
+                let found = lookup(vars, name)?;
+                spend(budget, approx_size(found))?;
+                return Ok(found.clone());
             }
-            Value::String(substitute_str(text, vars)?)
+            let out = substitute_str(text, vars)?;
+            spend(budget, out.len() + 2)?;
+            Value::String(out)
         }
         Value::Array(items) => Value::Array(
             items
                 .iter()
-                .map(|item| substitute(item, vars))
+                .map(|item| substitute_in(item, vars, budget))
                 .collect::<Result<_, _>>()?,
         ),
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(key, item)| Ok((key.clone(), substitute(item, vars)?)))
+                .map(|(key, item)| Ok((key.clone(), substitute_in(item, vars, budget)?)))
                 .collect::<Result<_, String>>()?,
         ),
         other => other.clone(),
@@ -214,7 +270,7 @@ pub fn capture(value: &Value, pointer: &str) -> Result<Value, String> {
     value
         .pointer(pointer)
         .cloned()
-        .ok_or_else(|| format!("nothing at `{pointer}` in {value}"))
+        .ok_or_else(|| format!("nothing at `{pointer}` in {}", clip_json(value)))
 }
 
 #[cfg(test)]
@@ -230,6 +286,28 @@ mod tests {
         v.insert("b", json!(true)).unwrap();
         v.insert("o", json!({"a": 1})).unwrap();
         v
+    }
+
+    #[test]
+    fn substitution_output_is_capped() {
+        let mut v = Vars::new();
+        v.insert("big", json!("x".repeat(300_000))).unwrap();
+        let ok = json!(["${big}", "${big}"]);
+        assert!(substitute(&ok, &v).is_ok());
+        let many = Value::Array(vec![json!("${big}"); 5]);
+        let e = substitute(&many, &v).unwrap_err();
+        assert!(e.contains("larger than"), "{e}");
+        let text = json!({"k": "${big}${big}${big}${big}"});
+        assert!(substitute(&text, &v).is_err());
+    }
+
+    #[test]
+    fn peer_values_are_clipped_in_messages() {
+        let long = json!({"k": "y".repeat(5000)});
+        let e = capture(&long, "/nope").unwrap_err();
+        assert!(e.len() < 400, "{}", e.len());
+        assert_eq!(clip_text("short"), "short");
+        assert!(clip_text(&"é".repeat(500)).contains("..."));
     }
 
     #[test]

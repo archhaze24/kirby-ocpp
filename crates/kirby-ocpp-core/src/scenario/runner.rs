@@ -604,8 +604,9 @@ fn check(
             Some(actual) if actual == wanted => {}
             Some(actual) => {
                 return Err(format!(
-                    "{}: expected status {wanted}, got {actual}",
-                    action.name()
+                    "{}: expected status {wanted}, got {}",
+                    action.name(),
+                    vars::clip_text(&actual)
                 ));
             }
             None => {
@@ -621,8 +622,10 @@ fn check(
             Outcome::Response { payload } if json_subset(wanted, payload) => {}
             Outcome::Response { payload } => {
                 return Err(format!(
-                    "{}: response {payload} does not contain {wanted}",
-                    action.name()
+                    "{}: response {} does not contain {}",
+                    action.name(),
+                    vars::clip_json(payload),
+                    vars::clip_json(wanted)
                 ));
             }
             _ => {

@@ -136,7 +136,12 @@ pub async fn run(
     json: bool,
     log_file: Option<&Path>,
 ) -> ExitCode {
-    let scenario = match load_scenario(&args.scenario, connector, args.id_tag.as_deref()) {
+    let scenario = match load_scenario(
+        &args.scenario,
+        connector,
+        args.id_tag.as_deref(),
+        &args.vars,
+    ) {
         Ok(scenario) => scenario,
         Err(error) => return usage_error(&error),
     };

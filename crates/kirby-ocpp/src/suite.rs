@@ -4,13 +4,14 @@
 //! `--no-persist` are ignored), so no state leaks from one scenario into the next and nothing
 //! is written to disk.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::scenario::{
     CancelToken, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin,
@@ -21,8 +22,8 @@ use serde_json::{Value, json};
 use crate::cli::SuiteArgs;
 use crate::headless::stdout_line;
 use crate::{
-    EXIT_INTERRUPTED, connect_and_run, override_vars, print_report, shutdown_signal, spawn_sink,
-    stop_station, usage_error, write_junit,
+    EXIT_INTERRUPTED, Shutdown, connect_and_run, names_a_path, override_vars, print_report,
+    spawn_sink, stop_station, usage_error, write_junit,
 };
 
 /// Built-ins that need a transaction left by an earlier run; they cannot pass on a fresh
@@ -83,22 +84,37 @@ fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<Vec<Entry>, 
             entries.push(Entry { scenario, source });
         }
     };
+    // Files already added, by canonical path: naming one twice (or a file and its directory)
+    // runs it once.
+    let mut seen_files: HashSet<PathBuf> = HashSet::new();
     for spec in &args.sources {
-        if let Some(scenario) = builtin::get(spec) {
+        // An existing path, or text that looks like one, beats a built-in of the same name.
+        if !names_a_path(spec)
+            && let Some(scenario) = builtin::get(spec)
+        {
             add_builtin(scenario, &mut entries);
             continue;
         }
         let path = Path::new(spec);
-        let files = if path.is_dir() {
-            let files = toml_files(path)?;
-            if files.is_empty() {
-                return Err(format!("no `*.toml` scenario files in `{spec}`"));
+        let files = match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => {
+                let files = toml_files(path)?;
+                if files.is_empty() {
+                    return Err(format!("no `*.toml` scenario files in `{spec}`"));
+                }
+                files
             }
-            files
-        } else {
-            vec![path.to_path_buf()]
+            Ok(meta) if !meta.is_file() => {
+                return Err(format!("`{spec}` is not a regular file or a directory"));
+            }
+            // A missing file is reported by `Scenario::load`.
+            _ => vec![path.to_path_buf()],
         };
         for file in files {
+            let canonical = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+            if !seen_files.insert(canonical) {
+                continue;
+            }
             let mut scenario = Scenario::load(&file).map_err(|e| e.to_string())?;
             scenario.retarget(None, None);
             entries.push(Entry {
@@ -170,6 +186,7 @@ enum Signal {
 /// Runs one scenario on a fresh station. `Err` is an exit code to return at once (the log
 /// file cannot be opened).
 async fn run_one(
+    shutdown: &mut Shutdown,
     config: &StationConfig,
     entry: &Entry,
     overrides: &Vars,
@@ -202,7 +219,7 @@ async fn run_one(
     let mut signal = Signal::None;
     let result = tokio::select! {
         result = connect_and_run(&handle, &entry.scenario, &cancel, overrides, 1) => result,
-        sigint = shutdown_signal() => {
+        sigint = shutdown.recv() => {
             signal = if sigint { Signal::Int } else { Signal::Term };
             cancel.cancel();
             Err("interrupted".to_owned())
@@ -226,6 +243,7 @@ async fn run_one(
     (Ok(outcome), signal)
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn run(
     mut config: StationConfig,
     args: &SuiteArgs,
@@ -245,12 +263,34 @@ pub async fn run(
     let names = unique_names(&entries);
     config.persist = false;
     let overrides = override_vars(&args.vars);
+    for entry in &entries {
+        for (name, _) in &args.vars {
+            if !entry.scenario.uses_variable(name) {
+                eprintln!(
+                    "warning: scenario `{}` does not use the variable `{name}` (--var ignored)",
+                    entry.scenario.name
+                );
+            }
+        }
+    }
     let started = Instant::now();
+    // Created once: a signal between two scenarios is kept for the next check.
+    let mut shutdown = Shutdown::new();
 
     let mut rows: Vec<Row> = Vec::new();
     let mut interrupted = false;
     let mut terminated = false;
     for (entry, name) in entries.iter().zip(&names) {
+        if !terminated
+            && !interrupted
+            && let Some(sigint) = shutdown.recv().now_or_never()
+        {
+            if sigint {
+                interrupted = true;
+            } else {
+                terminated = true;
+            }
+        }
         let stop = terminated || interrupted || (args.fail_fast && rows.iter().any(Row::failed));
         if stop {
             rows.push(Row {
@@ -261,8 +301,16 @@ pub async fn run(
             continue;
         }
         let begun = Instant::now();
-        let (outcome, signal) =
-            run_one(&config, entry, &overrides, args.timeout, json, log_file).await;
+        let (outcome, signal) = run_one(
+            &mut shutdown,
+            &config,
+            entry,
+            &overrides,
+            args.timeout,
+            json,
+            log_file,
+        )
+        .await;
         match signal {
             Signal::None => {}
             Signal::Int => interrupted = true,
@@ -286,8 +334,10 @@ pub async fn run(
 
     let summary = summary_json(&rows, total_ms);
     let mut write_failed = false;
-    if !interrupted {
-        // Files first: a closed stdout must not cost the machine-readable reports.
+    {
+        // Files first: a closed stdout must not cost the machine-readable reports. They are
+        // written after a signal too, for what finished (the interrupted scenario is an
+        // error row, the unstarted ones are skipped).
         if let Some(path) = &args.report {
             let text = serde_json::to_string_pretty(&summary).unwrap_or_default() + "\n";
             if let Err(error) = std::fs::write(path, text) {

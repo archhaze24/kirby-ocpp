@@ -159,17 +159,34 @@ fn scenarios(action: &ScenariosCmd) -> ExitCode {
     }
 }
 
-/// Resolves `--scenario`: a built-in name, else a file.
+/// Does a scenario SOURCE argument name a file or directory rather than a built-in: it has a
+/// path separator, ends in `.toml`, or exists on disk.
+pub(crate) fn names_a_path(spec: &str) -> bool {
+    spec.contains(['/', '\\'])
+        || Path::new(spec)
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"))
+        || Path::new(spec).exists()
+}
+
+/// Resolves `--scenario`: an existing path (or something that looks like one), else a
+/// built-in name.
 fn load_scenario(
     spec: &str,
     connector: ConnectorId,
     id_tag: Option<&str>,
+    vars: &[(String, serde_json::Value)],
 ) -> Result<Scenario, String> {
     let id_tag = id_tag
         .map(IdTag::new)
         .transpose()
         .map_err(|e| e.to_string())?;
-    let (mut scenario, is_builtin) = match builtin::get(spec) {
+    let builtin = if names_a_path(spec) {
+        None
+    } else {
+        builtin::get(spec)
+    };
+    let (mut scenario, is_builtin) = match builtin {
         Some(scenario) => (scenario, true),
         None => (
             Scenario::load(Path::new(spec)).map_err(|e| e.to_string())?,
@@ -178,28 +195,77 @@ fn load_scenario(
     };
     // Built-ins target connector 1; files say what they mean.
     scenario.retarget(is_builtin.then_some(connector), id_tag.as_ref());
+    if let Some((name, _)) = vars.iter().find(|(name, _)| !scenario.uses_variable(name)) {
+        return Err(format!(
+            "unknown variable `{name}`: scenario `{}` neither declares it in `[vars]` nor uses `${{{name}}}`",
+            scenario.name
+        ));
+    }
     Ok(scenario)
 }
 
-/// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C).
+/// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C). Builds its streams per call,
+/// so use [`Shutdown`] where a signal must not be lost between two waits.
 pub(crate) async fn shutdown_signal() -> bool {
+    Shutdown::new().recv().await
+}
+
+/// SIGINT/SIGTERM streams created once: a signal that arrives while nobody awaits is kept
+/// and delivered by the next [`Shutdown::recv`].
+pub(crate) struct Shutdown {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        if let Ok(mut term) = signal(SignalKind::terminate()) {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => true,
-                _ = term.recv() => false,
+    int: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    term: Option<tokio::signal::unix::Signal>,
+}
+
+impl Shutdown {
+    pub(crate) fn new() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Self {
+                int: signal(SignalKind::interrupt()).ok(),
+                term: signal(SignalKind::terminate()).ok(),
             }
-        } else {
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+
+    /// Resolves on the next signal; `true` means SIGINT (Ctrl-C).
+    #[cfg_attr(not(unix), allow(clippy::unused_self))]
+    pub(crate) async fn recv(&mut self) -> bool {
+        #[cfg(unix)]
+        {
+            match (self.int.as_mut(), self.term.as_mut()) {
+                (Some(int), Some(term)) => {
+                    tokio::select! {
+                        _ = int.recv() => true,
+                        _ = term.recv() => false,
+                    }
+                }
+                (Some(int), None) => {
+                    int.recv().await;
+                    true
+                }
+                (None, Some(term)) => {
+                    term.recv().await;
+                    false
+                }
+                (None, None) => {
+                    let _ = tokio::signal::ctrl_c().await;
+                    true
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
             let _ = tokio::signal::ctrl_c().await;
             true
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        true
     }
 }
 
@@ -297,7 +363,12 @@ async fn run(
     json: bool,
     log_file: Option<&Path>,
 ) -> ExitCode {
-    let scenario = match load_scenario(&args.scenario, connector, args.id_tag.as_deref()) {
+    let scenario = match load_scenario(
+        &args.scenario,
+        connector,
+        args.id_tag.as_deref(),
+        &args.vars,
+    ) {
         Ok(scenario) => scenario,
         Err(error) => return usage_error(&error),
     };

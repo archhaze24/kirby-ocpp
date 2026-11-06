@@ -37,7 +37,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -386,8 +386,9 @@ struct Backlog {
     /// Other CALLs are not remembered at all.
     wanted: HashMap<String, bool>,
     max_bytes: usize,
-    /// Events were lost to a slow receiver; `wait_call` may have missed a CALL.
-    lagged: AtomicBool,
+    /// How many times events were lost to a slow receiver. A `wait_call` that started before
+    /// a loss may have missed a CALL; one that started after cannot have.
+    losses: AtomicU64,
     /// The engine's event stream ended.
     closed: AtomicBool,
     /// Signalled after every event (the single waiter is the runner).
@@ -412,7 +413,9 @@ impl Pump {
             loop {
                 match events.recv().await {
                     Ok(event) => backlog.record(event),
-                    Err(RecvError::Lagged(_)) => backlog.lagged.store(true, Ordering::Relaxed),
+                    Err(RecvError::Lagged(_)) => {
+                        backlog.losses.fetch_add(1, Ordering::Relaxed);
+                    }
                     Err(RecvError::Closed) => {
                         backlog.closed.store(true, Ordering::Relaxed);
                         backlog.wake.notify_one();
@@ -455,14 +458,14 @@ impl Backlog {
             seen: Mutex::new(SeenStore::default()),
             wanted,
             max_bytes,
-            lagged: AtomicBool::new(false),
+            losses: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             wake: Notify::new(),
         }
     }
 
     /// Waits for a matching CALL and returns its payload (`Null` unless the action's payload
-    /// is kept). Fails at once when events were lost and nothing matches:
+    /// is kept). Fails at once when events were lost after this wait started and nothing matches:
     /// the CALL may be among the lost ones, so waiting out the timeout would only stall.
     async fn wait_call(
         &self,
@@ -471,11 +474,12 @@ impl Backlog {
         payload_contains: Option<&Value>,
         end: tokio::time::Instant,
     ) -> Result<Value, WaitLost> {
+        let started_at = self.losses.load(Ordering::Relaxed);
         loop {
             if let Some(payload) = self.take_call(station, call, payload_contains) {
                 return Ok(payload);
             }
-            if self.lagged.load(Ordering::Relaxed) {
+            if self.losses.load(Ordering::Relaxed) != started_at {
                 return Err(WaitLost::Lagged);
             }
             if self.next_event(end).await.is_err() {
@@ -521,6 +525,11 @@ impl Backlog {
                 consumed: false,
                 bytes,
             });
+            if store.calls.len() > SEEN_CAP || store.bytes > self.max_bytes {
+                // Entries a `wait_call` already took are dead weight: drop them first.
+                store.calls.retain(|seen| !seen.consumed);
+                store.bytes = store.calls.iter().map(|seen| seen.bytes).sum();
+            }
             while store.calls.len() > 1
                 && (store.calls.len() > SEEN_CAP || store.bytes > self.max_bytes)
             {
@@ -710,7 +719,9 @@ impl Runner<'_> {
                     && !json_subset(expected, &answer)
                 {
                     return Err(format!(
-                        "{call}: payload {answer} does not contain {expected}"
+                        "{call}: payload {} does not contain {}",
+                        vars::clip_json(&answer),
+                        vars::clip_json(expected)
                     ));
                 }
                 self.capture(capture, &answer)
@@ -832,7 +843,10 @@ fn check_answer(
                     } else {
                         Err(format!(
                             "{call}: expected status {expected}, got {}",
-                            actual.map_or_else(|| format!("payload {payload}"), str::to_owned)
+                            actual.map_or_else(
+                                || format!("payload {}", vars::clip_json(&payload)),
+                                vars::clip_text
+                            )
                         ))
                     }
                 }
@@ -845,8 +859,9 @@ fn check_answer(
                 Ok(Value::Null)
             } else {
                 Err(format!(
-                    "{call}: CALLERROR {}: {description}",
-                    code.as_str()
+                    "{call}: CALLERROR {}: {}",
+                    code.as_str(),
+                    vars::clip_text(&description)
                 ))
             }
         }
@@ -1103,18 +1118,70 @@ call = "Heartbeat"
     async fn wait_call_fails_at_once_after_lagged_events() {
         let wanted = HashMap::from([("Authorize".to_owned(), false)]);
         let backlog = Backlog::with_wanted(wanted, 1000);
-        backlog.lagged.store(true, Ordering::Relaxed);
         let end = tokio::time::Instant::now() + Duration::from_secs(3600);
-        let out = timeout(
-            Duration::from_secs(5),
-            backlog.wait_call(None, "Authorize", None, end),
-        )
-        .await
-        .expect("must not wait out the step timeout");
+        let backlog = Arc::new(backlog);
+        let waiter = {
+            let backlog = Arc::clone(&backlog);
+            tokio::spawn(async move { backlog.wait_call(None, "Authorize", None, end).await })
+        };
+        // Let the wait start, then lose events.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        backlog.losses.fetch_add(1, Ordering::Relaxed);
+        backlog.wake.notify_one();
+        let out = timeout(Duration::from_secs(5), waiter)
+            .await
+            .expect("must not wait out the step timeout")
+            .unwrap();
         assert!(matches!(out, Err(WaitLost::Lagged)));
         // A CALL that did arrive still matches.
         backlog.record(inbound("CP-1", "Authorize", Value::Null));
         let out = backlog.wait_call(None, "Authorize", None, end).await;
         assert!(out.is_ok());
+    }
+
+    #[tokio::test]
+    async fn an_old_loss_does_not_fail_later_waits() {
+        let wanted = HashMap::from([("Authorize".to_owned(), false)]);
+        let backlog = Backlog::with_wanted(wanted, 1000);
+        backlog.losses.fetch_add(1, Ordering::Relaxed);
+        let end = tokio::time::Instant::now() + Duration::from_millis(200);
+        let out = backlog.wait_call(None, "Authorize", None, end).await;
+        // Not `Lagged`: the wait ran its course and timed out.
+        assert!(matches!(out, Err(WaitLost::Timeout)));
+        backlog.record(inbound("CP-1", "Authorize", Value::Null));
+        assert!(
+            backlog
+                .wait_call(None, "Authorize", None, end)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn consumed_calls_leave_first_when_the_budget_is_full() {
+        let wanted = HashMap::from([("Authorize".to_owned(), true)]);
+        let backlog = Backlog::with_wanted(wanted, 200_000);
+        let pad = |i: usize| serde_json::json!({"pad": "z".repeat(50_000), "i": i});
+        backlog.record(inbound("CP-0", "Authorize", pad(0)));
+        backlog.record(inbound("CP-1", "Authorize", pad(1)));
+        assert!(backlog.take_call(Some("CP-1"), "Authorize", None).is_some());
+        backlog.record(inbound("CP-2", "Authorize", pad(2)));
+        backlog.record(inbound("CP-3", "Authorize", pad(3)));
+        // The oldest unconsumed call survives because the consumed one was dropped first.
+        assert!(backlog.take_call(Some("CP-0"), "Authorize", None).is_some());
+    }
+
+    #[test]
+    fn failure_reasons_clip_peer_values() {
+        let big = serde_json::json!({"k": "x".repeat(10_000)});
+        let reason = check_answer(
+            Ok(Frame::call_result("1", big)),
+            "X",
+            Some("Accepted"),
+            false,
+        )
+        .unwrap_err();
+        assert!(reason.len() < 400, "{}", reason.len());
+        assert!(reason.contains("..."));
     }
 }

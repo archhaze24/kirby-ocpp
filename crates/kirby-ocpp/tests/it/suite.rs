@@ -250,3 +250,184 @@ async fn duplicate_names_get_their_source_appended() {
     assert!(text.contains(&format!("FAIL same ({two}): ")), "{text}");
     csms.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_existing_path_beats_a_built_in_name_and_repeats_run_once() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    // A file called like a built-in, found through the working directory.
+    write(&dir, "heartbeat", &named("mine", PASSING));
+    let one = write(&dir, "one.toml", &named("one", PASSING));
+    let dir_path = dir.path().to_str().unwrap().to_owned();
+    let mut args = suite_args(&csms, &["heartbeat", &one, &dir_path]);
+    args.push("--json".to_owned());
+    let output = tokio::task::spawn_blocking(move || {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        command(&args)
+            .current_dir(dir.path())
+            .output()
+            .expect("binary runs")
+    })
+    .await
+    .unwrap();
+    let text = stdout(&output);
+    let summary: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    let names: Vec<&str> = summary["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    // `heartbeat` (a file here, the path wins), `one` once, and the directory adds only
+    // the files not yet seen (`heartbeat` has no `.toml` extension).
+    assert_eq!(names, ["mine", "one"], "{text}{}", stderr(&output));
+    csms.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_fifo_source_is_refused_instead_of_blocking() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let fifo = dir.path().join("pipe.toml");
+    let made = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo");
+    assert!(made.success());
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        run(suite_args(&csms, &[fifo.to_str().unwrap()])),
+    )
+    .await
+    .expect("must not block on a FIFO");
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("not a regular file"),
+        "{}",
+        stderr(&output)
+    );
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unknown_vars_warn_in_suite_and_fail_run() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        &dir,
+        "v.toml",
+        &named(
+            "v",
+            "[vars]\nk = 1\n[[steps]]\naction = \"data_transfer\"\nvendor_id = \"${w}\"\n",
+        ),
+    );
+    let output = run(suite_args(
+        &csms,
+        &[&file, "--var", "k=2", "--var", "w=x", "--var", "zzz=1"],
+    ))
+    .await;
+    assert!(
+        stderr(&output).contains("does not use the variable `zzz`"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!stderr(&output).contains("`k`") && !stderr(&output).contains("`w`"));
+
+    let args: Vec<String> = [
+        "--url",
+        csms.url(),
+        "--id",
+        "CP-RUN",
+        "--no-tui",
+        "run",
+        "--scenario",
+        &file,
+        "--var",
+        "zzz=1",
+    ]
+    .map(String::from)
+    .into();
+    let output = run(args).await;
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("unknown variable `zzz`"),
+        "{}",
+        stderr(&output)
+    );
+    csms.shutdown().await;
+}
+
+/// Starts a suite whose first scenario passes and second sleeps, signals the process while
+/// it sleeps and returns the exit code and the report file.
+#[cfg(unix)]
+async fn signalled_suite(signal: &str) -> (Option<i32>, Value) {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let quick = write(&dir, "a.toml", &named("quick", PASSING));
+    let slow = write(
+        &dir,
+        "b.toml",
+        &named("slow", "[[steps]]\naction = \"sleep\"\nms = 60000\n"),
+    );
+    let last = write(&dir, "c.toml", &named("last", PASSING));
+    let report = dir.path().join("report.json");
+    let junit = dir.path().join("junit.xml");
+    let args = suite_args(
+        &csms,
+        &[
+            &quick,
+            &slow,
+            &last,
+            "--report",
+            report.to_str().unwrap(),
+            "--junit",
+            junit.to_str().unwrap(),
+        ],
+    );
+    let child = {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        command(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("binary runs")
+    };
+    // Two connections: the quick scenario finished, the slow one is sleeping.
+    while csms.connections() < 2 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let sent = Command::new("kill")
+        .args([signal, &child.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(sent.success());
+    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
+        .await
+        .unwrap();
+    let text = std::fs::read_to_string(&report).expect("the report is written after a signal");
+    assert!(junit.exists(), "the JUnit report is written after a signal");
+    csms.shutdown().await;
+    let summary: Value = serde_json::from_str(&text).unwrap();
+    (output.status.code(), summary)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn sigint_writes_the_reports_and_exits_130() {
+    let (code, summary) = signalled_suite("-INT").await;
+    assert_eq!(code, Some(130));
+    let statuses: Vec<&str> = summary["scenarios"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["status"].as_str().unwrap())
+        .collect();
+    assert_eq!(statuses, ["passed", "error", "skipped"], "{summary}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn sigterm_writes_the_reports_and_exits_1() {
+    let (code, summary) = signalled_suite("-TERM").await;
+    assert_eq!(code, Some(1));
+    assert_eq!(summary["scenarios"][1]["status"], "error", "{summary}");
+}

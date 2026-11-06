@@ -321,6 +321,29 @@ struct RawScenario {
     steps: Vec<toml::Table>,
 }
 
+/// Largest scenario file [`Scenario::load`] reads.
+pub const MAX_SCENARIO_FILE_BYTES: u64 = 1024 * 1024;
+
+/// Reads a regular file of at most [`MAX_SCENARIO_FILE_BYTES`] as UTF-8 (a FIFO or device
+/// would block or never end).
+fn read_scenario_file(path: &Path) -> std::io::Result<String> {
+    use std::io::{Error, ErrorKind, Read};
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(Error::new(ErrorKind::InvalidInput, "not a regular file"));
+    }
+    let mut text = String::new();
+    let read = std::fs::File::open(path)?
+        .take(MAX_SCENARIO_FILE_BYTES + 1)
+        .read_to_string(&mut text)?;
+    if read as u64 > MAX_SCENARIO_FILE_BYTES {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("larger than {MAX_SCENARIO_FILE_BYTES} bytes"),
+        ));
+    }
+    Ok(text)
+}
+
 impl Scenario {
     /// Parses and validates a scenario from TOML text.
     ///
@@ -360,7 +383,7 @@ impl Scenario {
     /// # Errors
     /// [`ScenarioError::Io`] or [`ScenarioError::Invalid`].
     pub fn load(path: &Path) -> Result<Self, ScenarioError> {
-        let text = std::fs::read_to_string(path).map_err(|source| ScenarioError::Io {
+        let text = read_scenario_file(path).map_err(|source| ScenarioError::Io {
             path: path.to_path_buf(),
             source,
         })?;
@@ -380,6 +403,25 @@ impl Scenario {
     #[must_use]
     pub fn expanded_len(&self) -> u64 {
         count_expanded(&self.steps)
+    }
+
+    /// Does the scenario know a variable `name`: declared in `[vars]`, a loop counter, or
+    /// referenced by a `${name}` placeholder somewhere in its steps? A `--var` for any other
+    /// name has no effect.
+    #[must_use]
+    pub fn uses_variable(&self, name: &str) -> bool {
+        if self.vars.get(name).is_some() {
+            return true;
+        }
+        let mut counters = BTreeSet::new();
+        collect_counter_names(&self.steps, &mut counters);
+        if counters.contains(name) {
+            return true;
+        }
+        let needle = format!("${{{name}}}");
+        self.steps
+            .iter()
+            .any(|step| serde_json::to_value(step).is_ok_and(|value| mentions(&value, &needle)))
     }
 
     fn validate(&self) -> Result<(), ScenarioError> {
@@ -499,12 +541,15 @@ fn validate_steps(
                 return bad("`call` must not be empty");
             }
             Action::SecurityEvent { event_type, .. }
-                if !has_placeholder(event_type) && canonical_event_type(event_type).is_none() =>
+                if static_text(event_type)
+                    .is_some_and(|text| canonical_event_type(&text).is_none()) =>
             {
                 return bad(&format!("unknown security event type `{event_type}`"));
             }
-            Action::ClearRules { call: Some(call) } if !has_placeholder(call) => {
-                if let Err(error) = canonical_action(call) {
+            Action::ClearRules { call: Some(call) } => {
+                if let Some(text) = static_text(call)
+                    && let Err(error) = canonical_action(&text)
+                {
                     return bad(&error.to_string());
                 }
             }
@@ -578,9 +623,40 @@ fn retarget_connector(slot: &mut ConnectorId, to: Option<ConnectorId>) {
     }
 }
 
-/// Does `text` contain a `${` (a placeholder or an escape)? Such text is checked when it runs.
-fn has_placeholder(text: &str) -> bool {
-    text.contains("${")
+/// Does any string in `value` contain the placeholder `needle` (not as a `$${` escape)?
+fn mentions(value: &Value, needle: &str) -> bool {
+    match value {
+        Value::String(text) => text.match_indices(needle).any(|(at, _)| {
+            // A `$` right before the needle makes it the `$${` escape.
+            !text[..at].ends_with('$')
+        }),
+        Value::Array(items) => items.iter().any(|item| mentions(item, needle)),
+        Value::Object(map) => map.values().any(|item| mentions(item, needle)),
+        _ => false,
+    }
+}
+
+/// The text as it will read at run time when it holds no placeholder (`$${` escapes are
+/// resolved to `${`); `None` for text with a `${name}` placeholder, which is checked when it
+/// runs.
+fn static_text(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('$') {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        if let Some(after) = tail.strip_prefix("$${") {
+            out.push_str("${");
+            rest = after;
+        } else if tail.starts_with("${") {
+            return None;
+        } else {
+            out.push('$');
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 fn parse_vars(table: toml::Table) -> Result<Vars, ScenarioError> {
@@ -735,12 +811,16 @@ fn parse_step(mut table: toml::Table, open_loops: usize) -> Result<Step, String>
         ));
     }
     if let Action::SetRule { rule } = &mut action
-        && !has_placeholder(rule)
+        && let Some(text) = static_text(rule)
     {
-        *rule = rule
+        let normalized = text
             .parse::<ResponseRule>()
             .map_err(|e| format!("action `{tag}`: {e}"))?
             .to_string();
+        // Text with `$${` escapes stays as written: it is unescaped when the step runs.
+        if text == *rule {
+            *rule = normalized;
+        }
     }
     Ok(Step {
         name,
@@ -1038,10 +1118,48 @@ call = "Heartbeat"
             "action = \"set_rule\"\nrule = \"Reset=explode\"",
             "action = \"set_rule\"\nrule = \"Nope=reject\"",
             "action = \"clear_rules\"\ncall = \"Heartbeat\"",
+            // An escape is not a placeholder: the text is checked after unescaping.
+            "action = \"set_rule\"\nrule = \"Reset=explode$${x}\"",
+            "action = \"clear_rules\"\ncall = \"Nope$${x}\"",
+            "action = \"security_event\"\nevent_type = \"Nope$${x}\"",
         ] {
             let e = err(&format!("{HEAD}[[steps]]\n{step}\n"));
             assert!(e.contains("step 1"), "{e}");
         }
+    }
+
+    #[test]
+    fn load_refuses_big_files_and_non_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big.toml");
+        let pad = "#".repeat(usize::try_from(MAX_SCENARIO_FILE_BYTES).unwrap());
+        std::fs::write(
+            &big,
+            format!("{HEAD}[[steps]]\naction = \"heartbeat\"\n{pad}"),
+        )
+        .unwrap();
+        assert!(
+            Scenario::load(&big)
+                .unwrap_err()
+                .to_string()
+                .contains("larger than")
+        );
+        let e = Scenario::load(dir.path()).unwrap_err().to_string();
+        assert!(e.contains("not a regular file"), "{e}");
+        let ok = dir.path().join("ok.toml");
+        std::fs::write(&ok, format!("{HEAD}[[steps]]\naction = \"heartbeat\"\n")).unwrap();
+        assert!(Scenario::load(&ok).is_ok());
+    }
+
+    #[test]
+    fn uses_variable_sees_declared_counter_and_referenced_names() {
+        let s = Scenario::from_toml(
+            "name = \"t\"\n[vars]\na = \"x\"\n[[steps]]\naction = \"repeat\"\ncount = 2\nvar = \"k\"\n[[steps.steps]]\naction = \"data_transfer\"\nvendor_id = \"v\"\ndata = \"${b} $${esc}\"\n",
+        )
+        .unwrap();
+        assert!(s.uses_variable("a") && s.uses_variable("k") && s.uses_variable("k0"));
+        assert!(s.uses_variable("b"));
+        assert!(!s.uses_variable("esc") && !s.uses_variable("zzz"));
     }
 
     #[test]
