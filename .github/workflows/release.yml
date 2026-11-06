@@ -179,9 +179,16 @@ jobs:
           path: ${{ runner.temp }}/packaging/*
           if-no-files-found: error
 
+  # Ordering vs `publish` (needs both, so a failed release never leaves a pushed public image):
+  #  - tag push, publish ok:      publish.result == success -> image builds and pushes.
+  #  - tag push, publish fails:   publish.result == failure -> image skipped, nothing pushed.
+  #  - manual run:                publish is skipped (not a tag push) -> the condition lets the
+  #                               image build run anyway, without pushing.
+  # `!cancelled()` is required: without a status function a skipped `publish` skips this job too.
   image:
     name: container image
-    needs: build
+    needs: [build, publish]
+    if: ${{ !cancelled() && needs.build.result == 'success' && (github.event_name != 'push' || needs.publish.result == 'success') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -191,6 +198,8 @@ jobs:
       IMAGE: ghcr.io/archhaze24/kirby-ocpp
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # all tags, to find the highest published version
 
       # Only the two static musl builds go into the image.
       - uses: actions/download-artifact@v8
@@ -213,7 +222,8 @@ jobs:
             ls -l "dist/linux-$arch"
           done
 
-      # Tags on a real tag push: X.Y.Z always, X.Y and latest only for final releases.
+      # Tags on a real tag push: X.Y.Z always; X.Y and latest only for a final version that is
+      # the highest final v* tag (re-tagging an old 0.4.x must not move `latest` backwards).
       - name: Compute tags
         id: meta
         shell: bash
@@ -226,31 +236,33 @@ jobs:
           else
             version="0.0.0-manual"
           fi
+          highest="$(git tag --list 'v*' | grep -v -e '-' | sort -V | tail -1 || true)"
+          echo "highest final tag: ${highest:-none}"
           {
             echo "version=$version"
             echo "tags<<EOF"
             echo "$IMAGE:$version"
-            case "$version" in
-              *-*) ;;
-              *) echo "$IMAGE:${version%.*}"; echo "$IMAGE:latest" ;;
-            esac
+            if [ "$IS_TAG" = "true" ] && [ "$REF_NAME" = "$highest" ]; then
+              echo "$IMAGE:${version%.*}"
+              echo "$IMAGE:latest"
+            fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v4
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to ghcr.io
         if: github.event_name == 'push'
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64

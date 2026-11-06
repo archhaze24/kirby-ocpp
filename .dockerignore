@@ -1,7 +1,10 @@
-# Release image: only dist/ and docker/ are needed. Dockerfile.dev needs the sources.
+# Release image: only dist/linux-* and docker/ are needed (CI scratch like artifacts/ is excluded). Dockerfile.dev needs the sources.
 .git
 target
 npm/dist
+artifacts
+release-notes.md
+packaging
 node_modules
 docs/rewrite
 AGENTS.md

@@ -76,8 +76,13 @@ const child = spawn(binary, process.argv.slice(2), { stdio: "inherit" });
 // Forward termination signals so the native process does not outlive the launcher (docker
 // stop, timeout, CI cancel). Windows only supports SIGINT/SIGBREAK; the others are skipped.
 const FORWARDED = process.platform === "win32" ? ["SIGINT", "SIGBREAK"] : ["SIGINT", "SIGTERM", "SIGHUP"];
+// On a POSIX terminal Ctrl-C already reaches the child through the tty (same foreground process
+// group), so SIGINT is only swallowed here (the handler keeps the launcher alive until the child
+// exits) and not forwarded a second time.
+const TTY_SIGINT = process.platform !== "win32" && process.stdin.isTTY === true;
 for (const signal of FORWARDED) {
   process.on(signal, () => {
+    if (signal === "SIGINT" && TTY_SIGINT) return;
     if (child.exitCode === null && child.signalCode === null) child.kill(signal);
   });
 }

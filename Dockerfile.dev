@@ -5,7 +5,10 @@ FROM rust:1-alpine3.24 AS build
 RUN apk add --no-cache build-base
 WORKDIR /src
 COPY . .
-RUN cargo build --release --locked -p kirby-ocpp -p kirby-csms \
+# The image ships a complete toolchain; rust-toolchain.toml (clippy, rustfmt) would make rustup
+# download components over the network, and a build does not need them.
+RUN rm -f rust-toolchain.toml \
+ && cargo build --release --locked -p kirby-ocpp -p kirby-csms \
  && mkdir /out \
  && cp target/release/kirby-ocpp target/release/kirby-csms /out/
 

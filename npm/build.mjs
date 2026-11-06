@@ -10,6 +10,7 @@
 //   <out>/kirby-csms/               launcher package `kirby-csms`
 // Publish the platform packages first, the launcher packages last (see RELEASING.md).
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -77,18 +78,37 @@ function assetName(tag, platform) {
   return `kirby-ocpp-${tag}-${platform.target}.${platform.ext}`;
 }
 
+// Checks `file` against the text of its `.sha256` asset ("<hex>  <name>", as written by
+// sha256sum/shasum/Get-FileHash in release.yml).
+function verifyChecksum(file, checksumText, label) {
+  const expected = /^\s*([0-9a-fA-F]{64})(?:\s|$)/.exec(checksumText)?.[1]?.toLowerCase();
+  if (!expected) throw new Error(`${label}: no SHA-256 found in the checksum file`);
+  const actual = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+  if (actual !== expected) throw new Error(`checksum mismatch for ${path.basename(file)}: expected ${expected}, got ${actual}`);
+}
+
+async function download(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`download failed (${response.status}): ${url}`);
+  return Buffer.from(await response.arrayBuffer());
+}
+
 async function obtain(tag, platform, assetsDir, workDir) {
   const name = assetName(tag, platform);
   if (assetsDir) {
     const file = path.join(assetsDir, name);
     if (!fs.existsSync(file)) throw new Error(`missing asset ${file}`);
+    // Local archives are verified too when a .sha256 sits next to them.
+    const sum = `${file}.sha256`;
+    if (fs.existsSync(sum)) verifyChecksum(file, fs.readFileSync(sum, "utf8"), sum);
+    else console.warn(`warning: no ${path.basename(sum)} next to ${name}; archive not verified`);
     return file;
   }
-  const url = `https://github.com/${REPO}/releases/download/${tag}/${name}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`download failed (${response.status}): ${url}`);
+  const base = `https://github.com/${REPO}/releases/download/${tag}/${name}`;
   const file = path.join(workDir, name);
-  fs.writeFileSync(file, Buffer.from(await response.arrayBuffer()));
+  fs.writeFileSync(file, await download(base));
+  // The checksum asset is mandatory for downloads: a missing one fails the build.
+  verifyChecksum(file, (await download(`${base}.sha256`)).toString("utf8"), `${name}.sha256`);
   return file;
 }
 
@@ -127,8 +147,16 @@ async function main() {
   const { tag, assets, out } = parseArgs(process.argv.slice(2));
   const version = tag.slice(1);
   const template = JSON.parse(fs.readFileSync(path.join(root, "npm", "kirby-ocpp", "package.json"), "utf8")); // shared license/author/repository
-  const work = fs.mkdtempSync(path.join(os.tmpdir(), "kirby-ocpp-npm-"));
   checkOut(out);
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "kirby-ocpp-npm-"));
+  try {
+    await build({ tag, assets, out, version, template, work });
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
+async function build({ tag, assets, out, version, template, work }) {
   fs.rmSync(out, { recursive: true, force: true });
   fs.mkdirSync(out, { recursive: true });
   fs.writeFileSync(path.join(out, MARKER), "created by npm/build.mjs; safe to delete and overwrite\n");
@@ -189,7 +217,6 @@ async function main() {
     writeJson(path.join(dir, "package.json"), { ...manifest, version, optionalDependencies });
     console.log(`built ${manifest.name}@${version}`);
   }
-  fs.rmSync(work, { recursive: true, force: true });
 }
 
 main().catch((error) => {
