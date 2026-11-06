@@ -1,6 +1,5 @@
 //! Headless output: every station [`Event`] as a human line or a JSON line.
 
-use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +9,7 @@ use std::time::Duration;
 use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::fleet::{FleetEvents, FleetItem};
 use kirby_ocpp_core::station::{Direction, Event};
-use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump};
+use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file};
 use kirby_ocpp_tui::text::{escape_json_unsafe, sanitize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
@@ -128,7 +127,7 @@ impl Sink {
         stdout: bool,
     ) -> io::Result<Self> {
         let file = log_file
-            .map(|path| OpenOptions::new().create(true).append(true).open(path))
+            .map(open_log_file)
             .transpose()?
             .map(|file| LinePump::to_writer(json, file));
         let stdout_on = Arc::new(AtomicBool::new(stdout));
@@ -174,7 +173,7 @@ impl Sink {
         stdout: bool,
     ) -> io::Result<Self> {
         let file = log_file
-            .map(|path| OpenOptions::new().create(true).append(true).open(path))
+            .map(open_log_file)
             .transpose()?
             .map(|file| LinePump::to_writer(json, file));
         let stdout_on = Arc::new(AtomicBool::new(stdout));

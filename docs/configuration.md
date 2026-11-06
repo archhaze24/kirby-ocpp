@@ -83,7 +83,7 @@ Profiles and certificates are explained in [Security](security.md).
 | `--print-config` | | | Print the effective configuration as JSON and exit. With `--count` above 1 it prints `{"fleet": {...}, "config": {...}}`, `config` being the first station |
 | `--no-tui` | | | Never start the terminal UI; log to stdout (automatic when stdout is not a terminal) |
 | `--json` | | | One JSON object per line (events and the `run` report); never opens the UI |
-| `--log-file <PATH>` | | none | Also append the event log to this file, with the UI too. A helper thread writes it; lines that cannot be written in time are dropped and a `note` line reports the count |
+| `--log-file <PATH>` | | none | Also append the event log to this file, with the UI too. A new file is created `0600` on unix (frames hold idTags); an existing file keeps its mode. A helper thread writes it; lines that cannot be written in time are dropped and a `note` line reports the count |
 | `--licenses` | | | Print third-party licence notices and exit |
 | `-V, --version`, `-h, --help` | | | |
 
@@ -177,7 +177,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `--json` | `KIRBY_CSMS_JSON` | off | One JSON object per line |
-| `--log-file <PATH>` | `KIRBY_CSMS_LOG_FILE` | none | Append every event as a JSON line (helper thread; late lines are dropped and a `note` line counts them) |
+| `--log-file <PATH>` | `KIRBY_CSMS_LOG_FILE` | none | Append every event as a JSON line (new file `0600` on unix, an existing file keeps its mode) (helper thread; late lines are dropped and a `note` line counts them) |
 | `--stdin` | `KIRBY_CSMS_STDIN` | auto | Read JSON-line commands from stdin even on a terminal (automatic when stdin is not a terminal and there is no `--script`) |
 | `--no-tui` | `KIRBY_CSMS_NO_TUI` | auto | Never open the UI, print events to stdout (automatic when stdout or stdin is not a terminal, and with `--json`, `--script` or `--stdin`) |
 | `--script <FILE>` | `KIRBY_CSMS_SCRIPT` | none | Run a TOML script against connecting stations, print the report, exit |

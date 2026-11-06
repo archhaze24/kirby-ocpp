@@ -2,7 +2,6 @@
 //! output channel (stdout and the optional log file).
 
 use std::collections::HashMap;
-use std::fs::OpenOptions;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,7 +13,7 @@ use kirby_csms_core::{
     CsmsEvent, CsmsHandle, Direction, DisconnectReason, Frame, StationInfo, StationState,
     TransactionStatus,
 };
-use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump};
+use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file};
 use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
@@ -38,7 +37,7 @@ pub struct Output {
 impl Output {
     pub fn open(json: bool, log_file: Option<&Path>) -> io::Result<Arc<Self>> {
         let file = log_file
-            .map(|path| OpenOptions::new().create(true).append(true).open(path))
+            .map(open_log_file)
             .transpose()?
             .map(|file| LinePump::to_writer(true, file));
         Ok(Arc::new(Self {

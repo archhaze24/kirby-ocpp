@@ -18,6 +18,22 @@ const QUEUE: usize = 8192;
 /// Bytes that may wait for a slow reader before new lines are dropped.
 const QUEUE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Opens a `--log-file` for appending. A new file is readable by the owner only (frames hold
+/// idTags and transaction data); the permissions of an existing file are left alone.
+///
+/// # Errors
+/// Any I/O error from opening the file.
+pub fn open_log_file(path: &std::path::Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
 /// Writes `text` to stdout and ignores every error (a closed pipe must not panic).
 pub fn print_lossy(text: &str) {
     let mut out = io::stdout().lock();
@@ -162,6 +178,25 @@ impl LinePump {
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
+
+    #[cfg(unix)]
+    #[test]
+    fn new_log_files_are_private_and_existing_ones_keep_their_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let mode =
+            |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+
+        let fresh = dir.path().join("fresh.log");
+        drop(open_log_file(&fresh).unwrap());
+        assert_eq!(mode(&fresh), 0o600);
+
+        let old = dir.path().join("old.log");
+        std::fs::write(&old, b"x").unwrap();
+        std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+        drop(open_log_file(&old).unwrap());
+        assert_eq!(mode(&old), 0o644);
+    }
 
     struct Sink(mpsc::Sender<String>);
     impl Write for Sink {
