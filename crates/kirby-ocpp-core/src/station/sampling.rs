@@ -245,6 +245,9 @@ impl StationActor {
     }
 
     /// Abandons the oldest in-flight timer-driven samples until one more fits.
+    ///
+    /// Only timer-driven samples live in `sample_calls` (commands and offline flushes are
+    /// never abandoned), so aborting a token here cannot cut a command's reply short.
     fn make_room_for_sample(&mut self) {
         self.sample_calls.retain(|t| self.calls.contains_key(t));
         let limit = MAX_PENDING_SAMPLES.max(self.state.connectors.len());
@@ -256,6 +259,7 @@ impl StationActor {
             else {
                 continue;
             };
+            debug_assert_eq!(call.action, "MeterValues");
             call.task.abort();
             if !self.sample_overflow_warned {
                 self.sample_overflow_warned = true;

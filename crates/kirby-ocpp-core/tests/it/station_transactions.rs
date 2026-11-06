@@ -14,6 +14,7 @@ use kirby_ocpp_core::ocpp::types::{
 use kirby_ocpp_core::station::{Command, Outcome, TransactionState};
 use kirby_ocpp_core::{ManualClock, Station};
 use kirby_ocpp_testkit::{CsmsOptions, Fault};
+use serde_json::json;
 
 const C1: ConnectorId = ConnectorId::new(1);
 
@@ -338,6 +339,52 @@ async fn transaction_messages_are_retried_after_a_timeout() {
         "{outcome:?}"
     );
     assert_eq!(rig.calls("StartTransaction", 0).len(), 2);
+    rig.shutdown().await;
+}
+
+/// A sample whose answer timed out is retried later; if its transaction was stopped in the
+/// meantime the retry is dropped, so the CSMS never sees a `MeterValues` after the stop.
+#[tokio::test]
+async fn a_retried_sample_does_not_overtake_the_stop_of_its_transaction() {
+    let mut rig = Rig::with(CsmsOptions::default(), |mut c| {
+        c.call_timeout_ms = 400;
+        c
+    })
+    .await;
+    rig.connect_booted().await;
+    rig.cfg("TransactionMessageAttempts", "2").await;
+    rig.cfg("TransactionMessageRetryInterval", "1").await;
+    rig.begin(1, "TAG1").await;
+    rig.csms.inject(Fault::silence("MeterValues").times(1));
+    let mark = rig.csms.mark();
+    rig.csms
+        .expect_status(
+            "TriggerMessage",
+            json!({"requestedMessage": "MeterValues", "connectorId": 1}),
+            "Accepted",
+        )
+        .await
+        .unwrap();
+    rig.csms
+        .wait_for_call_after(mark, "MeterValues", |_| true, STEP)
+        .await
+        .unwrap();
+    // The stop queues behind the silent sample; the sample's retry is due a second later.
+    rig.stop(1, StopReason::Local).await;
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        rig.observed.wait_log("retry dropped"),
+    )
+    .await
+    .expect("the retry of the sample was dropped");
+    let messages = tx_messages(&rig, mark);
+    assert_eq!(
+        messages,
+        vec![
+            ("MeterValues".to_owned(), Some(123)),
+            ("StopTransaction".to_owned(), Some(123)),
+        ]
+    );
     rig.shutdown().await;
 }
 

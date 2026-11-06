@@ -108,6 +108,7 @@ where
         events: events_tx,
         replies: replies_tx,
         queue: VecDeque::new(),
+        prune_at: PRUNE_MIN,
         pending: HashMap::new(),
         incoming: HashMap::new(),
         awaiting_pong: false,
@@ -126,6 +127,8 @@ struct Task {
     /// Cloned into every [`ReplyHandle`]; replies come back through `replies`.
     replies: mpsc::UnboundedSender<Frame>,
     queue: VecDeque<OutboundCall>,
+    /// Queue length at which abandoned CALLs are pruned next (doubles, so pruning is amortised O(1)).
+    prune_at: usize,
     /// Message id -> our CALL awaiting CALLRESULT/CALLERROR.
     pending: HashMap<String, Pending>,
     /// Message id -> action of a CSMS CALL we have not replied to yet.
@@ -178,7 +181,10 @@ impl Task {
             Step::Command(Some(Command::Call(call))) => {
                 // Withdraw queued CALLs whose caller gave up, so a silent peer cannot make
                 // abandoned CALLs pile up.
-                self.queue.retain(|queued| !queued.reply.is_closed());
+                if self.queue.len() >= self.prune_at {
+                    self.queue.retain(|queued| !queued.reply.is_closed());
+                    self.prune_at = (self.queue.len() * 2).max(PRUNE_MIN);
+                }
                 self.queue.push_back(call);
                 self.pump(sink).await
             }
@@ -626,6 +632,9 @@ fn frame_code_and_reason(frame: Option<CloseFrame>) -> (Option<u16>, String) {
 }
 
 /// Sends a Close frame (normal closure) and waits, bounded, for the peer's reply.
+/// Smallest queue length that triggers pruning of abandoned CALLs.
+const PRUNE_MIN: usize = 64;
+
 async fn close_handshake<W, R>(
     sink: &mut W,
     stream: &mut R,

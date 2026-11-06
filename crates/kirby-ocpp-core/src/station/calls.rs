@@ -18,7 +18,9 @@
 //! * **Retries** for `StartTransaction` / `StopTransaction` / `MeterValues`
 //!   ([`is_transaction_message`]): the spawned task loops
 //!   `TransactionMessageAttempts` times with `TransactionMessageRetryInterval` between
-//!   attempts (values read when the call is made). CALLERROR, timeout and schema violations
+//!   attempts (values read when the call is made). A retry is queued behind CALLs made
+//!   since the first attempt, so retries may reorder; only a `MeterValues` retry is dropped
+//!   once the `StopTransaction` of its transaction was queued ([`RetryGuard`]). CALLERROR, timeout and schema violations
 //!   are retried, a closed connection is not. The task is aborted when the connection
 //!   goes away and the continuation then gets `Closed`, so retries never outlive a link.
 //! * **Gating** ([`Origin`]): until `BootNotification` was `Accepted` only `BootNotification`
@@ -26,10 +28,11 @@
 //!   ([`Origin::Triggered`]) are allowed as well (OCPP 1.6 section 4.2). [`Origin::Raw`]
 //!   (the `SendRaw` command, for negative testing) bypasses the gate.
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use super::actor::{Internal, StationActor};
 use super::command::Outcome;
@@ -37,6 +40,7 @@ use crate::error::{CallError, StationError};
 use crate::ocpp::action::OutboundAction;
 use crate::ocpp::types::RegistrationStatus;
 use crate::station::event::LogLevel;
+use crate::ws::{Connection, PendingReply};
 
 /// Answer channel of a command.
 pub(super) type Reply = oneshot::Sender<Result<Outcome, StationError>>;
@@ -60,6 +64,17 @@ pub(super) struct PendingCall {
     pub(super) action: String,
     pub(super) task: tokio::task::JoinHandle<()>,
     pub(super) continuation: Continuation,
+    /// `MeterValues` with retries: set once the transaction's `StopTransaction` was queued.
+    pub(super) retry_guard: Option<RetryGuard>,
+}
+
+/// Lets the actor stop the retries of a transaction's `MeterValues` once its stop is sent.
+/// The retry task holds the lock while it checks the flag and queues the retry, so a retry
+/// is either queued before the `StopTransaction` or not at all.
+#[derive(Clone)]
+pub(super) struct RetryGuard {
+    tx: i32,
+    stopped: Arc<Mutex<bool>>,
 }
 
 /// The actions that are retried (TS `isTransactionMessage`).
@@ -76,6 +91,77 @@ fn retryable(error: &CallError) -> bool {
         error,
         CallError::NotConnected | CallError::Closed { .. } | CallError::NotRegistered { .. }
     )
+}
+
+/// Retry plan of one CALL.
+struct Attempts {
+    connection: Connection,
+    name: String,
+    payload: Value,
+    timeout: Duration,
+    validate: bool,
+    tries: u32,
+    interval: Duration,
+    guard: Option<RetryGuard>,
+    log: mpsc::UnboundedSender<Internal>,
+}
+
+impl Attempts {
+    /// Waits for `first`, then retries retryable failures. A request that cannot be queued
+    /// (schema, serialisation, closed link) would fail the same way again: no retry.
+    async fn run(self, first: Result<PendingReply, CallError>) -> Result<Value, CallError> {
+        let Self {
+            connection,
+            name,
+            payload,
+            timeout,
+            validate,
+            tries: attempts,
+            interval,
+            guard,
+            log,
+        } = self;
+        let name = name.as_str();
+        let mut attempt = 1;
+        let mut queued = first;
+        loop {
+            let outcome = queued?.wait().await;
+            match outcome {
+                Err(error) if attempt < attempts && retryable(&error) => {
+                    let _ = log.send(Internal::Log(
+                        LogLevel::Warn,
+                        format!(
+                            "{name} attempt {attempt}/{attempts} failed: {error}; retrying in {}s",
+                            interval.as_secs()
+                        ),
+                    ));
+                    tokio::time::sleep(interval).await;
+                    attempt += 1;
+                    let enqueue =
+                        || connection.enqueue(name, payload.clone(), Some(timeout), validate);
+                    let retry = match &guard {
+                        Some(guard) => {
+                            let stopped = guard
+                                .stopped
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            if *stopped { None } else { Some(enqueue()) }
+                        }
+                        None => Some(enqueue()),
+                    };
+                    let Some(retry) = retry else {
+                        let _ = log.send(Internal::Log(
+                            LogLevel::Info,
+                            format!("{name} retry dropped: the transaction was already stopped"),
+                        ));
+                        return Err(error);
+                    };
+                    queued = retry;
+                }
+                other => return other,
+            }
+        }
+    }
 }
 
 impl StationActor {
@@ -134,43 +220,49 @@ impl StationActor {
         let results = self.internal_tx.clone();
         let name = action.to_owned();
 
+        if action == "StopTransaction" {
+            // A retried sample must not overtake the stop of its transaction.
+            if let Some(tx) = payload.get("transactionId").and_then(Value::as_i64) {
+                for call in self.calls.values() {
+                    if let Some(guard) = call.retry_guard.as_ref().filter(|g| i64::from(g.tx) == tx)
+                    {
+                        *guard
+                            .stopped
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = true;
+                    }
+                }
+            }
+        }
+        let retry_guard = (attempts > 1 && action == "MeterValues")
+            .then(|| {
+                let tx = payload.get("transactionId").and_then(Value::as_i64)?;
+                Some(RetryGuard {
+                    tx: i32::try_from(tx).ok()?,
+                    stopped: Arc::new(Mutex::new(false)),
+                })
+            })
+            .flatten();
         // The first attempt is queued on the connection right here, in call order: spawned
         // tasks are polled in scheduler order, which would reorder CALLs made back to back
         // (offline samples followed by their StopTransaction).
         let first = connection.enqueue(&name, payload.clone(), Some(timeout), validate);
         let task = tokio::spawn({
             let name = name.clone();
+            let guard = retry_guard.clone();
             async move {
-                let mut attempt = 1;
-                let mut first = Some(first);
-                let result = loop {
-                    let outcome = if let Some(first) = first.take() {
-                        match first {
-                            Ok(pending) => pending.wait().await,
-                            Err(error) => Err(error),
-                        }
-                    } else if validate {
-                        connection.call(&name, payload.clone(), Some(timeout)).await
-                    } else {
-                        connection
-                            .call_unvalidated(&name, payload.clone(), Some(timeout))
-                            .await
-                    };
-                    match outcome {
-                        Err(error) if attempt < attempts && retryable(&error) => {
-                            let _ = results.send(Internal::Log(
-                                LogLevel::Warn,
-                                format!(
-                                    "{name} attempt {attempt}/{attempts} failed: {error}; retrying in {}s",
-                                    interval.as_secs()
-                                ),
-                            ));
-                            tokio::time::sleep(interval).await;
-                            attempt += 1;
-                        }
-                        other => break other,
-                    }
+                let plan = Attempts {
+                    connection,
+                    name,
+                    payload,
+                    timeout,
+                    validate,
+                    tries: attempts,
+                    interval,
+                    guard,
+                    log: results.clone(),
                 };
+                let result = plan.run(first).await;
                 let _ = results.send(Internal::CallDone {
                     token,
                     generation,
@@ -184,6 +276,7 @@ impl StationActor {
                 action: name,
                 task,
                 continuation,
+                retry_guard,
             },
         );
     }
