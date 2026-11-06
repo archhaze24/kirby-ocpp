@@ -55,6 +55,21 @@ const MALFORMED_TEXT_CHARS: usize = 512;
 /// Close code for injected closes (internal error), as in the test mock.
 const CLOSE_CODE_ERROR: u16 = 1011;
 
+/// Most faults [`CsmsHandle::try_inject`] keeps.
+const MAX_FAULTS: usize = 1000;
+/// Most bytes of action and payload text [`CsmsHandle::try_inject`] keeps over all faults.
+const MAX_FAULT_BYTES: usize = 8 * 1024 * 1024;
+
+/// Approximate memory held by a fault: action plus reply text.
+fn fault_bytes(fault: &Fault) -> usize {
+    let reply = match &fault.reply {
+        Reply::Result(value) => value.to_string().len(),
+        Reply::Error(_, text) => text.len(),
+        _ => 0,
+    };
+    fault.action.len().saturating_add(reply)
+}
+
 /// Entry point: starts a multi-station OCPP 1.6J central system.
 ///
 /// # Station identity
@@ -242,13 +257,38 @@ impl CsmsHandle {
             .map(|rec| rec.state.clone())
     }
 
+    /// The newest `limit` frames of a station, oldest first (like [`CsmsHandle::history`], but
+    /// clones only the tail).
+    pub fn history_tail(&self, id: &str, limit: usize) -> Option<Vec<FrameEntry>> {
+        self.inner.lock().stations.get(id).map(|rec| {
+            let skip = rec.history.len().saturating_sub(limit);
+            rec.history
+                .iter()
+                .skip(skip)
+                .map(|item| item.entry.clone())
+                .collect()
+        })
+    }
+
     /// Removes a station from the registry, closing its connection if it has one.
     /// Returns whether the station existed.
     pub fn forget(&self, id: &str) -> bool {
+        self.forget_inner(id, false) == Some(true)
+    }
+
+    /// Like [`CsmsHandle::forget`], but only when the station has no open connection, decided
+    /// atomically with the removal. `Some(true)`: forgotten; `Some(false)`: the station is
+    /// connected and was left alone; `None`: unknown station.
+    pub fn forget_if_disconnected(&self, id: &str) -> Option<bool> {
+        self.forget_inner(id, true)
+    }
+
+    fn forget_inner(&self, id: &str, only_disconnected: bool) -> Option<bool> {
         let mut state = self.inner.lock();
-        let Some(rec) = state.stations.remove(id) else {
-            return false;
-        };
+        if only_disconnected && state.stations.get(id)?.session.is_some() {
+            return Some(false);
+        }
+        let rec = state.stations.remove(id)?;
         if let Some(session) = rec.session {
             let _ = session.tx.send(SessionCmd::Close {
                 code: 1000,
@@ -262,7 +302,7 @@ impl CsmsHandle {
         self.inner.emit(CsmsEvent::Forgotten {
             station: id.to_owned(),
         });
-        true
+        Some(true)
     }
 
     /// Sends a CALL to a connected station and waits for its CALLRESULT or CALLERROR, using
@@ -356,14 +396,34 @@ impl CsmsHandle {
         }
     }
 
+    /// Like [`CsmsHandle::inject`], but refuses a fault that would take the stored faults over
+    /// 1000 entries or 8 MiB of action and payload text.
+    pub fn try_inject(&self, fault: Fault) -> Result<(), String> {
+        if fault.remaining == 0 {
+            return Ok(());
+        }
+        let mut state = self.inner.lock();
+        if state.faults.len() >= MAX_FAULTS {
+            return Err(format!("too many faults stored (at most {MAX_FAULTS})"));
+        }
+        let stored: usize = state.faults.iter().map(fault_bytes).sum();
+        if stored.saturating_add(fault_bytes(&fault)) > MAX_FAULT_BYTES {
+            return Err(format!(
+                "stored faults would exceed {} MiB",
+                MAX_FAULT_BYTES / (1024 * 1024)
+            ));
+        }
+        state.faults.push(fault);
+        Ok(())
+    }
+
     /// Number of fault occurrences still waiting to be triggered.
     pub fn faults_remaining(&self) -> usize {
         self.inner
             .lock()
             .faults
             .iter()
-            .map(|fault| fault.remaining)
-            .sum()
+            .fold(0usize, |sum, fault| sum.saturating_add(fault.remaining))
     }
 
     /// Actions that currently have a responder, sorted.

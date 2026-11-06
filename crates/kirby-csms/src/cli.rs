@@ -242,6 +242,23 @@ pub struct Cli {
     pub licenses: bool,
 }
 
+/// Prints a warning when the token file can be read by the group or by others.
+#[cfg(unix)]
+fn warn_if_shared(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.permissions().mode() & 0o044 != 0
+    {
+        eprintln!(
+            "warning: {} is readable by group or others; chmod 600 it",
+            path.display()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_shared(_path: &std::path::Path) {}
+
 /// Parses a `--var` argument.
 fn script_var(text: &str) -> Result<(String, serde_json::Value), String> {
     kirby_ocpp_core::scenario::vars::parse_assignment(text)
@@ -258,10 +275,19 @@ impl Cli {
             if token.is_empty() {
                 return Err(format!("{} is empty", path.display()));
             }
+            warn_if_shared(path);
             Some(token.to_owned())
         } else {
             self.api_token.clone()
         };
+        if let Some(token) = &token
+            && !token.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err(
+                "the API token must be visible ASCII without spaces or control characters"
+                    .to_owned(),
+            );
+        }
         if let Some(addr) = self.api_listen
             && token.is_none()
             && !addr.ip().is_loopback()

@@ -247,6 +247,11 @@ impl Renderer {
         }
     }
 
+    /// Forgets the rendered state views, so the next state event of each station is complete.
+    pub fn reset(&mut self) {
+        self.last_state.clear();
+    }
+
     fn push(&mut self, value: &Value, human: &str) {
         self.pending.push((value.clone(), human.to_owned()));
     }

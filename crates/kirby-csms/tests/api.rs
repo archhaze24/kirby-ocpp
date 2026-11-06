@@ -798,3 +798,367 @@ async fn too_many_commands_in_flight_get_429() {
         task.abort();
     }
 }
+
+/// Sends `request` as is and returns the whole answer up to the close of the connection.
+async fn raw_exchange(addr: &str, request: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(WAIT, stream.read_to_end(&mut raw))
+        .await
+        .expect("response timeout")
+        .ok();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+fn status_of(answer: &str) -> u16 {
+    answer
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or(0)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_header_must_be_loopback_without_a_token() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let port = addr.rsplit(':').next().unwrap();
+    let get = |host: String| {
+        let request = format!("GET /v1/stations HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        async move { status_of(&raw_exchange(addr, &request).await) }
+    };
+    for host in [
+        format!("127.0.0.1:{port}"),
+        "127.0.0.1".to_owned(),
+        format!("localhost:{port}"),
+        "LOCALHOST".to_owned(),
+        format!("[::1]:{port}"),
+        "[::1]".to_owned(),
+    ] {
+        assert_eq!(get(host.clone()).await, 200, "{host}");
+    }
+    for host in [
+        format!("evil.example:{port}"),
+        "evil.example".to_owned(),
+        format!("127.0.0.1.evil.example:{port}"),
+        format!("localhost.evil.example:{port}"),
+        "127.0.0.1:99999999".to_owned(),
+        "127.0.0.1:".to_owned(),
+        "[::1".to_owned(),
+        "[::2]".to_owned(),
+        "192.168.1.5".to_owned(),
+    ] {
+        assert_eq!(get(host.clone()).await, 403, "{host}");
+    }
+    // Same-origin requests carry no Origin, but a cross-site fetch says so.
+    let (status, body) = http(
+        addr,
+        "GET",
+        "/v1/stations",
+        &[("Sec-Fetch-Site", "cross-site")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 403, "{body}");
+    let (status, _) = http(
+        addr,
+        "GET",
+        "/v1/stations",
+        &[("Sec-Fetch-Site", "same-origin")],
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    // With a token the bearer is the proof; the Host does not matter.
+    let tokened = Csms::start(&["--api-token", "tok"]);
+    let request = "GET /v1/health HTTP/1.1\r\nHost: api.internal\r\n\
+                   Authorization: Bearer tok\r\n\r\n";
+    assert_eq!(
+        status_of(&raw_exchange(&tokened.api_addr, request).await),
+        200
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn authorization_header_parsing_is_strict() {
+    let csms = Csms::start(&["--api-token", "tok"]);
+    let addr = &csms.api_addr;
+    let status = |headers: &'static str| {
+        let request = format!("GET /v1/health HTTP/1.1\r\nHost: {addr}\r\n{headers}\r\n");
+        async move { status_of(&raw_exchange(addr, &request).await) }
+    };
+    assert_eq!(status("Authorization: bearer tok\r\n").await, 200);
+    assert_eq!(status("Authorization: BEARER tok\r\n").await, 200);
+    assert_eq!(status("Authorization: Bearer  tok\r\n").await, 401);
+    assert_eq!(status("Authorization: Bearer\ttok\r\n").await, 401);
+    // Two headers are ambiguous, even when the first one is right.
+    assert_eq!(
+        status("Authorization: Bearer tok\r\nAuthorization: Bearer tok\r\n").await,
+        401
+    );
+    assert_eq!(
+        status("Authorization: Bearer nope\r\nAuthorization: Bearer tok\r\n").await,
+        401
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn head_and_options_are_answered() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let head = raw_exchange(
+        addr,
+        &format!("HEAD /v1/health HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(status_of(&head), 200, "{head}");
+    assert!(head.ends_with("\r\n\r\n"), "no body for HEAD: {head:?}");
+    let options = raw_exchange(
+        addr,
+        &format!("OPTIONS /v1/health HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+    )
+    .await;
+    assert_eq!(status_of(&options), 405, "{options}");
+    // Every answer closes the connection.
+    assert!(options.to_lowercase().contains("connection: close"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn chunked_body_over_the_limit_is_413() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let head = format!(
+        "POST /v1/stations/CP-1/calls HTTP/1.1\r\nHost: {addr}\r\n\
+         Transfer-Encoding: chunked\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    let chunk = "a".repeat(64 * 1024);
+    for _ in 0..17 {
+        let frame = format!("{:x}\r\n{chunk}\r\n", chunk.len());
+        if stream.write_all(frame.as_bytes()).await.is_err() {
+            break;
+        }
+    }
+    let _ = stream.write_all(b"0\r\n\r\n").await;
+    let mut raw = Vec::new();
+    let _ = tokio::time::timeout(WAIT, stream.read_to_end(&mut raw)).await;
+    let answer = String::from_utf8_lossy(&raw);
+    assert_eq!(status_of(&answer), 413, "{answer}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn limit_is_percent_decoded_like_station() {
+    let csms = Csms::start(&[]);
+    let _station = station(&csms.station_addr, "CP-1").await;
+    let (status, body) = csms.get("/v1/stations/CP-1/history?limit=%31").await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["frames"].as_array().unwrap().len(), 1);
+    let (status, _) = csms.get("/v1/stations/CP-1/history?limit=%zz").await;
+    assert_eq!(status, 400);
+    let (status, _) = csms.get("/v1/stations/CP-1/history?limit=-1").await;
+    assert_eq!(status, 400);
+    let (status, body) = csms.get("/v1/stations/CP-1/history?station=x").await;
+    assert_eq!(status, 400);
+    assert!(body["error"].as_str().unwrap().contains("limit"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fault_sizes_and_counts_are_bounded() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let post =
+        |body: String| async move { http(addr, "POST", "/v1/faults", &[], Some(&body)).await };
+    // `times` that would overflow the counter sum.
+    for _ in 0..2 {
+        let (status, body) = post(
+            r#"{"action":"Heartbeat","kind":"silence","times":18446744073709551615}"#.to_owned(),
+        )
+        .await;
+        assert_eq!(status, 400, "{body}");
+        assert!(body["error"].as_str().unwrap().contains("at most"));
+    }
+    let (status, body) =
+        post(r#"{"action":"Heartbeat","kind":"silence","times":1000000}"#.to_owned()).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["remaining"], 1_000_000);
+    http(addr, "DELETE", "/v1/faults", &[], None).await;
+
+    for _ in 0..1000 {
+        let (status, _) = post(r#"{"action":"Heartbeat","kind":"silence"}"#.to_owned()).await;
+        assert_eq!(status, 200);
+    }
+    let (status, body) = post(r#"{"action":"Heartbeat","kind":"silence"}"#.to_owned()).await;
+    assert_eq!(status, 409, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("too many faults"));
+    assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 1000}));
+    http(addr, "DELETE", "/v1/faults", &[], None).await;
+
+    // Byte budget: 8 payloads of ~900 KiB do not all fit in 8 MiB.
+    let big = "a".repeat(900 * 1024);
+    let body = json!({"action": "Heartbeat", "kind": "invalid_payload", "payload": {"x": big}})
+        .to_string();
+    let mut last = 0;
+    for _ in 0..10 {
+        last = http(addr, "POST", "/v1/faults", &[], Some(&body)).await.0;
+        if last != 200 {
+            break;
+        }
+    }
+    assert_eq!(last, 409);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slow_clients_and_connection_flood_are_cut() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+
+    // A head that never completes is cut after about 10 s.
+    let mut slow = TcpStream::connect(addr).await.unwrap();
+    slow.write_all(b"GET /v1/health HTTP/1.1\r\nHost: x")
+        .await
+        .unwrap();
+    // A complete head with a body that never arrives gets 408.
+    let mut stalled = TcpStream::connect(addr).await.unwrap();
+    stalled
+        .write_all(
+            format!(
+                "POST /v1/stations/CP-1/calls HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 50\r\n\r\n{{"
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let mut raw = Vec::new();
+    tokio::time::timeout(WAIT, slow.read_to_end(&mut raw))
+        .await
+        .expect("slow head not cut")
+        .ok();
+    assert!(started.elapsed() >= Duration::from_secs(8), "cut too early");
+    let mut raw = Vec::new();
+    tokio::time::timeout(WAIT, stalled.read_to_end(&mut raw))
+        .await
+        .expect("stalled body not cut")
+        .ok();
+    assert_eq!(status_of(&String::from_utf8_lossy(&raw)), 408);
+
+    // More than 512 idle connections: the extra ones are closed at once.
+    let mut open = Vec::new();
+    for _ in 0..512 {
+        open.push(TcpStream::connect(addr).await.unwrap());
+    }
+    // Give the accept loop time to take all of them.
+    let mut extra = TcpStream::connect(addr).await.unwrap();
+    let mut buf = [0_u8; 16];
+    let read = tokio::time::timeout(Duration::from_secs(5), extra.read(&mut buf))
+        .await
+        .expect("extra connection stays open");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    drop(open);
+    assert_eq!(csms.get("/v1/health").await.0, 200);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn event_streams_get_the_closing_events_on_shutdown() {
+    let mut csms = Csms::start(&[]);
+    let (status, mut sse) = Sse::open(&csms.api_addr, "/v1/events", &[]).await;
+    assert_eq!(status, 200);
+    let _station = station(&csms.station_addr, "CP-1").await;
+    sse.read_until("\"type\":\"connected\"").await;
+    let killed = Command::new("kill")
+        .args(["-TERM", &csms.child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+    // The stream ends by itself, after the `disconnected` event of the shutdown.
+    tokio::time::timeout(WAIT, async {
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let n = sse.stream.read(&mut chunk).await.unwrap_or(0);
+            if n == 0 {
+                break;
+            }
+            sse.buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+        }
+    })
+    .await
+    .expect("stream did not end");
+    assert!(
+        sse.buf.contains("event: disconnected") && sse.buf.contains("shutdown"),
+        "{}",
+        sse.buf
+    );
+    let _ = csms.child.wait();
+}
+
+#[test]
+fn api_token_must_be_visible_ascii() {
+    for token in ["has space", "tab\there", "naïve", "a\u{7f}b"] {
+        let (code, stderr) = run_to_end(&["--api-listen", "127.0.0.1:0", "--api-token", token]);
+        assert_eq!(code, 2, "{token:?}: {stderr}");
+        assert!(stderr.contains("visible ASCII"), "{token:?}: {stderr}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("token");
+    std::fs::write(&path, "two words\n").unwrap();
+    let (code, stderr) = run_to_end(&[
+        "--api-listen",
+        "127.0.0.1:0",
+        "--api-token-file",
+        path.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stderr}");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_token_file_gets_a_warning_and_the_env_token_conflicts_with_the_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("token");
+    std::fs::write(&path, "tok\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let mut child = command(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--api-listen",
+        "127.0.0.1:0",
+        "--api-token-file",
+        path.to_str().unwrap(),
+        "--json",
+    ])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .spawn()
+    .unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let mut lines = BufReader::new(stderr).lines();
+    let line = tokio::task::spawn_blocking(move || lines.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        line.contains("warning") && line.contains("chmod 600"),
+        "{line}"
+    );
+
+    let output = command(&[
+        "--api-listen",
+        "127.0.0.1:0",
+        "--api-token-file",
+        path.to_str().unwrap(),
+    ])
+    .env("KIRBY_CSMS_API_TOKEN", "from-env")
+    .stdin(Stdio::null())
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+}

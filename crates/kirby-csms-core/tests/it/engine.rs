@@ -1286,3 +1286,57 @@ async fn calls_beyond_the_per_station_queue_limit_are_refused() {
     }
     csms.shutdown().await;
 }
+
+#[tokio::test]
+async fn fault_counters_saturate_and_storage_is_bounded() {
+    let csms = start(|_| {}).await;
+    csms.inject(Fault::silence("Heartbeat").times(usize::MAX));
+    csms.inject(Fault::silence("Heartbeat").times(usize::MAX));
+    assert_eq!(csms.faults_remaining(), usize::MAX);
+    csms.clear_faults();
+
+    for _ in 0..1000 {
+        csms.try_inject(Fault::silence("Heartbeat")).unwrap();
+    }
+    let error = csms.try_inject(Fault::silence("Heartbeat")).unwrap_err();
+    assert!(error.contains("too many faults"), "{error}");
+    csms.clear_faults();
+
+    let big = json!({"x": "a".repeat(3 * 1024 * 1024)});
+    csms.try_inject(Fault::invalid_payload("A", big.clone()))
+        .unwrap();
+    csms.try_inject(Fault::invalid_payload("B", big.clone()))
+        .unwrap();
+    let error = csms
+        .try_inject(Fault::invalid_payload("C", big))
+        .unwrap_err();
+    assert!(error.contains("8 MiB"), "{error}");
+    assert_eq!(csms.faults_remaining(), 2);
+}
+
+#[tokio::test]
+async fn forget_if_disconnected_is_atomic_and_history_tail_is_bounded() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    assert_eq!(csms.forget_if_disconnected("ghost"), None);
+    let cp = Cp::connect(&csms, "/ocpp", "CP-TAIL").await;
+    wait_event(&mut events, "connect", connected("CP-TAIL")).await;
+    assert_eq!(csms.forget_if_disconnected("CP-TAIL"), Some(false));
+    assert!(csms.station("CP-TAIL").is_some());
+    let all = csms.history("CP-TAIL").unwrap();
+    let tail = csms.history_tail("CP-TAIL", 1).unwrap();
+    assert_eq!(tail.len(), all.len().min(1));
+    assert_eq!(csms.history_tail("CP-TAIL", 0).unwrap().len(), 0);
+    assert_eq!(
+        csms.history_tail("CP-TAIL", usize::MAX).unwrap().len(),
+        all.len()
+    );
+    assert!(csms.history_tail("ghost", 1).is_none());
+    cp.stop().await;
+    wait_event(&mut events, "disconnect", |e| {
+        matches!(e, CsmsEvent::Disconnected { .. })
+    })
+    .await;
+    assert_eq!(csms.forget_if_disconnected("CP-TAIL"), Some(true));
+    assert!(csms.station("CP-TAIL").is_none());
+}

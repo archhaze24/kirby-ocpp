@@ -138,10 +138,11 @@ async fn main() -> ExitCode {
         let _ = shutdown_signal().await;
         ExitCode::SUCCESS
     };
+    // The API stops last: event streams then still get the closing `disconnected` events.
+    handle.shutdown().await;
     if let Some(api) = api {
         api.finish().await;
     }
-    handle.shutdown().await;
     if let Some(sink) = sink {
         sink.finish().await;
     }

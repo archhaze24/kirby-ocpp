@@ -119,6 +119,9 @@ pub enum FaultKind {
     InvalidPayload,
 }
 
+/// Largest `times` of one fault.
+pub const MAX_FAULT_TIMES: usize = 1_000_000;
+
 /// Checks the fields of an `inject_fault` request (script step and API alike).
 pub fn check_fault(
     action: &str,
@@ -131,6 +134,9 @@ pub fn check_fault(
     }
     if times == 0 {
         return Err("`times` must be 1 or more".to_owned());
+    }
+    if times > MAX_FAULT_TIMES {
+        return Err(format!("`times` must be at most {MAX_FAULT_TIMES}"));
     }
     if kind == FaultKind::InvalidPayload && payload.is_none() {
         return Err("kind `invalid_payload` needs a `payload`".to_owned());

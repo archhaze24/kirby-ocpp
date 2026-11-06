@@ -1,9 +1,12 @@
 //! Local HTTP control API (`--api-listen`): JSON in and out, plain HTTP, optional bearer token.
 //! It only uses [`CsmsHandle`] and the command code shared with the stdin handler.
 
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
@@ -16,15 +19,17 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use chrono::SecondsFormat;
-use futures_util::stream;
+use futures_util::{StreamExt, stream};
 use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Reply, is_charge_point_action};
 use kirby_ocpp_core::text::is_unsafe_char;
 use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
 use tokio::task::JoinHandle;
+use tokio::time::Sleep;
 
 use crate::commands;
 use crate::headless::{Renderer, frame_json, station_summary};
@@ -37,6 +42,12 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 const MAX_STREAMS: usize = 16;
 /// Interval of the SSE keep-alive comments.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
+/// Most connections open at once; further ones are closed at once.
+const MAX_CONNECTIONS: usize = 512;
+/// Time a client gets to send the complete request head after connecting.
+const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time a client gets to send the whole request body.
+const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct ApiState {
@@ -59,6 +70,108 @@ pub async fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
+/// What a connection needs to see before its head timer stops: the end of the request head.
+struct HeadScan {
+    sleep: Pin<Box<Sleep>>,
+    /// The last four bytes read.
+    last: u32,
+}
+
+/// An accepted connection: holds a connection slot, and is cut when the request head does not
+/// arrive in time (slowloris). Every response says `Connection: close`, so a connection
+/// carries one request and the timer only has to cover the first head.
+struct GuardedIo {
+    inner: TcpStream,
+    head: Option<HeadScan>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl AsyncRead for GuardedIo {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        match Pin::new(&mut this.inner).poll_read(cx, buf) {
+            Poll::Ready(Ok(())) => {
+                if let Some(head) = &mut this.head {
+                    let mut done = false;
+                    for byte in buf.filled().get(before..).unwrap_or_default() {
+                        head.last = (head.last << 8) | u32::from(*byte);
+                        done |= head.last == 0x0d0a_0d0a || head.last & 0xffff == 0x0a0a;
+                    }
+                    if done {
+                        this.head = None;
+                    }
+                }
+                Poll::Ready(Ok(()))
+            }
+            Poll::Pending => {
+                if let Some(head) = &mut this.head
+                    && head.sleep.as_mut().poll(cx).is_ready()
+                {
+                    return Poll::Ready(Err(io::ErrorKind::TimedOut.into()));
+                }
+                Poll::Pending
+            }
+            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+impl AsyncWrite for GuardedIo {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
+
+/// The API listener: caps open connections and arms the head timer of each.
+struct GuardedListener {
+    inner: TcpListener,
+    slots: Arc<Semaphore>,
+}
+
+impl axum::serve::Listener for GuardedListener {
+    type Io = GuardedIo;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, addr) = axum::serve::Listener::accept(&mut self.inner).await;
+            // Over the cap the socket is dropped (closed) at once.
+            if let Ok(permit) = Arc::clone(&self.slots).try_acquire_owned() {
+                let io = GuardedIo {
+                    inner: stream,
+                    head: Some(HeadScan {
+                        sleep: Box::pin(tokio::time::sleep(HEAD_TIMEOUT)),
+                        last: 0,
+                    }),
+                    _permit: permit,
+                };
+                return (io, addr);
+            }
+        }
+    }
+
+    fn local_addr(&self) -> io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
 /// Serves the API on `listener` until [`Api::finish`].
 pub fn spawn(
     listener: TcpListener,
@@ -78,6 +191,10 @@ pub fn spawn(
     let task = tokio::spawn(async move {
         let shutdown = async move {
             let _ = stopped.wait_for(|stop| *stop).await;
+        };
+        let listener = GuardedListener {
+            inner: listener,
+            slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         };
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(shutdown)
@@ -120,6 +237,7 @@ fn router(state: ApiState) -> Router {
             error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
         })
         .layer(middleware::from_fn_with_state(state.clone(), auth))
+        .layer(middleware::from_fn(close_connection))
         .with_state(state)
 }
 
@@ -150,17 +268,59 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// With a token every request needs `Authorization: Bearer TOKEN`; without one, a request
-/// carrying `Origin` (a browser page) is refused.
+/// Every response closes its connection (see [`GuardedIo`]).
+async fn close_connection(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    response
+}
+
+/// Whether a `Host` header value names this machine: `127.0.0.1`, `[::1]` or `localhost`,
+/// with an optional port. Anything else (a DNS name that rebinds to 127.0.0.1) is not.
+fn is_loopback_host(value: &str) -> bool {
+    let (host, port, bracketed) = if let Some(rest) = value.strip_prefix('[') {
+        let Some((ip, tail)) = rest.split_once(']') else {
+            return false;
+        };
+        (ip, tail, true)
+    } else {
+        let (host, port) = value.split_at(value.find(':').unwrap_or(value.len()));
+        (host, port, false)
+    };
+    let host_ok = if bracketed {
+        host == "::1"
+    } else {
+        host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")
+    };
+    host_ok && (port.is_empty() || valid_port(port))
+}
+
+/// `:` and up to five digits.
+fn valid_port(text: &str) -> bool {
+    text.strip_prefix(':').is_some_and(|port| {
+        (1..=5).contains(&port.len()) && port.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// With a token every request needs exactly one `Authorization: Bearer TOKEN`. Without one the
+/// API trusts the loopback address only, so a browser must not be able to reach it: a request
+/// with an `Origin` header, a `Sec-Fetch-Site: cross-site` header or a `Host` that is not a
+/// loopback name (DNS rebinding) is refused.
 async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     let headers = request.headers();
     if let Some(token) = &state.token {
-        let given = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split_once(' '))
-            .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
-            .map(|(_, given)| given.trim());
+        let mut values = headers.get_all(header::AUTHORIZATION).iter();
+        let given = match (values.next(), values.next()) {
+            (Some(value), None) => value
+                .to_str()
+                .ok()
+                .and_then(|value| value.split_once(' '))
+                .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("bearer"))
+                .map(|(_, given)| given),
+            _ => None,
+        };
         if !given.is_some_and(|given| constant_time_eq(given.as_bytes(), token.as_bytes())) {
             let mut response = error(StatusCode::UNAUTHORIZED, "missing or wrong bearer token");
             response
@@ -172,6 +332,22 @@ async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Re
         return error(
             StatusCode::FORBIDDEN,
             "requests with an Origin header are refused without an API token",
+        );
+    } else if headers
+        .get("sec-fetch-site")
+        .is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"cross-site"))
+    {
+        return error(
+            StatusCode::FORBIDDEN,
+            "cross-site requests are refused without an API token",
+        );
+    } else if headers
+        .get(header::HOST)
+        .is_some_and(|host| !host.to_str().is_ok_and(is_loopback_host))
+    {
+        return error(
+            StatusCode::FORBIDDEN,
+            "the Host header must be 127.0.0.1, [::1] or localhost without an API token",
         );
     }
     next.run(request).await
@@ -243,17 +419,24 @@ async fn history(
         Ok(id) => id,
         Err(response) => return *response,
     };
-    let limit = match query_limit(&uri) {
-        Ok(limit) => limit,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    let limit = match query_param(&uri, "limit") {
+        Ok(Some(value)) => match value.parse::<usize>() {
+            Ok(limit) => Some(limit),
+            Err(_) => {
+                return error(
+                    StatusCode::BAD_REQUEST,
+                    "`limit` must be a non-negative integer",
+                );
+            }
+        },
+        Ok(None) => None,
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
-    let Some(entries) = state.handle.history(&id) else {
+    let Some(entries) = state.handle.history_tail(&id, limit.unwrap_or(usize::MAX)) else {
         return error(StatusCode::NOT_FOUND, "unknown station");
     };
-    let skip = limit.map_or(0, |limit| entries.len().saturating_sub(limit));
     let frames: Vec<Value> = entries
         .iter()
-        .skip(skip)
         .map(|entry| {
             let mut value = frame_json(&entry.frame);
             if let Some(object) = value.as_object_mut() {
@@ -278,27 +461,6 @@ async fn history(
     reply(StatusCode::OK, &json!({"station": id, "frames": frames}))
 }
 
-/// `limit=N` of the query string.
-fn query_limit(uri: &Uri) -> Result<Option<usize>, &'static str> {
-    let Some(query) = uri.query() else {
-        return Ok(None);
-    };
-    let mut limit = None;
-    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-        match pair.split_once('=') {
-            Some(("limit", value)) => {
-                limit = Some(
-                    value
-                        .parse::<usize>()
-                        .map_err(|_| "`limit` must be a non-negative integer")?,
-                );
-            }
-            _ => return Err("unknown query parameter; supported: limit"),
-        }
-    }
-    Ok(limit)
-}
-
 async fn forget_station(
     State(state): State<ApiState>,
     id: Result<Path<String>, PathRejection>,
@@ -307,16 +469,13 @@ async fn forget_station(
         Ok(id) => id,
         Err(response) => return *response,
     };
-    match state.handle.station(&id) {
+    match state.handle.forget_if_disconnected(&id) {
         None => error(StatusCode::NOT_FOUND, "unknown station"),
-        Some(info) if info.connected => error(
+        Some(false) => error(
             StatusCode::CONFLICT,
             "station is connected; only a disconnected station can be forgotten",
         ),
-        Some(_) => {
-            state.handle.forget(&id);
-            reply(StatusCode::OK, &json!({"station": id, "forgotten": true}))
-        }
+        Some(true) => reply(StatusCode::OK, &json!({"station": id, "forgotten": true})),
     }
 }
 
@@ -360,7 +519,7 @@ async fn call(
     reply(status, &answer.value)
 }
 
-/// The request body (at most 1 MiB) parsed as JSON.
+/// The request body (at most 1 MiB, read within 10 s) parsed as JSON.
 async fn read_json(request: Request<Body>) -> Result<Value, Box<Response>> {
     let too_large = || {
         Box::new(error(
@@ -376,13 +535,29 @@ async fn read_json(request: Request<Body>) -> Result<Value, Box<Response>> {
     if declared.is_some_and(|length| length > MAX_BODY_BYTES) {
         return Err(too_large());
     }
-    let bytes = match axum::body::to_bytes(request.into_body(), MAX_BODY_BYTES).await {
-        Ok(bytes) => bytes,
-        Err(e) if e.to_string().contains("length limit") => return Err(too_large()),
+    let collect = async {
+        let mut chunks = request.into_body().into_data_stream();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk.map_err(|_| {
+                Box::new(error(
+                    StatusCode::BAD_REQUEST,
+                    "cannot read the request body",
+                ))
+            })?;
+            if bytes.len().saturating_add(chunk.len()) > MAX_BODY_BYTES {
+                return Err(too_large());
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
+    };
+    let bytes = match tokio::time::timeout(BODY_TIMEOUT, collect).await {
+        Ok(bytes) => bytes?,
         Err(_) => {
             return Err(Box::new(error(
-                StatusCode::BAD_REQUEST,
-                "cannot read the request body",
+                StatusCode::REQUEST_TIMEOUT,
+                "the request body did not arrive in 10 s",
             )));
         }
     };
@@ -407,20 +582,20 @@ fn event_station(event: &CsmsEvent) -> Option<&str> {
     }
 }
 
-/// `station=ID` of the query string (percent-decoded by hand is not needed: ids are compared
-/// after decoding the common `%XX` escapes).
-fn query_station(uri: &Uri) -> Result<Option<String>, &'static str> {
+/// The value of the query parameter `name`, percent-decoded (`%XX` only; `+` stays a plus).
+/// Any other parameter is an error.
+fn query_param(uri: &Uri, name: &str) -> Result<Option<String>, String> {
     let Some(query) = uri.query() else {
         return Ok(None);
     };
-    let mut station = None;
+    let mut found = None;
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         match pair.split_once('=') {
-            Some(("station", value)) => station = Some(percent_decode(value)),
-            _ => return Err("unknown query parameter; supported: station"),
+            Some((key, value)) if key == name => found = Some(percent_decode(value)),
+            _ => return Err(format!("unknown query parameter; supported: {name}")),
         }
     }
-    Ok(station)
+    Ok(found)
 }
 
 fn percent_decode(text: &str) -> String {
@@ -463,14 +638,45 @@ struct StreamState {
     filter: Option<String>,
     queue: std::collections::VecDeque<Event>,
     stopped: watch::Receiver<bool>,
+    /// The server stopped: send what is queued and what the channel still holds, then end.
+    ending: bool,
     /// Held for the life of the stream: dropping the stream frees the slot.
     _permit: OwnedSemaphorePermit,
 }
 
+/// Resolves once the server stops.
+async fn wait_stopped(stopped: &mut watch::Receiver<bool>) {
+    let _ = stopped.wait_for(|stop| *stop).await;
+}
+
+impl StreamState {
+    /// Queues the SSE messages of `event` when it passes the station filter.
+    fn accept(&mut self, event: &CsmsEvent) {
+        if self
+            .filter
+            .as_deref()
+            .is_none_or(|id| event_station(event) == Some(id))
+        {
+            for (value, _) in self.renderer.render(event) {
+                self.queue.push_back(sse_event(&value));
+            }
+        }
+    }
+
+    /// Events were lost: say so, and forget the rendered state views so that the next state
+    /// event is complete instead of a diff against a view the client never saw.
+    fn lagged(&mut self, missed: u64) {
+        self.renderer.reset();
+        self.queue.push_back(sse_event(
+            &json!({"type": "note", "text": format!("{missed} events were dropped")}),
+        ));
+    }
+}
+
 async fn events(State(state): State<ApiState>, uri: Uri) -> Response {
-    let filter = match query_station(&uri) {
+    let filter = match query_param(&uri, "station") {
         Ok(filter) => filter,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        Err(message) => return error(StatusCode::BAD_REQUEST, &message),
     };
     let Ok(permit) = Arc::clone(&state.streams).try_acquire_owned() else {
         return error(
@@ -484,6 +690,7 @@ async fn events(State(state): State<ApiState>, uri: Uri) -> Response {
         filter,
         queue: std::collections::VecDeque::new(),
         stopped: state.stopped.clone(),
+        ending: false,
         _permit: permit,
     };
     let events = stream::unfold(init, |mut st| async move {
@@ -491,24 +698,25 @@ async fn events(State(state): State<ApiState>, uri: Uri) -> Response {
             if let Some(event) = st.queue.pop_front() {
                 return Some((Ok::<Event, std::convert::Infallible>(event), st));
             }
+            if st.ending {
+                return None;
+            }
             tokio::select! {
                 received = st.rx.recv() => match received {
-                    Ok(event) => {
-                        let wanted = st.filter.as_deref().is_none_or(|id| event_station(&event) == Some(id));
-                        if wanted {
-                            for (value, _) in st.renderer.render(&event) {
-                                st.queue.push_back(sse_event(&value));
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(missed)) => {
-                        st.queue.push_back(sse_event(
-                            &json!({"type": "note", "text": format!("{missed} events were dropped")}),
-                        ));
-                    }
+                    Ok(event) => st.accept(&event),
+                    Err(broadcast::error::RecvError::Lagged(missed)) => st.lagged(missed),
                     Err(broadcast::error::RecvError::Closed) => return None,
                 },
-                _ = st.stopped.wait_for(|stop| *stop) => return None,
+                () = wait_stopped(&mut st.stopped) => {
+                    st.ending = true;
+                    loop {
+                        match st.rx.try_recv() {
+                            Ok(event) => st.accept(&event),
+                            Err(broadcast::error::TryRecvError::Lagged(missed)) => st.lagged(missed),
+                            Err(_) => break,
+                        }
+                    }
+                }
             }
         }
     });
@@ -603,12 +811,14 @@ async fn inject_fault(State(state): State<ApiState>, request: Request<Body>) -> 
     ) {
         return error(StatusCode::BAD_REQUEST, &message);
     }
-    state.handle.inject(commands::build_fault(
+    if let Err(message) = state.handle.try_inject(commands::build_fault(
         &fault.action,
         fault.kind,
         fault.payload,
         fault.times,
-    ));
+    )) {
+        return error(StatusCode::CONFLICT, &message);
+    }
     reply(
         StatusCode::OK,
         &json!({"injected": true, "remaining": state.handle.faults_remaining()}),
