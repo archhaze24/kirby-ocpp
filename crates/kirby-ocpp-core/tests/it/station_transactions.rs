@@ -646,3 +646,100 @@ async fn silence_is_not_mistaken_for_a_started_transaction() {
     let _ = Duration::ZERO;
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_full_offline_queue_never_drops_the_entry_of_a_running_transaction() {
+    use kirby_ocpp_core::ids::IdTag;
+    use kirby_ocpp_core::station::offline::{MAX_QUEUED_TRANSACTIONS, OfflineTx};
+    use kirby_ocpp_core::station::transaction::PendingStart;
+    use kirby_ocpp_core::store::{PersistedConnector, PersistedStation, StationStore};
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config("ws://127.0.0.1:9/ocpp", &dir);
+    let store = StationStore::new(dir.path(), &config.charge_point_id);
+    let mut state = PersistedStation::new(config.charge_point_id.clone());
+    state.connector_count = 2;
+    state
+        .configuration
+        .insert("AllowOfflineTxForUnknownId".to_owned(), "true".to_owned());
+    state
+        .configuration
+        .insert("LocalAuthorizeOffline".to_owned(), "true".to_owned());
+    let pending = PendingStart {
+        tx_id: TxId::Local(1),
+        id_tag: IdTag::new("TAG1").unwrap(),
+        started_at: t0(),
+        meter_start_wh: 0,
+        reservation_id: None,
+    };
+    state.connectors.push(PersistedConnector {
+        id: C1,
+        status: ConnectorStatus::Charging,
+        availability: kirby_ocpp_core::ocpp::types::AvailabilityType::Operative,
+        pending_availability: None,
+        ev_connected: true,
+        meter_wh: 0,
+        last_id_tag: None,
+        reservation: None,
+        transaction: TransactionState::PendingStart(pending.clone()),
+    });
+    // The running transaction owns the oldest entry; the queue is already full.
+    for key in 1..=MAX_QUEUED_TRANSACTIONS as u64 {
+        let connector = if key == 1 { C1 } else { ConnectorId::new(2) };
+        let dropped = state.offline_queue.push(OfflineTx {
+            key,
+            connector,
+            tx_id: TxId::Local(key),
+            id_tag: pending.id_tag.clone(),
+            started_at: t0(),
+            meter_start_wh: 0,
+            reservation_id: None,
+            start_pending: true,
+            stop: None,
+        });
+        assert!(dropped.is_none(), "not over the bound yet");
+    }
+    store.save(&state).unwrap();
+
+    let (station, join) = Station::spawn(config, Arc::new(ManualClock::new(t0())));
+    let snapshot = station.snapshot();
+    assert!(!snapshot.connector(C1).unwrap().transaction.is_idle());
+    // A new offline transaction on connector 2 overflows the queue.
+    let outcome = station
+        .send(Command::StartTransaction {
+            connector: ConnectorId::new(2),
+            id_tag: tag("TAG2"),
+        })
+        .await;
+    assert!(
+        matches!(outcome, Ok(Outcome::TransactionStarted { .. })),
+        "{outcome:?}"
+    );
+
+    // The running transaction on connector 1 keeps its entry, so it can still be stopped
+    // and delivered later; an entry of nobody's connector went instead.
+    let one = station.snapshot().connector(C1).unwrap().clone();
+    assert_eq!(one.transaction.tx_id(), Some(TxId::Local(1)));
+    assert_eq!(
+        station.snapshot().pending_offline_messages as usize,
+        MAX_QUEUED_TRANSACTIONS
+    );
+    let stopped = station
+        .send(Command::StopTransaction {
+            connector: C1,
+            reason: StopReason::Local,
+            id_tag: None,
+        })
+        .await;
+    assert!(stopped.is_ok(), "{stopped:?}");
+    assert!(
+        station
+            .snapshot()
+            .connector(C1)
+            .unwrap()
+            .transaction
+            .is_idle()
+    );
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+}

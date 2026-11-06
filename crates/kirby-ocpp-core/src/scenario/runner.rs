@@ -136,6 +136,8 @@ pub async fn run_scenario_with_events(
     };
     let mut steps = Vec::with_capacity(scenario.steps.len());
     let mut failed = false;
+    // A step was cut short or skipped by the cancel token (not merely: it fired at the end).
+    let mut cut_short = false;
     for (index, step) in scenario.steps.iter().enumerate() {
         let name = step.label();
         if failed || cancel.is_cancelled() {
@@ -143,6 +145,7 @@ pub async fn run_scenario_with_events(
                 StepStatus::Skipped
             } else {
                 failed = true;
+                cut_short = true;
                 StepStatus::Failed("cancelled".to_owned())
             };
             let report = StepReport {
@@ -172,6 +175,7 @@ pub async fn run_scenario_with_events(
             Ok(()) => StepStatus::Passed,
             Err(reason) => {
                 failed = true;
+                cut_short |= cancel.is_cancelled();
                 StepStatus::Failed(reason)
             }
         };
@@ -189,7 +193,7 @@ pub async fn run_scenario_with_events(
     ScenarioReport {
         scenario: scenario.name.clone(),
         passed: steps.iter().all(|s| s.status == StepStatus::Passed),
-        cancelled: cancel.is_cancelled(),
+        cancelled: cut_short,
         steps,
         duration_ms: millis(started.elapsed()),
     }

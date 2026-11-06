@@ -70,6 +70,16 @@ impl OfflineQueue {
     /// Appends `entry`. Over [`MAX_QUEUED_TRANSACTIONS`] entries the oldest one is dropped
     /// and returned: a stop-only entry first (its transaction is over), else the oldest.
     pub fn push(&mut self, entry: OfflineTx) -> Option<OfflineTx> {
+        self.push_keeping(entry, |_| false)
+    }
+
+    /// Like [`push`](Self::push), but an entry for which `live` is true (its transaction still
+    /// runs on a connector) is only dropped when every entry is live.
+    pub fn push_keeping(
+        &mut self,
+        entry: OfflineTx,
+        live: impl Fn(&OfflineTx) -> bool,
+    ) -> Option<OfflineTx> {
         self.entries.push(entry);
         if self.entries.len() <= MAX_QUEUED_TRANSACTIONS {
             return None;
@@ -77,7 +87,8 @@ impl OfflineQueue {
         let index = self
             .entries
             .iter()
-            .position(|e| !e.start_pending)
+            .position(|e| !e.start_pending && !live(e))
+            .or_else(|| self.entries.iter().position(|e| !live(e)))
             .unwrap_or(0);
         Some(self.entries.remove(index))
     }

@@ -166,6 +166,27 @@ timeout_ms = 4000
 }
 
 #[tokio::test]
+async fn a_cancel_after_the_last_step_does_not_mark_the_report_cancelled() {
+    let rig = booted_rig().await;
+    // Nothing is left to cut short, so a fired token changes nothing: passed, not cancelled.
+    let done = Scenario {
+        name: "t".to_owned(),
+        description: String::new(),
+        steps: Vec::new(),
+    };
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let report = run_scenario(&rig.station, &done, &cancel, None).await;
+    assert!(report.passed && !report.cancelled, "{report:?}");
+
+    // A step that never ran because of the token: cancelled, not passed.
+    let s = scenario("[[steps]]\naction = \"heartbeat\"\n");
+    let report = run_scenario(&rig.station, &s, &cancel, None).await;
+    assert!(report.cancelled && !report.passed);
+    rig.shutdown().await;
+}
+
+#[tokio::test]
 async fn cancel_stops_a_sleeping_scenario() {
     let rig = booted_rig().await;
     let s = scenario(

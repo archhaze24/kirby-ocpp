@@ -372,22 +372,28 @@ impl StationActor {
             } else {
                 decision.id_tag_info.status
             };
-            self.log(
-                LogLevel::Warn,
+            let message = if decision.accepted {
+                format!(
+                    "StartTransaction accepted by Central System, but connector {id} no longer waits for it; closing transaction {} ({})",
+                    response.transaction_id, pending.id_tag
+                )
+            } else {
                 format!(
                     "StartTransaction rejected by Central System: {status} ({})",
                     pending.id_tag
-                ),
-            );
+                )
+            };
+            self.log(LogLevel::Warn, message);
             if still_ours {
                 self.abandon_start(id);
             }
-            // The CSMS opened transaction N for a tag it refused: close it.
+            // The CSMS opened transaction N, but we do not keep it: close it. `DeAuthorized`
+            // only when the CSMS really refused the tag.
             self.send_stop_for(
                 response.transaction_id,
                 pending.meter_start_wh,
                 Some(pending.id_tag),
-                StopReason::DeAuthorized,
+                unkept_start_stop_reason(decision.accepted),
             );
             return done(self, Ok(Outcome::TransactionRejected { status }));
         }
@@ -606,7 +612,15 @@ impl StationActor {
     /// Adds an entry to the offline queue; when the queue is over its bound the oldest
     /// entry is dropped (non-start entries first) with a warning.
     fn push_queue(&mut self, entry: OfflineTx) {
-        if let Some(dropped) = self.queue.push(entry) {
+        // An entry whose transaction still runs on a connector must stay: dropping it would
+        // leave the connector in a transaction nobody will ever deliver or end.
+        let connectors = &self.state.connectors;
+        let live = |e: &OfflineTx| {
+            connectors
+                .iter()
+                .any(|c| c.id == e.connector && c.transaction.tx_id() == Some(e.tx_id))
+        };
+        if let Some(dropped) = self.queue.push_keeping(entry, live) {
             self.sync_failures.remove(&dropped.key);
             self.log(
                 LogLevel::Warn,
@@ -981,10 +995,25 @@ fn stop_request(info: &StopInfo, wire: i32) -> StopTransactionRequest {
     }
 }
 
+/// Why the station closes a transaction the CSMS opened but the station does not keep.
+fn unkept_start_stop_reason(tag_accepted: bool) -> StopReason {
+    if tag_accepted {
+        StopReason::Other
+    } else {
+        StopReason::DeAuthorized
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::DateTime;
+
+    #[test]
+    fn an_unkept_start_is_deauthorized_only_when_the_tag_was_refused() {
+        assert_eq!(unkept_start_stop_reason(false), StopReason::DeAuthorized);
+        assert_eq!(unkept_start_stop_reason(true), StopReason::Other);
+    }
 
     #[test]
     fn stop_request_omits_empty_transaction_data() {
