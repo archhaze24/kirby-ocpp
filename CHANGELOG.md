@@ -9,6 +9,13 @@ tag as the GitHub release notes.
 
 Work in progress after 0.4.0.
 
+### Scenarios
+
+- Emulator scenarios have variables: an optional `[vars]` table (strings, numbers, booleans), `${name}` substitution in the string fields and JSON payloads of a step (an exact `"${name}"` keeps the JSON type, `$${` is a literal `${`), and the built-ins `${station_id}` and `${index}`.
+- `capture = { name = "/json/pointer" }` on `send_raw`, `data_transfer` and `expect_call` steps stores a value of the answer for later steps; a missing pointer fails the step.
+- `kirby-ocpp run --var NAME=VALUE` (repeatable) overrides scenario variables, also in fleet runs.
+- `kirby_ocpp_core::scenario::vars` is a public helper (`Vars`, `substitute`, `substitute_str`, `capture`) for other tools.
+
 ### Documentation
 
 - `README.md` is now a landing page; detailed pages live under `docs/` (index in `docs/README.md`): architecture, emulator, CSMS, scenarios and scripts, security, configuration reference, testing, development.

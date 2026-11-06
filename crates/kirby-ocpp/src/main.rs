@@ -14,7 +14,8 @@ use clap::Parser;
 use kirby_ocpp_core::fleet::Fleet;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::scenario::{
-    CancelToken, JunitSuite, Scenario, ScenarioReport, StepStatus, builtin, junit_xml, run_scenario,
+    CancelToken, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin, junit_xml,
+    run_scenario_with_vars,
 };
 use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
 use kirby_ocpp_tui::stdout_pump::print_lossy;
@@ -312,9 +313,10 @@ async fn run(
         })
     };
 
+    let overrides = override_vars(args);
     let mut interrupted = false;
     let outcome = tokio::select! {
-        outcome = connect_and_run(&handle, &scenario, &cancel) => outcome,
+        outcome = connect_and_run(&handle, &scenario, &cancel, &overrides, 1) => outcome,
         sigint = shutdown_signal() => {
             interrupted = sigint;
             cancel.cancel();
@@ -372,6 +374,8 @@ async fn connect_and_run(
     handle: &StationHandle,
     scenario: &Scenario,
     cancel: &CancelToken,
+    overrides: &Vars,
+    index: u64,
 ) -> Result<ScenarioReport, String> {
     handle.connect().await.map_err(|e| e.to_string())?;
     let mut snapshots = handle.watch_snapshot();
@@ -383,7 +387,17 @@ async fn connect_and_run(
             return Err("timed out waiting for the central system to accept the BootNotification".to_owned());
         }
     }
-    Ok(run_scenario(handle, scenario, cancel, None).await)
+    Ok(run_scenario_with_vars(handle, scenario, cancel, None, overrides, index).await)
+}
+
+/// The `--var` overrides of a `run` command.
+fn override_vars(args: &RunArgs) -> Vars {
+    let mut vars = Vars::new();
+    for (name, value) in &args.vars {
+        // Names were validated by the argument parser.
+        let _ = vars.insert(name, value.clone());
+    }
+    vars
 }
 
 /// Prints a scenario report; `station` (fleet mode) tags every line.

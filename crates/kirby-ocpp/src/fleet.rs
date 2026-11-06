@@ -19,8 +19,8 @@ use serde_json::{Value, json};
 use crate::cli::RunArgs;
 use crate::headless::{Sink, stdout_line};
 use crate::{
-    EXIT_INTERRUPTED, EXIT_USAGE, connect_and_run, load_scenario, print_report, shutdown_signal,
-    usage_error, write_junit, write_report,
+    EXIT_INTERRUPTED, EXIT_USAGE, connect_and_run, load_scenario, override_vars, print_report,
+    shutdown_signal, usage_error, write_junit, write_report,
 };
 
 fn clock() -> Arc<dyn Clock> {
@@ -127,6 +127,7 @@ pub async fn interactive(
 }
 
 /// Runs one scenario on every station at once; exit 0 only if all of them pass.
+#[allow(clippy::too_many_lines)]
 pub async fn run(
     config: StationConfig,
     spec: FleetSpec,
@@ -163,16 +164,19 @@ pub async fn run(
     };
 
     let stagger = fleet.stagger();
+    let overrides = override_vars(args);
+    let first_index = u64::from(spec.first_index);
     let runs = fleet
         .stations()
         .iter()
         .enumerate()
         .map(|(index, (_, handle))| {
-            let (scenario, cancel) = (&scenario, &cancel);
+            let (scenario, cancel, overrides) = (&scenario, &cancel, &overrides);
             async move {
                 let delay = stagger.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX));
                 wait_or_cancel(delay, cancel).await;
-                connect_and_run(handle, scenario, cancel).await
+                let index = first_index.saturating_add(index as u64);
+                connect_and_run(handle, scenario, cancel, overrides, index).await
             }
         });
     let mut interrupted = false;

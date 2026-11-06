@@ -73,6 +73,42 @@ Run it:
 kirby-ocpp --url ws://localhost:9000/ocpp run --scenario session-with-rejected-reset.toml --report report.json --junit junit.xml
 ```
 
+### Variables
+
+An optional `[vars]` table at the top of the file declares variables (strings, numbers and booleans only; objects, arrays and dates are a load error). Names match `[A-Za-z_][A-Za-z0-9_]*`. `station_id` (the station's id) and `index` (its place in a fleet, 1 for a single station; `--first-index` plus the position in a fleet run) are built in and cannot be redefined.
+
+```toml
+name = "tagged-session"
+
+[vars]
+tag = "KIRBY-A"
+wh = 500
+
+[[steps]]
+action = "data_transfer"
+vendor_id = "com.example"
+message_id = "hello-${station_id}"      # text inside a longer string
+capture = { token = "/data" }          # store a value of the answer
+
+[[steps]]
+action = "send_raw"
+call = "DataTransfer"
+payload = { vendorId = "com.example", data = "${token}", messageId = "n${index}" }
+
+[[steps]]
+action = "authorize"
+id_tag = "${tag}"
+```
+
+Rules:
+
+- `${name}` is replaced right before the step runs, so a variable captured by an earlier step is visible. An unknown variable, a malformed `${` or a bad result fails that step with a message naming the variable.
+- A string that is exactly `${name}` takes the variable's JSON type (`connectorId = "${n}"` sends a number when `n` is a number). Inside longer text the variable becomes text: strings without quotes, numbers and booleans as written. An object or array inside longer text is an error.
+- `$${` is a literal `${`.
+- Substituted fields: the JSON of `payload` and `match`, `expect.status`, `expect.payload`, and the string fields `id_tag`, `call`, `vendor_id`, `message_id`, `data`, `info`, `tech_info`, `event_type`, `rule`. Typed fields (`connector`, `reason`, `status`, `error_code`, `wh_delta`, `ms`, `timeout_ms`, `condition`, `direction`, `validate`) are never substituted: a variable cannot make a connector number or a timeout. A placeholder in `id_tag` is checked at load time as plain text (at most 20 characters), the substituted value again when the step runs. `rule`, `event_type` and `clear_rules` `call` with a placeholder are validated only when the step runs.
+- `capture = { name = "/json/pointer" }` stores the value at a [JSON pointer](https://www.rfc-editor.org/rfc/rfc6901) of the step's raw answer after the step ran. It is valid on `send_raw`, `data_transfer` (the CALLRESULT payload) and `expect_call` (the payload of the matched CALL) and a load error elsewhere. An empty pointer captures the whole answer. A missing pointer fails the step. The captured value keeps its JSON type and may be an object or array (usable only as a whole `"${name}"` value).
+- `kirby-ocpp run --var NAME=VALUE` (repeatable) overrides `[vars]`. `true`, `false` and numbers keep their type, everything else is a string. Setting `station_id` or `index`, or a bad name, is a usage error (exit 2). In a fleet run every station gets the same `--var` values and its own `index` and `station_id`.
+
 ### Actions
 
 Every step has `action` plus the fields of that action, and may add `name` (shown in reports; default is the action name) and `expect` (see [Expect](#expect)). Fields without a default are required.

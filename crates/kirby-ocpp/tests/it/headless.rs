@@ -306,3 +306,58 @@ fn read_lines(path: &Path) -> Vec<Value> {
         .map(|l| serde_json::from_str(l).unwrap())
         .collect()
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_var_overrides_scenario_vars_and_bad_names_exit_2() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        &dir,
+        "vars.toml",
+        "name = \"v\"\n[vars]\nwho = \"scenario\"\nn = 1\n\
+         [[steps]]\naction = \"data_transfer\"\nvendor_id = \"${station_id}-${index}-${who}\"\n\
+         [[steps]]\naction = \"send_raw\"\ncall = \"StatusNotification\"\n\
+         payload = { connectorId = \"${n}\", status = \"Available\", errorCode = \"NoError\" }\n",
+    );
+    let output = run(station_args(
+        &csms,
+        &[
+            "run",
+            "--scenario",
+            &file,
+            "--json",
+            "--var",
+            "who=cli",
+            "--var",
+            "n=2",
+        ],
+    ))
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let lines = jsonl(&output);
+    let sent = |action: &str| {
+        lines
+            .iter()
+            .find(|l| l["type"] == "frame" && l["direction"] == "out" && l["action"] == action)
+            .map_or_else(|| panic!("no {action} frame"), |l| l["payload"].clone())
+    };
+    assert_eq!(sent("DataTransfer")["vendorId"], "CP-CLI-1-cli");
+    let statuses: Vec<&Value> = lines
+        .iter()
+        .filter(|l| l["type"] == "frame" && l["action"] == "StatusNotification")
+        .collect();
+    assert!(
+        statuses.iter().any(|l| l["payload"]["connectorId"] == 2),
+        "the number stays a number: {statuses:?}"
+    );
+
+    for bad in ["nonsense", "1a=2", "index=3", "station_id=x"] {
+        let output = run(station_args(
+            &csms,
+            &["run", "--scenario", "charge-session", "--var", bad],
+        ))
+        .await;
+        assert_eq!(output.status.code(), Some(2), "{bad}");
+    }
+    csms.shutdown().await;
+}

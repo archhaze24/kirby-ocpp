@@ -340,6 +340,21 @@ pub struct RunArgs {
     /// Replace the idTag of the scenario's authorize / start_tx / stop_tx steps
     #[arg(long, value_name = "IDTAG", value_parser = non_empty)]
     pub id_tag: Option<String>,
+
+    /// Set a scenario variable (repeatable): `${NAME}` in the scenario becomes VALUE.
+    /// Overrides `[vars]`; `true`/`false`/numbers keep their type. `station_id` and `index`
+    /// are built in and cannot be set.
+    #[arg(long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
+    pub vars: Vec<(String, serde_json::Value)>,
+}
+
+/// Parses a `--var` argument.
+fn scenario_var(text: &str) -> Result<(String, serde_json::Value), String> {
+    let (name, value) = kirby_ocpp_core::scenario::vars::parse_assignment(text)?;
+    if kirby_ocpp_core::scenario::vars::is_builtin(&name) {
+        return Err(format!("`{name}` is a built-in variable and cannot be set"));
+    }
+    Ok((name, value))
 }
 
 #[derive(Debug, Subcommand)]
