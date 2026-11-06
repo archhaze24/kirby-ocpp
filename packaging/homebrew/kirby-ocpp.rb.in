@@ -1,0 +1,40 @@
+# Rendered by .github/scripts/render-packaging.sh from packaging/homebrew/kirby-ocpp.rb.in.
+# Lives in the tap repo archhaze24/homebrew-tap as Formula/kirby-ocpp.rb.
+# Linux uses the static musl builds, so no particular glibc is required.
+class KirbyOcpp < Formula
+  desc "OCPP 1.6J charge point emulator (kirby-ocpp) and central system (kirby-csms) for testing"
+  homepage "https://github.com/archhaze24/kirby-ocpp"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/archhaze24/kirby-ocpp/releases/download/@TAG@/kirby-ocpp-@TAG@-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA_aarch64_apple_darwin@"
+    end
+    on_intel do
+      url "https://github.com/archhaze24/kirby-ocpp/releases/download/@TAG@/kirby-ocpp-@TAG@-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA_x86_64_apple_darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/archhaze24/kirby-ocpp/releases/download/@TAG@/kirby-ocpp-@TAG@-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA_aarch64_unknown_linux_musl@"
+    end
+    on_intel do
+      url "https://github.com/archhaze24/kirby-ocpp/releases/download/@TAG@/kirby-ocpp-@TAG@-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA_x86_64_unknown_linux_musl@"
+    end
+  end
+
+  def install
+    bin.install "kirby-ocpp", "kirby-csms"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/kirby-ocpp --version")
+    assert_match version.to_s, shell_output("#{bin}/kirby-csms --version")
+  end
+end

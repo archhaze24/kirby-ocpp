@@ -1,7 +1,8 @@
 name: Release
 
 # Builds release binaries. Runs only on a `v*` tag push (which also creates a GitHub
-# release) or manually. A manual run only builds and packages; it never creates a release.
+# release and pushes the container image to ghcr.io) or manually. A manual run only builds and
+# packages (the image is built but not pushed); it never creates a release.
 # On a tag push the tag must equal the workspace version in Cargo.toml, and CHANGELOG.md must
 # have a section for it: that section becomes the release notes.
 on:
@@ -66,6 +67,7 @@ jobs:
           - { target: x86_64-unknown-linux-gnu, os: ubuntu-latest }
           - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-gnu, os: ubuntu-24.04-arm }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
           - { target: x86_64-apple-darwin, os: macos-15-intel }
           - { target: aarch64-apple-darwin, os: macos-latest }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
@@ -89,6 +91,7 @@ jobs:
         env:
           # ring compiles C code; point it at the musl wrapper (ignored for other targets).
           CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
           TARGET: ${{ matrix.target }}
         run: cargo build --release --locked -p kirby-ocpp -p kirby-csms --target "$TARGET"
 
@@ -162,3 +165,97 @@ jobs:
           gh release create "$REF_NAME" dist/* \
             --repo "$REPO" \
             --title "$REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" "${flags[@]}"
+
+      # Homebrew formula and Scoop manifest with the real checksums. Uploaded as a workflow
+      # artifact, NOT as release assets: the owner pushes them to the tap and bucket repos.
+      - name: Render packaging files
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: .github/scripts/render-packaging.sh "$REF_NAME" dist "$RUNNER_TEMP/packaging"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: packaging
+          path: ${{ runner.temp }}/packaging/*
+          if-no-files-found: error
+
+  image:
+    name: container image
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ghcr.io/archhaze24/kirby-ocpp
+    steps:
+      - uses: actions/checkout@v7
+
+      # Only the two static musl builds go into the image.
+      - uses: actions/download-artifact@v8
+        with:
+          name: x86_64-unknown-linux-musl
+          path: artifacts/amd64
+      - uses: actions/download-artifact@v8
+        with:
+          name: aarch64-unknown-linux-musl
+          path: artifacts/arm64
+
+      - name: Unpack binaries into the build context
+        shell: bash
+        run: |
+          for arch in amd64 arm64; do
+            mkdir -p "dist/linux-$arch"
+            archive=(artifacts/"$arch"/*.tar.gz)
+            [ "${#archive[@]}" -eq 1 ] || { echo "::error::expected one archive in artifacts/$arch"; exit 1; }
+            tar -xzf "${archive[0]}" -C "dist/linux-$arch" --strip-components=1 --wildcards '*/kirby-ocpp' '*/kirby-csms'
+            ls -l "dist/linux-$arch"
+          done
+
+      # Tags on a real tag push: X.Y.Z always, X.Y and latest only for final releases.
+      - name: Compute tags
+        id: meta
+        shell: bash
+        env:
+          IS_TAG: ${{ github.event_name == 'push' }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ "$IS_TAG" = "true" ]; then
+            version="${REF_NAME#v}"
+          else
+            version="0.0.0-manual"
+          fi
+          {
+            echo "version=$version"
+            echo "tags<<EOF"
+            echo "$IMAGE:$version"
+            case "$version" in
+              *-*) ;;
+              *) echo "$IMAGE:${version%.*}"; echo "$IMAGE:latest" ;;
+            esac
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
