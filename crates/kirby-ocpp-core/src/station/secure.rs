@@ -100,7 +100,8 @@ pub(super) fn classify_tls_failure(text: &str) -> Option<TlsFailure> {
 }
 
 /// Whether a failed attempt looks like the server refusing our client certificate (a fatal
-/// alert about certificates, from the TLS handshake or right after it under TLS 1.3).
+/// alert about certificates, from the TLS handshake or right after it under TLS 1.3; an HTTP
+/// 401/403 upgrade answer; a close or reset right after the handshake).
 /// `HandshakeFailure` is deliberately not counted here.
 fn is_client_certificate_refusal(error: &ConnectError) -> bool {
     const ALERTS: &[&str] = &[
@@ -113,15 +114,33 @@ fn is_client_certificate_refusal(error: &ConnectError) -> bool {
         "CertificateRequired",
         "AccessDenied",
     ];
-    let (ConnectError::Tls(text) | ConnectError::Handshake(text) | ConnectError::Network(text)) =
-        error
-    else {
-        return false;
+    let has_alert = |text: &str| {
+        ALERTS
+            .iter()
+            .any(|alert| text.contains(&format!("received fatal alert: {alert}")))
     };
-    ALERTS
-        .iter()
-        .any(|alert| text.contains(&format!("received fatal alert: {alert}")))
+    match error {
+        ConnectError::HttpStatus {
+            status: 401 | 403, ..
+        } => true,
+        // The server completed the TLS handshake and then closed or reset the connection
+        // before answering the upgrade request (see `ws::handshake::read_head`).
+        ConnectError::Handshake(text) => {
+            if text.contains("received fatal alert") {
+                has_alert(text)
+            } else {
+                text.contains("closed before the upgrade response")
+                    || text.contains("cannot read the upgrade response")
+            }
+        }
+        ConnectError::Tls(text) | ConnectError::Network(text) => has_alert(text),
+        _ => false,
+    }
 }
+
+/// Consecutive failed attempts of any kind after which the client certificate alternates
+/// (`A02.FR.28`) when the failure is not clearly a refusal.
+const ALTERNATE_AFTER_FAILURES: u32 = 3;
 
 impl StationActor {
     /// Reports a security event: queued, then sent as soon as the station is registered.
@@ -381,6 +400,7 @@ impl StationActor {
         self.secrets.charge_point_key_pem = Some(key);
         self.secrets.pending_key_pem = None;
         self.use_previous_cert = false;
+        self.cert_failures = 0;
     }
 
     /// A connection with a stored client certificate succeeded. The new certificate working
@@ -390,6 +410,7 @@ impl StationActor {
         let used = self.connect_identity;
         let has_previous = self.certs.previous_charge_point_chain.is_some();
         self.use_previous_cert = false;
+        self.cert_failures = 0;
         match used {
             StoredIdentity::Current if has_previous => {
                 self.certs.previous_charge_point_chain = None;
@@ -522,6 +543,43 @@ impl StationActor {
         identity
     }
 
+    /// `A02.FR.28`: while a renewed client certificate waits for its first successful
+    /// connection (a previous one is kept), failed attempts alternate between the new and the
+    /// previous certificate so a bad renewal cannot strand the station. A refusal (TLS alert,
+    /// HTTP 401/403, connection closed or reset right after the TLS handshake) switches at
+    /// once; any other failure (timeout, refused TCP, DNS) after [`ALTERNATE_AFTER_FAILURES`]
+    /// consecutive ones, so a short outage does not flip the choice constantly. Nothing is
+    /// discarded here: that needs a successful connection ([`Self::client_certificate_connected`]).
+    fn alternate_client_certificate(&mut self, error: &ConnectError) {
+        if self.connect_identity == StoredIdentity::None
+            || self.certs.previous_charge_point_chain.is_none()
+        {
+            self.cert_failures = 0;
+            return;
+        }
+        self.cert_failures += 1;
+        let refused = is_client_certificate_refusal(error);
+        if !refused && self.cert_failures < ALTERNATE_AFTER_FAILURES {
+            return;
+        }
+        self.cert_failures = 0;
+        self.use_previous_cert = !self.use_previous_cert;
+        let next = if self.use_previous_cert {
+            "previous"
+        } else {
+            "new"
+        };
+        let why = if refused {
+            "the server refused the client certificate".to_owned()
+        } else {
+            format!("{ALTERNATE_AFTER_FAILURES} failed attempts in a row")
+        };
+        self.log(
+            LogLevel::Warn,
+            format!("{why}; the next attempt uses the {next} one"),
+        );
+    }
+
     /// Security events for a failed connection attempt, and the next attempt's certificate
     /// choices. `FailedToAuthenticateAtCentralSystem`, `InvalidCentralSystemCertificate`,
     /// `InvalidTLSVersion` and `InvalidTLSCipherSuite` are reported once per series of failed
@@ -534,23 +592,7 @@ impl StationActor {
         if certificate_error && !wildcard && self.certs.has_fallback() {
             self.use_fallback_root = !self.use_fallback_root;
         }
-        if self.connect_identity != StoredIdentity::None
-            && self.certs.previous_charge_point_chain.is_some()
-            && is_client_certificate_refusal(error)
-        {
-            self.use_previous_cert = !self.use_previous_cert;
-            self.log(
-                LogLevel::Warn,
-                format!(
-                    "the server refused the client certificate; the next attempt uses the {} one",
-                    if self.use_previous_cert {
-                        "previous"
-                    } else {
-                        "new"
-                    }
-                ),
-            );
-        }
+        self.alternate_client_certificate(error);
         match error {
             ConnectError::HttpStatus {
                 status: 401 | 403,

@@ -604,9 +604,22 @@ fn refused_pair() -> (String, String) {
 /// A station state with profile 3 and the given new and previous certificates.
 fn mtls_case(csms: MockCsms, new: (String, String), previous: (String, String)) -> MtlsCase {
     let ca_pem = csms.tls_material().unwrap().ca_cert_pem().to_owned();
+    let url = csms.url().to_owned();
+    mtls_case_at(csms, &url, &ca_pem, new, previous)
+}
+
+/// Like [`mtls_case`], with the station pointed at `url` (trusting `ca_pem`) while `csms` only
+/// records the traffic.
+fn mtls_case_at(
+    csms: MockCsms,
+    url: &str,
+    ca_pem: &str,
+    new: (String, String),
+    previous: (String, String),
+) -> MtlsCase {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = test_config(csms.url(), &dir);
-    config.tls.ca_file = Some(write_file(&dir, "ca.pem", &ca_pem));
+    let mut config = test_config(url, &dir);
+    config.tls.ca_file = Some(write_file(&dir, "ca.pem", ca_pem));
     config.tls.server_name = Some("localhost".to_owned());
     let store = StationStore::new(dir.path(), "CP-001");
     let mut state = PersistedStation::new("CP-001");
@@ -706,6 +719,182 @@ async fn a_working_new_certificate_discards_the_previous_one_silently() {
             .iter()
             .any(|r| r.payload["type"] == "DiscardedRenewedClientCertificate"),
         "nothing to report"
+    );
+    case.csms.shutdown().await;
+}
+
+/// How the gate treats the connection of the refused ("new") client certificate.
+#[derive(Clone, Copy)]
+enum Refusal {
+    /// Complete the TLS handshake, then drop the connection.
+    Close,
+    /// Answer the upgrade with `403 Forbidden`.
+    Forbidden,
+}
+
+/// A TLS front for a plain mock CSMS: connections presenting `refused_der` are refused as
+/// `refusal` says (after a successful TLS handshake), every other client certificate is
+/// forwarded to `upstream`. Returns the `wss://` URL, the CA PEM and the refused-attempt count.
+async fn certificate_gate(
+    upstream: SocketAddr,
+    refused_der: Vec<u8>,
+    refusal: Refusal,
+) -> (String, String, Arc<AtomicUsize>) {
+    let authority = ca("Gate CA");
+    let (cert, key) = server_leaf(&authority, &["localhost"], None);
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ServerConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_client_cert_verifier(Arc::new(AnyClientCertificate(provider)))
+        .with_single_cert(
+            vec![cert],
+            PrivateKeyDer::from(PrivatePkcs8KeyDer::from(key.serialize_der())),
+        )
+        .unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let refused = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&refused);
+    tokio::spawn(async move {
+        loop {
+            let Ok((tcp, _)) = listener.accept().await else {
+                return;
+            };
+            let acceptor = acceptor.clone();
+            let refused_der = refused_der.clone();
+            let counter = Arc::clone(&counter);
+            tokio::spawn(async move {
+                let Ok(mut stream) = acceptor.accept(tcp).await else {
+                    return;
+                };
+                let presented = stream
+                    .get_ref()
+                    .1
+                    .peer_certificates()
+                    .and_then(|c| c.first())
+                    .map(|c| c.as_ref().to_vec());
+                if presented.as_deref() == Some(refused_der.as_slice()) {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    if matches!(refusal, Refusal::Forbidden) {
+                        let mut buf = [0_u8; 1024];
+                        let _ = stream.read(&mut buf).await;
+                        let _ = stream
+                            .write_all(b"HTTP/1.1 403 Forbidden\r\ncontent-length: 0\r\n\r\n")
+                            .await;
+                    }
+                    let _ = stream.shutdown().await;
+                    return;
+                }
+                if let Ok(mut plain) = tokio::net::TcpStream::connect(upstream).await {
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut plain).await;
+                }
+            });
+        }
+    });
+    (
+        format!("wss://127.0.0.1:{port}/ocpp"),
+        authority.0.pem(),
+        refused,
+    )
+}
+
+fn first_der(pem: &str) -> Vec<u8> {
+    CertificateDer::from_pem_slice(pem.as_bytes())
+        .unwrap()
+        .as_ref()
+        .to_vec()
+}
+
+async fn silent_rejection(refusal: Refusal) {
+    let upstream = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    upstream.respond("SecurityEventNotification", |_| Reply::Result(json!({})));
+    let ca = ca("Client CA");
+    let new = client_pair(&ca, true);
+    let previous = client_pair(&ca, true);
+    let upstream_addr = upstream.url().trim_start_matches("ws://");
+    let upstream_addr: SocketAddr = upstream_addr.split('/').next().unwrap().parse().unwrap();
+    let (url, ca_pem, refused) = certificate_gate(upstream_addr, first_der(&new.0), refusal).await;
+    let case = mtls_case_at(upstream, &url, &ca_pem, new, previous.clone());
+    let (state, secrets, logs, case) =
+        run_mtls(case, Some("DiscardedRenewedClientCertificate")).await;
+    assert!(refused.load(Ordering::SeqCst) >= 1);
+    assert!(
+        logs.iter()
+            .any(|l| l.contains("the next attempt uses the previous"))
+    );
+    assert_eq!(
+        state.certificates.charge_point_chain.as_deref(),
+        Some(previous.0.trim())
+    );
+    assert_eq!(state.certificates.previous_charge_point_chain, None);
+    assert_eq!(
+        secrets.charge_point_key_pem.as_deref(),
+        Some(previous.1.as_str())
+    );
+    assert_eq!(secrets.previous_charge_point_key_pem, None);
+    case.csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_new_certificate_whose_connection_is_closed_after_the_handshake_alternates() {
+    silent_rejection(Refusal::Close).await;
+}
+
+#[tokio::test]
+async fn a_new_certificate_answered_with_403_alternates() {
+    silent_rejection(Refusal::Forbidden).await;
+}
+
+#[tokio::test]
+async fn an_outage_alternates_at_most_once_per_three_failures_and_discards_nothing() {
+    let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = unused.local_addr().unwrap().port();
+    drop(unused);
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let ca = ca("Client CA");
+    let new = client_pair(&ca, true);
+    let previous = client_pair(&ca, true);
+    let ca_pem = ca.0.pem();
+    let case = mtls_case_at(
+        csms,
+        &format!("wss://127.0.0.1:{port}/ocpp"),
+        &ca_pem,
+        new.clone(),
+        previous.clone(),
+    );
+    let clock = Arc::new(kirby_ocpp_core::ManualClock::new(t0()));
+    let (station, join) = Station::spawn(case.config.clone(), clock);
+    let mut observed = Observed::new(station.subscribe());
+    station.connect().await.unwrap();
+    observed.wait_log("reconnect attempt 9").await;
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    observed.drain();
+    let failures = observed
+        .logs
+        .iter()
+        .filter(|l| l.contains("connection failed"))
+        .count();
+    let toggles = observed
+        .logs
+        .iter()
+        .filter(|l| l.contains("the next attempt uses"))
+        .count();
+    assert!(failures >= 9, "{failures}");
+    assert_eq!(toggles, failures / 3);
+    let store = StationStore::new(case.dir.path(), "CP-001");
+    let kirby_ocpp_core::store::LoadOutcome::Loaded(state) = store.load().unwrap() else {
+        panic!("state not loaded");
+    };
+    assert_eq!(
+        state.certificates.charge_point_chain.as_deref(),
+        Some(new.0.trim())
+    );
+    assert_eq!(
+        state.certificates.previous_charge_point_chain.as_deref(),
+        Some(previous.0.trim())
     );
     case.csms.shutdown().await;
 }

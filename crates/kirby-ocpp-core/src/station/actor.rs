@@ -179,6 +179,9 @@ pub(crate) struct StationActor {
     pub(super) failure_series: std::collections::HashSet<&'static str>,
     /// The next connection uses the previous client certificate (runtime only, `A02.FR.28`).
     pub(super) use_previous_cert: bool,
+    /// Consecutive failed attempts with a renewed client certificate pending its first
+    /// successful connection (runtime only, `A02.FR.28`).
+    pub(super) cert_failures: u32,
     /// Which stored client certificate the connection attempt in progress presents.
     pub(super) connect_identity: super::secure::StoredIdentity,
     /// The `SignCertificate` back-off series in progress.
@@ -308,6 +311,7 @@ impl StationActor {
             use_fallback_root: false,
             failure_series: std::collections::HashSet::new(),
             use_previous_cert: false,
+            cert_failures: 0,
             connect_identity: super::secure::StoredIdentity::None,
             sign_series: None,
             next_sign_series: 0,
