@@ -43,6 +43,8 @@ pub const MAX_INSTALLED_CERTIFICATES: usize = 64;
 /// Schema limits of `CertificateHashDataType` fields (hex characters).
 const MAX_HASH_LEN: usize = 128;
 const MAX_SERIAL_LEN: usize = 40;
+/// Longest station-supplied free text kept (the longest string in the 1.6 schemas).
+const MAX_TEXT_LEN: usize = 255;
 
 /// What the engine knows about one station's protocol state. See the module docs.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -360,16 +362,17 @@ impl StationState {
     fn on_boot(&mut self, request: &Value, response: &Value, now: DateTime<Utc>) -> Option<()> {
         let req = BootNotificationRequest::deserialize(request).ok()?;
         let res = BootNotificationResponse::deserialize(response).ok();
+        let text = |value: Option<String>| value.map(|text| truncate(text, MAX_TEXT_LEN));
         self.boot = Some(BootInfo {
-            vendor: req.charge_point_vendor,
-            model: req.charge_point_model,
-            charge_point_serial_number: req.charge_point_serial_number,
-            charge_box_serial_number: req.charge_box_serial_number,
-            firmware_version: req.firmware_version,
-            iccid: req.iccid,
-            imsi: req.imsi,
-            meter_type: req.meter_type,
-            meter_serial_number: req.meter_serial_number,
+            vendor: truncate(req.charge_point_vendor, MAX_TEXT_LEN),
+            model: truncate(req.charge_point_model, MAX_TEXT_LEN),
+            charge_point_serial_number: text(req.charge_point_serial_number),
+            charge_box_serial_number: text(req.charge_box_serial_number),
+            firmware_version: text(req.firmware_version),
+            iccid: text(req.iccid),
+            imsi: text(req.imsi),
+            meter_type: text(req.meter_type),
+            meter_serial_number: text(req.meter_serial_number),
             booted_at: now,
             registration: res.as_ref().map(|res| res.status),
             interval: res.map(|res| res.interval),
@@ -388,9 +391,11 @@ impl StationState {
             ConnectorState {
                 status: req.status,
                 error_code: req.error_code,
-                info: req.info,
-                vendor_id: req.vendor_id,
-                vendor_error_code: req.vendor_error_code,
+                info: req.info.map(|text| truncate(text, MAX_TEXT_LEN)),
+                vendor_id: req.vendor_id.map(|text| truncate(text, MAX_TEXT_LEN)),
+                vendor_error_code: req
+                    .vendor_error_code
+                    .map(|text| truncate(text, MAX_TEXT_LEN)),
                 timestamp: req.timestamp,
                 received_at: now,
             },

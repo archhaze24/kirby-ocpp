@@ -490,3 +490,51 @@ async fn calls_errors_surface_as_typed_errors() {
     cp.stop().await;
     csms.shutdown().await;
 }
+
+#[tokio::test]
+async fn station_supplied_free_text_is_cut_to_a_bound() {
+    // Without schema validation a station may send strings of any length (up to 1 MiB).
+    let csms = start(|c| c.validate_inbound = false).await;
+    let mut events = csms.subscribe();
+    let mut socket = raw_connect(&csms, "/CP-LONG").await;
+    wait_event(&mut events, "connect", connected("CP-LONG")).await;
+    let long = "x".repeat(100_000);
+    raw_send(
+        &mut socket,
+        &format!(
+            r#"[2,"b1","BootNotification",{{"chargePointVendor":"{long}","chargePointModel":"{long}","firmwareVersion":"{long}"}}]"#
+        ),
+    )
+    .await;
+    raw_recv(&mut socket).await;
+    raw_send(
+        &mut socket,
+        &format!(
+            r#"[2,"s1","StatusNotification",{{"connectorId":1,"errorCode":"NoError","status":"Available","info":"{long}","vendorId":"{long}","vendorErrorCode":"{long}"}}]"#
+        ),
+    )
+    .await;
+    raw_recv(&mut socket).await;
+
+    let state = wait_state(
+        &csms,
+        &mut events,
+        "CP-LONG",
+        "connector and boot info",
+        |s| s.boot.is_some() && s.connectors.contains_key(&1),
+    )
+    .await;
+    let boot = state.boot.unwrap();
+    let connector = &state.connectors[&1];
+    for text in [
+        Some(boot.vendor.as_str()),
+        Some(boot.model.as_str()),
+        boot.firmware_version.as_deref(),
+        connector.info.as_deref(),
+        connector.vendor_id.as_deref(),
+        connector.vendor_error_code.as_deref(),
+    ] {
+        assert_eq!(text.map(|t| t.chars().count()), Some(255));
+    }
+    csms.shutdown().await;
+}
