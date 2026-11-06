@@ -62,7 +62,7 @@ User-visible changes also get a line under `## [Unreleased]` in [CHANGELOG.md](.
 
 ## Store version
 
-The station state file is versioned: `STORE_VERSION` in `crates/kirby-ocpp-core/src/store.rs` (now 8). Any change to the persisted format needs a bump of that constant and a CHANGELOG note; new fields get `#[serde(default)]` so older files still load (there is no migration step); a file with a newer version is refused untouched. Files that are corrupt or belong to another charge point are moved to `.bak`. Add a persistence test in `tests/it/station_persistence.rs`.
+The station state file is versioned: `STORE_VERSION` in `crates/kirby-ocpp-core/src/store.rs` (now 9). Any change to the persisted format needs a bump of that constant and a CHANGELOG note; new fields get `#[serde(default)]` so older files still load (there is no migration step); a file with a newer version is refused untouched. Files that are corrupt or belong to another charge point are moved to `.bak`. Add a persistence test in `tests/it/station_persistence.rs`.
 
 ## Recipes
 

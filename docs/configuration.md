@@ -55,6 +55,7 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 | `--tls-server-name <NAME>` | `OCPP_TLS_SERVER_NAME` | URL host | SNI and verification name override |
 | `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Disable certificate verification (local or self-signed testing only) |
 | `--show-secrets` | `OCPP_SHOW_SECRETS` | off | Show `AuthorizationKey` values in frame logs; by default they are replaced by `***` |
+| `--security-profile-fallback <BOOL>` | `OCPP_SECURITY_PROFILE_FALLBACK` | `true` | Go back to the previous `SecurityProfile` after 3 profile-attributable connection failures (HTTP 401/403, TLS errors) with a newly set one, before it ever connected (`A05.FR.08`); see [Security](security.md#emulator-side) |
 | `--additional-root-certificate-check` | `OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK` | off | Value of the read-only `AdditionalRootCertificateCheck` key: a new Central System root must be signed by the installed one |
 
 Profiles and certificates are explained in [Security](security.md).
@@ -112,7 +113,7 @@ Profiles and certificates are explained in [Security](security.md).
 | `--fail-fast` | | off | Stop after the first failed scenario; the rest are reported as SKIP |
 | `--var <NAME=VALUE>` | | none | Scenario variable for every scenario (repeatable), as for `run` |
 
-Exit codes of `suite`: 0 all scenarios passed; 1 any failed, timed out or could not boot, or a report file could not be written; 2 usage error; 130 SIGINT. See [Scenarios](scenarios.md#suite-runs).
+Exit codes of `suite`: 0 all scenarios passed; 1 any failed, timed out or could not boot, or a report file could not be written; 2 usage error; 130 SIGINT (both signals still write `--report`/`--junit` for what finished; SIGTERM exits 1). See [Scenarios](scenarios.md#suite-runs).
 
 `kirby-ocpp scenarios list` lists the built-in scenarios; `kirby-ocpp scenarios show <NAME>` prints one as TOML. Scenario format: [Scenarios](scenarios.md).
 
@@ -166,7 +167,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--listen <ADDR>` | `KIRBY_CSMS_LISTEN` | `0.0.0.0:9000` | Address to listen on; port `0` picks a free port (the real address is printed first) |
 | `--api-listen <ADDR>` | `KIRBY_CSMS_API_LISTEN` | off | Address of the local HTTP control API; port `0` picks a free port. A non-loopback address needs a token (exit 2 otherwise). See [api.md](api.md) |
 | `--api-token <TOKEN>` | `KIRBY_CSMS_API_TOKEN` | none | Bearer token the API requires (visible in `ps`: prefer the environment variable or `--api-token-file`); needs `--api-listen`, excludes `--api-token-file` |
-| `--api-token-file <FILE>` | `KIRBY_CSMS_API_TOKEN_FILE` | none | File holding the API bearer token (read once, trailing newline dropped, must not be empty); needs `--api-listen` |
+| `--api-token-file <FILE>` | `KIRBY_CSMS_API_TOKEN_FILE` | none | File holding the API bearer token (read once, trailing newline dropped, must not be empty; a warning on unix when group/world readable); needs `--api-listen`, excludes `KIRBY_CSMS_API_TOKEN`; a token is visible ASCII without spaces |
 | `--tls-cert <FILE>` | `KIRBY_CSMS_TLS_CERT` | none | Server certificate chain (PEM) for `wss://`; needs `--tls-key` |
 | `--tls-key <FILE>` | `KIRBY_CSMS_TLS_KEY` | none | Server private key (PEM); needs `--tls-cert` |
 | `--tls-client-ca <FILE>` | `KIRBY_CSMS_TLS_CLIENT_CA` | none | Trusted CA(s) for client certificates; with `--tls-cert` every client must present one (mutual TLS); needs `--tls-cert` |
@@ -215,7 +216,7 @@ CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md). Th
 | 0 | Success (scenario passed, normal shutdown) | Success or clean shutdown |
 | 1 | Scenario step failed or timed out, or runtime error; in fleet mode, any station failed | Script failed or timed out, or runtime error |
 | 2 | Usage or configuration error | Usage or configuration error |
-| 130 | `run` or `suite` interrupted by SIGINT (SIGTERM still ends with 1) | Script interrupted by SIGINT |
+| 130 | `run` or `suite` interrupted by SIGINT (SIGTERM still ends with 1; `suite` writes its reports on both signals) | Script interrupted by SIGINT |
 
 ## Related pages
 

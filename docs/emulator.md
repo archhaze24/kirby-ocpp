@@ -108,7 +108,7 @@ Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints 
 | 0 | Success (scenario passed, normal shutdown) |
 | 1 | Scenario failed or timed out, a runtime error, or a report file could not be written |
 | 2 | Usage or configuration error |
-| 130 | `run` or `suite` interrupted by SIGINT (Ctrl-C); SIGTERM still ends it with 1 |
+| 130 | `run` or `suite` interrupted by SIGINT (Ctrl-C); SIGTERM still ends it with 1. `suite` writes `--report` and `--junit` for the finished scenarios on both signals (the interrupted one is an `error` row, the rest `skipped`) |
 
 ## Suite mode
 

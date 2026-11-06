@@ -15,8 +15,8 @@ The `api listening` line comes right after the `listening` line (with `--json`: 
 
 ## Auth model
 
-- Without a token the API accepts only loopback addresses (`--api-listen 0.0.0.0:...` without a token exits with code 2). Any local process of any user can use it, and a request carrying an `Origin` header (a browser page, also via DNS rebinding) gets `403`.
-- With `--api-token TOKEN` / `--api-token-file FILE` (env `KIRBY_CSMS_API_TOKEN`, `KIRBY_CSMS_API_TOKEN_FILE`) every request, whatever the path, needs `Authorization: Bearer TOKEN` (compared in constant time), otherwise `401` with `WWW-Authenticate: Bearer`. `--api-token` is visible in `ps`; prefer the environment variable or the file (read once, trailing newline dropped, must not be empty).
+- Without a token the API accepts only loopback addresses (`--api-listen 0.0.0.0:...` without a token exits with code 2). Any local process of any user can use it. Browsers are kept out by three checks, each answered with `403`: a request with an `Origin` header; a request with `Sec-Fetch-Site: cross-site`; and a `Host` header that is not `127.0.0.1`, `[::1]` or `localhost` (optionally with a port). The `Host` rule is what stops DNS rebinding: a page on `evil.example` rebound to 127.0.0.1 sends no `Origin` on a same-origin GET, but its `Host` is still `evil.example`. A request without any `Host` header is let through (no browser sends one). Reaching the API by another name (an SSH tunnel to a host name, a reverse proxy) needs a token.
+- With `--api-token TOKEN` / `--api-token-file FILE` (env `KIRBY_CSMS_API_TOKEN`, `KIRBY_CSMS_API_TOKEN_FILE`) every request, whatever the path, needs exactly one `Authorization: Bearer TOKEN` header (scheme case-insensitive, exactly one space, compared in constant time; two `Authorization` headers are refused), otherwise `401` with `WWW-Authenticate: Bearer`. With a token the `Host` and `Origin` rules do not apply: the bearer proves intent. A token must be visible ASCII without spaces (startup exit code 2 otherwise). `--api-token` is visible in `ps`; prefer the environment variable or the file (read once, trailing newline dropped, must not be empty; on unix a warning goes to stderr when the file is readable by group or others). `KIRBY_CSMS_API_TOKEN` and `--api-token-file` together are a usage error (exit 2), like `--api-token` with it.
 - There is no TLS and no per-user permission: the token is sent in clear text. Keep the API on loopback, or put it behind a reverse proxy or SSH tunnel that adds TLS. Everything the API can do (sending any CALL to any station, forgetting stations) is available to every holder of the token.
 
 ## Endpoints
@@ -28,9 +28,9 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `GET /v1/health` | `{"ok":true,"version":"...","stations":N}` |
 | `GET /v1/stations` | `{"stations":[...]}`, the objects of the stdin `{"cmd":"stations"}` answer |
 | `GET /v1/stations/{id}` | The station summary plus `state` (boot info, connectors, transactions, ...); `404` if unknown |
-| `GET /v1/stations/{id}/history?limit=N` | `{"station":..,"frames":[...]}`, oldest first, only the newest `N` with `limit` (`0` gives none); frames are shaped like the `--json` frame lines; `AuthorizationKey` values are redacted unless `--show-secrets`; `404` if unknown |
+| `GET /v1/stations/{id}/history?limit=N` | `{"station":..,"frames":[...]}`, oldest first, only the newest `N` with `limit` (`0` gives none; decimal digits, `%XX` escapes are decoded like `station=`; other parameters are `400`); frames are shaped like the `--json` frame lines; `AuthorizationKey` values are redacted unless `--show-secrets`; `404` if unknown |
 | `POST /v1/stations/{id}/calls` | Sends a CALL; body `{"action":"Reset","payload":{...},"timeout_ms":5000}` (`payload` default `{}`, `timeout_ms` 1..=86400000, default `--call-timeout`). Answers with the stdin result object (`type`, `station`, `action`, `ok`, `result` or `error`/`code`/`details`) |
-| `DELETE /v1/stations/{id}` | Forgets a disconnected station (`{"station":..,"forgotten":true}`); `409` while it is connected, `404` if unknown |
+| `DELETE /v1/stations/{id}` | Forgets a disconnected station (`{"station":..,"forgotten":true}`); `409` while it is connected (decided atomically with the removal), `404` if unknown |
 | `GET /v1/events?station=ID` | Server-Sent Events, see [Event stream](#event-stream) |
 | `GET /v1/rules` | `{"rules":["Heartbeat",...]}`: actions that have a fixed reply, sorted |
 | `PUT /v1/rules/{action}` | Sets the fixed CALLRESULT payload (body: a JSON object) for a charge-point action |
@@ -39,7 +39,7 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `GET /v1/faults` | `{"remaining":N}`: fault occurrences not triggered yet |
 | `DELETE /v1/faults` | Clears all faults (`{"remaining":0}`) |
 
-Status of a call: `200` also when the station answered with a CALLERROR or the call timed out (`"ok":false` in the body); `404` when the station is unknown or not connected (the body is the result object with `error`); `400` for a bad body; `413` above 1 MiB; `429` when 256 commands (stdin and API together) are already in flight.
+Status of a call: `200` also when the station answered with a CALLERROR or the call timed out (`"ok":false` in the body); `404` when the station is unknown or not connected (the body is the result object with `error`); `400` for a bad body; `413` above 1 MiB; `429` when 256 commands (stdin and API together) are already in flight. The 256 slots are shared with the stdin handler: when they are full the API answers `429` at once, while a stdin line waits for a free slot.
 
 ```
 $ curl -s http://127.0.0.1:9100/v1/stations
@@ -72,7 +72,8 @@ data: {"action":"Heartbeat","direction":"in","id":"...","kind":"call","payload":
 - A `: keep-alive` comment is sent every 15 s.
 - A client that reads too slowly loses events and gets `event: note` with `{"type":"note","text":"N events were dropped"}`; the stream continues.
 - At most 16 streams at a time; the 17th gets `503` with a JSON error. The slot is freed when the client disconnects.
-- Streams end when the server stops. The token and `Origin` rules apply as for every route (`curl -N -H "Authorization: Bearer $TOKEN" ...`).
+- A lag note also resets the per-stream state view: the next `state` event is complete, not a diff against events the client missed.
+- Streams end when the server stops, after the closing events of the shutdown (`disconnected` with reason `shutdown`) were sent; the API stops after the CSMS. The token and `Origin` rules apply as for every route (`curl -N -H "Authorization: Bearer $TOKEN" ...`).
 
 ## Rules and faults
 
@@ -94,7 +95,7 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/faults
 ```
 
 - `PUT /v1/rules/{action}`: `{action}` must be an action a charge point can send in OCPP 1.6 (otherwise `400`); the body must be a JSON object (the whole CALLRESULT payload, not checked against the schema).
-- `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `times` defaults to 1 and must be 1 or more. Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
+- `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `times` defaults to 1 and must be 1 to 1000000 (`400` otherwise); at most 1000 faults and 8 MiB of action and payload text are stored at once (`409` with a JSON error beyond that; `DELETE /v1/faults` frees them). Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
 
 ## Errors and limits
 
@@ -102,13 +103,16 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/faults
 | --- | --- |
 | 400 | Invalid JSON or fields, bad `timeout_ms`, bad `limit`, unknown query parameter, unsafe station id, unknown rule action, bad fault |
 | 401 | Token configured and missing or wrong |
-| 403 | No token configured and the request has an `Origin` header |
+| 403 | No token configured and the request has an `Origin` header, `Sec-Fetch-Site: cross-site` or a non-loopback `Host` |
 | 404 | Unknown route, unknown station, station not connected (calls) |
 | 405 | Wrong method for the path |
-| 409 | Forgetting a connected station |
-| 413 | Request body over 1 MiB |
+| 409 | Forgetting a connected station; fault store full |
+| 408 | Request body not complete 10 s after the head |
+| 413 | Request body over 1 MiB (also when chunked) |
 | 429 | Too many commands in flight |
 | 503 | Already 16 event streams open |
+
+Connection limits: at most 512 connections at once (extra ones are closed immediately; more than the 256 command slots plus 16 streams, so `429` stays reachable); a client has 10 s to send the complete request head (the connection is cut otherwise) and 10 s to send the body (`408`). Every response carries `Connection: close`, so a connection serves one request. There is no timeout on the response side, so a call waits as long as its `timeout_ms`.
 
 ## Related pages
 

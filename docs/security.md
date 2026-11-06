@@ -41,7 +41,9 @@ What the CSMS does for the whitepaper messages:
 
 ## Emulator side
 
-There is no security-profile flag. The station follows the registry keys `SecurityProfile` and `AuthorizationKey`, which a CSMS sets with `ChangeConfiguration` as the whitepaper describes.
+There is no flag that sets the security profile (`--security-profile-fallback` only controls the fallback, below). The station follows the registry keys `SecurityProfile` and `AuthorizationKey`, which a CSMS sets with `ChangeConfiguration` as the whitepaper describes.
+
+**Profile fallback (`A05.FR.08`, SHOULD).** After an accepted change of `SecurityProfile` the station remembers the profile that was in force (and the previous `AuthorizationKey` in the secrets file when the key changed in the meantime). If it then fails 3 times in a row to connect with the new profile before its first successful connection, it goes back to the previous profile (and key), logs a warning, queues a `ReconfigurationOfSecurityParameters` security event whose `techInfo` names the fallback, and reconnects at once. Only failures the profile can explain count: HTTP 401/403, TLS errors and refusals right after the TLS handshake. Timeouts, refused TCP and DNS errors do not count, because the CSMS may just be offline. A successful connection with the new profile ends the window for good (`A05.FR.09`: the station never falls back later). The record is persisted (state file format 9), so a restart in the middle does not lose it. `--security-profile-fallback false` (`OCPP_SECURITY_PROFILE_FALLBACK`) turns the fallback off: the station then keeps retrying with the new profile.
 
 - Profile 1 or 2: the station sends Basic Auth with user = charge point id and password = `AuthorizationKey`, unless the `--url` already carries a password (`wss://user:pass@host/path`; the userinfo becomes the `Authorization` header and never appears in the request line, `Host` or error messages).
 - Profile 3: the station presents the stored charge point certificate (from `CertificateSigned`) as the TLS client identity, unless `--tls-cert` / `--tls-key` are given.
@@ -147,7 +149,7 @@ The emulator keeps secrets out of its main state file `<state dir>/<id>.station.
 - the private key of the charge point certificate, the key of the previous certificate and the key of a pending certificate request;
 - the `AuthorizationKey`.
 
-Certificates (public) are in the main file. The secrets file is never part of logs or snapshots (the snapshot shows `********`). `--no-persist` disables both loading and saving; `--state-dir` moves both files. The file format changes only together with a `STORE_VERSION` bump (8 now). Persistence details: [emulator.md](emulator.md).
+Certificates (public) are in the main file. The secrets file is never part of logs or snapshots (the snapshot shows `********`). `--no-persist` disables both loading and saving; `--state-dir` moves both files. The file format changes only together with a `STORE_VERSION` bump (9 now). Persistence details: [emulator.md](emulator.md).
 
 The CSMS keeps nothing on disk. Its keys come from flags, the environment or `--auth-keys-file`; keep that file private.
 
@@ -165,7 +167,6 @@ Intentional or open points; see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE
 | Item | Behaviour |
 | --- | --- |
 | A00.FR.205 hex key | The `AuthorizationKey` is used as given, not hex-decoded; non-hex printable keys are accepted |
-| A05.FR.08 | Fallback to the previous profile when the connection with the new one fails is not implemented |
 | A05.FR.03 | An installed Central System root is not required for profile 2 or 3 (public CA setups are legitimate) |
 | Leaf CN | No Common Name check on the `CertificateSigned` leaf (the whitepaper CN is the serial number, the CSR uses the station id) |
 | A02.FR.28 and neighbours | Old/new certificate alternation: refusals switch at once, other failures after 3 in a row; a flapping server that accepts both certificates is not handled |
