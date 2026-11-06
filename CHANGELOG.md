@@ -9,6 +9,11 @@ tag as the GitHub release notes.
 
 Work in progress after 0.4.0.
 
+### Whitepaper and offline leftovers
+
+- Transaction-related `MeterValues` samples taken while the station is offline (or while the transaction still has a local id) are queued instead of dropped: bounded (1000, oldest first), persisted, sent with the real `transactionId` after the start was synchronised and before the stop. State file format 8 (`offline_samples`; older files load).
+- Security events stay in the persisted queue until the CSMS answered, so a restart with events in flight no longer loses them.
+
 ### Scenarios
 
 - Emulator scenarios have variables: an optional `[vars]` table (strings, numbers, booleans), `${name}` substitution in the string fields and JSON payloads of a step (an exact `"${name}"` keeps the JSON type, `$${` is a literal `${`), and the built-ins `${station_id}` and `${index}`.

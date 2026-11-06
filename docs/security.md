@@ -147,7 +147,7 @@ The emulator keeps secrets out of its main state file `<state dir>/<id>.station.
 - the private key of the charge point certificate, the key of the previous certificate and the key of a pending certificate request;
 - the `AuthorizationKey`.
 
-Certificates (public) are in the main file. The secrets file is never part of logs or snapshots (the snapshot shows `********`). `--no-persist` disables both loading and saving; `--state-dir` moves both files. The file format changes only together with a `STORE_VERSION` bump (7 now). Persistence details: [emulator.md](emulator.md).
+Certificates (public) are in the main file. The secrets file is never part of logs or snapshots (the snapshot shows `********`). `--no-persist` disables both loading and saving; `--state-dir` moves both files. The file format changes only together with a `STORE_VERSION` bump (8 now). Persistence details: [emulator.md](emulator.md).
 
 The CSMS keeps nothing on disk. Its keys come from flags, the environment or `--auth-keys-file`; keep that file private.
 
@@ -169,8 +169,6 @@ Intentional or open points; see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE
 | A05.FR.03 | An installed Central System root is not required for profile 2 or 3 (public CA setups are legitimate) |
 | Leaf CN | No Common Name check on the `CertificateSigned` leaf (the whitepaper CN is the serial number, the CSR uses the station id) |
 | A02.FR.28 and neighbours | Old/new certificate alternation covers TLS client-certificate alerts only; edge cases are open |
-| Offline MeterValues | Dropped, not queued |
-| `flush_security_events` | Drops in-flight events from the persisted queue |
 | Store full | `InstallCertificate` answers `Rejected` (as OCPP 2.0.1), the whitepaper text is ambiguous |
 | Last root | `DeleteCertificate` of the last Central System root is `Failed` only under profile 2 or 3 |
 | Profile 2 | The station does not require TLS verification to be on (`--tls-skip-verify` still works) |
