@@ -27,6 +27,13 @@ Work in progress after 0.4.0.
 - The control API also has `GET /v1/events?station=ID` (Server-Sent Events: one `--json` event object per message, redacted like `--json`, keep-alive every 15 s, a `note` event when the client lags, at most 16 streams, 503 beyond), `GET /v1/rules`, `PUT`/`DELETE /v1/rules/{action}` (fixed CALLRESULT, like the `respond` script step) and `POST`/`GET`/`DELETE /v1/faults` (like `inject_fault`).
 - New dependency: `axum` (HTTP/1 only) with `hyper` and `tower` crates.
 
+### Distribution
+
+- New release target `aarch64-unknown-linux-musl` (static, built on `ubuntu-24.04-arm`) and the npm platform package `@archhaze24/kirby-ocpp-linux-arm64-musl`; the npm launcher prefers it on musl arm64 systems and falls back to it when the glibc package is missing. A release now has 14 files (7 archives + 7 `.sha256`).
+- Multi-arch container image `ghcr.io/archhaze24/kirby-ocpp` (`linux/amd64`, `linux/arm64`) built by the release workflow from the static musl binaries; non-root user, state volume `/data`, port 9000, both binaries (`kirby-csms` as the first argument starts the CSMS). `Dockerfile.dev` builds it from a source checkout.
+- Homebrew formula and Scoop manifest templates under `packaging/` plus `.github/scripts/render-packaging.sh`; the release workflow renders them with the real checksums into the workflow artifact `packaging`.
+- New page `docs/distribution.md`.
+
 ### Documentation
 
 - New page `docs/api.md` for the HTTP control API.

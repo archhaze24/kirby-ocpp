@@ -26,6 +26,7 @@ Contents: [Start here](#start-here) · [Pages](#pages)
 | [security.md](security.md) | Security profiles 0-3, TLS and mTLS, certificates, security events |
 | [configuration.md](configuration.md) | Every flag and environment variable of both binaries, precedence, id templates, `--rule`, exit codes, state files |
 | [testing.md](testing.md) | Test layout, mock CSMS, rules for async tests, nextest, Windows trap, CI |
+| [distribution.md](distribution.md) | Every install channel: npm, Cargo, release archives, Docker image, Homebrew, Scoop |
 | [development.md](development.md) | Toolchain, commands, conventions, commit style, store version, recipes for adding messages, commands, actions and flags |
 | [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md) | Spec coverage and intentional deviations |
 | [../RELEASING.md](../RELEASING.md) | Release runbook (tag, GitHub release, crates.io, npm) |

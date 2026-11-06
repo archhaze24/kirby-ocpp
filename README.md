@@ -34,7 +34,9 @@ cargo install kirby-ocpp
 cargo install kirby-csms
 ```
 
-Or download a prebuilt archive for Linux (x86_64 glibc, aarch64 glibc, x86_64 static musl for Alpine and minimal containers), macOS or Windows from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). Each archive holds both binaries, the licence, the third-party notices and this README. To build from a checkout: `cargo install --path crates/kirby-ocpp` (and `--path crates/kirby-csms`).
+With Docker (multi-arch, both binaries): `docker run --rm -p 9000:9000 ghcr.io/archhaze24/kirby-ocpp kirby-csms`. Homebrew: `brew install archhaze24/tap/kirby-ocpp`; Scoop: `scoop bucket add kirby https://github.com/archhaze24/scoop-bucket && scoop install kirby-ocpp` (both once the owner has published the tap and bucket). Details: [docs/distribution.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/distribution.md).
+
+Or download a prebuilt archive for Linux (x86_64 and aarch64, glibc or static musl for Alpine and minimal containers), macOS or Windows from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). Each archive holds both binaries, the licence, the third-party notices and this README. To build from a checkout: `cargo install --path crates/kirby-ocpp` (and `--path crates/kirby-csms`).
 
 ## Quick start
 
