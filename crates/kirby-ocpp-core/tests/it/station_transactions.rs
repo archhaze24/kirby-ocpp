@@ -894,7 +894,7 @@ async fn offline_meter_values_of_an_online_transaction_survive_a_restart() {
     station.shutdown().await.unwrap();
     join.await.unwrap();
     let value = read_state();
-    assert_eq!(value["version"], 8);
+    assert_eq!(value["version"], 9);
     assert_eq!(
         value["offline_samples"]["items"].as_array().unwrap().len(),
         0

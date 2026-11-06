@@ -139,6 +139,7 @@ pub(super) struct RestoredParts {
     pub(super) certs: CertificateStore,
     pub(super) secrets: StationSecrets,
     pub(super) security_events: Vec<PendingSecurityEvent>,
+    pub(super) pending_profile_switch: Option<crate::store::PendingProfileSwitch>,
 }
 
 #[allow(
@@ -166,6 +167,8 @@ pub(crate) struct StationActor {
     pub(super) secrets: StationSecrets,
     /// Security events that could not be sent yet (bounded).
     pub(super) security_events: Vec<PendingSecurityEvent>,
+    /// A `SecurityProfile` change that has not connected yet (`A05.FR.08`, persisted).
+    pub(super) pending_profile_switch: Option<crate::store::PendingProfileSwitch>,
     /// Security events sent and not answered yet (runtime only, keyed by a sequence number).
     /// They stay in the persisted queue until the CSMS answered.
     pub(super) security_in_flight: Vec<(u64, PendingSecurityEvent)>,
@@ -267,6 +270,7 @@ impl StationActor {
             certs: CertificateStore::default(),
             secrets: StationSecrets::default(),
             security_events: Vec::new(),
+            pending_profile_switch: None,
         };
         persistence.restore(&mut state, &mut parts, &mut startup_logs, clock.now_utc());
         // Profiles saved before store version 3 have no install time: count it from now.
@@ -305,6 +309,7 @@ impl StationActor {
             certs: parts.certs,
             secrets: parts.secrets,
             security_events: parts.security_events,
+            pending_profile_switch: parts.pending_profile_switch,
             security_in_flight: Vec::new(),
             security_seq: 0,
             certs_dirty: false,

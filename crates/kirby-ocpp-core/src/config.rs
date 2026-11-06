@@ -126,6 +126,10 @@ impl std::fmt::Debug for IdentityPem {
 /// Everything needed to run one emulated charge point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent switches of one configuration record"
+)]
 pub struct StationConfig {
     /// TS: `centralSystemUrl`. Base URL; the charge point id is appended as the last path segment.
     pub url: String,
@@ -169,6 +173,10 @@ pub struct StationConfig {
     /// Initial value of the read-only `AdditionalRootCertificateCheck` key (Security Whitepaper
     /// `M05.FR.08` to `M05.FR.13`): a new Central System root must be signed by the installed one.
     pub additional_root_certificate_check: bool,
+    /// Security Whitepaper `A05.FR.08`: after a change of `SecurityProfile` that the Central
+    /// System does not accept (repeated profile-attributable connection failures before the
+    /// first successful connection) the station goes back to the previous profile.
+    pub security_profile_fallback: bool,
 }
 
 impl Default for StationConfig {
@@ -196,6 +204,7 @@ impl Default for StationConfig {
             response_rules: Vec::new(),
             show_secrets: false,
             additional_root_certificate_check: false,
+            security_profile_fallback: true,
         }
     }
 }

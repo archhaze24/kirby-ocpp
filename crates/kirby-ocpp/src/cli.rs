@@ -262,6 +262,13 @@ pub struct Cli {
     )]
     pub additional_root_certificate_check: bool,
 
+    /// Go back to the previous SecurityProfile when the Central System cannot be reached with a newly set one
+    #[arg(global = true,
+        long, env = "OCPP_SECURITY_PROFILE_FALLBACK", value_name = "BOOL", default_value_t = true,
+        action = ArgAction::Set, value_parser = BoolishValueParser::new()
+    )]
+    pub security_profile_fallback: bool,
+
     /// Misbehave on purpose when the CSMS sends a command: ACTION=BEHAVIOR[*COUNT]. Repeatable
     #[arg(
         global = true,
@@ -459,6 +466,7 @@ impl Cli {
             response_rules: self.rule,
             show_secrets: self.show_secrets,
             additional_root_certificate_check: self.additional_root_certificate_check,
+            security_profile_fallback: self.security_profile_fallback,
         })
     }
 }

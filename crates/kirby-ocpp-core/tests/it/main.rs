@@ -10,6 +10,7 @@ mod station_local_edits;
 mod station_log_trigger;
 mod station_persistence;
 mod station_power;
+mod station_profile_fallback;
 mod station_response_rules;
 mod station_retry;
 mod station_review_fixes;

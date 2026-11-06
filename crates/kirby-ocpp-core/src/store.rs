@@ -52,7 +52,19 @@ use crate::station::transaction::TransactionState;
 ///
 /// Version 8 added the queue of transaction-related `MeterValues` samples taken while offline
 /// (`offline_samples`; older files load with it empty).
-pub const STORE_VERSION: u32 = 8;
+///
+/// Version 9 added the pending security profile switch (`pending_profile_switch`, the
+/// `A05.FR.08` fallback; older files load without one) and the previous `AuthorizationKey` in
+/// the secrets file.
+pub const STORE_VERSION: u32 = 9;
+
+/// A change of `SecurityProfile` that has not connected yet (`A05.FR.08`): the profile that was
+/// in force before it and the profile-attributable connection failures since.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingProfileSwitch {
+    pub previous_profile: u8,
+    pub failures: u32,
+}
 
 /// Everything that survives a restart.
 ///
@@ -82,6 +94,9 @@ pub struct PersistedStation {
     pub certificates: CertificateStore,
     /// Security events waiting for a connection (added in version 4).
     pub security_events: Vec<PendingSecurityEvent>,
+    /// A security profile change waiting for its first successful connection (added in
+    /// version 9).
+    pub pending_profile_switch: Option<PendingProfileSwitch>,
 }
 
 impl PersistedStation {
@@ -111,6 +126,7 @@ impl Default for PersistedStation {
             configuration: BTreeMap::new(),
             certificates: CertificateStore::default(),
             security_events: Vec::new(),
+            pending_profile_switch: None,
         }
     }
 }
@@ -130,6 +146,10 @@ pub struct StationSecrets {
     /// Private key (PEM) of the previous charge point certificate, kept until the new one has
     /// connected (added in version 7).
     pub previous_charge_point_key_pem: Option<String>,
+    /// The `AuthorizationKey` before the latest change, kept until a connection proves the
+    /// current one so the profile fallback can restore a working credential (added in
+    /// version 9).
+    pub previous_authorization_key: Option<String>,
 }
 
 impl std::fmt::Debug for StationSecrets {
@@ -145,6 +165,7 @@ impl StationSecrets {
             && self.charge_point_key_pem.is_none()
             && self.pending_key_pem.is_none()
             && self.previous_charge_point_key_pem.is_none()
+            && self.previous_authorization_key.is_none()
     }
 }
 

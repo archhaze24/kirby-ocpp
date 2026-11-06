@@ -163,6 +163,7 @@ impl Persistence {
         };
         parts.certs = persisted.certificates;
         parts.security_events = persisted.security_events;
+        parts.pending_profile_switch = persisted.pending_profile_switch;
 
         // The connector count only grows.
         let highest_saved = persisted
@@ -348,6 +349,7 @@ impl StationActor {
             configuration: self.registry.snapshot().values,
             certificates: self.certs.clone(),
             security_events: self.persisted_security_events(),
+            pending_profile_switch: self.pending_profile_switch,
             ..PersistedStation::default()
         }
     }

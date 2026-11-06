@@ -161,9 +161,16 @@ impl StationActor {
                         super::security::strip_control(&error.to_string())
                     ),
                 );
-                self.report_connect_failure(&error);
+                let fell_back = self.report_connect_failure(&error);
                 self.state.connection = ConnectionState::Disconnected;
-                self.schedule_reconnect();
+                if fell_back && self.link.wanted && self.config.reconnect.enabled {
+                    // A05.FR.08: the previous profile is in force again; try it at once.
+                    self.link.attempts = 0;
+                    self.timers.cancel(&TimerKey::Reconnect);
+                    self.start_connect();
+                } else {
+                    self.schedule_reconnect();
+                }
             }
         }
     }

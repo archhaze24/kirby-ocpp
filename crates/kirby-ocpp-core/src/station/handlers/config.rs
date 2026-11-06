@@ -43,6 +43,7 @@ impl StationActor {
             );
             return ConfigurationStatus::Rejected;
         }
+        let previous_profile = self.registry.security_profile();
         let status = self.registry.change(key, value);
         if status != ConfigurationStatus::Accepted {
             self.log(
@@ -61,7 +62,7 @@ impl StationActor {
             LogLevel::Info,
             format!("configuration {canonical} set to {shown}"),
         );
-        self.on_security_key_changed(&canonical);
+        self.on_security_key_changed(&canonical, previous_profile);
         self.flush_now();
         self.on_configuration_changed(&canonical);
         status

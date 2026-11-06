@@ -142,6 +142,17 @@ fn is_client_certificate_refusal(error: &ConnectError) -> bool {
 /// (`A02.FR.28`) when the failure is not clearly a refusal.
 const ALTERNATE_AFTER_FAILURES: u32 = 3;
 
+/// `A05.FR.08`: profile-attributable connection failures after a `SecurityProfile` change
+/// that make the station go back to the previous profile.
+pub(super) const PROFILE_FALLBACK_AFTER_FAILURES: u32 = 3;
+
+/// A failure the security profile can explain: HTTP 401/403, a TLS error, or a refusal right
+/// after the TLS handshake. Timeouts, refused TCP and DNS errors only say the Central System
+/// may be offline.
+fn is_profile_failure(error: &ConnectError) -> bool {
+    matches!(error, ConnectError::Tls(_)) || is_client_certificate_refusal(error)
+}
+
 impl StationActor {
     /// Reports a security event: queued, then sent as soon as the station is registered.
     pub(super) fn security_event(&mut self, event_type: &str, tech_info: Option<&str>) {
@@ -585,7 +596,10 @@ impl StationActor {
     /// `InvalidTLSVersion` and `InvalidTLSCipherSuite` are reported once per series of failed
     /// attempts (the whitepaper notes say that is enough and keeps the offline queue small);
     /// the series ends at the next successful connection.
-    pub(super) fn report_connect_failure(&mut self, error: &ConnectError) {
+    ///
+    /// Returns `true` when the failure made the station fall back to the previous security
+    /// profile (`A05.FR.08`): the caller reconnects at once.
+    pub(super) fn report_connect_failure(&mut self, error: &ConnectError) -> bool {
         let certificate_error =
             matches!(error, ConnectError::Tls(text) if text.contains("invalid peer certificate"));
         let wildcard = matches!(error, ConnectError::Tls(text) if text.contains(WILDCARD_REFUSED));
@@ -612,6 +626,55 @@ impl StationActor {
             },
             _ => {}
         }
+        self.count_profile_failure(error)
+    }
+
+    /// `A05.FR.08`: counts a profile-attributable failure while a profile change waits for its
+    /// first successful connection; at the threshold the previous profile is restored.
+    fn count_profile_failure(&mut self, error: &ConnectError) -> bool {
+        if !self.config.security_profile_fallback || !is_profile_failure(error) {
+            return false;
+        }
+        let Some(mut pending) = self.pending_profile_switch else {
+            return false;
+        };
+        pending.failures += 1;
+        if pending.failures < PROFILE_FALLBACK_AFTER_FAILURES {
+            self.pending_profile_switch = Some(pending);
+            self.mark_dirty();
+            return false;
+        }
+        self.fall_back_to_previous_profile(pending.previous_profile);
+        true
+    }
+
+    /// Restores the previous profile (and the previous `AuthorizationKey` when it changed in the
+    /// meantime) without the lowering rules: the new profile never worked (`A05.FR.09` only
+    /// bars lowering after a connection with it).
+    fn fall_back_to_previous_profile(&mut self, previous: u8) {
+        let current = self.registry.security_profile();
+        self.registry.set_security_profile_unchecked(previous);
+        self.pending_profile_switch = None;
+        if let Some(key) = self.secrets.previous_authorization_key.take() {
+            if previous >= 1 {
+                self.registry.set_authorization_key(&key);
+                self.secrets.authorization_key = Some(key);
+            }
+            self.mark_secrets_dirty();
+        }
+        self.log(
+            LogLevel::Warn,
+            format!(
+                "security profile {current} could not connect {PROFILE_FALLBACK_AFTER_FAILURES} times; falling back to profile {previous}"
+            ),
+        );
+        self.security_event(
+            "ReconfigurationOfSecurityParameters",
+            Some(&format!(
+                "SecurityProfile fell back from {current} to {previous} after {PROFILE_FALLBACK_AFTER_FAILURES} failed connection attempts"
+            )),
+        );
+        self.flush_now();
     }
 
     /// Reports `event_type` unless the current series of failed attempts already did.
@@ -625,6 +688,17 @@ impl StationActor {
     /// certificate that worked settles the old/new alternation.
     pub(super) fn on_connection_established(&mut self) {
         self.failure_series.clear();
+        // A05.FR.09: a connection with the new profile settles the change; the previous
+        // credential is not needed any more (nor is it for a profile that uses the key).
+        let settled = self.pending_profile_switch.take().is_some();
+        if settled {
+            self.mark_dirty();
+        }
+        if (settled || self.registry.security_profile() >= 1)
+            && self.secrets.previous_authorization_key.take().is_some()
+        {
+            self.mark_secrets_dirty();
+        }
         self.client_certificate_connected();
     }
 
@@ -651,10 +725,36 @@ impl StationActor {
     }
 
     /// Side effects of an accepted change of a security key (called after it was stored).
-    pub(super) fn on_security_key_changed(&mut self, key: &str) {
+    pub(super) fn on_security_key_changed(&mut self, key: &str, previous_profile: u8) {
         if key == AUTHORIZATION_KEY {
-            self.secrets.authorization_key = self.registry.authorization_key().map(str::to_owned);
+            let new = self.registry.authorization_key().map(str::to_owned);
+            // The oldest unproven key is the one to go back to (`A05.FR.08`).
+            if self.secrets.previous_authorization_key.is_none()
+                && self.secrets.authorization_key != new
+            {
+                self.secrets.previous_authorization_key = self
+                    .secrets
+                    .authorization_key
+                    .clone()
+                    .filter(|k| !k.is_empty());
+            }
+            self.secrets.authorization_key = new;
             self.mark_secrets_dirty();
+        }
+        if key == SECURITY_PROFILE
+            && self.config.security_profile_fallback
+            && self.registry.security_profile() != previous_profile
+        {
+            let before = self
+                .pending_profile_switch
+                .map_or(previous_profile, |p| p.previous_profile);
+            self.pending_profile_switch = (before != self.registry.security_profile()).then_some(
+                crate::store::PendingProfileSwitch {
+                    previous_profile: before,
+                    failures: 0,
+                },
+            );
+            self.mark_dirty();
         }
         if key == AUTHORIZATION_KEY || key == SECURITY_PROFILE {
             self.log(

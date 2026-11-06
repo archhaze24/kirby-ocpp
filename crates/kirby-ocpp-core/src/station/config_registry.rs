@@ -489,6 +489,12 @@ impl ConfigRegistry {
         u8::try_from(self.number(SECURITY_PROFILE)).unwrap_or(0)
     }
 
+    /// Sets `SecurityProfile` without the transport and lowering rules (the `A05.FR.08`
+    /// fallback only).
+    pub fn set_security_profile_unchecked(&mut self, profile: u8) {
+        self.set_internal(SECURITY_PROFILE, profile.to_string());
+    }
+
     /// `AllowSecurityProfileDowngrade` (default `false`).
     pub fn allow_security_profile_downgrade(&self) -> bool {
         self.boolean(ALLOW_SECURITY_PROFILE_DOWNGRADE)

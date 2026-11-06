@@ -24,6 +24,7 @@ const ENV_VARS: &[&str] = &[
     "OCPP_TLS_SERVER_NAME",
     "OCPP_TLS_SKIP_VERIFY",
     "OCPP_SHOW_SECRETS",
+    "OCPP_SECURITY_PROFILE_FALLBACK",
     "KIRBY_OCPP_NO_PERSIST",
     "KIRBY_OCPP_STATE_DIR",
     "KIRBY_OCPP_RULES",
@@ -454,6 +455,34 @@ fn additional_root_certificate_check_is_off_by_default_and_can_be_enabled() {
         config(URL, &[("OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK", "1")])["additional_root_certificate_check"],
         true
     );
+}
+
+#[test]
+fn security_profile_fallback_is_on_by_default_and_parsed_strictly() {
+    assert_eq!(config(URL, &[])["security_profile_fallback"], true);
+    assert_eq!(
+        config(&with_url(&["--security-profile-fallback", "off"]), &[])["security_profile_fallback"],
+        false
+    );
+    assert_eq!(
+        config(URL, &[("OCPP_SECURITY_PROFILE_FALLBACK", "no")])["security_profile_fallback"],
+        false
+    );
+    // The flag beats the environment.
+    assert_eq!(
+        config(
+            &with_url(&["--security-profile-fallback", "true"]),
+            &[("OCPP_SECURITY_PROFILE_FALLBACK", "0")]
+        )["security_profile_fallback"],
+        true
+    );
+    let output = run(
+        &with_url(&["--print-config", "--security-profile-fallback", "maybe"]),
+        &[],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let help = run(&["--help"], &[]);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--security-profile-fallback <BOOL>"));
 }
 
 #[test]
