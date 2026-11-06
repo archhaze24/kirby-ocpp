@@ -1277,6 +1277,8 @@ dependencies = [
  "chrono",
  "clap",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "kirby-csms-core",
  "kirby-csms-tui",
  "kirby-ocpp-core",

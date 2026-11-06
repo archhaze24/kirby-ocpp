@@ -1,9 +1,8 @@
 //! Local HTTP control API (`--api-listen`): JSON in and out, plain HTTP, optional bearer token.
 //! It only uses [`CsmsHandle`] and the command code shared with the stdin handler.
 
-use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -20,15 +19,18 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use chrono::SecondsFormat;
 use futures_util::{StreamExt, stream};
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::service::TowerToHyperService;
 use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Reply, is_charge_point_action};
 use kirby_ocpp_core::text::is_unsafe_char;
 use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Sleep;
 
 use crate::commands;
@@ -44,8 +46,11 @@ const MAX_STREAMS: usize = 16;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 /// Most connections open at once; further ones are closed at once.
 const MAX_CONNECTIONS: usize = 512;
-/// Time a client gets to send the complete request head after connecting.
+/// Time a client gets to send the complete request head after connecting (hyper's
+/// `header_read_timeout`, which only a real request line and a complete head satisfy).
 const HEAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// A write that makes no progress for this long ends the connection.
+const WRITE_STALL: Duration = Duration::from_secs(30);
 /// Time a client gets to send the whole request body.
 const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -56,6 +61,8 @@ struct ApiState {
     token: Option<Arc<str>>,
     streams: Arc<Semaphore>,
     stopped: watch::Receiver<bool>,
+    /// The address the API listens on.
+    bound: IpAddr,
 }
 
 /// A running API server.
@@ -70,106 +77,123 @@ pub async fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
-/// What a connection needs to see before its head timer stops: the end of the request head.
-struct HeadScan {
-    sleep: Pin<Box<Sleep>>,
-    /// The last four bytes read.
-    last: u32,
+/// An accepted connection's socket: gives up when a write makes no progress for
+/// [`WRITE_STALL`] (a client that stopped reading), so stalled streams free their slot.
+struct StallIo<T> {
+    inner: T,
+    /// How long a write may make no progress.
+    after: Duration,
+    /// Armed while a write is pending; cleared by any write progress.
+    stall: Option<Pin<Box<Sleep>>>,
 }
 
-/// An accepted connection: holds a connection slot, and is cut when the request head does not
-/// arrive in time (slowloris). Every response says `Connection: close`, so a connection
-/// carries one request and the timer only has to cover the first head.
-struct GuardedIo {
-    inner: TcpStream,
-    head: Option<HeadScan>,
-    _permit: OwnedSemaphorePermit,
+impl<T> StallIo<T> {
+    /// Applies the stall rule to the result of a write-side poll.
+    fn guard<R>(
+        &mut self,
+        cx: &mut Context<'_>,
+        polled: Poll<io::Result<R>>,
+    ) -> Poll<io::Result<R>> {
+        match polled {
+            Poll::Pending => {
+                let sleep = self
+                    .stall
+                    .get_or_insert_with(|| Box::pin(tokio::time::sleep(self.after)));
+                if sleep.as_mut().poll(cx).is_ready() {
+                    Poll::Ready(Err(io::ErrorKind::TimedOut.into()))
+                } else {
+                    Poll::Pending
+                }
+            }
+            ready @ Poll::Ready(_) => {
+                self.stall = None;
+                ready
+            }
+        }
+    }
 }
 
-impl AsyncRead for GuardedIo {
+impl<T: AsyncRead + Unpin> AsyncRead for StallIo<T> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let this = self.get_mut();
-        let before = buf.filled().len();
-        match Pin::new(&mut this.inner).poll_read(cx, buf) {
-            Poll::Ready(Ok(())) => {
-                if let Some(head) = &mut this.head {
-                    let mut done = false;
-                    for byte in buf.filled().get(before..).unwrap_or_default() {
-                        head.last = (head.last << 8) | u32::from(*byte);
-                        done |= head.last == 0x0d0a_0d0a || head.last & 0xffff == 0x0a0a;
-                    }
-                    if done {
-                        this.head = None;
-                    }
-                }
-                Poll::Ready(Ok(()))
-            }
-            Poll::Pending => {
-                if let Some(head) = &mut this.head
-                    && head.sleep.as_mut().poll(cx).is_ready()
-                {
-                    return Poll::Ready(Err(io::ErrorKind::TimedOut.into()));
-                }
-                Poll::Pending
-            }
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
-        }
+        Pin::new(&mut self.get_mut().inner).poll_read(cx, buf)
     }
 }
 
-impl AsyncWrite for GuardedIo {
+impl<T: AsyncWrite + Unpin> AsyncWrite for StallIo<T> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<io::Result<usize>> {
-        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.inner).poll_write(cx, buf);
+        this.guard(cx, polled)
     }
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.inner).poll_flush(cx);
+        this.guard(cx, polled)
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.inner).poll_shutdown(cx);
+        this.guard(cx, polled)
     }
 }
 
-/// The API listener: caps open connections and arms the head timer of each.
-struct GuardedListener {
-    inner: TcpListener,
+/// Accepts connections until `stopped`, one task each (tracked in a [`JoinSet`], so dropping
+/// this future closes every connection). A connection holds a slot of the cap, gets
+/// [`HEAD_TIMEOUT`] from hyper for the request head and carries one request.
+async fn serve(
+    listener: TcpListener,
+    app: Router,
     slots: Arc<Semaphore>,
-}
-
-impl axum::serve::Listener for GuardedListener {
-    type Io = GuardedIo;
-    type Addr = SocketAddr;
-
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            let (stream, addr) = axum::serve::Listener::accept(&mut self.inner).await;
-            // Over the cap the socket is dropped (closed) at once.
-            if let Ok(permit) = Arc::clone(&self.slots).try_acquire_owned() {
-                let io = GuardedIo {
-                    inner: stream,
-                    head: Some(HeadScan {
-                        sleep: Box::pin(tokio::time::sleep(HEAD_TIMEOUT)),
-                        last: 0,
-                    }),
-                    _permit: permit,
+    mut stopped: watch::Receiver<bool>,
+) {
+    let mut connections = JoinSet::new();
+    loop {
+        tokio::select! {
+            () = wait_stopped(&mut stopped) => break,
+            Some(_) = connections.join_next() => {}
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else {
+                    // Out of descriptors or similar: do not spin.
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
                 };
-                return (io, addr);
+                // Over the cap the socket is dropped (closed) at once.
+                let Ok(permit) = Arc::clone(&slots).try_acquire_owned() else {
+                    continue;
+                };
+                let io = TokioIo::new(StallIo { inner: stream, after: WRITE_STALL, stall: None });
+                let service = TowerToHyperService::new(app.clone());
+                let mut stop = stopped.clone();
+                connections.spawn(async move {
+                    let _permit = permit;
+                    let connection = http1::Builder::new()
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(HEAD_TIMEOUT)
+                        .keep_alive(false)
+                        .serve_connection(io, service);
+                    tokio::pin!(connection);
+                    tokio::select! {
+                        _ = connection.as_mut() => {}
+                        () = wait_stopped(&mut stop) => {
+                            connection.as_mut().graceful_shutdown();
+                            let _ = connection.await;
+                        }
+                    }
+                });
             }
         }
     }
-
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.inner.local_addr()
-    }
+    while connections.join_next().await.is_some() {}
 }
 
 /// Serves the API on `listener` until [`Api::finish`].
@@ -179,32 +203,31 @@ pub fn spawn(
     slots: Arc<Semaphore>,
     token: Option<String>,
 ) -> Api {
-    let (stop, mut stopped) = watch::channel(false);
+    let (stop, stopped) = watch::channel(false);
+    let bound = listener
+        .local_addr()
+        .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |addr| addr.ip());
     let state = ApiState {
         handle,
         slots,
         token: token.map(Arc::from),
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
         stopped: stopped.clone(),
+        bound,
     };
     let app = router(state);
-    let task = tokio::spawn(async move {
-        let shutdown = async move {
-            let _ = stopped.wait_for(|stop| *stop).await;
-        };
-        let listener = GuardedListener {
-            inner: listener,
-            slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
-        };
-        let _ = axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown)
-            .await;
-    });
+    let task = tokio::spawn(serve(
+        listener,
+        app,
+        Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        stopped,
+    ));
     Api { stop, task }
 }
 
 impl Api {
-    /// Stops accepting, waits a bounded time for open requests, then drops the rest.
+    /// Stops accepting, waits a bounded time for open requests, then aborts the server task,
+    /// which drops (closes) every connection still open.
     pub async fn finish(mut self) {
         let _ = self.stop.send(true);
         if tokio::time::timeout(SHUTDOWN_GRACE, &mut self.task)
@@ -212,6 +235,7 @@ impl Api {
             .is_err()
         {
             self.task.abort();
+            let _ = self.task.await;
         }
     }
 }
@@ -277,22 +301,31 @@ async fn close_connection(request: Request, next: Next) -> Response {
     response
 }
 
-/// Whether a `Host` header value names this machine: `127.0.0.1`, `[::1]` or `localhost`,
-/// with an optional port. Anything else (a DNS name that rebinds to 127.0.0.1) is not.
-fn is_loopback_host(value: &str) -> bool {
-    let (host, port, bracketed) = if let Some(rest) = value.strip_prefix('[') {
+/// Whether a `Host` header value names this machine: a loopback IP literal (`127.0.0.1`,
+/// `[::1]`, `[0:0:0:0:0:0:0:1]`), the address the API is bound to, or `localhost` (with an
+/// optional trailing dot), each with an optional port. Anything else (a DNS name that
+/// rebinds to 127.0.0.1) is not.
+fn is_loopback_host(value: &str, bound: IpAddr) -> bool {
+    let known = |ip: IpAddr| ip.is_loopback() || (ip == bound && !ip.is_unspecified());
+    let (host_ok, port) = if let Some(rest) = value.strip_prefix('[') {
         let Some((ip, tail)) = rest.split_once(']') else {
             return false;
         };
-        (ip, tail, true)
+        (
+            ip.parse::<Ipv6Addr>().is_ok_and(|ip| known(IpAddr::V6(ip))),
+            tail,
+        )
     } else {
         let (host, port) = value.split_at(value.find(':').unwrap_or(value.len()));
-        (host, port, false)
-    };
-    let host_ok = if bracketed {
-        host == "::1"
-    } else {
-        host == "127.0.0.1" || host.eq_ignore_ascii_case("localhost")
+        let named =
+            host.eq_ignore_ascii_case("localhost") || host.eq_ignore_ascii_case("localhost.");
+        (
+            named
+                || host
+                    .parse::<Ipv4Addr>()
+                    .is_ok_and(|ip| known(IpAddr::V4(ip))),
+            port,
+        )
     };
     host_ok && (port.is_empty() || valid_port(port))
 }
@@ -341,13 +374,18 @@ async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Re
             StatusCode::FORBIDDEN,
             "cross-site requests are refused without an API token",
         );
-    } else if headers
-        .get(header::HOST)
-        .is_some_and(|host| !host.to_str().is_ok_and(is_loopback_host))
-    {
+    } else if headers.get(header::HOST).is_some_and(|host| {
+        !host
+            .to_str()
+            .is_ok_and(|host| is_loopback_host(host, state.bound))
+    }) {
         return error(
             StatusCode::FORBIDDEN,
-            "the Host header must be 127.0.0.1, [::1] or localhost without an API token",
+            &format!(
+                "without an API token the Host header must be 127.0.0.1, [::1], localhost \
+                 (any loopback IP) or the API address {}, with an optional port",
+                state.bound
+            ),
         );
     }
     next.run(request).await
@@ -420,9 +458,13 @@ async fn history(
         Err(response) => return *response,
     };
     let limit = match query_param(&uri, "limit") {
-        Ok(Some(value)) => match value.parse::<usize>() {
-            Ok(limit) => Some(limit),
-            Err(_) => {
+        Ok(Some(value)) => match value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+            .then(|| value.parse::<usize>())
+        {
+            Some(Ok(limit)) => Some(limit),
+            Some(Err(_)) | None => {
                 return error(
                     StatusCode::BAD_REQUEST,
                     "`limit` must be a non-negative integer",
@@ -835,4 +877,84 @@ async fn faults_remaining(State(state): State<ApiState>) -> Response {
 async fn clear_faults(State(state): State<ApiState>) -> Response {
     state.handle.clear_faults();
     reply(StatusCode::OK, &json!({"remaining": 0}))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use kirby_csms_core::{CsmsConfig, CsmsServer};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_write_without_progress_times_out() {
+        // The peer end of the pipe is never read: 8 bytes fit, the rest of the write blocks.
+        let (near, _far) = tokio::io::duplex(8);
+        let mut io = StallIo {
+            inner: near,
+            after: Duration::from_millis(150),
+            stall: None,
+        };
+        let started = Instant::now();
+        let error = io.write_all(&[0_u8; 64]).await.unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[tokio::test]
+    async fn a_slow_but_moving_write_is_left_alone() {
+        let (near, mut far) = tokio::io::duplex(8);
+        let mut io = StallIo {
+            inner: near,
+            after: Duration::from_millis(300),
+            stall: None,
+        };
+        let reader = tokio::spawn(async move {
+            let mut got = 0;
+            let mut chunk = [0_u8; 8];
+            while got < 64 {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                got += far.read(&mut chunk).await.unwrap();
+            }
+        });
+        io.write_all(&[0_u8; 64]).await.unwrap();
+        reader.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn finish_closes_connections_that_are_still_open() {
+        let csms = CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let api = spawn(listener, csms.clone(), Arc::new(Semaphore::new(4)), None);
+        // One connection idle, one with a request body that never completes.
+        let mut idle = TcpStream::connect(addr).await.unwrap();
+        let mut stalled = TcpStream::connect(addr).await.unwrap();
+        stalled
+            .write_all(
+                format!(
+                    "POST /v1/rules/Heartbeat HTTP/1.1\r\nHost: {addr}\r\nContent-Length: 50\r\n\r\n{{"
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let started = Instant::now();
+        api.finish().await;
+        assert!(started.elapsed() < Duration::from_secs(6));
+        for stream in [&mut idle, &mut stalled] {
+            // Closed by the server: end of stream or a reset, not a hang.
+            let mut rest = Vec::new();
+            let read = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut rest))
+                .await
+                .expect("connection still open after finish");
+            drop(read);
+        }
+        csms.shutdown().await;
+    }
 }

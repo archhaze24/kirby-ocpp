@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
@@ -163,6 +163,7 @@ impl CsmsServer {
             state: Mutex::new(State {
                 stations: BTreeMap::new(),
                 faults: Vec::new(),
+                fault_bytes: 0,
                 responders: std::collections::HashMap::new(),
                 tx_ids: config.transaction_ids.allocator(),
                 next_session: 0,
@@ -340,6 +341,15 @@ impl CsmsHandle {
                 station: station.to_owned(),
             };
             let session = rec.session.as_ref().ok_or_else(not_connected)?;
+            let Some(slot) = session.slots.reserve() else {
+                // Calls whose callers gave up may hold the slots: have the session drop them.
+                if !session.slots.prune.swap(true, Ordering::AcqRel) {
+                    let _ = session.tx.send(SessionCmd::Prune);
+                }
+                return Err(CsmsError::QueueFull {
+                    station: station.to_owned(),
+                });
+            };
             session
                 .tx
                 .send(SessionCmd::Call(QueuedCall {
@@ -347,6 +357,7 @@ impl CsmsHandle {
                     payload,
                     timeout,
                     reply,
+                    _slot: slot,
                 }))
                 .map_err(|_| not_connected())?;
         }
@@ -392,7 +403,9 @@ impl CsmsHandle {
     /// are used in the order injected.
     pub fn inject(&self, fault: Fault) {
         if fault.remaining > 0 {
-            self.inner.lock().faults.push(fault);
+            let mut state = self.inner.lock();
+            state.fault_bytes = state.fault_bytes.saturating_add(fault_bytes(&fault));
+            state.faults.push(fault);
         }
     }
 
@@ -406,13 +419,14 @@ impl CsmsHandle {
         if state.faults.len() >= MAX_FAULTS {
             return Err(format!("too many faults stored (at most {MAX_FAULTS})"));
         }
-        let stored: usize = state.faults.iter().map(fault_bytes).sum();
-        if stored.saturating_add(fault_bytes(&fault)) > MAX_FAULT_BYTES {
+        let added = fault_bytes(&fault);
+        if state.fault_bytes.saturating_add(added) > MAX_FAULT_BYTES {
             return Err(format!(
                 "stored faults would exceed {} MiB",
                 MAX_FAULT_BYTES / (1024 * 1024)
             ));
         }
+        state.fault_bytes = state.fault_bytes.saturating_add(added);
         state.faults.push(fault);
         Ok(())
     }
@@ -435,7 +449,9 @@ impl CsmsHandle {
 
     /// Drops every scripted fault that has not triggered yet.
     pub fn clear_faults(&self) {
-        self.inner.lock().faults.clear();
+        let mut state = self.inner.lock();
+        state.faults.clear();
+        state.fault_bytes = 0;
     }
 
     /// Stops accepting, closes every connection (close frame 1001) and waits for the
@@ -482,6 +498,8 @@ struct Inner {
 struct State {
     stations: BTreeMap<String, StationRec>,
     faults: Vec<Fault>,
+    /// Sum of `fault_bytes` over `faults`, kept up to date on insert, consume and clear.
+    fault_bytes: usize,
     responders: std::collections::HashMap<String, Responder>,
     tx_ids: TransactionIdAllocator,
     next_session: u64,
@@ -505,11 +523,47 @@ struct HistoryItem {
 struct SessionLink {
     id: u64,
     tx: mpsc::UnboundedSender<SessionCmd>,
+    slots: Arc<CallSlots>,
+}
+
+/// Calls of one session that [`CsmsHandle::call`] accepted and that have not left its queue
+/// yet (in the command channel or in the session's queue). Counted at call time, because the
+/// channel is unbounded and the session loop may be stuck in a write.
+#[derive(Default)]
+struct CallSlots {
+    used: AtomicUsize,
+    /// A `Prune` command is on its way.
+    prune: AtomicBool,
+}
+
+impl CallSlots {
+    /// Takes a slot, or `None` when [`MAX_QUEUED_CALLS`] are in use.
+    fn reserve(self: &Arc<Self>) -> Option<CallSlot> {
+        if self.used.fetch_add(1, Ordering::AcqRel) >= MAX_QUEUED_CALLS {
+            self.used.fetch_sub(1, Ordering::AcqRel);
+            return None;
+        }
+        Some(CallSlot(Arc::clone(self)))
+    }
+}
+
+/// A taken slot of [`CallSlots`]; freed when dropped.
+struct CallSlot(Arc<CallSlots>);
+
+impl Drop for CallSlot {
+    fn drop(&mut self) {
+        self.0.used.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 enum SessionCmd {
     Call(QueuedCall),
-    Close { code: u16, reason: &'static str },
+    /// Drop queued calls whose callers gave up.
+    Prune,
+    Close {
+        code: u16,
+        reason: &'static str,
+    },
 }
 
 struct QueuedCall {
@@ -517,6 +571,8 @@ struct QueuedCall {
     payload: Value,
     timeout: Duration,
     reply: oneshot::Sender<Result<Frame, CsmsError>>,
+    /// Freed when the call leaves the queue.
+    _slot: CallSlot,
 }
 
 enum RegisterError {
@@ -556,6 +612,7 @@ impl Inner {
         peer: SocketAddr,
         subprotocol: Option<String>,
         tx: mpsc::UnboundedSender<SessionCmd>,
+        slots: Arc<CallSlots>,
     ) -> Result<u64, RegisterError> {
         let mut state = self.lock();
         if *self.shutdown.borrow() {
@@ -597,7 +654,11 @@ impl Inner {
                 reason: DisconnectReason::Replaced,
             });
         }
-        rec.session = Some(SessionLink { id: session_id, tx });
+        rec.session = Some(SessionLink {
+            id: session_id,
+            tx,
+            slots,
+        });
         rec.info.connected = true;
         rec.info.connected_at = Some(Utc::now());
         rec.info.disconnected_at = None;
@@ -750,6 +811,12 @@ impl Inner {
         {
             fault.remaining -= 1;
             let reply = fault.reply.clone();
+            let freed = if fault.remaining == 0 {
+                fault_bytes(fault)
+            } else {
+                0
+            };
+            state.fault_bytes = state.fault_bytes.saturating_sub(freed);
             state.faults.retain(|fault| fault.remaining > 0);
             return reply;
         }
@@ -927,7 +994,8 @@ async fn run_session<S>(
     };
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let session_id = match inner.register(&station, peer, subprotocol, cmd_tx) {
+    let slots = Arc::new(CallSlots::default());
+    let session_id = match inner.register(&station, peer, subprotocol, cmd_tx, Arc::clone(&slots)) {
         Ok(session_id) => session_id,
         Err(RegisterError::Shutdown) => return,
         Err(RegisterError::TooManyStations) => {
@@ -953,6 +1021,7 @@ async fn run_session<S>(
         link_id: session_id,
         station,
         socket,
+        slots,
         queue: VecDeque::new(),
         in_flight: None,
         last_seen: Instant::now(),
@@ -989,6 +1058,7 @@ struct Session<S> {
     link_id: u64,
     station: String,
     socket: WebSocketStream<S>,
+    slots: Arc<CallSlots>,
     queue: VecDeque<QueuedCall>,
     in_flight: Option<InFlight>,
     /// When the station last sent anything (a frame of any kind, a pong included).
@@ -1034,18 +1104,15 @@ where
                     }
                 } => self.watchdog_fired().await,
                 command = commands.recv() => match command {
+                    // `call()` reserved a slot, so the queue cannot outgrow its limit.
                     Some(SessionCmd::Call(call)) => {
-                        if self.queue.len() >= MAX_QUEUED_CALLS {
-                            // Callers that gave up still hold a slot until they are popped.
-                            self.queue.retain(|queued| !queued.reply.is_closed());
-                        }
-                        if self.queue.len() >= MAX_QUEUED_CALLS {
-                            let _ = call.reply.send(Err(CsmsError::QueueFull {
-                                station: self.station.clone(),
-                            }));
-                        } else {
-                            self.queue.push_back(call);
-                        }
+                        self.queue.push_back(call);
+                        None
+                    }
+                    Some(SessionCmd::Prune) => {
+                        // Callers that gave up hold a slot until they are popped or pruned.
+                        self.slots.prune.store(false, Ordering::Release);
+                        self.queue.retain(|queued| !queued.reply.is_closed());
                         None
                     }
                     Some(SessionCmd::Close { code, reason }) => {

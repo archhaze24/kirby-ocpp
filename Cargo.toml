@@ -26,6 +26,8 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock", "s
 clap = { version = "4.6.7", features = ["derive", "env"] }
 base64 = "0.22.1"
 crossterm = "0.29.0"
+hyper = { version = "1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["server", "service", "tokio"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 jsonschema = { version = "0.60.2", default-features = false }
 nucleo-matcher = "0.3.1"

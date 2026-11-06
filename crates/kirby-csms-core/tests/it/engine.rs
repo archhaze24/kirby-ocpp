@@ -1288,6 +1288,98 @@ async fn calls_beyond_the_per_station_queue_limit_are_refused() {
 }
 
 #[tokio::test]
+async fn queue_limit_holds_while_the_session_is_stuck_in_a_write() {
+    let csms = start(|config| {
+        config.max_message_size = 64 * 1024 * 1024;
+        config.write_timeout = Duration::from_secs(3600);
+    })
+    .await;
+    let mut events = csms.subscribe();
+    // The station never reads: a huge first CALL blocks the session loop in its write, so
+    // later calls pile up in the command channel instead of the session queue.
+    let _silent = raw_connect(&csms, "/ocpp/CP-STUCK").await;
+    wait_event(&mut events, "stuck station", connected("CP-STUCK")).await;
+    let big = {
+        let csms = csms.clone();
+        tokio::spawn(async move {
+            csms.call_timeout(
+                "CP-STUCK",
+                "DataTransfer",
+                json!({"vendorId": "v", "data": "x".repeat(48 * 1024 * 1024)}),
+                Duration::from_secs(3600),
+            )
+            .await
+        })
+    };
+    wait_event(&mut events, "big call written", |event| {
+        matches!(
+            event,
+            CsmsEvent::Frame {
+                direction: Direction::Out,
+                ..
+            }
+        )
+    })
+    .await;
+
+    let (done_tx, mut done_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut tasks = Vec::new();
+    for _ in 0..1100 {
+        let (csms, done_tx) = (csms.clone(), done_tx.clone());
+        tasks.push(tokio::spawn(async move {
+            let result = csms
+                .call_timeout(
+                    "CP-STUCK",
+                    "Reset",
+                    json!({"type": "Soft"}),
+                    Duration::from_secs(3600),
+                )
+                .await;
+            let _ = done_tx.send(result);
+        }));
+    }
+    // The refusals come at once, not after the write timeout of an hour.
+    for _ in 0..70 {
+        match timeout(STEP, done_rx.recv()).await {
+            Ok(Some(Err(CsmsError::QueueFull { station }))) => assert_eq!(station, "CP-STUCK"),
+            other => panic!("expected QueueFull, got {other:?}"),
+        }
+    }
+    big.abort();
+    for task in tasks {
+        task.abort();
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn consumed_faults_free_their_bytes() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    let mut socket = raw_connect(&csms, "/ocpp/CP-FAULT").await;
+    wait_event(&mut events, "station", connected("CP-FAULT")).await;
+    let big = json!({"x": "a".repeat(3 * 1024 * 1024)});
+    csms.try_inject(Fault::invalid_payload("Heartbeat", big.clone()))
+        .unwrap();
+    csms.try_inject(Fault::invalid_payload("Authorize", big.clone()))
+        .unwrap();
+    raw_send(&mut socket, r#"[2,"h1","Heartbeat",{}]"#).await;
+    raw_recv(&mut socket).await;
+    assert_eq!(csms.faults_remaining(), 1);
+    // 3 MiB are stored, so another 3 MiB fit and a further 3 MiB do not.
+    csms.try_inject(Fault::invalid_payload("StatusNotification", big.clone()))
+        .unwrap();
+    let error = csms
+        .try_inject(Fault::invalid_payload("MeterValues", big.clone()))
+        .unwrap_err();
+    assert!(error.contains("8 MiB"), "{error}");
+    csms.clear_faults();
+    csms.try_inject(Fault::invalid_payload("A", big.clone()))
+        .unwrap();
+    csms.try_inject(Fault::invalid_payload("B", big)).unwrap();
+}
+
+#[tokio::test]
 async fn fault_counters_saturate_and_storage_is_bounded() {
     let csms = start(|_| {}).await;
     csms.inject(Fault::silence("Heartbeat").times(usize::MAX));

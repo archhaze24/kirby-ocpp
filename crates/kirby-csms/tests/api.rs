@@ -835,6 +835,10 @@ async fn host_header_must_be_loopback_without_a_token() {
         "LOCALHOST".to_owned(),
         format!("[::1]:{port}"),
         "[::1]".to_owned(),
+        "[0:0:0:0:0:0:0:1]".to_owned(),
+        format!("[0:0:0:0:0:0:0:1]:{port}"),
+        "localhost.".to_owned(),
+        format!("Localhost.:{port}"),
     ] {
         assert_eq!(get(host.clone()).await, 200, "{host}");
     }
@@ -848,9 +852,20 @@ async fn host_header_must_be_loopback_without_a_token() {
         "[::1".to_owned(),
         "[::2]".to_owned(),
         "192.168.1.5".to_owned(),
+        "[::ffff:192.168.1.5]".to_owned(),
+        "localhost..".to_owned(),
     ] {
         assert_eq!(get(host.clone()).await, 403, "{host}");
     }
+    let refused = raw_exchange(
+        addr,
+        "GET /v1/stations HTTP/1.1\r\nHost: evil.example\r\n\r\n",
+    )
+    .await;
+    assert!(
+        refused.contains("127.0.0.1") && refused.contains("[::1]") && refused.contains("localhost"),
+        "{refused}"
+    );
     // Same-origin requests carry no Origin, but a cross-site fetch says so.
     let (status, body) = http(
         addr,
@@ -960,6 +975,10 @@ async fn limit_is_percent_decoded_like_station() {
     assert_eq!(status, 400);
     let (status, _) = csms.get("/v1/stations/CP-1/history?limit=-1").await;
     assert_eq!(status, 400);
+    let (status, _) = csms.get("/v1/stations/CP-1/history?limit=%2B5").await;
+    assert_eq!(status, 400);
+    let (status, _) = csms.get("/v1/stations/CP-1/history?limit=").await;
+    assert_eq!(status, 400);
     let (status, body) = csms.get("/v1/stations/CP-1/history?station=x").await;
     assert_eq!(status, 400);
     assert!(body["error"].as_str().unwrap().contains("limit"));
@@ -1059,6 +1078,63 @@ async fn slow_clients_and_connection_flood_are_cut() {
     assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
     drop(open);
     assert_eq!(csms.get("/v1/health").await.0, 200);
+}
+
+/// Reads until the peer closes or `limit` passes; whether it was still open at the end.
+async fn open_after(stream: &mut TcpStream, limit: Duration) -> bool {
+    let mut buf = [0_u8; 4096];
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.read(&mut buf)).await {
+            Err(_) => return true,
+            Ok(Ok(0) | Err(_)) => return false,
+            Ok(Ok(_)) => {}
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn head_timer_only_stops_for_a_real_request() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let started = tokio::time::Instant::now();
+
+    // Blank lines before the request line do not count as a head.
+    let blank = async {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(b"\r\n\r\n").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        stream.write_all(b"GET /v1/he").await.unwrap();
+        let open = open_after(&mut stream, WAIT).await;
+        (open, started.elapsed())
+    };
+    // A complete head with a bare-LF line and a `\n\r\n` end still stops the timer: the
+    // event stream is not cut after 10 s of silence.
+    let sloppy = async {
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        let request = format!("GET /v1/events HTTP/1.1\nHost: {addr}\r\n\n");
+        stream.write_all(request.as_bytes()).await.unwrap();
+        open_after(&mut stream, Duration::from_secs(13)).await
+    };
+    // A call that outlasts the head timeout is not cut either.
+    let _silent = silent_station(&csms.station_addr, "CP-1").await;
+    let long_call = async {
+        csms.post_call(
+            "CP-1",
+            &json!({"action": "Reset", "payload": {"type": "Soft"}, "timeout_ms": 12000}),
+        )
+        .await
+    };
+    let ((blank_open, cut_after), sloppy_open, (status, body)) =
+        tokio::join!(blank, sloppy, long_call);
+    assert!(!blank_open, "blank lines kept the connection open");
+    assert!(cut_after >= Duration::from_secs(8), "cut too early");
+    assert!(sloppy_open, "the event stream was cut");
+    assert_eq!(status, 200, "{body}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(12),
+        "the call returned early: {body}"
+    );
 }
 
 #[cfg(unix)]
