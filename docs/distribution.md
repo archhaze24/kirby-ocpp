@@ -66,16 +66,16 @@ Notes:
 brew install archhaze24/tap/kirby-ocpp
 ```
 
-Installs both binaries (macOS arm64/x64, Linux arm64/x64 from the static musl archives). This works once the owner has pushed the rendered formula to the tap repo `archhaze24/homebrew-tap` as `Formula/kirby-ocpp.rb`. The template is `packaging/homebrew/kirby-ocpp.rb.in`.
+Installs both binaries (macOS arm64/x64, Linux arm64/x64 from the static musl archives). The formula is published with each final release to the tap repo `archhaze24/homebrew-tap` as `Formula/kirby-ocpp.rb`. The template is `packaging/homebrew/kirby-ocpp.rb.in`.
 
 ## Scoop
 
 ```powershell
-scoop bucket add kirby https://github.com/archhaze24/scoop-bucket
+scoop bucket add archhaze24 https://github.com/archhaze24/scoop-bucket
 scoop install kirby-ocpp
 ```
 
-Installs both `.exe` files (Windows x64). This works once the owner has pushed the rendered manifest to the bucket repo `archhaze24/scoop-bucket` as `bucket/kirby-ocpp.json`. The template is `packaging/scoop/kirby-ocpp.json.in`; `checkver` and `autoupdate` keep the bucket current with new releases.
+Installs both `.exe` files (Windows x64). The manifest is published with each final release to the bucket repo `archhaze24/scoop-bucket` as `bucket/kirby-ocpp.json`. The template is `packaging/scoop/kirby-ocpp.json.in`; `checkver` and `autoupdate` keep the bucket current with new releases.
 
 Both files are produced by `.github/scripts/render-packaging.sh TAG [ASSET_DIR|- [OUT_DIR]]` from the release's `.sha256` assets (read from `ASSET_DIR`, or downloaded from the public release URL when `ASSET_DIR` is omitted or `-`). The release workflow runs it and attaches the result as the workflow artifact `packaging` (not a release asset).
 

@@ -65,6 +65,8 @@ Security Whitepaper actions: `C` creates a key pair and a CSR and sends `SignCer
 
 `K` (config keys), `L` (local authorization list), `P` (charging profiles) and `Y` (certificates) open one popup with four pages, switched with `Tab`/`Shift-Tab`, `Left`/`Right`, `h`/`l` or `1`-`4`. `/` filters the rows fuzzily (`Enter` keeps the filter, `Esc` clears it). `Up/Down`, `j/k`, `PageUp/PageDown`, `g`/`G` move. `Esc` or `q` clears an active filter first, then closes. Forms and confirmations opened from the browser return to it.
 
+Form fields take at most 256 KiB (typed or pasted; the rest is dropped and the field says so). DataTransfer limits `vendorId` to 255 characters, `messageId` to 50 and `data` to 64 KiB. Ids and numbers are trimmed; a configuration value and DataTransfer `data` keep their leading and trailing spaces. The log export (`e`) is written with mode 0600 (an existing file is tightened first) and is refused when the path is a symlink.
+
 Edits are local commands that behave like the CSMS-triggered ones, without a CSMS round trip:
 
 | Page | Keys |
@@ -99,7 +101,7 @@ One `Run: <name>` action per built-in scenario (keys `o`, `w`, `s`, `i` for the 
 
 ## Headless mode and exit codes
 
-Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints events until SIGINT or SIGTERM, then closes the WebSocket cleanly and exits 0. Human lines look like `12:00:01.234 -> [2,"...","Heartbeat",{}]` (`->` sent, `<-` received) and `12:00:01.300 [Info] text`. With `--json` each line is one JSON object with a `type` of `frame` (carries a `payload` field next to the raw `frame`), `log` or `state_changed`. If the stdout reader is too slow, events are dropped and a `note` line says how many. Text that comes from the CSMS is sanitised (control characters replaced or escaped) before it is printed.
+Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints events until SIGINT or SIGTERM, then closes the WebSocket cleanly and exits 0. Human lines look like `12:00:01.234 -> [2,"...","Heartbeat",{}]` (`->` sent, `<-` received) and `12:00:01.300 [Info] text`. With `--json` each line is one JSON object with a `type` of `frame` (carries a `payload` field next to the raw `frame`), `log` or `state_changed`. If the stdout reader is too slow, events are dropped and a `note` line says how many. Text that comes from the CSMS is sanitized (control characters replaced or escaped) before it is printed.
 
 `kirby-ocpp run --scenario NAME_OR_FILE` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`). The run options (`--report`, `--junit`, `--timeout`, `--id-tag`), the report shapes and CI use are in [scenarios.md](scenarios.md#running-scenarios).
 
@@ -120,7 +122,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp suite scenarios/ charge-session --juni
 
 Every scenario runs on its own new station (same URL, id and station options as `run`), never in parallel. Persistence is switched off for suite runs (`--state-dir` and `--no-persist` are ignored), so no state carries over from one scenario to the next and nothing is written to disk. Human output is one line per scenario, then a summary:
 
-```
+```text
 PASS charge-session (1.2 s)
 FAIL my-auth: authorize - Blocked
 SKIP last-one

@@ -167,7 +167,7 @@ jobs:
             --title "$REF_NAME" --notes-file "$RUNNER_TEMP/release-notes.md" "${flags[@]}"
 
       # Homebrew formula and Scoop manifest with the real checksums. Uploaded as a workflow
-      # artifact, NOT as release assets: the owner pushes them to the tap and bucket repos.
+      # artifact, NOT as release assets; they are pushed to the tap and bucket repos after the release.
       - name: Render packaging files
         env:
           REF_NAME: ${{ github.ref_name }}

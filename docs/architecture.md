@@ -6,7 +6,7 @@ Contents: [Crate map](#crate-map) · [Layer contracts](#layer-contracts) · [Emu
 
 ## Crate map
 
-```
+```text
 kirby-ocpp (bin)   ---> kirby-ocpp-tui ---> kirby-ocpp-core
 kirby-csms (bin)   ---> kirby-csms-tui ---> kirby-csms-core ---> kirby-ocpp-core
                         kirby-csms-tui ---> kirby-ocpp-tui   (shared terminal pieces only)
@@ -72,7 +72,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 
 **Actor model.** One `StationActor` task owns all station state (connectors, config registry, authorization list and cache, charging profiles, reservations, offline queue, certificates). Nothing is shared behind a lock.
 
-```
+```text
  UI / headless / scenario            StationActor (owns state)                   ws task (owns socket)
  handle.send(Command) --mpsc-->      match command, mutate state  --calls-->     CALL queue -> socket
         <--oneshot Outcome--         publish() after every change <--mpsc--      ConnectionEvent: Frame / Call / Closed
@@ -85,7 +85,11 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * The actor never blocks on I/O. Connect, CALLs and state writes run as spawned tasks and report back as internal messages. An outbound CALL is a spawned future plus a boxed continuation `FnOnce(&mut StationActor, Result<Value, CallError>)` keyed by a token; the continuation runs exactly once (on completion, or from `fail_pending_calls` when the link is lost, disconnected or shut down).
 * The actor ends on `Command::Shutdown` or when every handle is dropped. Timers and the ws task therefore never hold a clone of the command sender; they feed an internal channel instead.
 * **Registration gate:** until BootNotification is `Accepted` only the boot may be sent; while `Pending` also CSMS-triggered messages; `SendRaw` is never gated. A failure is `CallError::NotRegistered`.
-* **CALL order:** `call_raw` queues the first attempt on the connection synchronously (`Connection::enqueue`, which only sends on the connection task's unbounded command channel) and then spawns the task that waits for the answer. The order in which actor code issues CALLs is therefore the order on the wire; spawning the whole `call()` would leave it to the scheduler (multi-thread runtime). Retries (`StartTransaction`, `StopTransaction`, `MeterValues`) are queued again after the retry interval, behind any CALL made since, so they may be reordered relative to later CALLs (a retried `StartTransaction` can follow a later one). The one exception is a retried `MeterValues` sample: once the `StopTransaction` of its transaction is queued the retry is dropped (Info log), so the CSMS never gets a sample after the stop. A request that cannot be queued (schema or serialisation error, closed link) is not retried. The connection task prunes abandoned queued CALLs only when its queue has doubled past 64 entries (amortised cost); a withdrawn CALL is still skipped at pump time. Dropping the waiter still withdraws a CALL that is queued; the serialization and the registration gate are unchanged.
+* **CALL order:** `call_raw` queues the first attempt on the connection synchronously (`Connection::enqueue`, which only sends on the connection task's unbounded command channel) and then spawns the task that waits for the answer. The order in which actor code issues CALLs is therefore the order on the wire; spawning the whole `call()` would leave it to the scheduler (multi-thread runtime).
+  * Retries (`StartTransaction`, `StopTransaction`, `MeterValues`) are queued again after the retry interval, behind any CALL made since, so they may be reordered relative to later CALLs (a retried `StartTransaction` can follow a later one).
+  * The one exception is a retried `MeterValues` sample: once the `StopTransaction` of its transaction is queued the retry is dropped (Info log), so the CSMS never gets a sample after the stop.
+  * A request that cannot be queued (schema or serialization error, closed link) is not retried.
+  * The connection task prunes abandoned queued CALLs only when its queue has doubled past 64 entries (amortized cost); a withdrawn CALL is still skipped at pump time. Dropping the waiter still withdraws a CALL that is queued.
 * **Generations:** the link generation is bumped on every connect attempt and teardown; results of an older generation are ignored.
 * **Inbound dispatch:** `handlers::dispatch_incoming` maps an action name to a typed `fn(&mut StationActor, Responder<A>, A::Req)`. Decode failures become `TypeConstraintViolation`. Handlers reply first and then start follow-up work. Response rules (`response_rules.rs`) are applied before payload decoding.
 * **Ids:** `ConnectorId(u32)` (0 = the charge point), `ReservationId(i32)`, `IdTag` (validated, at most 20 chars); "no id" is `Option`, never `0`. `TxId` is `Csms(i32) | Local(u64)`: a transaction started offline carries `Local` until `StartTransaction.conf`; `TxId::wire()` is `None` for `Local`. Transaction state per connector: `Idle | PendingStart | Active | Stopping`.
@@ -97,7 +101,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 ## CSMS internals
 
 * `CsmsServer` accepts any number of stations on `ws(s)://host:port/<any prefix>/<station id>`; the id is the last non-empty percent-decoded path segment. Ids with control, line-separator or bidi characters (`kirby_ocpp_core::text::is_unsafe_char`) or over 128 bytes are refused with HTTP 400. A second connection with the same id replaces the first (`Disconnected{Replaced}`).
-* Outbound CALLs are serialized per station (one outstanding); at most 1024 more wait behind it, further `call()`s fail with `CsmsError::QueueFull` at once (a slot is reserved when `call()` is made and freed when the call leaves the queue; callers that gave up are pruned); the timeout counts from the write; a late reply after a timeout is recorded but ignored.
+* Outbound CALLs are serialized per station (one outstanding); at most 1024 more wait behind it, further `call()`s fail with `CsmsError::QueueFull` at once (a slot is reserved when `call()` is made and freed when the call leaves the queue; callers that gave up are pruned); the timeout counts from the `call()`, queue time included; when a caller drops its call after the write, the session waits at most the default call timeout more for the station before the next CALL is written; a late reply after a timeout is recorded but ignored.
 * Inbound CALLs: schema-validated if `validate_inbound`; then a `Fault` (global, counted), a responder, or the canned `default_reply`; known non-CP actions get `NotSupported`, unknown `NotImplemented`; malformed frames with a readable id get `FormationViolation`.
 * State tracking (`state.rs`) is built from the actual reply payload of CALLs answered with `Reply::Result`. Stopped transactions are capped (`transaction_history_cap`), active ones at 256. Free text from stations (boot fields, connector `info`/vendor codes, security events) is cut to the schema maximum (255 characters at most).
 * Security profiles 0-3 (`auth.rs`, `tls.rs`): Basic Auth checked in the handshake callback (constant-time, user must equal the URL id), TLS, mTLS with client CN equal to the station id; refusals emit `CsmsEvent::AuthFailed`.
@@ -118,11 +122,11 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * **Outbound CALLs are serialized**: the next CALL goes out only after the current one resolved (result, error or timeout). `ConnectOptions::serialize_calls = false` exists for negative tests. A dropped `call()` future withdraws a not yet written CALL.
 * **Schema validation both ways** with the embedded OCPP 1.6J schemas; violations map to `OccurenceConstraintViolation` / `TypeConstraintViolation` / `PropertyConstraintViolation` / `FormationViolation`.
 * **State file format changes only with a `STORE_VERSION` bump** (now 9, `store.rs`). Older files load with serde defaults; newer ones are refused. No compatibility with the old TypeScript state files.
-* **Redaction:** `AuthorizationKey` values are replaced by `***` in recorded frames, logs and the config log (`ocpp::frame::redact_secrets`) unless `--show-secrets`. Secrets never go into the main state file. Station ids and payloads are attacker-controlled: sanitise before printing (control characters become `·`).
+* **Redaction:** `AuthorizationKey` values are replaced by `***` in recorded frames, logs and the config log (`ocpp::frame::redact_secrets`) unless `--show-secrets`. Secrets never go into the main state file. Station ids and payloads are attacker-controlled: sanitize before printing (control characters become `·`).
 * **No `unsafe`; no `unwrap`/`expect`/indexing on external data** (clippy pedantic is on).
 * **Bounded memory** everywhere external input grows: log buffers, frame history, scenario CALL backlog (10 000 / ~16 MiB), stdin lines (1 MiB), stdout/log-file helper threads drop lines instead of blocking. The one known exception: CSMS station records are never evicted (`forget()` only), bounded per station and by `max_stations` (see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md)).
 * **Spec wins over TS parity.** Intentional deviations are listed in [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md).
-* Keep public shapes (docs, scenarios, planned HTTP API) free of 1.6J-only assumptions where it is cheap: OCPP 2.0.1/2.1 are planned for a later release, not 0.5.
+* Keep public shapes (docs, scenarios, the HTTP API) free of 1.6J-only assumptions where it is cheap. OCPP 2.0.1 and 2.1 are not supported in 0.5.
 
 ## Where each concern lives
 

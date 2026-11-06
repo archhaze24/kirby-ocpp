@@ -7,57 +7,77 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
-Work in progress after 0.4.0.
+### ✨ Added
 
-### Fixed and hardened
+#### Scenarios and scripts
 
-- A secrets file that is unreadable or written by a newer build is never overwritten (the station keeps running without persisting secrets); `--log-file` is created with mode 0600 on unix.
-- `kirby-csms-core`: sockets in the TLS/WebSocket handshake are capped (`max_pending_handshakes`, 1024), the per-station CALL queue is bounded (`CsmsError::QueueFull`), station-supplied text in the state is cut to 255 characters, station ids with bidi or line-separator characters are refused (HTTP 400), new `forget_if_disconnected` and `history_tail`.
-- The emulator keeps the queue entry of a still running offline transaction when the queue overflows, closes an unkept start with a matching stop reason, ends delayed-reply tasks with the connection, reports `cancelled` for a scenario only when a step was cut short, sanitises footer notices in both TUIs, and loads scenario files off the UI loop.
-- `kirby-csms` scripts: `wait_call` fails at once after lost events only for waits that started before the loss; stdin and the control API share one command executor.
-- Release tooling: the npm builder verifies archives against their `.sha256` assets, the launcher does not forward SIGINT twice on a terminal, the container image is pushed only after the GitHub release succeeded, and `latest` only moves for the highest final version.
-
-### Whitepaper and offline leftovers
-
-- Transaction-related `MeterValues` samples taken while the station is offline (or while the transaction still has a local id) are queued instead of dropped: bounded (1000, oldest first), persisted, sent with the real `transactionId` after the start was synchronised and before the stop. State file format 8 (`offline_samples`; older files load).
-- Back-to-back CALLs of the station (queued offline samples, then their `StopTransaction`) are queued on the connection in call order; before, the order depended on the scheduler of a multi-thread runtime. A restored sample queue drops samples of a transaction that no longer exists.
-- A retried `MeterValues` sample no longer arrives after the `StopTransaction` of its transaction (the retry is dropped once the stop is queued); a request that fails schema validation or serialisation is not retried; the connection task prunes abandoned queued CALLs in amortised constant time.
-- Client certificate alternation (`A02.FR.28`) no longer depends on a TLS alert: an HTTP 401/403 upgrade answer or a close/reset right after the TLS handshake switches between the new and the previous certificate at once, any other failure after 3 in a row, so a bad renewed certificate cannot strand the station.
-- Security events stay in the persisted queue until the CSMS answered, so a restart with events in flight no longer loses them.
-- Security profile fallback (`A05.FR.08`): after a change of `SecurityProfile` the station goes back to the previous profile (and `AuthorizationKey`) after 3 connection failures the profile can explain (only HTTP 401/403 and client-certificate TLS alerts; never server-certificate errors, closes, timeouts, refused TCP or DNS, so a man in the middle cannot force a downgrade) before the new profile ever connected, queues a `ReconfigurationOfSecurityParameters` event and reconnects. New flag `--security-profile-fallback <BOOL>` (`OCPP_SECURITY_PROFILE_FALLBACK`, default `true`). State file format 9 (`pending_profile_switch`, previous key in the secrets file; older files load).
-
-### Scenarios
-
-- Emulator scenarios have variables: an optional `[vars]` table (strings, numbers, booleans), `${name}` substitution in the string fields and JSON payloads of a step (an exact `"${name}"` keeps the JSON type, `$${` is a literal `${`), and the built-ins `${station_id}` and `${index}`.
+- Emulator scenarios have variables: an optional `[vars]` table (strings, numbers, booleans) and `${name}` substitution in the string fields and JSON payloads of a step. An exact `"${name}"` keeps the JSON type, `$${` is a literal `${`, and `${station_id}` and `${index}` are built in.
 - `capture = { name = "/json/pointer" }` on `send_raw`, `data_transfer` and `expect_call` steps stores a value of the answer for later steps; a missing pointer fails the step.
-- `kirby-ocpp run --var NAME=VALUE` (repeatable) overrides scenario variables, also in fleet runs.
-- `--var` for a name a scenario never uses is a usage error in `run` (exit 2) and a warning in `suite`. Scenario files must be regular files of at most 1 MiB; an existing path beats a built-in of the same name; `suite` runs a file named twice once, writes its reports on SIGINT and SIGTERM too, and keeps a signal that arrives between scenarios. A substitution is capped at about 1 MiB and CSMS values in failure reasons are cut to about 200 characters. A `kirby-csms --script` `wait_call` is only failed by events lost after it started waiting.
-- `kirby_ocpp_core::scenario::vars` is a public helper (`Vars`, `substitute`, `substitute_str`, `capture`) for other tools.
-- `kirby-csms` scripts have variables too: a top-level `[vars]` table, `${name}` substitution in `station`, `expect_status` and the JSON payloads of steps, `capture = { name = "/json/pointer" }` on `call` (CALLRESULT payload) and `wait_call` (matched CALL payload), and `kirby-csms --script FILE --var NAME=VALUE`.
-- `call` steps in `kirby-csms` scripts take `expect_payload = { ... }`, a JSON subset the CALLRESULT payload must contain (with `expect_status`; not with `expect_error`).
-- Emulator scenarios have loops: `action = "repeat"` with `count` (1..=1000) and nested `[[steps.steps]]`, up to 3 levels, counters `${i}` / `${i0}` (or a custom `var`), at most 10000 expanded steps (checked at load time). Reports and JUnit list every executed step as `name [n]` (`name [2.3]` when nested).
+- `kirby-ocpp run --var NAME=VALUE` (repeatable) overrides scenario variables, also in fleet runs. A name the scenario never uses is a usage error in `run` (exit 2) and a warning in `suite`.
+- Emulator scenarios have loops: `action = "repeat"` with `count` (1..=1000) and nested `[[steps.steps]]`, up to 3 levels, counters `${i}` / `${i0}` (or a custom `var`) and at most 10000 expanded steps (checked at load time). Reports and JUnit list every executed step as `name [n]` (`name [2.3]` when nested).
 - Five new built-in scenarios: `heartbeat-and-status`, `metering-burst`, `data-transfer`, `security-event` and `reconnect` (see `kirby-ocpp scenarios list`).
-- `kirby-ocpp suite [SOURCE...]` runs many scenarios (files, directories of `*.toml`, built-in names, `--all-builtins`) one after another, each on a fresh station, with a per-scenario PASS/FAIL line, a summary, `--report` (suite JSON), one `--junit` file with a test suite per scenario, `--fail-fast`, `--var` and a per-scenario `--timeout`.
+- `kirby-ocpp suite [SOURCE...]` runs many scenarios (files, directories of `*.toml`, built-in names, `--all-builtins`) one after another, each on a fresh station. It prints a PASS/FAIL line per scenario and a summary, and supports `--report` (suite JSON), one `--junit` file with a test suite per scenario, `--fail-fast`, `--var` and a per-scenario `--timeout`.
+- `kirby-csms` scripts have variables too: a top-level `[vars]` table, `${name}` substitution in `station`, `expect_status` and the JSON payloads of steps, `capture` on `call` (CALLRESULT payload) and `wait_call` (matched CALL payload), and `kirby-csms --script FILE --var NAME=VALUE`.
+- `call` steps in `kirby-csms` scripts take `expect_payload = { ... }`, a JSON subset the CALLRESULT payload must contain (used with `expect_status`, not with `expect_error`).
+- `kirby_ocpp_core::scenario::vars` is a public helper (`Vars`, `substitute`, `substitute_str`, `capture`) for other tools.
 
-### Control API
+#### Control API
 
-- `kirby-csms --api-listen ADDR` starts a local HTTP control API (JSON, plain HTTP, off by default) with `GET /v1/health`, `GET /v1/stations`, `GET /v1/stations/{id}`, `GET /v1/stations/{id}/history?limit=N`, `POST /v1/stations/{id}/calls` (same result object as the stdin commands, shared 256-command limit, 429 when full) and `DELETE /v1/stations/{id}` (forget a disconnected station). `--api-token` / `--api-token-file` (env `KIRBY_CSMS_API_TOKEN`, `KIRBY_CSMS_API_TOKEN_FILE`) require a bearer token; a non-loopback address needs one; without a token requests with an `Origin` header, `Sec-Fetch-Site: cross-site` or a non-loopback `Host` (DNS rebinding) are refused. The API caps connections (512), times out slow request heads and bodies (10 s), closes every connection after one response, bounds injected faults (1000 faults, `times` up to 1000000, 8 MiB) and ends event streams after the shutdown events. See `docs/api.md`.
-- Control API connections are served by hyper itself (`hyper` and `hyper-util` are now direct dependencies, already part of the axum tree): the request-head timeout is hyper's `header_read_timeout` (blank lines or odd line endings no longer confuse it), a write without progress for 30 s ends the connection (frees stalled event streams), connection tasks are tracked and dropped at shutdown, `Host` also accepts `localhost.`, `[0:0:0:0:0:0:0:1]` and the bound address, and `limit=+5` is `400`.
-- `kirby-csms-core`: the per-station call queue limit (1024) is reserved when `call()` is made, so `QueueFull` is returned at once even when the session is blocked writing to a station that does not read; `try_inject` keeps a running byte total instead of re-serialising all faults.
-- The control API also has `GET /v1/events?station=ID` (Server-Sent Events: one `--json` event object per message, redacted like `--json`, keep-alive every 15 s, a `note` event when the client lags, at most 16 streams, 503 beyond), `GET /v1/rules`, `PUT`/`DELETE /v1/rules/{action}` (fixed CALLRESULT, like the `respond` script step) and `POST`/`GET`/`DELETE /v1/faults` (like `inject_fault`).
+- `kirby-csms --api-listen ADDR` starts a local HTTP control API (JSON, plain HTTP, off by default) with `GET /v1/health`, `GET /v1/stations`, `GET /v1/stations/{id}`, `GET /v1/stations/{id}/history?limit=N`, `POST /v1/stations/{id}/calls` (same result object as the stdin commands, shared 256-command limit, 429 when full) and `DELETE /v1/stations/{id}` (forget a disconnected station).
+- `GET /v1/events?station=ID` streams Server-Sent Events: one `--json` event object per message, redacted like `--json`, keep-alive every 15 s, a `note` event when the client lags, at most 16 streams (503 beyond).
+- `GET /v1/rules`, `PUT`/`DELETE /v1/rules/{action}` (fixed CALLRESULT, like the `respond` script step) and `POST`/`GET`/`DELETE /v1/faults` (like `inject_fault`).
+- `--api-token` / `--api-token-file` (env `KIRBY_CSMS_API_TOKEN`, `KIRBY_CSMS_API_TOKEN_FILE`) require a bearer token. A non-loopback address needs one. Without a token, requests with an `Origin` header, `Sec-Fetch-Site: cross-site` or a non-loopback `Host` (DNS rebinding) are refused. See `docs/api.md`.
+- The API caps connections (512) and the request data held by calls in flight (32 MiB), times out slow request heads and bodies (10 s), limits the writing of a response (60 s total, 30 s without progress; event streams end after 1 hour with a note), enables TCP keepalive, closes every connection after one response, bounds injected faults (1000 faults, `times` up to 1000000, 8 MiB) and ends event streams after the shutdown events.
 - New dependency: `axum` (HTTP/1 only) with `hyper` and `tower` crates.
 
-### Distribution
+#### Whitepaper and offline behavior
 
-- New release target `aarch64-unknown-linux-musl` (static, built on `ubuntu-24.04-arm`) and the npm platform package `@archhaze24/kirby-ocpp-linux-arm64-musl`; the npm launcher prefers it on musl arm64 systems and falls back to it when the glibc package is missing. A release now has 14 files (7 archives + 7 `.sha256`).
-- Multi-arch container image `ghcr.io/archhaze24/kirby-ocpp` (`linux/amd64`, `linux/arm64`) built by the release workflow from the static musl binaries; non-root user, state volume `/data`, port 9000, both binaries (`kirby-csms` as the first argument starts the CSMS). `Dockerfile.dev` builds it from a source checkout.
+- Transaction-related `MeterValues` samples taken while the station is offline (or while the transaction still has a local id) are queued instead of dropped: bounded (1000, oldest first), persisted, and sent with the real `transactionId` after the start was synchronized and before the stop. State file format 8 (`offline_samples`; older files load).
+- Security profile fallback (`A05.FR.08`): after a change of `SecurityProfile` the station goes back to the previous profile (and `AuthorizationKey`) after 3 connection failures the profile can explain, queues a `ReconfigurationOfSecurityParameters` event and reconnects. Only HTTP 401/403 and client-certificate TLS alerts count, never server-certificate errors, closes, timeouts, refused TCP or DNS, so a man in the middle cannot force a downgrade. New flag `--security-profile-fallback <BOOL>` (`OCPP_SECURITY_PROFILE_FALLBACK`, default `true`). State file format 9 (`pending_profile_switch`, previous key in the secrets file; older files load).
+- Client certificate alternation (`A02.FR.28`) no longer depends on a TLS alert: an HTTP 401/403 upgrade answer or a close/reset right after the TLS handshake switches between the new and the previous certificate at once, and any other failure does so after 3 in a row. A bad renewed certificate cannot strand the station.
+
+#### Distribution
+
+- New release target `aarch64-unknown-linux-musl` (static, built on `ubuntu-24.04-arm`) and the npm platform package `@archhaze24/kirby-ocpp-linux-arm64-musl`. The npm launcher prefers it on musl arm64 systems and falls back to it when the glibc package is missing. A release has 14 files (7 archives + 7 `.sha256`).
+- Multi-arch container image `ghcr.io/archhaze24/kirby-ocpp` (`linux/amd64`, `linux/arm64`) built by the release workflow from the static musl binaries: non-root user, state volume `/data`, port 9000, both binaries (`kirby-csms` as the first argument starts the CSMS). `Dockerfile.dev` builds it from a source checkout.
 - Homebrew formula and Scoop manifest templates under `packaging/` plus `.github/scripts/render-packaging.sh`; the release workflow renders them with the real checksums into the workflow artifact `packaging`.
-- New page `docs/distribution.md`.
 
-### Documentation
+#### Documentation
 
-- New page `docs/api.md` for the HTTP control API.
-- `README.md` is now a landing page; detailed pages live under `docs/` (index in `docs/README.md`): architecture, emulator, CSMS, scenarios and scripts, security, configuration reference, testing, development.
+- `README.md` is a landing page; detailed pages live under `docs/` (index in `docs/README.md`): architecture, emulator, CSMS, scenarios and scripts, security, configuration reference, testing, development, distribution and the HTTP control API (`docs/api.md`).
+
+### 🔧 Changed
+
+- `kirby-csms-core`: the per-station call queue limit (1024) is reserved when `call()` is made, so `QueueFull` is returned at once even when the session is blocked writing to a station that does not read. `try_inject` keeps a running byte total instead of re-serializing all faults. New `forget_if_disconnected` and `history_tail`.
+- Control API connections are served by hyper itself (`hyper` and `hyper-util` are now direct dependencies, already part of the axum tree). The request-head timeout is hyper's `header_read_timeout`, so blank lines or odd line endings no longer confuse it. `Host` also accepts `localhost.`, `[0:0:0:0:0:0:0:1]` and the bound address, and `limit=+5` is `400`.
+- `kirby-csms-core`: the timeout of `CsmsHandle::call` counts from the call and so covers the time spent queued (a call that waited longer fails with `Timeout` without being written), and a call whose caller is gone (its future was dropped) no longer holds the station's queue until its own timeout: the session waits at most the default call timeout for the abandoned CALL, then writes the next one; a late answer to the abandoned one is ignored. `CsmsHandle::clear_responder` returns whether a responder was removed.
+- Scenario files must be regular files of at most 1 MiB, and an existing path beats a built-in of the same name. A substitution is capped at about 1 MiB and CSMS values in failure reasons are cut to about 200 characters.
+- `suite` runs a file named twice once, writes its reports on SIGINT and SIGTERM too, and keeps a signal that arrives between scenarios.
+- Back-to-back CALLs of the station (queued offline samples, then their `StopTransaction`) are queued on the connection in call order; before, the order depended on the scheduler of a multi-thread runtime.
+- Faster builds and tests: line-table debuginfo in the dev profile and one integration-test binary per crate (cold test build 3:07 to 1:23, warm test run 64 s to 33 s; `cargo nextest` runs the suite in about 15 s).
+
+### 🐛 Fixed
+
+- `--id .` and `--id ..` are refused (exit 2): the URL layer drops such path segments, so the station connected to the bare base path under the wrong id. `--ws-subprotocol` must be an RFC 6455 token. Non-UTF-8 percent-encoded bytes in URL credentials reach the Basic `Authorization` header unchanged, an unparsable URL in an error text loses everything before its last `@`, and the status line of a refused upgrade is sanitised and cut to 200 characters in the error.
+- A secrets file that is unreadable or written by a newer build is never overwritten; the station keeps running without persisting secrets.
+- The emulator keeps the queue entry of a still running offline transaction when the queue overflows, closes an unkept start with a matching stop reason, and ends delayed-reply tasks with the connection.
+- A restored sample queue drops samples of a transaction that no longer exists.
+- A retried `MeterValues` sample no longer arrives after the `StopTransaction` of its transaction, and a request that fails schema validation or serialization is not retried. The connection task prunes abandoned queued CALLs in amortized constant time.
+- Security events stay in the persisted queue until the CSMS answered, so a restart with events in flight no longer loses them.
+- A scenario is reported as `cancelled` only when a step was cut short. Scenario files load off the UI loop, and footer notices are sanitized in both TUIs.
+- In `kirby-csms` scripts, `wait_call` fails at once after lost events only for waits that started before the loss.
+- Stdin commands and the control API share one command executor in `kirby-csms`.
+- Release tooling: the npm builder verifies archives against their `.sha256` assets, the launcher does not forward SIGINT twice on a terminal, the container image is pushed only after the GitHub release succeeded, and `latest` only moves for the highest final version.
+- Windows CI test made independent of the OS send buffer size.
+
+### 🔒 Security
+
+- TUI forms (both programs): DataTransfer `vendorId`, `messageId` and `data` are length-checked inline (255 characters, 50 characters, 64 KiB); every field takes at most 256 KiB, with a visible notice when input was dropped; ChangeConfiguration values and DataTransfer `data` keep leading and trailing spaces; `kirby-csms` asks before a ClearChargingProfile with no filter, which clears every profile.
+- The emulator's log export tightens an existing file to mode 0600 before writing and refuses a symlink.
+- `kirby-csms --auth-keys-file` warns when the file is shared, ignores a UTF-8 BOM, keeps trailing spaces of a key and refuses a file over 1 MiB.
+- `--log-file` is created with mode 0600 on unix.
+- `kirby-csms-core` caps sockets in the TLS/WebSocket handshake (`max_pending_handshakes`, 1024) and bounds the per-station CALL queue (`CsmsError::QueueFull`).
+- Station-supplied text in the CSMS state is cut to 255 characters, and station ids with bidi or line-separator characters are refused with HTTP 400.
 
 ## [0.4.0] - 2026-11-05
 
@@ -151,8 +171,8 @@ New binary `kirby-csms` (default listen `0.0.0.0:9000`) and the new crates `kirb
 - OCPP schema attribution now points to the official Open Charge Alliance downloads
   (CC BY-ND 4.0); the bundled files are byte-identical to them.
 - Faster builds and tests: line-table debuginfo in the dev profile and one integration-test
-  binary per crate (cold test build 3:07 → 1:23, warm test run 64 s → 33 s on the maintainer's
-  VM; `cargo nextest` runs the suite in about 15 s).
+  binary per crate (cold test build 3:07 → 1:23, warm test run 64 s → 33 s on a
+  development machine; `cargo nextest` runs the suite in about 15 s).
 - Windows CI test made independent of the OS send buffer size.
 
 ### 🐛 Fixed
@@ -192,7 +212,7 @@ New binary `kirby-csms` (default listen `0.0.0.0:9000`) and the new crates `kirb
 - Unbounded memory growth from unauthenticated stations closed (byte caps, action key length,
   station id limits).
 - Text sent by the other side (station ids, payloads, reasons, certificate subjects) is
-  sanitised before it reaches terminals, logs and reports; C1 controls and bidi controls
+  sanitized before it reaches terminals, logs and reports; C1 controls and bidi controls
   included. A station can no longer forge lines in a script report.
 - Secrets stay out of output: URL passwords (`--url`, `--help`, environment echo), `--auth-key`
   in clap errors, `AuthorizationKey` in schema error messages and `Debug` output.

@@ -71,7 +71,7 @@ Environment variables cannot be set inside a test (edition 2024 makes `std::env:
 
 CI builds with `RUSTFLAGS=-D warnings` on Windows. Code behind `#[cfg(unix)]` leaves helpers, imports or constants unused there, and the warning becomes an error. Emulate it on Linux or macOS before pushing anything that touches `cfg(unix)`:
 
-```
+```bash
 rsync -a --exclude .git --exclude target ./ /path/to/win-copy/
 cd /path/to/win-copy
 grep -rl 'cfg' crates --include='*.rs' | xargs sed -i \

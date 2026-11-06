@@ -2,7 +2,7 @@
 
 `kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware development and load tests. It accepts any number of stations, answers their CALLs with canned replies, prints everything that happens and sends commands to stations. On an interactive terminal it opens a terminal UI; otherwise it runs headless.
 
-Contents: [Quick start](#quick-start) · [Connecting stations](#connecting-stations) · [Output](#output) · [Terminal UI](#terminal-ui) · [Commands on stdin](#commands-on-stdin) · [HTTP API](#http-api) · [Response rules and fault injection](#response-rules-and-fault-injection) · [Headless behaviour](#headless-behaviour) · [Exit codes](#exit-codes) · [Use as a library](#use-as-a-library) · [Related pages](#related-pages)
+Contents: [Quick start](#quick-start) · [Connecting stations](#connecting-stations) · [Output](#output) · [Terminal UI](#terminal-ui) · [Commands on stdin](#commands-on-stdin) · [HTTP API](#http-api) · [Response rules and fault injection](#response-rules-and-fault-injection) · [Headless behavior](#headless-behavior) · [Exit codes](#exit-codes) · [Use as a library](#use-as-a-library) · [Related pages](#related-pages)
 
 ## Quick start
 
@@ -30,7 +30,7 @@ Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhos
 
 The first output line is the listen address, so `--listen 127.0.0.1:0` works in tests:
 
-```
+```text
 listening on ws://127.0.0.1:41234
 {"type":"listening","addr":"127.0.0.1:41234","url":"ws://127.0.0.1:41234"}   (with --json)
 ```
@@ -92,7 +92,7 @@ Actions on the selected station:
 | `T` | TriggerMessage (message, optional connector) |
 | `u` `A` `C` | UnlockConnector / ChangeAvailability / ClearCache |
 | `P` | SetChargingProfile (connector and profile JSON, validated against the schema) |
-| `K` `H` | ClearChargingProfile / GetCompositeSchedule (the answer opens in a popup) |
+| `K` `H` | ClearChargingProfile (asks first when no filter is set, because every profile is cleared) / GetCompositeSchedule (the answer opens in a popup) |
 | `V` | ReserveNow |
 | `U` `O` | UpdateFirmware / GetDiagnostics |
 | `B` | SendLocalList (Differential or Full; entries as comma separated `idTag[:status]`, status defaults to Accepted, `idTag:-` deletes in a differential update, at most 100 entries) |
@@ -110,7 +110,7 @@ Actions on the selected station:
 | `F` | forget a disconnected station and its state (asks first) |
 | `n` | copy the station id |
 
-Forms: `Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels. Fields are checked as you type and the request is checked against the OCPP 1.6J schema before anything is sent; errors show under the field.
+Forms: `Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels. Fields are checked as you type and the request is checked against the OCPP 1.6J schema before anything is sent; errors show under the field. A field takes at most 256 KiB (typed or pasted; the rest is dropped and the field says so). DataTransfer limits `vendorId` to 255 characters, `messageId` to 50 and `data` to 64 KiB. Ids and numbers are trimmed; the values of ChangeConfiguration and DataTransfer `data` keep their leading and trailing spaces.
 
 Results: commands run in the background, several can be in flight (the header shows `N pending`). The answer appears in the status line (`Reset (Soft) on CP-1: Accepted`, or the CALLERROR code and text, or a timeout) and is kept in a history of the last 20 results per station (`r`). Answers that carry content (GetConfiguration as a readable key list with `(readonly)` marks and unknown keys, raw calls, DataTransfer with data, GetCompositeSchedule, hash data) open in a popup (`c` copies).
 
@@ -118,7 +118,7 @@ Results: commands run in the background, several can be in flight (the header sh
 
 Without `--script`, when stdin is not a terminal (or with `--stdin`), each input line is a JSON object and gets exactly one answer line. End of input does not stop the server. Answers are always JSON, also without `--json`.
 
-```
+```text
 {"station":"CP-1","action":"ChangeConfiguration","payload":{"key":"HeartbeatInterval","value":"60"},"timeout_ms":5000,"id":"my-tag"}
 -> {"type":"result","station":"CP-1","action":"ChangeConfiguration","ok":true,"result":{"status":"Accepted"},"id":"my-tag"}
 -> {"type":"result","station":"CP-1","action":"Reset","ok":false,"error":"CALLERROR NotSupported: ..."}
@@ -161,7 +161,7 @@ Both apply to all stations, not to the selected one, and to CALLs sent by statio
 
 In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` steps, see [scenarios.md](scenarios.md). The emulator has the mirror feature for CSMS commands ([emulator.md](emulator.md)).
 
-## Headless behaviour
+## Headless behavior
 
 - Events go to stdout (text or `--json`); `--log-file` also gets them.
 - Stdin commands are read when stdin is not a terminal and there is no `--script` (or always with `--stdin`).

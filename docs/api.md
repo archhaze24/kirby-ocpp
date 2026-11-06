@@ -6,7 +6,7 @@ Contents: [Start](#start) · [Auth model](#auth-model) · [Endpoints](#endpoints
 
 ## Start
 
-```
+```text
 kirby-csms --listen 127.0.0.1:9000 --api-listen 127.0.0.1:9100
 api listening on http://127.0.0.1:9100
 ```
@@ -39,9 +39,9 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `GET /v1/faults` | `{"remaining":N}`: fault occurrences not triggered yet |
 | `DELETE /v1/faults` | Clears all faults (`{"remaining":0}`) |
 
-Status of a call: `200` also when the station answered with a CALLERROR or the call timed out (`"ok":false` in the body); `404` when the station is unknown or not connected (the body is the result object with `error`); `400` for a bad body; `413` above 1 MiB; `429` when 256 commands (stdin and API together) are already in flight. The 256 slots are shared with the stdin handler: when they are full the API answers `429` at once, while a stdin line waits for a free slot.
+Status of a call: `200` also when the station answered with a CALLERROR or the call timed out (`"ok":false` in the body); `404` when the station is unknown or not connected (the body is the result object with `error`); `400` for a bad body; `413` above 1 MiB; `429` when 256 commands (stdin and API together) are already in flight, or when the request bodies of the calls in flight already hold 32 MiB (a body counts while its call runs; only the payload is kept in memory, the rest of the body is dropped before the call starts). The 256 slots are shared with the stdin handler: when they are full the API answers `429` at once, while a stdin line waits for a free slot.
 
-```
+```text
 $ curl -s http://127.0.0.1:9100/v1/stations
 {"stations":[{"id":"CP-1","connected":true,"vendor":"Kirby","model":"Emu","connectors":{"1":"Available"},"active_transactions":[]}]}
 
@@ -58,7 +58,7 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/stations/CP-1
 
 `GET /v1/events` is a Server-Sent Events stream of everything the server sees, from the moment of the request. Each SSE message has `event: <type>` and one `data:` line holding the same JSON object that `--json` prints for that event (types `connected`, `disconnected`, `frame`, `state`, `malformed`, `forgotten`, `auth_failed`; text is escaped the same way and `AuthorizationKey` values are redacted unless `--show-secrets`). The optional `station=ID` (percent-encoded) shows only that station's events; an id that does not exist is fine and matches nothing. Nothing is replayed: use `/history` for the past.
 
-```
+```text
 $ curl -N http://127.0.0.1:9100/v1/events?station=CP-1
 event: connected
 data: {"station":"CP-1","ts":"2030-01-01T10:00:00.000Z","type":"connected"}
@@ -71,7 +71,7 @@ data: {"action":"Heartbeat","direction":"in","id":"...","kind":"call","payload":
 
 - A `: keep-alive` comment is sent every 15 s.
 - A client that reads too slowly loses events and gets `event: note` with `{"type":"note","text":"N events were dropped"}`; the stream continues.
-- At most 16 streams at a time; the 17th gets `503` with a JSON error. The slot is freed when the client disconnects.
+- At most 16 streams at a time; the 17th gets `503` with a JSON error. The slot is freed when the client disconnects, when its socket stops accepting writes for 30 s or fails (TCP keepalive: first probe after 30 s idle, then every 10 s, 3 probes, where the platform allows it), or when the stream reaches its maximum age of 1 hour: the last event is then `event: note` with `{"type":"note","text":"the stream reached its maximum age; reconnect to continue"}` and the stream ends. A client that is connected but never reads is only cut by that age limit, since its kernel keeps acknowledging.
 - A lag note also resets the per-stream state view: the next `state` event is complete, not a diff against events the client missed.
 - Streams end when the server stops, after the closing events of the shutdown (`disconnected` with reason `shutdown`) were sent; the API stops after the CSMS. The token and `Origin` rules apply as for every route (`curl -N -H "Authorization: Bearer $TOKEN" ...`).
 
@@ -79,7 +79,7 @@ data: {"action":"Heartbeat","direction":"in","id":"...","kind":"call","payload":
 
 Same engine features as the script steps `respond` and `inject_fault` ([csms.md](csms.md#response-rules-and-fault-injection)); they apply to every station.
 
-```
+```text
 $ curl -s -X PUT http://127.0.0.1:9100/v1/rules/Heartbeat -d '{"currentTime":"2030-01-01T00:00:00Z"}'
 {"action":"Heartbeat","set":true}
 $ curl -s http://127.0.0.1:9100/v1/rules
@@ -95,7 +95,7 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/faults
 ```
 
 - `PUT /v1/rules/{action}`: `{action}` must be an action a charge point can send in OCPP 1.6 (otherwise `400`); the body must be a JSON object (the whole CALLRESULT payload, not checked against the schema).
-- `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `times` defaults to 1 and must be 1 to 1000000 (`400` otherwise); at most 1000 faults and 8 MiB of action and payload text are stored at once (`409` with a JSON error beyond that; `DELETE /v1/faults` frees them). Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
+- `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `times` defaults to 1 and must be 1 to 1000000 (`400` otherwise); at most 1000 faults and 8 MiB of action and payload text are stored at once (`409` with a JSON error beyond that; `DELETE /v1/faults` frees them). These caps apply to the API only: faults injected by scripts and stdin commands are not capped. Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
 
 ## Errors and limits
 
@@ -112,7 +112,7 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/faults
 | 429 | Too many commands in flight |
 | 503 | Already 16 event streams open |
 
-Connection limits: at most 512 connections at once (extra ones are closed immediately; more than the 256 command slots plus 16 streams, so `429` stays reachable); a client has 10 s to send the complete request head (hyper's `header_read_timeout`: it starts at connect, blank lines before the request line do not stop it, any line ending is accepted; the connection is cut otherwise) and 10 s to send the body (`408`). Every response carries `Connection: close`, so a connection serves one request. A response has no total timeout (a call waits as long as its `timeout_ms`, an event stream lasts as long as the client reads), but a write that makes no progress for 30 s (a client that stopped reading) ends the connection, which frees its stream slot. On shutdown open connections get 3 s, then every one is dropped (closed); the connection tasks are tracked, none outlives the API.
+Connection limits: at most 512 connections at once (extra ones are closed immediately; more than the 256 command slots plus 16 streams, so `429` stays reachable); a client has 10 s to send the complete request head (hyper's `header_read_timeout`: it starts at connect, blank lines before the request line do not stop it, any line ending is accepted; the connection is cut otherwise) and 10 s to send the body (`408`). Every response produced by a route carries `Connection: close`, so a connection serves one request (hyper's own `400`/`431` answers and cuts by the head timeout do not carry the header). A call waits as long as its `timeout_ms`, which also counts the time it spends queued behind other calls of the same station; once the answer is ready its writing has a total limit of 60 s from the first byte (a client draining a byte at a time is cut), and a write that makes no progress for 30 s ends the connection. An event stream is exempt from the 60 s limit (see above). After a response the server shuts down its side and reads, for up to 100 ms and 64 KiB, what the client is still sending, so that an early `401`, `403` or `413` reaches a client that is mid-upload instead of being lost to a connection reset. More than one `Host` header is `400`. On shutdown the listener closes at once, open connections get 3 s, then every one is dropped (closed) and awaited: none outlives the API.
 
 ## Related pages
 

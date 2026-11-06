@@ -12,7 +12,7 @@ Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.
 
 ## 1. Prepare
 
-1. Get the release commit onto `main`: from the development branch (e.g. `dev-0.5`) merge it into `main` (`git switch main && git pull --ff-only && git merge dev-0.5`; the owner decides fast-forward or merge commit), push, and wait until CI on `main` is green.
+1. Get the release commit onto `main`: from the development branch (e.g. `dev-0.5`) merge it into `main` (`git switch main && git pull --ff-only && git merge dev-0.5`; fast-forward or merge commit), push, and wait until CI on `main` is green.
 2. Bump the version in the root `Cargo.toml`: `[workspace.package] version` and the `version = "…"` of all four internal crates in `[workspace.dependencies]`: `kirby-ocpp-core`, `kirby-ocpp-tui`, `kirby-csms-core`, `kirby-csms-tui` (drop the `-dev` suffix, e.g. `0.4.0-dev` -> `0.4.0`; `kirby-ocpp-testkit` has no version and stays unpublished). Run `cargo check --workspace` so `Cargo.lock` follows.
 3. Update the "Install" section of `README.md` (these channels exist only after the release):
    ```
@@ -57,7 +57,7 @@ Order follows the dependencies: `kirby-ocpp-core` -> (`kirby-ocpp-tui`, `kirby-c
 
 ## 4. npm
 
-The wrapper has two launcher packages (`kirby-ocpp` and `kirby-csms`, both using the same `npm/launcher.js`, which picks the binary by its own file name) and seven platform packages under the owner's personal scope (`@archhaze24/kirby-ocpp-linux-x64`, `-linux-x64-musl`, `-linux-arm64`, `-linux-arm64-musl`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) that carry both binaries in `bin/` (unscoped names were rejected by npm's spam filter); npm installs only the one matching the machine.
+The wrapper has two launcher packages (`kirby-ocpp` and `kirby-csms`, both using the same `npm/launcher.js`, which picks the binary by its own file name) and seven platform packages under the personal scope (`@archhaze24/kirby-ocpp-linux-x64`, `-linux-x64-musl`, `-linux-arm64`, `-linux-arm64-musl`, `-darwin-x64`, `-darwin-arm64`, `-win32-x64`) that carry both binaries in `bin/` (unscoped names were rejected by npm's spam filter); npm installs only the one matching the machine.
 
 ```
 node npm/build.mjs v0.2.0            # downloads the release assets, writes npm/dist/*
@@ -85,7 +85,7 @@ Then bump `main` to the next development version (e.g. `0.5.0-dev`) when you sta
 
 ## 6. Homebrew and Scoop
 
-Download the workflow artifact `packaging` of the release run (`gh run download <run-id> -n packaging`; or render it yourself with `.github/scripts/render-packaging.sh v0.2.0`, which downloads the public `.sha256` files). Copy `kirby-ocpp.rb` to `Formula/kirby-ocpp.rb` in the repo `archhaze24/homebrew-tap` and `kirby-ocpp.json` to `bucket/kirby-ocpp.json` in `archhaze24/scoop-bucket` (create both repos once), commit and push. Check: `brew install archhaze24/tap/kirby-ocpp && kirby-csms --version`, `scoop bucket add kirby https://github.com/archhaze24/scoop-bucket && scoop install kirby-ocpp`. Skip this for prereleases. Templates live in `packaging/`; the install channels are described in `docs/distribution.md`.
+Download the workflow artifact `packaging` of the release run (`gh run download <run-id> -n packaging`; or render it yourself with `.github/scripts/render-packaging.sh v0.2.0`, which downloads the public `.sha256` files). Copy `kirby-ocpp.rb` to `Formula/kirby-ocpp.rb` in the repo `archhaze24/homebrew-tap` and `kirby-ocpp.json` to `bucket/kirby-ocpp.json` in `archhaze24/scoop-bucket` (create both repos once), commit and push. Check: `brew install archhaze24/tap/kirby-ocpp && kirby-csms --version`, `scoop bucket add archhaze24 https://github.com/archhaze24/scoop-bucket && scoop install kirby-ocpp`. Skip this for prereleases. Templates live in `packaging/`; the install channels are described in `docs/distribution.md`.
 
 ## Notes
 

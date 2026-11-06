@@ -239,7 +239,7 @@ Built-ins target connector 1; `--connector N` retargets every connector-bound st
 
 ## Running scenarios
 
-```
+```bash
 kirby-ocpp [station options] run --scenario NAME_OR_FILE [--report report.json] [--junit junit.xml] [--timeout 60] [--id-tag TAG]
 ```
 
@@ -278,7 +278,7 @@ Point `--junit` at the path your CI reads test reports from.
 
 ## Suite runs
 
-```
+```bash
 kirby-ocpp [station options] suite [SOURCE...] [--all-builtins] [--report suite.json] [--junit junit.xml] [--timeout 60] [--fail-fast] [--var NAME=VALUE]
 ```
 
@@ -478,7 +478,7 @@ Both runners produce the same report structure, so tools can read either.
 
 `cancelled` is true when the run was stopped (timeout or signal). With `--json` the same object is printed on stdout as one line with an extra `"type": "report"` (and `"station"` in fleet runs). Without `--json` the text form is:
 
-```
+```text
 scenario smoke
   PASS  1 respond DataTransfer (0 ms)
   PASS  2 wait_station CP-1 (412 ms)
@@ -517,7 +517,7 @@ Setup error:
 </testcase>
 ```
 
-Text from a station (CALLERROR descriptions) can end up in step names and reasons; it is sanitised for the terminal and escaped for XML.
+Text from a station (CALLERROR descriptions) can end up in step names and reasons; it is sanitized for the terminal and escaped for XML.
 
 ## Related pages
 

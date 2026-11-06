@@ -12,7 +12,7 @@ Contents: [Toolchain](#toolchain) · [Build and test](#build-and-test) · [Defin
 
 ## Build and test
 
-```
+```bash
 cargo build --workspace
 cargo run -p kirby-ocpp -- --url ws://localhost:9000/ocpp
 cargo run -p kirby-csms -- --listen 127.0.0.1:9000
@@ -26,7 +26,7 @@ cargo test --workspace                                          # what CI runs
 
 ## Definition of done
 
-```
+```bash
 cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
@@ -36,7 +36,7 @@ CI runs this on Linux, macOS and Windows with `RUSTFLAGS=-D warnings`. Before pu
 
 * `unsafe` is forbidden (`unsafe_code = "forbid"`). `todo!` and `dbg!` are denied. `unused_must_use` is denied.
 * Clippy `pedantic` is on (warn, so `-D warnings` fails on it). Opt-outs live in the workspace `[workspace.lints.clippy]`; do not add `#[allow]` without a reason in a comment.
-* No `unwrap`, `expect` or direct indexing on external data (frames, payloads, files, CLI input). Station ids and payloads are attacker-controlled: sanitise before printing to a terminal or file name (escape control characters, escape ids for file names).
+* No `unwrap`, `expect` or direct indexing on external data (frames, payloads, files, CLI input). Station ids and payloads are attacker-controlled: sanitize before printing to a terminal or file name (escape control characters, escape ids for file names).
 * Secrets: `AuthorizationKey` values are redacted in logs and history unless `--show-secrets`. New secret-bearing fields must go through `redact_secrets` and be kept out of the main state file (`<id>.station.secrets.json`).
 * Spec behavior wins over parity with the old TypeScript tool. Intentional deviations are listed in [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md).
 * Outbound CALLs are serialized; every inbound CALL gets exactly one reply (`Responder` is consume-on-use). See [Invariants](architecture.md#invariants).

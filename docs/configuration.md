@@ -20,7 +20,7 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `-u, --url <URL>` | `OCPP_URL` | none (required) | Central System WebSocket URL, `ws://` or `wss://`, e.g. `ws://localhost:9000/ocpp` |
-| `-i, --id <ID>` | `OCPP_CHARGE_POINT_ID` | `CP-001` | Charge point id (non-empty); with `--count` above 1 it is the id template unless `--id-template` is given |
+| `-i, --id <ID>` | `OCPP_CHARGE_POINT_ID` | `CP-001` | Charge point id (non-empty, not `.` or `..`); with `--count` above 1 it is the id template unless `--id-template` is given |
 | `--vendor <VENDOR>` | `OCPP_VENDOR` | `archhaze24` | BootNotification vendor (non-empty) |
 | `--model <MODEL>` | `OCPP_MODEL` | `KIRBY` | BootNotification model (non-empty) |
 | `--serial <SERIAL>` | `OCPP_SERIAL` | none | Serial number in BootNotification, BootNotification schema limit: 25 characters |
@@ -31,7 +31,7 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 | `--nominal-power-w <WATTS>` | | `7200` | Nominal charging power per connector (at least 1); charging profiles can only lower it |
 | `--voltage-v <VOLTS>` | | `230` | Voltage per phase (at least 1), used for A to W conversion and the `Voltage` reading |
 | `--phases <COUNT>` | | `1` | Number of phases, 1 to 3 |
-| `--ws-subprotocol <PROTOCOL>` | `OCPP_WS_SUBPROTOCOL` | `ocpp1.6` | Requested WebSocket subprotocol |
+| `--ws-subprotocol <PROTOCOL>` | `OCPP_WS_SUBPROTOCOL` | `ocpp1.6` | Requested WebSocket subprotocol (RFC 6455 token characters only) |
 | `--ws-ping <SECONDS>` | `OCPP_WS_PING_INTERVAL` | `30` | WebSocket ping interval; `0` disables pings |
 | `--call-timeout-ms <MILLISECONDS>` | `OCPP_CALL_TIMEOUT_MS` | `30000` | CALL response timeout, 1 to 86400000 |
 
@@ -141,7 +141,7 @@ Makes the station misbehave on purpose when the CSMS sends a command. Form: `ACT
 
 Repeat the flag or separate rules with `;` (also in `KIRBY_OCPP_RULES`); a rule must not contain `;`. Examples:
 
-```
+```bash
 --rule Reset=reject --rule GetConfiguration=delay:5000 --rule ChangeConfiguration=error:InternalError*3
 ```
 
@@ -173,7 +173,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--tls-client-ca <FILE>` | `KIRBY_CSMS_TLS_CLIENT_CA` | none | Trusted CA(s) for client certificates; with `--tls-cert` every client must present one (mutual TLS); needs `--tls-cert` |
 | `--security-profile <0..3>` | `KIRBY_CSMS_SECURITY_PROFILE` | `0` | `0` none, `1` Basic Auth, `2` Basic Auth plus TLS, `3` TLS with client certificates (CN must equal the station id) |
 | `--auth-key <ID=KEY>` | `KIRBY_CSMS_AUTH_KEY` (`ID=KEY;ID=KEY`) | none | Basic Auth key of one station (repeatable). The environment variable is used only when no `--auth-key` is given. The flag value is visible in `ps`; prefer the variable or `--auth-keys-file` |
-| `--auth-keys-file <FILE>` | `KIRBY_CSMS_AUTH_KEYS_FILE` | none | Lines `ID=KEY`; blank lines and `#` comments are skipped. Keep the file private (permissions are not checked) |
+| `--auth-keys-file <FILE>` | `KIRBY_CSMS_AUTH_KEYS_FILE` | none | Lines `ID=KEY`; blank lines and `#` comments are skipped. A leading UTF-8 BOM is ignored, leading spaces and the line end are dropped, trailing spaces belong to the key. At most 1 MiB. A startup warning is printed when the file is readable by group or others (Unix) |
 | `--default-auth-key <KEY>` | `KIRBY_CSMS_DEFAULT_AUTH_KEY` | none | Key for stations without an `ID=KEY` entry |
 | `--subprotocol <POLICY>` | `KIRBY_CSMS_SUBPROTOCOL` | `require:ocpp1.6` | `require:NAME` (refuse clients that do not offer it), `select:NAME` (always select it), `omit` (select nothing), `reject` (refuse every upgrade) |
 | `--show-secrets` | `KIRBY_CSMS_SHOW_SECRETS` | off | Keep `AuthorizationKey` values in frame logs and history; by default replaced by `***` |
