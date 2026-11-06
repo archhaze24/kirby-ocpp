@@ -153,7 +153,7 @@ The CSMS keeps nothing on disk. Its keys come from flags, the environment or `--
 
 ## Redaction and --show-secrets
 
-- The value of a `ChangeConfiguration` CALL for `AuthorizationKey` is replaced by `***` in recorded frames on both tools: TUI logs, `--json`, `--log-file`, history, and scenario / script matching. The wire is unaffected.
+- The value of a `ChangeConfiguration` CALL for `AuthorizationKey` is replaced by `***` in recorded frames on both tools: TUI logs, `--json`, `--log-file`, history, and scenario / script matching. The wire is unaffected. Scope: only `ChangeConfiguration` CALLs whose `key` is `AuthorizationKey` (case-insensitive) are redacted. The station never parses the key from other messages (for example `DataTransfer`), so nothing else is treated as a secret; a payload you craft yourself with the key in another action is shown as is.
 - `--show-secrets` (`OCPP_SHOW_SECRETS` / `KIRBY_CSMS_SHOW_SECRETS`) keeps the real value in those places. Use it only for debugging; logs then contain the key.
 - Schema errors for `AuthorizationKey` never quote the value, and `Debug` output of the configuration registry and the CSMS security policy masks keys.
 - `kirby-csms --auth-key` is not redacted from the process list. Use the environment or a key file instead.
@@ -174,7 +174,7 @@ Intentional or open points; see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE
 | Store full | `InstallCertificate` answers `Rejected` (as OCPP 2.0.1), the whitepaper text is ambiguous |
 | Last root | `DeleteCertificate` of the last Central System root is `Failed` only under profile 2 or 3 |
 | Profile 2 | The station does not require TLS verification to be on (`--tls-skip-verify` still works) |
-| CSMS keys | No eviction of station records (`forget()` only); default listener is unauthenticated (profile 0); `--auth-key` is visible in `ps` |
+| CSMS keys | No eviction of station records (`forget()` only); default listener is unauthenticated (profile 0), so a peer can replace a live station by connecting with the same id; `--auth-key` is visible in `ps` |
 | Firmware and logs | Simulated; signatures are not verified, no `RevokedCertificate`, a cancelled signed update sends no further status |
 
 ## Related pages

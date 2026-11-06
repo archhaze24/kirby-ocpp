@@ -117,7 +117,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * **State file format changes only with a `STORE_VERSION` bump** (now 7, `store.rs`). Older files load with serde defaults; newer ones are refused. No compatibility with the old TypeScript state files.
 * **Redaction:** `AuthorizationKey` values are replaced by `***` in recorded frames, logs and the config log (`ocpp::frame::redact_secrets`) unless `--show-secrets`. Secrets never go into the main state file. Station ids and payloads are attacker-controlled: sanitise before printing (control characters become `·`).
 * **No `unsafe`; no `unwrap`/`expect`/indexing on external data** (clippy pedantic is on).
-* **Bounded memory** everywhere external input grows: log buffers, frame history, scenario CALL backlog (10 000 / ~16 MiB), stdin lines (1 MiB), stdout/log-file helper threads drop lines instead of blocking.
+* **Bounded memory** everywhere external input grows: log buffers, frame history, scenario CALL backlog (10 000 / ~16 MiB), stdin lines (1 MiB), stdout/log-file helper threads drop lines instead of blocking. The one known exception: CSMS station records are never evicted (`forget()` only), bounded per station and by `max_stations` (see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md)).
 * **Spec wins over TS parity.** Intentional deviations are listed in [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md).
 * Keep public shapes (docs, scenarios, planned HTTP API) free of 1.6J-only assumptions where it is cheap: OCPP 2.0.1/2.1 are planned for a later release, not 0.5.
 

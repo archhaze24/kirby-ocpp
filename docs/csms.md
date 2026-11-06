@@ -19,7 +19,7 @@ Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhos
 ## Connecting stations
 
 - URL: `ws(s)://HOST:PORT/<any prefix>/<station id>`. The station id is the last path segment.
-- A second connection with the same id replaces the first one (the old one shows as "replaced").
+- A second connection with the same id replaces the first one (the old one shows as "replaced"). At security profile 0 nothing authenticates the new connection, so anybody who can reach the listener can take over a live station's id; use a profile or a firewall (see [security.md](security.md)).
 - Default WebSocket subprotocol policy is `require:ocpp1.6` (`--subprotocol`: `require:NAME`, `select:NAME`, `omit`, `reject`).
 - TLS and authentication: [security.md](security.md).
 - Inbound CALLs are validated against the OCPP 1.6J schemas by default (`--validate-inbound`). An invalid payload gets a CALLERROR (`OccurenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormationViolation`) and is not tracked. A fault on the same action wins; unknown actions are not checked.
