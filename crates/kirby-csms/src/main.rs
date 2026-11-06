@@ -193,8 +193,21 @@ async fn prepare_api(cli: &Cli) -> Result<Option<ApiPlan>, ExitCode> {
 
 /// Adds the keys of an `--auth-keys-file`; entries given on the command line win.
 fn merge_auth_keys_file(config: &mut CsmsConfig, path: &Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(path)
+    use std::io::Read as _;
+    cli::warn_if_shared(path);
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(cli::AUTH_KEYS_FILE_MAX + 1).read_to_end(&mut bytes))
         .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    if bytes.len() as u64 > cli::AUTH_KEYS_FILE_MAX {
+        return Err(format!(
+            "{} is larger than {} bytes",
+            path.display(),
+            cli::AUTH_KEYS_FILE_MAX
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("cannot read {}: not valid UTF-8", path.display()))?;
     let keys = cli::parse_auth_keys_text(&text).map_err(|e| format!("{}: {e}", path.display()))?;
     for (id, key) in keys {
         config.security.keys.entry(id).or_insert(key);

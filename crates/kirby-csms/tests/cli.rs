@@ -1127,3 +1127,21 @@ async fn sigterm_during_a_script_writes_the_junit_report() {
     );
     let _ = booted.shutdown().await;
 }
+
+#[test]
+fn oversized_auth_keys_file_is_refused_and_a_shared_one_is_warned_about() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = format!("A={}\n", "k".repeat(1024 * 1024));
+    let file = write(dir.path(), "big.txt", &text);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    let (code, _, stderr) = run_to_end(&["--security-profile", "1", "--auth-keys-file", &file]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("larger than 1048576 bytes"), "{stderr}");
+    assert!(!stderr.contains("kkkkkkkk"), "{stderr}");
+    #[cfg(unix)]
+    assert!(stderr.contains("readable by group or others"), "{stderr}");
+}

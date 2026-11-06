@@ -209,13 +209,21 @@ impl Command {
             Self::RemoteStop { transaction_id } => {
                 format!("RemoteStopTransaction ({transaction_id})")
             }
+            Self::ClearChargingProfile(req) if clears_everything(req) => {
+                "ClearChargingProfile (ALL charging profiles)".to_owned()
+            }
             other => other.action().to_owned(),
         }
     }
 
-    /// Commands that disrupt the station ask first.
+    /// Commands that disrupt the station or wipe its state ask first.
     pub fn needs_confirm(&self) -> bool {
-        matches!(self, Self::Reset(_))
+        match self {
+            Self::Reset(_) => true,
+            // No filter set: the station drops every charging profile.
+            Self::ClearChargingProfile(req) => clears_everything(req),
+            _ => false,
+        }
     }
 
     /// Whether a successful answer is worth a popup instead of just a notice.
@@ -229,6 +237,14 @@ impl Command {
             _ => false,
         }
     }
+}
+
+/// A `ClearChargingProfile` with no filter drops every profile of the station.
+fn clears_everything(req: &ClearChargingProfileRequest) -> bool {
+    req.id.is_none()
+        && req.connector_id.is_none()
+        && req.charging_profile_purpose.is_none()
+        && req.stack_level.is_none()
 }
 
 /// A failed command, already worded for the user.

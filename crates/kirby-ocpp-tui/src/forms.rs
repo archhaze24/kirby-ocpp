@@ -23,6 +23,50 @@ use serde_json::Value;
 
 use crate::text::TextInput;
 
+/// Most bytes one form field accepts (typed or pasted); the rest is dropped.
+pub const INPUT_CAP: usize = 256 * 1024;
+
+/// Most bytes of the `DataTransfer` `data` field.
+pub const DATA_MAX: usize = 64 * 1024;
+
+/// Shown on a field whose input hit [`INPUT_CAP`].
+pub const CAP_NOTICE: &str = "input limited to 256 KiB, the rest was dropped";
+
+/// Inserts a pasted string, keeping the field within [`INPUT_CAP`] bytes. Returns `true` when
+/// something was dropped.
+pub fn insert_str_capped(input: &mut TextInput, s: &str) -> bool {
+    let room = INPUT_CAP.saturating_sub(input.text().len());
+    let mut end = s.len().min(room);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    input.insert_str(&s[..end]);
+    end < s.len()
+}
+
+/// Inserts one typed character within [`INPUT_CAP`]. Returns `true` when it was dropped.
+pub fn insert_char_capped(input: &mut TextInput, c: char) -> bool {
+    if input.text().len() + c.len_utf8() > INPUT_CAP {
+        return true;
+    }
+    input.insert_char(c);
+    false
+}
+
+/// Length limit of a `DataTransfer` field (`vendorId` 255 and `messageId` 50 characters, as
+/// in the schema; `data` is bounded in bytes). `None` when the value fits.
+pub fn data_transfer_error(index: usize, value: &str) -> Option<String> {
+    let (name, max, len) = match index {
+        0 => ("vendorId", 255, value.chars().count()),
+        1 => ("messageId", 50, value.chars().count()),
+        _ => ("data", DATA_MAX, value.len()),
+    };
+    (len > max).then(|| {
+        let unit = if index > 1 { "bytes" } else { "characters" };
+        format!("{name} is {len} {unit}, at most {max}")
+    })
+}
+
 /// The schema registry is expensive to build, so it is shared.
 pub fn schemas() -> Arc<SchemaRegistry> {
     static REG: OnceLock<Arc<SchemaRegistry>> = OnceLock::new();
@@ -68,6 +112,8 @@ pub struct Field {
     pub option: usize,
     pub checked: Vec<bool>,
     pub error: Option<String>,
+    /// Input was dropped at [`INPUT_CAP`]; shown as the field error until text is removed.
+    pub capped: bool,
 }
 
 impl Field {
@@ -80,6 +126,7 @@ impl Field {
             option: 0,
             checked: Vec::new(),
             error: None,
+            capped: false,
         }
     }
 
@@ -422,7 +469,7 @@ impl Form {
     pub fn paste(&mut self, text: &str) {
         let f = &mut self.fields[self.focus];
         if f.is_text() {
-            f.input.insert_str(text);
+            f.capped |= insert_str_capped(&mut f.input, text);
             self.validate_field(self.focus);
             self.after_edit();
         }
@@ -480,7 +527,7 @@ impl Form {
                     (_, KeyCode::Char(c))
                         if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                     {
-                        f.input.insert_char(c);
+                        f.capped |= insert_char_capped(&mut f.input, c);
                     }
                     _ => {}
                 }
@@ -507,12 +554,13 @@ impl Form {
 
     fn validate_field(&mut self, i: usize) {
         let max = self.max_connector;
+        let form_kind = self.kind;
         let action = (self.kind == FormKind::Raw)
             .then(|| self.fields[0].options.get(self.fields[0].option).cloned())
             .flatten();
         let config_error = (self.kind == FormKind::ConfigValue)
             .then(|| {
-                let value = self.fields[i].input.text().trim();
+                let value = self.fields[i].input.text();
                 self.checker
                     .as_ref()
                     .filter(|c| c.check(&self.context, value) != ConfigurationStatus::Accepted)
@@ -562,6 +610,20 @@ impl Form {
             }
             FieldKind::OptionalText | FieldKind::Select | FieldKind::Multi => None,
         };
+        if f.error.is_none() && form_kind == FormKind::DataTransfer {
+            let value = if i == 2 {
+                f.input.text()
+            } else {
+                f.input.text().trim()
+            };
+            f.error = data_transfer_error(i, value);
+        }
+        if f.input.text().len() < INPUT_CAP {
+            f.capped = false;
+        }
+        if f.capped && f.error.is_none() {
+            f.error = Some(CAP_NOTICE.to_owned());
+        }
     }
 
     /// Validates and converts the form. On failure the errors are set on the fields.
@@ -600,7 +662,8 @@ impl Form {
             FormKind::DataTransfer => Submitted::Data {
                 vendor_id: text(0),
                 message_id: opt(1),
-                data: opt(2),
+                // Free text: spaces at the ends are part of the value.
+                data: Some(self.fields[2].input.text().to_owned()).filter(|s| !s.trim().is_empty()),
             },
             FormKind::Rule => match parse_rule_input(&text(0)).ok()? {
                 RuleInput::Set(rule) => Submitted::Rule(rule),
@@ -615,7 +678,8 @@ impl Form {
             FormKind::LoadScenario => Submitted::LoadScenario(text(0)),
             FormKind::ConfigValue => Submitted::ConfigValue {
                 key: self.context.clone(),
-                value: text(0),
+                // Free text: spaces at the ends are part of the value.
+                value: self.fields[0].input.text().to_owned(),
             },
             FormKind::LocalEntry => Submitted::LocalEntry {
                 id_tag: IdTag::new(text(0)).ok()?,
@@ -906,5 +970,73 @@ mod tests {
         assert!(!c.items.iter().any(|i| i == "NoError"));
         c.move_by(-1);
         assert_eq!(c.selected, c.items.len() - 1);
+    }
+
+    #[test]
+    fn data_transfer_limits_are_checked_inline() {
+        let mut f = Form::data_transfer(&"v".repeat(256));
+        assert!(f.fields[0].error.is_none(), "set only by validation");
+        assert!(f.submit().is_none());
+        assert!(f.fields[0].error.as_ref().unwrap().contains("at most 255"));
+        let mut f = Form::data_transfer("Acme");
+        f.focus = 1;
+        f.paste(&"m".repeat(51));
+        assert!(f.fields[1].error.as_ref().unwrap().contains("at most 50"));
+        f.focus = 2;
+        f.paste(&"d".repeat(DATA_MAX + 1));
+        assert!(
+            f.fields[2]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("at most 65536")
+        );
+        assert!(f.submit().is_none());
+        let mut f = Form::data_transfer("Acme");
+        f.focus = 2;
+        f.paste(&"d".repeat(DATA_MAX));
+        assert!(f.submit().is_some());
+    }
+
+    #[test]
+    fn free_text_values_keep_their_spaces() {
+        let mut f = Form::data_transfer("Acme");
+        f.focus = 2;
+        f.paste("  a b  ");
+        let Some(Submitted::Data { data, .. }) = f.submit() else {
+            panic!("valid");
+        };
+        assert_eq!(data.as_deref(), Some("  a b  "));
+        let mut f = Form::data_transfer("  Acme ");
+        f.focus = 2;
+        f.paste("   ");
+        let Some(Submitted::Data {
+            vendor_id, data, ..
+        }) = f.submit()
+        else {
+            panic!("valid");
+        };
+        assert_eq!(vendor_id, "Acme", "ids are still trimmed");
+        assert_eq!(data, None, "blank means absent");
+    }
+
+    #[test]
+    fn paste_is_capped_with_a_visible_notice() {
+        let mut f = Form::raw(None);
+        f.focus = 1;
+        f.paste(&"x".repeat(INPUT_CAP + 5000));
+        assert_eq!(f.fields[1].input.text().len(), INPUT_CAP);
+        assert!(f.fields[1].capped);
+        f.handle_key(key(KeyCode::Char('y')));
+        assert_eq!(f.fields[1].input.text().len(), INPUT_CAP);
+        f.handle_key(key(KeyCode::Backspace));
+        assert!(!f.fields[1].capped, "room again");
+    }
+
+    #[test]
+    fn capped_notice_shows_when_nothing_else_is_wrong() {
+        let mut f = Form::search("");
+        f.paste(&"x".repeat(INPUT_CAP + 1));
+        assert_eq!(f.fields[0].error.as_deref(), Some(CAP_NOTICE));
     }
 }

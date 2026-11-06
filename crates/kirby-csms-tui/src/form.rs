@@ -20,7 +20,10 @@ use kirby_ocpp_core::ocpp::types::{
     AuthorizationStatus, AvailabilityType, ChargingProfilePurposeType, ChargingRateUnitType,
     MessageTrigger, ResetType, UpdateType,
 };
-use kirby_ocpp_tui::forms::{PROFILE_TEMPLATE, schemas};
+use kirby_ocpp_tui::forms::{
+    CAP_NOTICE, INPUT_CAP, PROFILE_TEMPLATE, data_transfer_error, insert_char_capped,
+    insert_str_capped, schemas,
+};
 use kirby_ocpp_tui::text::TextInput;
 use serde_json::Value;
 
@@ -89,6 +92,8 @@ pub struct Field {
     pub options: Vec<String>,
     pub option: usize,
     pub error: Option<String>,
+    /// Input was dropped at the size cap; shown as the field error until text is removed.
+    pub capped: bool,
 }
 
 impl Field {
@@ -100,6 +105,7 @@ impl Field {
             options: Vec::new(),
             option: 0,
             error: None,
+            capped: false,
         }
     }
 
@@ -824,7 +830,7 @@ impl Form {
         if let Some(f) = self.fields.get_mut(i)
             && f.is_text()
         {
-            f.input.insert_str(text);
+            f.capped |= insert_str_capped(&mut f.input, text);
             self.touched(i);
         }
     }
@@ -877,7 +883,7 @@ impl Form {
                     (_, KeyCode::Char(c))
                         if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                     {
-                        f.input.insert_char(c);
+                        f.capped |= insert_char_capped(&mut f.input, c);
                     }
                     _ => {}
                 }
@@ -916,6 +922,14 @@ impl Form {
             .unwrap_or_default()
     }
 
+    /// The field as typed, spaces at the ends included (free-text values).
+    fn untrimmed(&self, i: usize) -> String {
+        self.fields
+            .get(i)
+            .map(|f| f.input.text().to_owned())
+            .unwrap_or_default()
+    }
+
     /// The normalised PEM of a `Pem` field.
     fn pem(&self, i: usize) -> Option<String> {
         let FieldKind::Pem { max } = self.fields.get(i)?.kind else {
@@ -933,6 +947,7 @@ impl Form {
             .get(1)
             .and_then(|f| f.chosen())
             .map(str::to_owned);
+        let form_kind = self.kind;
         let Some(f) = self.fields.get_mut(i) else {
             return;
         };
@@ -1003,6 +1018,20 @@ impl Form {
                 }
             }
         };
+        if f.error.is_none() && form_kind == FormKind::DataTransfer {
+            let value = if i == 2 {
+                f.input.text()
+            } else {
+                f.input.text().trim()
+            };
+            f.error = data_transfer_error(i, value);
+        }
+        if f.input.text().len() < INPUT_CAP {
+            f.capped = false;
+        }
+        if f.capped && f.error.is_none() {
+            f.error = Some(CAP_NOTICE.to_owned());
+        }
     }
 
     /// Validates and converts the form. On failure the errors are set on the fields (or on
@@ -1043,7 +1072,8 @@ impl Form {
             FormKind::Reset => Submitted::Send(Command::Reset(chosen(0)?.parse().ok()?)),
             FormKind::ChangeConfiguration => Submitted::Send(Command::ChangeConfiguration {
                 key: self.text(0),
-                value: self.text(1),
+                // Free text: spaces at the ends are part of the value.
+                value: self.untrimmed(1),
             }),
             FormKind::GetConfiguration => Submitted::Send(Command::GetConfiguration {
                 keys: split_keys(&self.text(0)),
@@ -1069,7 +1099,8 @@ impl Form {
             FormKind::DataTransfer => Submitted::Send(Command::DataTransfer {
                 vendor_id: self.text(0),
                 message_id: opt(self.text(1)),
-                data: opt(self.text(2)),
+                // Free text: spaces at the ends are part of the value.
+                data: opt(self.untrimmed(2)).filter(|s| !s.trim().is_empty()),
             }),
             FormKind::GetLog => Submitted::Send(Command::GetLog(Box::new(GetLogRequest {
                 log_type: chosen(0)?.parse().ok()?,
@@ -1655,5 +1686,79 @@ mod tests {
         assert_eq!(f.fields[0].error, None);
         f.paste("x");
         assert!(f.fields[0].error.is_some());
+    }
+
+    #[test]
+    fn data_transfer_limits_apply_inline() {
+        let mut f = Form::data_transfer("CP-1");
+        type_text(&mut f, &"v".repeat(256));
+        assert!(f.fields[0].error.as_ref().unwrap().contains("at most 255"));
+        assert!(f.submit().is_none());
+        clear(&mut f);
+        type_text(&mut f, "Acme");
+        f.handle_key(key(KeyCode::Tab));
+        f.paste(&"m".repeat(51));
+        assert!(f.fields[1].error.as_ref().unwrap().contains("at most 50"));
+        clear(&mut f);
+        f.handle_key(key(KeyCode::Tab));
+        f.paste(&"d".repeat(64 * 1024 + 1));
+        assert!(
+            f.fields[2]
+                .error
+                .as_ref()
+                .unwrap()
+                .contains("at most 65536")
+        );
+        clear(&mut f);
+        f.paste(&"d".repeat(64 * 1024));
+        assert!(f.submit().is_some());
+    }
+
+    #[test]
+    fn free_text_values_keep_their_spaces() {
+        let mut f = Form::data_transfer("CP-1");
+        type_text(&mut f, " Acme ");
+        f.handle_key(key(KeyCode::Tab));
+        f.handle_key(key(KeyCode::Tab));
+        f.paste("  a b  ");
+        let Some(Submitted::Send(Command::DataTransfer {
+            vendor_id, data, ..
+        })) = f.submit()
+        else {
+            panic!("valid");
+        };
+        assert_eq!(vendor_id, "Acme", "ids are trimmed");
+        assert_eq!(data.as_deref(), Some("  a b  "));
+        let mut f = Form::change_configuration("CP-1");
+        type_text(&mut f, " Key ");
+        f.handle_key(key(KeyCode::Tab));
+        f.paste(" v ");
+        assert_eq!(
+            f.submit(),
+            Some(Submitted::Send(Command::ChangeConfiguration {
+                key: "Key".into(),
+                value: " v ".into()
+            }))
+        );
+    }
+
+    #[test]
+    fn input_is_capped_with_a_visible_notice() {
+        let mut f = Form::data_transfer("CP-1");
+        f.handle_key(key(KeyCode::Tab));
+        f.handle_key(key(KeyCode::Tab));
+        f.paste(&"x".repeat(INPUT_CAP + 1000));
+        assert_eq!(f.fields[2].input.text().len(), INPUT_CAP);
+        assert!(f.fields[2].capped);
+        assert!(f.fields[2].error.is_some());
+        type_text(&mut f, "y");
+        assert_eq!(f.fields[2].input.text().len(), INPUT_CAP);
+        f.handle_key(key(KeyCode::Backspace));
+        assert!(!f.fields[2].capped);
+        // Free text without its own limit shows the cap notice itself.
+        let mut f = Form::change_configuration("CP-1");
+        f.handle_key(key(KeyCode::Tab));
+        f.paste(&"x".repeat(INPUT_CAP + 1));
+        assert_eq!(f.fields[1].error.as_deref(), Some(CAP_NOTICE));
     }
 }

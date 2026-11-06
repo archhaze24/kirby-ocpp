@@ -298,3 +298,15 @@ fn forms_draw_their_labels() {
     );
     assert!(text.contains("idTag[:status]"), "{text}");
 }
+
+#[test]
+fn clear_charging_profile_without_a_filter_asks_first() {
+    let mut f = Form::clear_charging_profile("CP-1");
+    let all = sent(&mut f);
+    assert!(all.needs_confirm());
+    assert!(all.label().contains("ALL"), "{}", all.label());
+    set(&mut f, 3, "2");
+    let narrow = sent(&mut f);
+    assert!(!narrow.needs_confirm());
+    assert_eq!(narrow.label(), "ClearChargingProfile");
+}

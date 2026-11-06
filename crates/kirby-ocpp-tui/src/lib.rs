@@ -357,23 +357,40 @@ async fn execute(effect: Effect, ctx: &mut Ctx, guard: &mut terminal::TerminalGu
     }
 }
 
-/// Writes the export readable by the owner only: logs contain idTags and meter data.
+/// Writes the export readable by the owner only: logs contain idTags and meter data. Refuses
+/// a symlink, and tightens the mode of an existing file before any byte is written.
 async fn write_private(path: &str, contents: String) -> std::io::Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
-        use std::io::Write as _;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(path)?;
-        file.write_all(contents.as_bytes())
+        write_private_blocking(std::path::Path::new(&path), &contents)
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+fn write_private_blocking(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(std::io::Error::other("refusing to write through a symlink"));
+    }
+    let mut options = std::fs::OpenOptions::new();
+    // No truncation yet: an existing file is made private first.
+    options.write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    if file.metadata()?.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        file.set_len(0)?;
+    }
+    file.write_all(contents.as_bytes())
 }
 
 /// Loads a scenario file off the UI loop (a FIFO or a stalled mount must not freeze keys,
@@ -452,6 +469,29 @@ mod tests {
         // Nothing dropped: nothing sent.
         resync(&tx, 0, &mut dropped, snapshot);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_tightens_an_existing_file_and_refuses_symlinks() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("log.txt");
+        std::fs::write(&file, "old old old").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_private_blocking(&file, "new").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        let mode = std::fs::metadata(&file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(write_private_blocking(&link, "pwned").is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        let dangling = dir.path().join("dangling.txt");
+        std::os::unix::fs::symlink(dir.path().join("missing"), &dangling).unwrap();
+        assert!(write_private_blocking(&dangling, "x").is_err());
+        assert!(!dir.path().join("missing").exists());
     }
 
     #[cfg(unix)]

@@ -244,7 +244,7 @@ pub struct Cli {
 
 /// Prints a warning when the token file can be read by the group or by others.
 #[cfg(unix)]
-fn warn_if_shared(path: &std::path::Path) {
+pub fn warn_if_shared(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(path)
         && meta.permissions().mode() & 0o044 != 0
@@ -257,7 +257,7 @@ fn warn_if_shared(path: &std::path::Path) {
 }
 
 #[cfg(not(unix))]
-fn warn_if_shared(_path: &std::path::Path) {}
+pub fn warn_if_shared(_path: &std::path::Path) {}
 
 /// Parses a `--var` argument.
 fn script_var(text: &str) -> Result<(String, serde_json::Value), String> {
@@ -427,12 +427,18 @@ fn reject_duplicates(keys: &[(String, String)], source: &str) -> Result<(), Stri
     }
 }
 
-/// Parses the contents of an `--auth-keys-file`. Errors name the line, never the key.
+/// Largest `--auth-keys-file` that is read, in bytes.
+pub const AUTH_KEYS_FILE_MAX: u64 = 1024 * 1024;
+
+/// Parses the contents of an `--auth-keys-file`. A leading UTF-8 BOM is ignored; leading
+/// spaces and the line end are dropped but trailing spaces belong to the key. Errors name
+/// the line, never the key.
 pub fn parse_auth_keys_text(text: &str) -> Result<Vec<(String, String)>, String> {
     let mut keys: Vec<(String, String)> = Vec::new();
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (number, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
+        let line = line.trim_start().trim_end_matches(['\r', '\n']);
+        if line.trim().is_empty() || line.starts_with('#') {
             continue;
         }
         let pair = parse_auth_key(line).map_err(|e| format!("line {}: {e}", number + 1))?;
@@ -540,8 +546,17 @@ mod tests {
             parse_auth_keys_text(text),
             Ok(vec![
                 ("A".to_owned(), "1".to_owned()),
-                ("B".to_owned(), "2".to_owned())
-            ])
+                ("B".to_owned(), "2  ".to_owned())
+            ]),
+            "leading spaces go, trailing spaces belong to the key"
+        );
+        assert_eq!(
+            parse_auth_keys_text("\u{feff}A=1\r\nB=k \r\n"),
+            Ok(vec![
+                ("A".to_owned(), "1".to_owned()),
+                ("B".to_owned(), "k ".to_owned())
+            ]),
+            "a BOM and CRLF line ends are not part of the values"
         );
         let error = parse_auth_keys_text("A=1\nsecretlooking").unwrap_err();
         assert!(error.starts_with("line 2:") && !error.contains("secretlooking"));
