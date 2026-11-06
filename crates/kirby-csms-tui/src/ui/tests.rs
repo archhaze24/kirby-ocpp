@@ -477,3 +477,14 @@ mod commands {
         }
     }
 }
+
+#[test]
+fn notices_with_bidi_and_line_separators_are_drawn_inert() {
+    let mut a = app_with(&[]).0;
+    a.notify(
+        kirby_ocpp_tui::app::NoticeLevel::Error,
+        "bad \u{202e}evil\u{2028}end",
+    );
+    let t = render(&a, 120, 40);
+    assert!(t.contains("evil") && !t.contains('\u{202e}') && !t.contains('\u{2028}'));
+}

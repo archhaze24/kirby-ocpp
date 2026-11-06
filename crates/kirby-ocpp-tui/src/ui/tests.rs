@@ -417,3 +417,14 @@ fn security_views_survive_narrow_terminals() {
         let _ = render(&a, w, h);
     }
 }
+
+#[test]
+fn notices_with_bidi_and_line_separators_are_drawn_inert() {
+    let mut a = app();
+    a.notify(
+        crate::app::NoticeLevel::Error,
+        "bad \u{202e}evil\u{2028}end",
+    );
+    let t = render(&a, 110, 40);
+    assert!(t.contains("evil") && !t.contains('\u{202e}') && !t.contains('\u{2028}'));
+}

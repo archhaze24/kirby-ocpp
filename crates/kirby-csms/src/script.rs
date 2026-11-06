@@ -346,6 +346,12 @@ struct Backlog {
     wake: Notify,
 }
 
+/// Why `wait_call` gave up.
+enum WaitLost {
+    Timeout,
+    Lagged,
+}
+
 /// Moves engine events into the [`Backlog`] continuously, also during long steps, so the
 /// broadcast buffer cannot overflow while the runner is busy. Aborted on drop.
 struct Pump {
@@ -403,6 +409,35 @@ impl Backlog {
             closed: AtomicBool::new(false),
             wake: Notify::new(),
         }
+    }
+
+    /// Waits for a matching CALL. Fails at once when events were lost and nothing matches:
+    /// the CALL may be among the lost ones, so waiting out the timeout would only stall.
+    async fn wait_call(
+        &self,
+        station: Option<&str>,
+        call: &str,
+        payload_contains: Option<&Value>,
+        end: tokio::time::Instant,
+    ) -> Result<(), WaitLost> {
+        loop {
+            if self.take_call(station, call, payload_contains) {
+                return Ok(());
+            }
+            if self.lagged.load(Ordering::Relaxed) {
+                return Err(WaitLost::Lagged);
+            }
+            if self.next_event(end).await.is_err() {
+                return Err(WaitLost::Timeout);
+            }
+        }
+    }
+
+    async fn next_event(&self, end: tokio::time::Instant) -> Result<(), ()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(());
+        }
+        timeout_at(end, self.wake.notified()).await.map_err(|_| ())
     }
 
     fn record(&self, event: CsmsEvent) {
@@ -567,24 +602,17 @@ impl Runner<'_> {
                 timeout_ms,
             } => {
                 let end = end_of(*timeout_ms);
-                loop {
-                    if self
-                        .backlog
-                        .take_call(station.as_deref(), call, payload_contains.as_ref())
-                    {
-                        return Ok(());
-                    }
-                    if self.next_event(end).await.is_err() {
-                        let lost = if self.backlog.lagged.load(Ordering::Relaxed) {
-                            " (events were dropped, a CALL may have been missed)"
-                        } else {
-                            ""
-                        };
-                        return Err(format!(
-                            "no matching {call} CALL within {timeout_ms} ms{lost}"
-                        ));
-                    }
-                }
+                self.backlog
+                    .wait_call(station.as_deref(), call, payload_contains.as_ref(), end)
+                    .await
+                    .map_err(|lost| match lost {
+                        WaitLost::Timeout => {
+                            format!("no matching {call} CALL within {timeout_ms} ms")
+                        }
+                        WaitLost::Lagged => format!(
+                            "events were lost (the event stream lagged), so a {call} CALL may have been missed"
+                        ),
+                    })
             }
             Action::Call {
                 station,
@@ -671,12 +699,7 @@ impl Runner<'_> {
 
     /// Waits until the pump saw another event. `Err` when `end` passed or the stream is gone.
     async fn next_event(&mut self, end: tokio::time::Instant) -> Result<(), ()> {
-        if self.backlog.closed.load(Ordering::Relaxed) {
-            return Err(());
-        }
-        timeout_at(end, self.backlog.wake.notified())
-            .await
-            .map_err(|_| ())
+        self.backlog.next_event(end).await
     }
 }
 
@@ -743,6 +766,8 @@ fn json_subset(expected: &Value, actual: &Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use tokio::time::timeout;
+
     use super::*;
 
     fn err(text: &str) -> String {
@@ -885,5 +910,24 @@ call = "Heartbeat"
         let store = backlog.seen.lock().unwrap();
         assert!(store.calls.len() <= 3 && !store.calls.is_empty());
         assert_eq!(store.calls.back().unwrap().station, "CP-19");
+    }
+
+    #[tokio::test]
+    async fn wait_call_fails_at_once_after_lagged_events() {
+        let wanted = HashMap::from([("Authorize".to_owned(), false)]);
+        let backlog = Backlog::with_wanted(wanted, 1000);
+        backlog.lagged.store(true, Ordering::Relaxed);
+        let end = tokio::time::Instant::now() + Duration::from_secs(3600);
+        let out = timeout(
+            Duration::from_secs(5),
+            backlog.wait_call(None, "Authorize", None, end),
+        )
+        .await
+        .expect("must not wait out the step timeout");
+        assert!(matches!(out, Err(WaitLost::Lagged)));
+        // A CALL that did arrive still matches.
+        backlog.record(inbound("CP-1", "Authorize", Value::Null));
+        let out = backlog.wait_call(None, "Authorize", None, end).await;
+        assert!(out.is_ok());
     }
 }

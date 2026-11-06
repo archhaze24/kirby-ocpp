@@ -327,19 +327,19 @@ async fn execute(effect: Effect, ctx: &mut Ctx, guard: &mut terminal::TerminalGu
         }
         Effect::RunScenario(scenario) => {
             ctx.cancel = CancelToken::new();
-            spawn_scenario(*scenario, ctx);
+            spawn_scenario(
+                *scenario,
+                ctx.runner.clone(),
+                ctx.out.clone(),
+                ctx.cancel.clone(),
+            );
         }
         Effect::RunScenarioFile(path) => {
-            match tokio::task::spawn_blocking(move || Scenario::load(std::path::Path::new(&path)))
-                .await
-            {
-                Ok(Ok(scenario)) => {
-                    ctx.cancel = CancelToken::new();
-                    spawn_scenario(scenario, ctx);
-                }
-                Ok(Err(e)) => ctx.out.send(Msg::ScenarioError(e.to_string())),
-                Err(e) => ctx.out.send(Msg::ScenarioError(e.to_string())),
-            }
+            ctx.cancel = CancelToken::new();
+            let (runner, out, cancel) = (ctx.runner.clone(), ctx.out.clone(), ctx.cancel.clone());
+            load_scenario_in_background(path, ctx.out.clone(), move |scenario| {
+                spawn_scenario(scenario, runner, out, cancel);
+            });
         }
         Effect::CancelScenario => ctx.cancel.cancel(),
         Effect::Copy { text, what } => {
@@ -376,8 +376,24 @@ async fn write_private(path: &str, contents: String) -> std::io::Result<()> {
     .map_err(std::io::Error::other)?
 }
 
-fn spawn_scenario(scenario: Scenario, ctx: &Ctx) {
-    let (runner, out, cancel) = (ctx.runner.clone(), ctx.out.clone(), ctx.cancel.clone());
+/// Loads a scenario file off the UI loop (a FIFO or a stalled mount must not freeze keys,
+/// ticks or shutdown); a failure goes back as `Msg::ScenarioError`, a success to `start`.
+fn load_scenario_in_background(
+    path: String,
+    out: Out,
+    start: impl FnOnce(Scenario) + Send + 'static,
+) {
+    tokio::spawn(async move {
+        match tokio::task::spawn_blocking(move || Scenario::load(std::path::Path::new(&path))).await
+        {
+            Ok(Ok(scenario)) => start(scenario),
+            Ok(Err(e)) => out.send(Msg::ScenarioError(e.to_string())),
+            Err(e) => out.send(Msg::ScenarioError(e.to_string())),
+        }
+    });
+}
+
+fn spawn_scenario(scenario: Scenario, runner: ScenarioRunner, out: Out, cancel: CancelToken) {
     let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
     let relay = out.clone();
     tokio::spawn(async move {
@@ -436,5 +452,33 @@ mod tests {
         // Nothing dropped: nothing sent.
         resync(&tx, 0, &mut dropped, snapshot);
         assert!(rx.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scenario_file_load_does_not_block_the_caller() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("scenario.toml");
+        // `unsafe` is forbidden, so use the mkfifo binary.
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let out = Out { tx, station: 0 };
+        // Returns at once although nobody has opened the FIFO for writing.
+        load_scenario_in_background(fifo.to_string_lossy().into_owned(), out, |_| {});
+        // Unblock the reader with an empty file: the load fails and reports back.
+        // Opened on a blocking thread: on this single-threaded runtime the reader task has to run.
+        tokio::task::spawn_blocking(move || {
+            drop(std::fs::OpenOptions::new().write(true).open(&fifo).unwrap());
+        })
+        .await
+        .unwrap();
+        match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+            Ok(Some(Inbound::Msg(0, Msg::ScenarioError(_)))) => {}
+            _ => panic!("expected a ScenarioError"),
+        }
     }
 }

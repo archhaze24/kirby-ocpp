@@ -212,8 +212,10 @@ impl App {
     }
 
     pub fn notify(&mut self, level: NoticeLevel, text: impl Into<String>) {
+        // Notices may carry peer-controlled text (CALLERROR descriptions).
+        let text: String = text.into();
         self.notice = Some(Notice {
-            text: text.into(),
+            text: crate::text::sanitize(&text),
             level,
             ttl: NOTICE_TICKS,
         });

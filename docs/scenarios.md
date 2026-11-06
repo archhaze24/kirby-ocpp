@@ -276,7 +276,7 @@ Every step takes an optional `name`. `timeout_ms` must be between 1 and 86400000
 | `clear_respond` | `call` | Remove that responder |
 | `inject_fault` | `call`, `kind`, `payload`, `times` (default 1) | Make the next `times` CALLs of that action fail; see below |
 
-`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived before the previous wait's match). CALLs that arrive while other steps run are kept (the last 10 000, at most about 16 MiB); only CALLs some `wait_call` of the script names are remembered, and their payload only if a `wait_call` for that action uses `payload_contains`. A lost-events warning is added to the failure text if the stream lagged.
+`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived before the previous wait's match). CALLs that arrive while other steps run are kept (the last 10 000, at most about 16 MiB); only CALLs some `wait_call` of the script names are remembered, and their payload only if a `wait_call` for that action uses `payload_contains`. If the event stream lagged (events were lost), a `wait_call` that finds no match fails at once with a lost-events error instead of waiting out its timeout.
 
 `inject_fault` kinds:
 
