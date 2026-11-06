@@ -189,7 +189,8 @@ Per charge point id, one JSON file `<state dir>/<id>.station.json` holds everyth
 * the local authorization list and its version, and the authorization cache;
 * charging profiles and writable configuration values;
 * availability (including a `Scheduled` change waiting for a transaction to end), connector count, and per-connector state (status, meter, reservation, transaction);
-* the offline transaction queue;
+* the offline transaction queue and the queue of `MeterValues` samples taken during a running offline transaction (at most 1000, delivered in order after reconnecting);
+* a pending security profile switch (the previous profile and a failure count, used by the A05.FR.08 fallback; see [security.md](security.md));
 * installed certificates (public data) and queued security events.
 
 Secrets (such as private keys) live in a separate `<id>.station.secrets.json`.
