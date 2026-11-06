@@ -438,9 +438,9 @@ impl App {
         self.scenario = ScenarioView {
             name: s.name.clone(),
             steps: s
-                .steps
-                .iter()
-                .map(|st| (st.label(), StepState::Pending))
+                .expanded_steps()
+                .into_iter()
+                .map(|st| (st.name, StepState::Pending))
                 .collect(),
             running: true,
             report: None,
