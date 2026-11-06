@@ -467,15 +467,9 @@ mod tests {
         assert!(status.success());
         let (tx, mut rx) = mpsc::unbounded_channel();
         let out = Out { tx, station: 0 };
-        // Returns at once although nobody has opened the FIFO for writing.
+        // Returns at once, and the loader refuses a FIFO without ever opening it (a blocking
+        // open would hang a worker thread and the runtime teardown), so the error comes back.
         load_scenario_in_background(fifo.to_string_lossy().into_owned(), out, |_| {});
-        // Unblock the reader with an empty file: the load fails and reports back.
-        // Opened on a blocking thread: on this single-threaded runtime the reader task has to run.
-        tokio::task::spawn_blocking(move || {
-            drop(std::fs::OpenOptions::new().write(true).open(&fifo).unwrap());
-        })
-        .await
-        .unwrap();
         match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
             Ok(Some(Inbound::Msg(0, Msg::ScenarioError(_)))) => {}
             _ => panic!("expected a ScenarioError"),
