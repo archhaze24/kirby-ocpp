@@ -105,7 +105,11 @@ Rules:
 - `${name}` is replaced right before the step runs, so a variable captured by an earlier step is visible. An unknown variable, a malformed `${` or a bad result fails that step with a message naming the variable.
 - A string that is exactly `${name}` takes the variable's JSON type (`connectorId = "${n}"` sends a number when `n` is a number). Inside longer text the variable becomes text: strings without quotes, numbers and booleans as written. An object or array inside longer text is an error.
 - `$${` is a literal `${`.
-- Substituted fields: the JSON of `payload` and `match`, `expect.status`, `expect.payload`, and the string fields `id_tag`, `call`, `vendor_id`, `message_id`, `data`, `info`, `tech_info`, `event_type`, `rule`. Typed fields (`connector`, `reason`, `status`, `error_code`, `wh_delta`, `ms`, `timeout_ms`, `condition`, `direction`, `validate`) are never substituted: a variable cannot make a connector number or a timeout. A placeholder in `id_tag` is checked at load time as plain text (at most 20 characters), the substituted value again when the step runs. `rule`, `event_type` and `clear_rules` `call` with a `${name}` placeholder are validated only when the step runs; text that only contains `$${` escapes is validated at load time after unescaping. One substitution may produce at most about 1 MiB (serialized); a larger result fails the step. Values that come from the CSMS (captured variables, answers) are cut to about 200 characters in failure reasons.
+- Substituted fields: the JSON of `payload` and `match`, `expect.status`, `expect.payload`, and the string fields `id_tag`, `call`, `vendor_id`, `message_id`, `data`, `info`, `tech_info`, `event_type`, `rule`.
+  - Typed fields (`connector`, `reason`, `status`, `error_code`, `wh_delta`, `ms`, `timeout_ms`, `condition`, `direction`, `validate`) are never substituted: a variable cannot make a connector number or a timeout.
+  - A placeholder in `id_tag` is checked at load time as plain text (at most 20 characters), the substituted value again when the step runs.
+  - `rule`, `event_type` and `clear_rules` `call` with a `${name}` placeholder are validated only when the step runs; text that only contains `$${` escapes is validated at load time after unescaping. One substitution may produce at most about 1 MiB (serialized); a larger result fails the step.
+  - Values that come from the CSMS (captured variables, answers) are cut to about 200 characters in failure reasons.
 - `capture = { name = "/json/pointer" }` stores the value at a [JSON pointer](https://www.rfc-editor.org/rfc/rfc6901) of the step's raw answer after the step ran. It is valid on `send_raw`, `data_transfer` (the CALLRESULT payload) and `expect_call` (the payload of the matched CALL) and a load error elsewhere. An empty pointer captures the whole answer. A missing pointer fails the step. The captured value keeps its JSON type and may be an object or array (usable only as a whole `"${name}"` value).
 - `kirby-ocpp run --var NAME=VALUE` (repeatable) overrides `[vars]`. `true`, `false` and numbers keep their type, everything else is a string. Setting `station_id` or `index`, or a bad name, is a usage error (exit 2), and so is a name the scenario never uses (see `run` below). In a fleet run every station gets the same `--var` values and its own `index` and `station_id`.
 
@@ -243,7 +247,9 @@ Built-ins target connector 1; `--connector N` retargets every connector-bound st
 kirby-ocpp [station options] run --scenario NAME_OR_FILE [--report report.json] [--junit junit.xml] [--timeout 60] [--id-tag TAG]
 ```
 
-`--scenario` is a file path or a built-in name. An argument with a path separator, ending in `.toml`, or naming an existing file or directory is a path (a built-in only applies when no such path exists). Scenario files must be regular files of at most 1 MiB (FIFOs and devices are refused). A `--var` for a name the scenario neither declares in `[vars]`, uses as a loop counter, nor references as `${name}` is a usage error (exit 2, "unknown variable"). `run` connects, waits for an accepted BootNotification, runs the steps and prints the report. Station events (frames and log lines) are also printed to stdout while it runs; `--log-file` keeps them in a file. The station options (`--url`, `--id`, TLS flags, ...) are in [configuration.md](configuration.md).
+`--scenario` is a file path or a built-in name. An argument with a path separator, ending in `.toml`, or naming an existing file or directory is a path (a built-in only applies when no such path exists). Scenario files must be regular files of at most 1 MiB (FIFOs and devices are refused).
+- A `--var` for a name the scenario neither declares in `[vars]`, uses as a loop counter, nor references as `${name}` is a usage error (exit 2, "unknown variable"). `run` connects, waits for an accepted BootNotification, runs the steps and prints the report.
+- Station events (frames and log lines) are also printed to stdout while it runs; `--log-file` keeps them in a file. The station options (`--url`, `--id`, TLS flags, ...) are in [configuration.md](configuration.md).
 
 | Option | Meaning |
 | --- | --- |
@@ -282,7 +288,10 @@ Point `--junit` at the path your CI reads test reports from.
 kirby-ocpp [station options] suite [SOURCE...] [--all-builtins] [--report suite.json] [--junit junit.xml] [--timeout 60] [--fail-fast] [--var NAME=VALUE]
 ```
 
-`suite` runs many scenarios one after another, each on a fresh station (see [Suite mode](emulator.md#suite-mode)). SOURCE is a file, a directory (`*.toml` directly inside, sorted by name; an empty directory is a usage error) or a built-in name (an existing path or an argument that looks like a path wins over a built-in of the same name); at least one SOURCE or `--all-builtins` is required. A file named twice, or a file plus its directory, runs once (by canonical path). A `--var` that a scenario does not use is ignored with a `warning:` line on stderr per scenario. `--all-builtins` skips `finish-session`, which needs a running transaction. Scenario names that appear twice get their source appended in the output and the reports (`name (path)`). All scenarios are loaded first: a bad file exits 2 before any connection.
+`suite` runs many scenarios one after another, each on a fresh station (see [Suite mode](emulator.md#suite-mode)).
+- SOURCE is a file, a directory (`*.toml` directly inside, sorted by name; an empty directory is a usage error) or a built-in name (an existing path or an argument that looks like a path wins over a built-in of the same name); at least one SOURCE or `--all-builtins` is required.
+- A file named twice, or a file plus its directory, runs once (by canonical path). A `--var` that a scenario does not use is ignored with a `warning:` line on stderr per scenario. `--all-builtins` skips `finish-session`, which needs a running transaction.
+- Scenario names that appear twice get their source appended in the output and the reports (`name (path)`). All scenarios are loaded first: a bad file exits 2 before any connection.
 
 | Option | Meaning |
 | --- | --- |
@@ -326,7 +335,8 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 --stagger-ms 
 
 ## CSMS scripts
 
-`kirby-csms --script FILE` starts the server, runs the script against the stations that connect, prints the report and exits with its verdict. The stations are external processes (for example `kirby-ocpp`) that connect while the script waits. Steps run in order and the first failing step stops the run (later steps are `SKIP`). Top-level keys are `name` (required, not empty), an optional `[vars]` table (see [Variables, capture and payload checks](#script-variables-capture-and-payload-checks)) and `[[steps]]` (at least one); other top-level keys are ignored. Unknown fields inside a step are rejected, naming the step.
+`kirby-csms --script FILE` starts the server, runs the script against the stations that connect, prints the report and exits with its verdict. The stations are external processes (for example `kirby-ocpp`) that connect while the script waits. Steps run in order and the first failing step stops the run (later steps are `SKIP`).
+- Top-level keys are `name` (required, not empty), an optional `[vars]` table (see [Variables, capture and payload checks](#script-variables-capture-and-payload-checks)) and `[[steps]]` (at least one); other top-level keys are ignored. Unknown fields inside a step are rejected, naming the step.
 
 ### Example
 
@@ -388,14 +398,18 @@ Every step takes an optional `name`. `timeout_ms` must be between 1 and 86400000
 | `clear_respond` | `call` | Remove that responder |
 | `inject_fault` | `call`, `kind`, `payload`, `times` (default 1) | Make the next `times` CALLs of that action fail; see below |
 
-`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived before the previous wait's match). CALLs that arrive while other steps run are kept (the last 10 000, at most about 16 MiB); only CALLs some `wait_call` of the script names are remembered, and their payload only if a `wait_call` for that action uses `payload_contains` or `capture`. If the event stream lagged (events were lost), a `wait_call` that was already waiting when the loss happened and finds no match fails at once with a lost-events error instead of waiting out its timeout; waits that start later are not affected. CALLs a `wait_call` already took are dropped first when the memory limit is reached.
+`wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived before the previous wait's match).
+- CALLs that arrive while other steps run are kept (the last 10 000, at most about 16 MiB); only CALLs some `wait_call` of the script names are remembered, and their payload only if a `wait_call` for that action uses `payload_contains` or `capture`.
+- If the event stream lagged (events were lost), a `wait_call` that was already waiting when the loss happened and finds no match fails at once with a lost-events error instead of waiting out its timeout; waits that start later are not affected. CALLs a `wait_call` already took are dropped first when the memory limit is reached.
 
 ### Script variables, capture and payload checks
 
 Scripts have the same variables as [emulator scenarios](#variables), with these differences: only the variables you define exist (no `${station_id}` or `${index}`: a script talks to many stations), and `capture` also feeds later steps.
 
 - `[vars]` at the top level declares variables (strings, numbers, booleans). `kirby-csms --script FILE --var NAME=VALUE` (repeatable, needs `--script`, a bad name is a usage error, exit 2) overrides or adds one; `true`/`false`/numbers keep their type.
-- `${name}` is replaced when the step runs, in `station`, `expect_status` and the JSON of `payload`, `payload_contains`, `expect_payload` and the payloads of `respond` and `inject_fault` (object keys are not substituted). A string that is exactly `"${name}"` keeps the variable's JSON type; `$${` is a literal `${`. Action names (`call`, also in `wait_call`, `respond`, `clear_respond`, `inject_fault`) and typed fields (`ms`, `times`, `count`, `booted`, `timeout_ms`, `expect_error`) are not substituted. An unknown variable fails that step with a reason naming it. One substitution may produce at most about 1 MiB, and CSMS values in failure reasons are cut to about 200 characters.
+- `${name}` is replaced when the step runs, in `station`, `expect_status` and the JSON of `payload`, `payload_contains`, `expect_payload` and the payloads of `respond` and `inject_fault` (object keys are not substituted). A string that is exactly `"${name}"` keeps the variable's JSON type; `$${` is a literal `${`.
+  - Action names (`call`, also in `wait_call`, `respond`, `clear_respond`, `inject_fault`) and typed fields (`ms`, `times`, `count`, `booted`, `timeout_ms`, `expect_error`) are not substituted. An unknown variable fails that step with a reason naming it.
+  - One substitution may produce at most about 1 MiB, and CSMS values in failure reasons are cut to about 200 characters.
 - `capture = { name = "/json/pointer" }` on `call` stores a value of the CALLRESULT payload, on `wait_call` a value of the matched CALL payload (the payload is then kept even without `payload_contains`). The empty pointer `""` captures the whole payload. A missing pointer fails the step. Names and pointers are checked when the script loads.
 - `expect_payload = { ... }` on `call`: the CALLRESULT payload must contain this JSON, with the same subset rule as `payload_contains` (objects by key, arrays element by element and equal length, anything else equal). It works together with `expect_status`; the order of checks is status, payload, capture.
 
