@@ -104,10 +104,17 @@ impl ReplyHandle {
         let (proxy, mut frames) = mpsc::unbounded_channel();
         let due = tokio::time::Instant::now() + delay;
         tokio::spawn(async move {
-            if let Some(frame) = frames.recv().await {
-                tokio::time::sleep_until(due).await;
-                // The connection may have closed meanwhile; nothing more can be done then.
-                let _ = sink.send(frame);
+            // A closed connection ends the task at once instead of after the whole delay.
+            tokio::select! {
+                () = sink.closed() => {}
+                frame = frames.recv() => if let Some(frame) = frame {
+                    tokio::select! {
+                        () = tokio::time::sleep_until(due) => {
+                            let _ = sink.send(frame);
+                        }
+                        () = sink.closed() => {}
+                    }
+                },
             }
         });
         Self {
@@ -291,6 +298,18 @@ mod tests {
             panic!("expected the InternalError fallback");
         };
         assert_eq!(code, ErrorCode::InternalError);
+    }
+
+    #[tokio::test]
+    async fn delayed_task_ends_when_the_connection_closes() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = ReplyHandle::new("m11", tx).delayed(Duration::from_secs(3600));
+        let watcher = handle.sink.clone().unwrap();
+        drop(rx);
+        // The helper task drops its receiver (closing `watcher`) instead of sleeping an hour.
+        tokio::time::timeout(Duration::from_secs(5), watcher.closed())
+            .await
+            .expect("the delay task ended with the connection");
     }
 
     #[tokio::test]
