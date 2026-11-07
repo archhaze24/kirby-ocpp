@@ -2,6 +2,7 @@
 //! Add a test file as `tests/it/<name>.rs` and declare it here.
 
 mod cli;
+mod config_file;
 mod fleet;
 mod hardening;
 mod headless;

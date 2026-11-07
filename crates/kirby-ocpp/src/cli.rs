@@ -7,7 +7,7 @@
 //! are accepted (any other text is an error, whereas `z.coerce.boolean()` made every
 //! non-empty string `true`).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
@@ -21,7 +21,7 @@ use kirby_ocpp_core::station::ResponseRule;
 ///
 /// Without a subcommand it opens an interactive terminal UI (or, when stdout is not a
 /// terminal or with --no-tui, connects and logs events to stdout until interrupted).
-/// Precedence: command-line flag, then environment variable, then default.
+/// Precedence: command-line flag, then environment variable, then configuration file (--config), then default.
 #[derive(Debug, Parser)]
 #[command(
     name = "kirby-ocpp",
@@ -293,9 +293,40 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
     )]
     pub rule: Vec<ResponseRule>,
 
-    /// Print the effective configuration as JSON and exit
-    #[arg(help_heading = "Output", global = true, long)]
-    pub print_config: bool,
+    /// Read settings from this TOML file; flags and environment variables win over it
+    #[arg(
+        help_heading = "Configuration",
+        global = true,
+        long,
+        env = "KIRBY_OCPP_CONFIG",
+        value_name = "FILE",
+        value_parser = non_empty_path
+    )]
+    pub config: Option<PathBuf>,
+
+    /// Use the `[profile.NAME]` tables of the configuration file on top of its other values
+    #[arg(
+        help_heading = "Configuration",
+        global = true,
+        long,
+        env = "KIRBY_OCPP_PROFILE",
+        value_name = "NAME",
+        value_parser = non_empty
+    )]
+    pub profile: Option<String>,
+
+    /// Print the effective configuration and exit: JSON, or with `=toml` a configuration file for --config
+    #[arg(
+        help_heading = "Output",
+        global = true,
+        long,
+        value_name = "FORMAT",
+        value_enum,
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "json"
+    )]
+    pub print_config: Option<PrintFormat>,
 
     /// Never start the terminal UI; log to stdout instead (automatic when stdout is not a terminal)
     #[arg(help_heading = "Output", global = true, long)]
@@ -340,6 +371,15 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
 
     #[command(subcommand)]
     pub command: Option<Cmd>,
+}
+
+/// `--print-config` formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum PrintFormat {
+    /// The station configuration as JSON.
+    Json,
+    /// A configuration file that `--config` accepts.
+    Toml,
 }
 
 /// `--color` values.
@@ -584,8 +624,106 @@ impl Cli {
     /// `--version` and usage errors like `Parser::parse`.
     pub fn parse_args() -> Self {
         use clap::FromArgMatches;
-        let mut matches = command().get_matches();
+        let mut matches = crate::settings::parse_matches(std::env::args_os().collect());
         Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|error| error.exit())
+    }
+
+    /// The effective settings as a configuration file (`--print-config=toml`): every
+    /// setting that has a value, paths absolute, the URL without its password, no secrets.
+    pub fn config_toml(&self) -> String {
+        use crate::settings::{SCHEMA, absolute_text};
+        use kirby_ocpp_core::config_file::{Value, render, strip_url_password};
+        let text = |value: &str| Value::Text(value.to_owned());
+        let int = |value: u64| Value::Integer(i64::try_from(value).unwrap_or(i64::MAX));
+        let path = |value: &Path| Value::Text(absolute_text(value));
+        let mut comments =
+            vec!["Effective kirby-ocpp configuration; valid input for --config.".to_owned()];
+        let mut values: Vec<(&str, Value)> = Vec::new();
+        if let Some(url) = &self.url {
+            let shown = strip_url_password(url);
+            if shown != *url {
+                comments.push(
+                    "The URL password is not printed; pass the URL through --url or OCPP_URL."
+                        .to_owned(),
+                );
+            }
+            values.push(("url", Value::Text(shown)));
+        }
+        values.push(("ws_subprotocol", text(&self.ws_subprotocol)));
+        values.push(("ws_ping", int(u64::from(self.ws_ping))));
+        values.push(("call_timeout_ms", int(self.call_timeout_ms)));
+        values.push(("id", text(&self.id)));
+        values.push(("vendor", text(&self.vendor)));
+        values.push(("model", text(&self.model)));
+        if let Some(serial) = &self.serial {
+            values.push(("serial", text(serial)));
+        }
+        if let Some(version) = &self.firmware_version {
+            values.push(("firmware_version", text(version)));
+        }
+        values.push(("connector", int(u64::from(self.connector))));
+        values.push(("connectors", int(u64::from(self.connectors))));
+        values.push(("heartbeat", int(u64::from(self.heartbeat))));
+        values.push(("nominal_power_w", int(u64::from(self.nominal_power_w))));
+        values.push(("voltage_v", int(u64::from(self.voltage_v))));
+        values.push(("phases", int(u64::from(self.phases))));
+        values.push(("no_persist", Value::Bool(self.no_persist)));
+        if let Some(dir) = &self.state_dir {
+            values.push(("state_dir", path(dir)));
+        }
+        for (key, file) in [
+            ("tls_ca", &self.tls_ca),
+            ("tls_cert", &self.tls_cert),
+            ("tls_key", &self.tls_key),
+        ] {
+            if let Some(file) = file {
+                values.push((key, path(file)));
+            }
+        }
+        if let Some(name) = &self.tls_server_name {
+            values.push(("tls_server_name", text(name)));
+        }
+        values.push(("tls_skip_verify", Value::Bool(self.tls_skip_verify)));
+        values.push((
+            "additional_root_certificate_check",
+            Value::Bool(self.additional_root_certificate_check),
+        ));
+        values.push((
+            "security_profile_fallback",
+            Value::Bool(self.security_profile_fallback),
+        ));
+        values.push(("reconnect", Value::Bool(self.reconnect)));
+        values.push(("no_reconnect", Value::Bool(self.no_reconnect)));
+        values.push(("reconnect_initial_ms", int(self.reconnect_initial_ms)));
+        values.push(("reconnect_max_ms", int(self.reconnect_max_ms)));
+        values.push((
+            "reconnect_max_attempts",
+            int(u64::from(self.reconnect_max_attempts)),
+        ));
+        values.push(("count", int(u64::from(self.count))));
+        if let Some(template) = &self.id_template {
+            values.push(("id_template", text(template)));
+        }
+        values.push(("first_index", int(u64::from(self.first_index))));
+        values.push(("stagger_ms", int(self.stagger_ms)));
+        values.push((
+            "rule",
+            Value::List(self.rule.iter().map(ToString::to_string).collect()),
+        ));
+        values.push(("show_secrets", Value::Bool(self.show_secrets)));
+        values.push(("no_tui", Value::Bool(self.no_tui)));
+        values.push(("json", Value::Bool(self.json)));
+        if let Some(file) = &self.log_file {
+            values.push(("log_file", path(file)));
+        }
+        values.push(("verbose", Value::Bool(self.verbose)));
+        values.push(("quiet", Value::Bool(self.quiet)));
+        let color = self
+            .color
+            .to_possible_value()
+            .map_or_else(|| "auto".to_owned(), |value| value.get_name().to_owned());
+        values.push(("color", text(&color)));
+        render(&SCHEMA, &values, &comments)
     }
 
     /// The fleet this command line describes: the id template (`--id-template`, else

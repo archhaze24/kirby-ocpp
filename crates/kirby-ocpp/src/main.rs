@@ -12,6 +12,7 @@ macro_rules! eprintln {
 mod cli;
 mod fleet;
 mod headless;
+mod settings;
 mod suite;
 
 use std::fmt::Write as _;
@@ -32,7 +33,7 @@ use kirby_ocpp_tui::stdout_pump::print_lossy;
 use kirby_ocpp_tui::{TuiError, TuiOptions};
 use tokio::task::JoinHandle;
 
-use crate::cli::{Cli, Cmd, RunArgs, ScenarioVar, ScenariosCmd, SuiteArgs};
+use crate::cli::{Cli, Cmd, PrintFormat, RunArgs, ScenarioVar, ScenariosCmd, SuiteArgs};
 use crate::headless::{Level, LinkWatch, Sink};
 
 /// Project license line and third-party notices (`--licenses`).
@@ -81,6 +82,7 @@ async fn real_main() -> ExitCode {
         _ => {}
     }
     let (print_config, no_tui, json) = (cli.print_config, cli.no_tui, cli.json);
+    let config_toml = (print_config == Some(PrintFormat::Toml)).then(|| cli.config_toml());
     let spec = cli.fleet_spec();
     let templated = cli.id_template.is_some();
     let log_file = cli.log_file.clone();
@@ -117,7 +119,11 @@ async fn real_main() -> ExitCode {
         return usage_error(&error.to_string());
     }
 
-    if print_config {
+    if let Some(text) = config_toml {
+        print_lossy(&text);
+        return ExitCode::SUCCESS;
+    }
+    if print_config.is_some() {
         // The URL may carry `user:password@`; never print credentials.
         let mut shown = config.clone();
         shown.url = kirby_ocpp_tui::text::redact_url(&shown.url);

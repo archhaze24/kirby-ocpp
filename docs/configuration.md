@@ -2,18 +2,18 @@
 
 Every command-line flag and environment variable of `kirby-ocpp` and `kirby-csms`, with defaults, ranges, exit codes and the files they touch. The tables follow `--help` of the same version; if they ever disagree, `--help` and `cli.rs` are right and this page is a bug (see [Development](development.md#keeping-docs-in-step-with-code)).
 
-Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#kirby-ocpp) · [Subcommands](#kirby-ocpp-subcommands) · [Id templates](#id-templates) · [Response rules](#response-rules---rule) · [State directory](#state-directory-and-files) · [kirby-csms](#kirby-csms) · [Exit codes](#exit-codes) · [Related pages](#related-pages)
+Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#kirby-ocpp) · [Subcommands](#kirby-ocpp-subcommands) · [Configuration file](#configuration-file) · [Id templates](#id-templates) · [Response rules](#response-rules---rule) · [State directory](#state-directory-and-files) · [kirby-csms](#kirby-csms) · [Exit codes](#exit-codes) · [Related pages](#related-pages)
 
 ## Precedence and booleans
 
-* Order: command-line flag, then environment variable, then built-in default. Both binaries use `clap` with `env =`.
+* Order: command-line flag, then environment variable, then [configuration file](#configuration-file) (`--config`), then built-in default. Both binaries use `clap` with `env =`.
 * Boolean values (env vars and flags that take `<BOOL>`) accept `true/false/t/f/yes/no/y/n/on/off/1/0`, case-insensitive. Anything else is a usage error (exit 2). An empty variable counts as unset.
 * Pure switches (`--no-persist`, `--tls-skip-verify`, `--show-secrets`, `--json`, `--no-tui`, ...) are set by the flag or by a true value in their variable.
 * Numeric options reject out-of-range values with exit 2 (ranges below). Text options reject empty values.
 
 ## kirby-ocpp
 
-`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help` and `suite --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), and `version --help` shows only `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Output and Scenarios; the tables below use a similar grouping (the headings differ in places).
+`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help` and `suite --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), and `version --help` shows only `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Configuration, Output and Scenarios; the tables below use a similar grouping (the headings differ in places).
 
 ### Station and connection
 
@@ -81,7 +81,7 @@ Profiles and certificates are explained in [Security](security.md).
 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
-| `--print-config` | | | Print the effective configuration as JSON and exit. With `--count` above 1 it prints `{"fleet": {...}, "config": {...}}`, `config` being the first station |
+| `--print-config[=<FORMAT>]` | | | Print the effective configuration and exit without connecting. Without a value or with `=json`: JSON; with `--count` above 1 it prints `{"fleet": {...}, "config": {...}}`, `config` being the first station. With `=toml`: a configuration file that is valid input for `--config` (see [Configuration file](#configuration-file)); secrets are never printed. `FORMAT` is `json` or `toml`, and the value needs `=` |
 | `--no-tui` | | | Never start the terminal UI; log to stdout (automatic when stdout is not a terminal) |
 | `--json` | | | One JSON object per line (events and the `run` report); never opens the UI. Never colored |
 | `-v, --verbose` | | off | `run` and `suite` also print the event and frame lines (see [Output levels](#output-levels)); excludes `--quiet` |
@@ -90,6 +90,13 @@ Profiles and certificates are explained in [Security](security.md).
 | `--log-file <PATH>` | | none | Also append the event log to this file, with the UI too. A new file is created `0600` on unix (frames hold idTags); an existing file keeps its mode. A helper thread writes it; lines that cannot be written in time are dropped and a `note` line reports the count |
 | `--licenses` | | | Print third-party license notices and exit |
 | `-V, --version`, `-h, --help` | | | `--version` prints one line; `kirby-ocpp version` prints the build details |
+
+### Configuration
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `--config <FILE>` | `KIRBY_OCPP_CONFIG` | none | Read settings from a TOML [configuration file](#configuration-file). Flags and environment variables win over the file; the file wins over defaults |
+| `--profile <NAME>` | `KIRBY_OCPP_PROFILE` | none | Overlay the `[profile.NAME]` tables of the configuration file on its top-level values; needs `--config` |
 
 ### Output levels
 
@@ -150,6 +157,101 @@ Exit codes: [Exit codes](#kirby-ocpp-suite). Details: [Scenarios](scenarios.md#s
 * a path is one of the scenario files being run (it would be overwritten).
 
 Each file is written to a temporary file in the same directory and renamed over the target, so a reader never sees a half-written report. An existing file keeps its permissions. A write that fails after the run (a full disk) still exits 1 with `cannot write the report`.
+
+## Configuration file
+
+`kirby-ocpp --config FILE` (or `KIRBY_OCPP_CONFIG`) reads settings from a TOML file, so a test setup lives in one versionable file instead of a long command line. `--profile NAME` (or `KIRBY_OCPP_PROFILE`) picks a named variant inside the file. Both are global flags: they work for the plain station and for `run` and `suite`. `version`, `completions` and `scenarios` never read the file.
+
+### Precedence
+
+For every setting: command-line flag, then environment variable, then the selected profile, then the top level of the file, then the built-in default. A flag or variable that is set always wins, also over a file value that is stricter or looser. A list setting (`rule`) is replaced as a whole: a `--rule` flag or `KIRBY_OCPP_RULES` discards the `rule` list of the file, and a `rule` list of the profile discards the one of the top level. `--no-reconnect`, `--verbose` and `--quiet` keep their exclusion rules: a file value is dropped when the flag or variable that excludes it is set.
+
+### Format
+
+* TOML, at most 1 MiB. A file that cannot be read, is too large, is not valid TOML or breaks any rule below exits 2 with a message that names the file and, where it applies, the key path (`connection.url`, `profile.lab.tls.tls_ca`).
+* Top-level `schema = 1` is optional; no other value is accepted. Top-level `protocol = "ocpp1.6"` is optional; no other value is accepted. The name `protocol` is reserved for the OCPP version of the file; synonyms such as `ocpp_version` are rejected as unknown keys. Both keys are accepted only at the top level.
+* Settings sit in tables. The tables match the headings of `kirby-ocpp --help`, in lower case: `[connection]`, `[identity]`, `[station]`, `[tls]`, `[reconnect]`, `[fleet]`, `[faults]` and `[output]`.
+* The key of a setting is the long flag name with `-` replaced by `_`: `--tls-ca` is `tls_ca`, `--reconnect-max-ms` is `reconnect_max_ms`. The key keeps its table even when the table name repeats a prefix (`[tls]` holds `tls_ca`). Values have the type of the flag: text, integer, boolean (`true` or `false`), or an array of text for `rule`. Text values are not trimmed or parsed any differently from the same flag; a value that the flag would refuse (out of range, empty, wrong form) is refused with the same message.
+* Unknown tables and unknown keys are errors, never ignored. A key in the wrong table is an unknown key.
+* Settings that exist for one OCPP version only belong to a version table below the section, such as `[station.v16]`. No setting needs one today; the table name is reserved and holds no keys yet.
+* Not file keys: `--config`, `--profile`, `--print-config`, `--licenses` and the arguments of `run`, `suite` and `scenarios` (`--scenario`, `--report`, `--junit`, `--var`, ...). They describe one invocation, not a station.
+* Relative paths in the file (`tls_ca`, `tls_cert`, `tls_key`, `state_dir`, `log_file`) resolve against the directory of the configuration file, not against the working directory. Paths given by flag or variable keep resolving against the working directory.
+
+| Table | Keys |
+| --- | --- |
+| `[connection]` | `url`, `ws_subprotocol`, `ws_ping`, `call_timeout_ms` |
+| `[identity]` | `id`, `vendor`, `model`, `serial`, `firmware_version` |
+| `[station]` | `connector`, `connectors`, `heartbeat`, `nominal_power_w`, `voltage_v`, `phases`, `no_persist`, `state_dir` |
+| `[tls]` | `tls_ca`, `tls_cert`, `tls_key`, `tls_server_name`, `tls_skip_verify`, `additional_root_certificate_check`, `security_profile_fallback` |
+| `[reconnect]` | `reconnect`, `no_reconnect`, `reconnect_initial_ms`, `reconnect_max_ms`, `reconnect_max_attempts` |
+| `[fleet]` | `count`, `id_template`, `first_index`, `stagger_ms` |
+| `[faults]` | `rule` (array of `ACTION=BEHAVIOR[*COUNT]` strings, see [Response rules](#response-rules---rule)) |
+| `[output]` | `show_secrets`, `no_tui`, `json`, `log_file`, `verbose`, `quiet`, `color` |
+
+The meaning, default and range of each key are those of the flag with the same name in the tables above. Pure switches (`tls_skip_verify`, `no_persist`, `show_secrets`, ...) take `true` or `false`; `false` leaves the switch off.
+
+### Profiles
+
+`[profile.NAME]` tables hold the same tables as the top level (`[profile.NAME.connection]`, `[profile.NAME.tls]`, ...). A profile has no `schema`, `protocol` or nested `profile`. Without `--profile` only the top level applies. With `--profile NAME` every key of the profile replaces the key of the top level; keys the profile does not set keep the top-level value. All profiles are checked on every load, not only the selected one. An unknown name exits 2 and lists the profiles the file defines. `--profile` without `--config` exits 2.
+
+### Secrets
+
+A configuration file never carries a secret. A key that would hold one is a configuration error that names the key and the allowed alternatives (a `*_file` key naming a file with the secret, or the environment variable). The only such value of `kirby-ocpp` is the password in the URL: a `url` such as `ws://user:password@host/path` is rejected in the file, and the message does not repeat the password. Pass that URL with `--url` or `OCPP_URL`. The `AuthorizationKey` of a station is set by the CSMS and lives in the state directory, not in the configuration. Certificate and key settings (`tls_ca`, `tls_cert`, `tls_key`) are paths to files, which is allowed.
+
+`--print-config=toml` omits the password of a URL and never reads or prints the content of the files that paths point to.
+
+### `--print-config=toml`
+
+Prints the effective configuration (flags, environment, file and defaults merged, the selected profile applied, no `[profile]` tables) as a configuration file and exits 0 without connecting. Settings without a value (`serial`, `state_dir`, ...) are left out. Paths are printed absolute. The output is valid input for `--config`, and printing it again gives the same text:
+
+```bash
+kirby-ocpp --config lab.toml --profile staging --print-config=toml > effective.toml
+kirby-ocpp --config effective.toml --print-config=toml | diff - effective.toml
+```
+
+A fleet prints its settings in `[fleet]`. The JSON form (`--print-config` without a value, or `=json`) keeps its shape and reflects the file and the profile like any other command.
+
+### Example
+
+```toml
+schema = 1
+protocol = "ocpp1.6"
+
+[connection]
+url = "ws://localhost:9000/ocpp"
+call_timeout_ms = 15000
+
+[identity]
+id = "CP-001"
+vendor = "Acme"
+model = "AC-22"
+
+[station]
+connectors = 2
+state_dir = "state"            # relative to the directory of this file
+
+[reconnect]
+reconnect_max_attempts = 5
+
+[fleet]
+count = 10
+id_template = "CP-{n:03}"
+stagger_ms = 200
+
+[faults]
+rule = ["Reset=reject", "GetConfiguration=delay:2000"]
+
+[output]
+no_tui = true
+
+[profile.staging.connection]
+url = "wss://staging.example/ocpp"
+
+[profile.staging.tls]
+tls_ca = "certs/staging-ca.pem"
+```
+
+`kirby-ocpp --config lab.toml` runs the top level; `kirby-ocpp --config lab.toml --profile staging` connects to the staging URL with its CA, everything else unchanged; `--count 3` on the command line wins over `count = 10`.
 
 ## Id templates
 
@@ -253,9 +355,9 @@ No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no termi
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Normal shutdown (quit in the UI, SIGINT or SIGTERM in headless mode). `--print-config`, `--licenses`, `version`, `completions` and `scenarios list|show` also exit 0 |
+| 0 | Normal shutdown (quit in the UI, SIGINT or SIGTERM in headless mode). `--print-config` (either format), `--licenses`, `version`, `completions` and `scenarios list|show` also exit 0 |
 | 1 | Headless only: the connection was lost for good (`--no-reconnect`, or `--reconnect-max-attempts` used up). The process prints `reconnect stopped (...)` with the last connect error and a hint. A fleet exits 1 when every station gave up. `run` and `suite` also exit 1 with `connection lost: ...` when that happens while a scenario is running. The UI keeps running instead |
-| 2 | Usage or configuration error |
+| 2 | Usage or configuration error, including a configuration file that cannot be read or breaks a rule (the message names the file and the key), an unknown `--profile` and `--profile` without `--config` |
 
 ### kirby-ocpp run
 

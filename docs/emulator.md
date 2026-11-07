@@ -12,7 +12,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp --no-tui --json       # headless, JSON
 kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session
 ```
 
-`--url` (or `OCPP_URL`) is the only required option (without it the error shows this example and suggests `kirby-csms --listen 127.0.0.1:9000` as a local peer); the station id defaults to `CP-001`. Precedence is flag, then environment variable, then default. Booleans accept `true/false/t/f/yes/no/y/n/on/off/1/0`, case-insensitive; anything else is a usage error (exit 2). The full flag and environment table is in [configuration.md](configuration.md); `kirby-ocpp --help` always matches the binary. `--print-config` prints the effective configuration as JSON and exits (URL credentials are redacted).
+`--url` (or `OCPP_URL`) is the only required option (without it the error shows this example and suggests `kirby-csms --listen 127.0.0.1:9000` as a local peer); the station id defaults to `CP-001`. Precedence is flag, then environment variable, then default. Booleans accept `true/false/t/f/yes/no/y/n/on/off/1/0`, case-insensitive; anything else is a usage error (exit 2). The full flag and environment table is in [configuration.md](configuration.md); `kirby-ocpp --help` always matches the binary. `--print-config` prints the effective configuration as JSON and exits (URL credentials are redacted); `--print-config=toml` prints it as a configuration file. Settings can also come from a TOML file (`--config`, optionally `--profile`): see [Configuration file](#configuration-file).
 
 The station connects at startup in every mode (`--print-config`, `version`, `completions` and `scenarios` exit before connecting). If the first connect fails, the error is printed and the reconnect loop keeps trying (backoff `--reconnect-initial-ms` to `--reconnect-max-ms`). In headless mode, `run` and `suite` the process exits with code 1 once the loop ends for good: with `--no-reconnect`, or when `--reconnect-max-attempts` is used up. See [Connection errors](#connection-errors).
 
@@ -211,6 +211,30 @@ The UI shows a selector row on top (`1 CP-001+* 2 CP-002- ...`: index, id, conne
 Selector keys work in normal mode only (inside a dialog they are plain input). `Alt` combinations need "Option as Meta" in macOS Terminal.
 
 Exit codes in fleet mode are the same as for a single station: see [configuration.md](configuration.md#exit-codes).
+
+## Configuration file
+
+`--config FILE` (or `KIRBY_OCPP_CONFIG`) reads a TOML file with the same settings as the flags, and `--profile NAME` (or `KIRBY_OCPP_PROFILE`) applies one of its `[profile.NAME]` variants. Flags and environment variables win over the file; the file wins over the defaults.
+
+```toml
+[connection]
+url = "ws://localhost:9000/ocpp"
+
+[fleet]
+count = 5
+id_template = "CP-{n:03}"
+
+[profile.staging.connection]
+url = "wss://staging.example/ocpp"
+```
+
+```bash
+kirby-ocpp --config lab.toml --no-tui                      # five stations against the local CSMS
+kirby-ocpp --config lab.toml --profile staging --count 1   # one station, staging URL
+kirby-ocpp --config lab.toml --print-config=toml           # the merged result, as a file
+```
+
+Relative paths in the file resolve against the directory of the file. A password never goes into the file; unknown keys are errors. Format, tables, key names and profiles: [configuration.md](configuration.md#configuration-file).
 
 ## Response rules
 

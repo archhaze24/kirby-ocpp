@@ -99,7 +99,8 @@ Start from the table in [Architecture](architecture.md#where-each-concern-lives)
 2. Apply it in `main.rs` / the config builder (`StationConfig` validation in `kirby-ocpp-core/src/config.rs` or `CsmsConfig`).
 3. Env names: emulator `OCPP_*` for connection options and `KIRBY_OCPP_*` for tool options; CSMS always `KIRBY_CSMS_*`.
 4. Add a CLI test that spawns the binary: default, env, flag over env, invalid value (exit 2).
-5. Update [Configuration](configuration.md), the README options table if the flag is there, and CHANGELOG.
+5. A station flag also needs a configuration file key: add it to `SCHEMA` in `crates/kirby-ocpp/src/settings.rs` (table of its `--help` heading, name = long flag with `_`) and to `Cli::config_toml`; the key must hold a value the flag accepts, and a flag that carries a secret takes a `*_file` variant instead of an inline key.
+6. Update [Configuration](configuration.md) (flag tables and the key table of [Configuration file](configuration.md#configuration-file)), the README options table if the flag is there, and CHANGELOG.
 
 ## Keeping docs in step with code
 

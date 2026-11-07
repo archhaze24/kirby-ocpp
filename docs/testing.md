@@ -27,7 +27,7 @@ Contents: [Quick commands](#quick-commands) · [Layout](#layout) · [Mock CSMS](
 | `kirby-ocpp-core` | `tests/it/`: `station_*.rs` (lifecycle, transactions, power, sampling, security, TLS, persistence, response rules, ...), `ws_*.rs` (connection, calls, TLS), `scenario_runner.rs`, `fleet.rs` | `station_support/`, `ws_support/` |
 | `kirby-csms-core` | `tests/it/`: `engine.rs`, `security.rs`, `state.rs`, `redaction.rs` | `common/` where present |
 | `kirby-ocpp-tui` | `tests/it/`: `model_flow.rs`, `fleet_flow.rs` | |
-| `kirby-ocpp` | `tests/it/`: `cli.rs`, `fleet.rs`, `headless.rs`, `hardening.rs` | |
+| `kirby-ocpp` | `tests/it/`: `cli.rs`, `config_file.rs`, `fleet.rs`, `headless.rs`, `hardening.rs` | |
 | `kirby-csms` | `tests/cli.rs` | |
 | `kirby-ocpp-testkit` | `tests/it/` (tests of the mock itself) | |
 

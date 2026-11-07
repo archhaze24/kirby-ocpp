@@ -35,6 +35,7 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 | `scenario/` | TOML scenario model (`model.rs`), runner (`runner.rs`), variables and capture (`vars.rs`, shared with the `kirby-csms` scripts), JUnit renderer (`junit.rs`), nine built-ins (`builtin.rs`, TOML in `crates/kirby-ocpp-core/scenarios/`) |
 | `fleet.rs` | `Fleet`: N independent stations, id templates, merged event stream |
 | `store.rs` | `StationStore`: atomic versioned JSON state |
+| `config_file.rs` | Generic TOML configuration file loader: schema of tables and keys, unknown-key rejection, profiles, relative path resolution, secret-key refusal, rendering (no clap; the binaries supply their schema) |
 | `config.rs`, `ids.rs`, `clock.rs`, `error.rs` | `StationConfig` + validation, id newtypes, `Clock` (`SystemClock`, `ManualClock`), error types |
 
 ### Binaries

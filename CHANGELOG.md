@@ -7,6 +7,11 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- `kirby-ocpp --config FILE` (`KIRBY_OCPP_CONFIG`) reads settings from a TOML file and `--profile NAME` (`KIRBY_OCPP_PROFILE`) applies a `[profile.NAME]` variant. Every flag except the per-invocation ones has a key (the long flag name with `_`), grouped in tables that match the `--help` headings. Precedence: flag, environment variable, profile, file, default. Unknown keys and wrong types are errors that name the file and the key path (exit 2); relative paths resolve against the directory of the file; a password never goes into the file. See [Configuration file](docs/configuration.md#configuration-file).
+- `--print-config=toml` prints the effective configuration as a file that `--config` accepts (the same text comes back when it is printed again); secrets are never printed. `--print-config` alone still prints JSON.
+
 ## [0.5.0] - 2026-11-07
 
 **The polish release: documentation as a first-class deliverable, a stronger scenario engine, a local HTTP control API for `kirby-csms`, prepared distribution channels and a long list of hardening and usability fixes.**

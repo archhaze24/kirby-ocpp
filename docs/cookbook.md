@@ -145,6 +145,43 @@ Expected: `fleet: 20/20 stations PASSED`, exit 0; otherwise `fleet: 19/20 statio
 
 Reference: [Fleet mode](emulator.md#fleet-mode), [Fleet runs](scenarios.md#fleet-runs), [Id templates](configuration.md#id-templates).
 
+## Keep a test setup in a configuration file
+
+Goal: one file that describes the stations of a test setup, with a variant for a single station.
+
+```toml
+# lab.toml
+[connection]
+url = "ws://127.0.0.1:9000/ocpp"
+
+[identity]
+id = "LAB-{n:02}"
+
+[fleet]
+count = 3
+stagger_ms = 50
+
+[output]
+no_tui = true
+
+[profile.single.identity]
+id = "LAB-01"
+
+[profile.single.fleet]
+count = 1
+```
+
+```bash
+kirby-ocpp --config lab.toml run --scenario charge-session -q                  # three stations
+kirby-ocpp --config lab.toml --profile single run --scenario charge-session -q # one station
+kirby-ocpp --config lab.toml --count 2 run --scenario charge-session -q        # the flag wins over the file
+kirby-ocpp --config lab.toml --profile single --print-config=toml              # what would run, as a file
+```
+
+Expected: `fleet: 3/3 stations PASSED`, `PASSED in N ms` and `fleet: 2/2 stations PASSED` for the runs against a local `kirby-csms --listen 127.0.0.1:9000`; the last command prints the merged configuration and exits 0 without connecting. Unknown keys, wrong types and a password in the URL exit 2 with the file and key named. Put the URL password in `OCPP_URL` instead of the file.
+
+Reference: [Configuration file](configuration.md#configuration-file).
+
 ## Script the central system
 
 Goal: drive `kirby-csms` from CI to test charge point firmware, either with a script file or over HTTP.
