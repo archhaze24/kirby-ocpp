@@ -53,7 +53,8 @@ jobs:
         run: |
           kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-1 \
             suite --all-builtins \
-            --timeout 30 --junit junit.xml --report suite.json
+            --timeout 30 --retries 1 --jobs 4 --github-annotations \
+            --junit junit.xml --report suite.json
 
       - name: Stop the central system
         if: always()
@@ -81,8 +82,29 @@ Notes:
 
 * The CSMS prints `listening on ws://127.0.0.1:9000` once it accepts connections; the loop waits for that line instead of sleeping. With `--listen 127.0.0.1:0` the line shows the real port.
 * `suite --all-builtins` runs every built-in except `finish-session`. Add your own scenarios by naming files or a directory (`suite --all-builtins scenarios/`, every `*.toml` directly inside). A step that fails fails the job; the `if: always()` steps still publish what exists.
+* `--github-annotations` prints an `::error` line per failed scenario (shown on the run page and, with `file=`, on the file), `--retries 1` runs a failed scenario once more on a fresh station and reports a pass after a failure as flaky (exit code 0), and `--jobs 4` runs four scenarios at a time (each station gets its own id: `CP-1`, `CP-1-2`, `CP-1-3`, `CP-1-4`). Inside GitHub Actions the suite also appends a Markdown table to the job summary (`$GITHUB_STEP_SUMMARY`); `--summary-md PATH` writes the same table to a file. See [Suite runs](scenarios.md#suite-runs) for the exact rules.
 * The two action steps use `mikepenz/action-junit-report`; any reporter that reads JUnit XML works, for example `dorny/test-reporter` with `reporter: java-junit`. Action names and versions here were current when this page was written; pin the ones you use.
 * A CSMS you test on a network host needs no `kirby-csms` steps: put its URL in `--url` and add `--id`, `--tls-*` or Basic Auth credentials in the URL as needed ([Security](security.md)).
+
+### Select scenarios by tag
+
+Give scenario files a top-level `tags` list and pick them per job:
+
+```toml
+name = "quick-login"
+tags = ["smoke"]
+
+[[steps]]
+action = "heartbeat"
+```
+
+```bash
+# pull requests: the smoke set only; nightly: everything except the slow ones
+kirby-ocpp --url ws://127.0.0.1:9000/ocpp suite scenarios/ --tag smoke
+kirby-ocpp --url ws://127.0.0.1:9000/ocpp suite scenarios/ --skip-tag slow --skip 'wip-*'
+```
+
+`--filter` and `--skip` take globs over the scenario name, `--tag` needs every given tag, `--skip-tag` drops on any. A selection that matches nothing exits 2, so a typo in a tag fails the job instead of passing with no tests.
 
 ## GitLab CI
 
@@ -164,7 +186,8 @@ For a scenario with `status` `error`, print its `error` text instead (`jq -r '.s
 * Wait for readiness, not for time: the `listening on` line for `kirby-csms`, an accepted BootNotification for the station (`run` and `suite` do this for you).
 * Set `--timeout` per scenario high enough for a cold CI machine (for example 30 to 60 seconds). Raise `timeout_ms` of single `wait_for` and `expect_call` steps rather than adding `sleep` steps.
 * Give every scenario a fresh station: `suite` does, and `run` is ephemeral by default (no state file). Do not combine `--persist` with CI runs.
-* Use a fixed station id with `--id` when the CSMS under test has an allow-list.
+* Use a fixed station id with `--id` when the CSMS under test has an allow-list. With `--jobs N` the allow-list also needs `ID-2` to `ID-N`.
+* `--retries` hides nothing: a scenario that passed on a retry is listed under `FLAKY:` in the summary line, in `flaky_names` of the report, as a `::warning` with `--github-annotations` and as `flaky` in the JUnit file. Track that list and fix the scenario rather than raising the retry count.
 * Use `-q` in logs you read often and `-v` when diagnosing; keep `--log-file` on the CSMS side as an artifact.
 * Fix the ports. Use `127.0.0.1` rather than `localhost`, which can resolve to IPv6 first.
 * Start the CSMS per job, not shared between jobs, so state and transaction ids do not leak across runs.

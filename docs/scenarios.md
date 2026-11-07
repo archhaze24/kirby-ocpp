@@ -21,7 +21,7 @@ The allowed top-level keys are `name`, `description`, `vars`, `steps` and three 
 | --- | --- | --- | --- |
 | `ocpp_version` | string | `"1.6"` | Protocol the file is written for. Any other value is a load error (`this build supports OCPP 1.6 only`, naming the value). |
 | `schema` | integer | `1` | Version of the file format. Any other value is a load error (`unsupported schema N`). |
-| `tags` | array of strings | none | Free-form labels. Each entry must be a string (any other type is a load error); the text is not checked further. They are kept, but nothing filters on them yet. |
+| `tags` | array of strings | none | Free-form labels. Each entry must be a string (any other type is a load error); the text is not checked further. `suite --tag` and `--skip-tag` select on them (exact, case-sensitive match); built-in scenarios have none. |
 
 Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key. The version keys are read and checked before anything else, so a file written for a later version fails with `unsupported schema N` or `this build supports OCPP 1.6 only` even when it also uses keys this build does not know. A value of the wrong type fails with a plain message such as `` `schema` must be an integer``.
 
@@ -297,9 +297,11 @@ Point `--junit` at the path your CI reads test reports from.
 
 ```bash
 kirby-ocpp [station options] suite [SOURCE...] [--all-builtins] [--report suite.json] [--junit junit.xml] [--timeout 60] [--fail-fast] [--var NAME=VALUE]
+  [--filter GLOB] [--skip GLOB] [--tag TAG] [--skip-tag TAG] [--retries N] [--jobs N]
+  [--github-annotations] [--summary-md summary.md]
 ```
 
-`suite` runs many scenarios one after another, each on a fresh station (see [Suite mode](emulator.md#suite-mode)).
+`suite` runs many scenarios, by default one after another, each on a fresh station (see [Suite mode](emulator.md#suite-mode)).
 - SOURCE is a file, a directory (`*.toml` directly inside, sorted by name; an empty directory is a usage error) or a built-in name (an existing path or an argument that looks like a path wins over a built-in of the same name); at least one SOURCE or `--all-builtins` is required.
 - A file named twice, or a file plus its directory, runs once (by canonical path). A `--var` that a scenario does not use is ignored with a `warning:` line on stderr per scenario. `--all-builtins` skips `finish-session`, which needs a running transaction.
 - Scenario names that appear twice get their source appended in the output and the reports (`name (path)`). All scenarios are loaded first: a bad file exits 2 before any connection.
@@ -312,8 +314,58 @@ kirby-ocpp [station options] suite [SOURCE...] [--all-builtins] [--report suite.
 | `--report PATH` | Write the suite summary as JSON |
 | `--junit PATH` | Write one JUnit file with a `<testsuite>` per scenario (skipped scenarios are left out; a scenario whose station never booted is one errored `setup` case) |
 | `--json` | Print events and one `report` line per scenario that ran, then the summary |
+| `--filter GLOB`, `--skip GLOB`, `--tag TAG`, `--skip-tag TAG` | Select scenarios, see [Selecting scenarios](#selecting-scenarios) |
+| `--retries N` | Run a failed scenario again, see [Retries](#retries-and-flaky-scenarios) |
+| `--jobs N` | Run scenarios in parallel, see [Parallel jobs](#parallel-jobs) |
+| `--github-annotations`, `--summary-md PATH` | CI output, see [GitHub annotations and summary](#github-annotations-and-summary) |
 
-Output: `PASS name (1.2 s)`, `FAIL name: first failing step - reason` (or the setup error), `SKIP name`, then `suite: 7/8 scenarios passed, FAILED: a, b` (`, SKIPPED: ...` when some were skipped). The JSON summary (`--report`, and the last line under `--json`) is `{"type":"suite_report","schema":1,"ocpp_version":"1.6","tool_version":"0.5.0","started_at":"...","status":"failed","counts":{"passed":7,"failed":1,"error":0,"skipped":0},"passed":false,"total":8,"passed_count":7,"failed":["a"],"failed_names":["a"],"error_names":[],"skipped":[],"scenarios":[{"name":"a","scenario":"a","status":"failed","ocpp_version":"1.6","source":"a.toml","station":"CP-001","started_at":"...","duration_ms":1200,"report":{...}}],"duration_ms":9000}`. `status` is `passed`, `failed`, `error` (never booted, or cut short; carries `error` instead of `report`) or `skipped`.
+#### Selecting scenarios
+
+The selection applies to the loaded scenarios (every source is loaded and validated first) in this order:
+
+1. `--filter GLOB` (repeatable): keep scenarios whose `name` matches any glob. Without `--filter` everything is kept. `*` stands for any run of characters (also none), `?` for exactly one, everything else matches itself, case-sensitively. The glob is matched against the scenario `name`, not the file name; a glob that contains a comma is one glob (the flag is not comma-separated).
+2. `--skip GLOB` (repeatable): drop scenarios whose name matches any glob.
+3. `--tag TAG` (repeatable): keep scenarios whose top-level `tags` contain every given tag. A scenario without tags never matches a `--tag`.
+4. `--skip-tag TAG` (repeatable): drop scenarios that carry any given tag.
+
+Scenarios left out are not part of the run: they do not appear in the output or the reports, and `total` counts only the selected ones. The order of the remaining scenarios is the order of the sources. A selection that leaves nothing exits 2 with `the selection ... matches none of the N scenarios`; nothing connects. `--fail-fast` and `--var` warnings apply to the selected scenarios.
+
+```bash
+kirby-ocpp --url ws://127.0.0.1:9000/ocpp suite scenarios/ --tag smoke --skip-tag slow --skip 'wip-*'
+```
+
+#### Retries and flaky scenarios
+
+`--retries N` (0 to 10, default 0) runs a scenario that failed, timed out or could not boot again, up to N more times. Every attempt gets a fresh station (so with the same station id); a retry never starts after a signal. The scenario `status` is the status of the last attempt: it is `passed` when a retry passed and `failed` or `error` when every attempt failed. A scenario that passed after at least one failed attempt is flaky; it counts as passed and does not change the exit code, but it is visible:
+
+- Text output: `RETRY name: reason (attempt 1 of 3)` after each failed attempt that is followed by another, `PASS name (1.2 s, flaky: passed on attempt 2)` for the pass, `FAIL name: reason (after 3 attempts)` when the last attempt failed too, and `, FLAKY: a, b` in the summary line.
+- JSON summary: new top-level `retries` (the `--retries` value) and `flaky_names`; every `scenarios` entry gains `attempts` (attempts made, `0` for a skipped scenario), `flaky` (boolean) and `attempt_results` (one `{attempt, status, duration_ms, message}` per attempt, oldest first; `message` only for a failure). `duration_ms`, `started_at` (first attempt) and `report` describe the last attempt only, and `counts` count final statuses.
+- JUnit: with `--retries` above 0 every `<testsuite>` gets the property `attempts`, and `flaky` with value `true` for a flaky pass. Each failed earlier attempt becomes a `<flakyFailure>` (a step failure) or `<flakyError>` (the station never booted) on the test case of its first failed step, or on the first case; when the final attempt failed too, the same data is written as `<rerunFailure>` / `<rerunError>`. These are the Maven Surefire elements, which common CI reporters turn into "flaky" markers. Test case names, `classname` and the counts describe the last attempt, so history by name keeps working.
+- `--github-annotations` prints a `::warning` for a flaky pass.
+
+#### Parallel jobs
+
+`--jobs N` (1 to 16, default 1) runs up to N scenarios at the same time; with fewer scenarios than jobs only that many slots are used. Each scenario still runs on its own station with no state on disk. Slot 1 uses the station id as given, slot 2 the id with `-2` appended, slot 3 `-3`, and so on, so two running stations never share an id and a central system sees distinct charge points (`CP-1`, `CP-1-2`, ...). A central system that allows only listed ids must list them. Scenarios are started in selection order as slots free up.
+
+- Reports and summaries list the scenarios in the order of the selection whatever order they finish in. Only the progress lines (`PASS`, `FAIL`, `RETRY`) appear in completion order; every line is written whole. `-v` event lines of parallel stations interleave line by line.
+- Each scenario keeps its own `--timeout`. `--fail-fast` stops starting new scenarios after the first final failure; scenarios already running finish.
+
+#### GitHub annotations and summary
+
+`--github-annotations` prints one workflow command per failed scenario and one per flaky pass to stdout, after the last scenario finished and before the `suite:` line, in selection order:
+
+```text
+::error file=scenarios/bad.toml,title=bad::authorize - expected Accepted, got Blocked
+::warning file=scenarios/wobbly.toml,title=wobbly::flaky: passed on attempt 2 after a failure (heartbeat - timeout)
+```
+
+`file` is the scenario file (omitted for built-ins), `title` the scenario name and the message the first failing step and its reason (the setup error for a scenario that never booted). `%`, CR and LF are escaped as the workflow command syntax requires, `:` and `,` also in `file` and `title`; control characters and invisible marks in station-controlled text are written as `\u{XXXX}`. The flag is a plain switch instead of a `--format` value because `--format` is reserved for choosing the report format of every command; the workflow commands are extra lines next to the usual output. It cannot be combined with `--json` (exit 2): a JSON stream must stay machine-readable.
+
+`--summary-md PATH` writes a Markdown summary: a headline (`7 of 8 scenarios passed, 1 failed, 1 flaky (9.0 s).`) and a table with scenario, status (`flaky` for a flaky pass), time, attempts and the failure message (clipped to 300 characters; `|`, `<`, `>`, `&` and control characters neutralized). When the environment variable `GITHUB_STEP_SUMMARY` names a file, the same text is also appended to it, with or without the flag, so a plain `suite` step in a workflow adds its table to the job summary. The summary holds names, statuses, durations and failure messages only. `PATH` must not be a scenario, `--report` or `--junit` file (exit 2).
+
+#### Output and exit codes
+
+`PASS name (1.2 s)`, `FAIL name: first failing step - reason` (or the setup error), `SKIP name`, then `suite: 7/8 scenarios passed, FAILED: a, b` (`, SKIPPED: ...` when some were skipped). The JSON summary (`--report`, and the last line under `--json`) is `{"type":"suite_report","schema":1,"ocpp_version":"1.6","tool_version":"0.5.0","started_at":"...","status":"failed","counts":{"passed":7,"failed":1,"error":0,"skipped":0},"passed":false,"total":8,"passed_count":7,"failed":["a"],"failed_names":["a"],"error_names":[],"skipped":[],"scenarios":[{"name":"a","scenario":"a","status":"failed","ocpp_version":"1.6","source":"a.toml","station":"CP-001","started_at":"...","duration_ms":1200,"report":{...}}],"duration_ms":9000}`. `status` is `passed`, `failed`, `error` (never booted, or cut short; carries `error` instead of `report`) or `skipped`.
 
 Exit codes: 0 only if every scenario passes, 1 if any does not, 2 for a usage error. On SIGINT and SIGTERM the running scenario is stopped, the rest are `skipped`, and the reports are written for what finished. The full table is in [configuration.md](configuration.md#kirby-ocpp-suite). More CI recipes: [ci.md](ci.md).
 
@@ -542,7 +594,7 @@ FAILED in 20413 ms
 
 Every report level carries `started_at`, `duration_ms`, `status` and `ocpp_version`. The single run, each suite entry, the fleet report and each station entry also carry `scenario` and `source` (the suite report itself covers many scenarios, so it has neither), plus `station` where one applies. A suite entry keeps `name` as an alias of `scenario`. `ocpp_version` is taken from the run's own report. Entries that never started (`skipped`) have no `started_at`; an entry with `status` `error` has an `error` text instead of a `report`.
 
-The suite report adds `type: "suite_report"`, `counts`, the name lists below and `scenarios` (one entry per scenario with `name`, `scenario`, `status`, `ocpp_version`, `source`, `station`, `started_at`, `duration_ms` and `report`). The fleet report adds `type: "fleet_report"`, `counts`, the name lists below and `stations` (one entry per station with `station`, `schema`, `ocpp_version`, `tool_version`, `scenario`, `source`, `started_at`, `duration_ms`, `status`, `passed`, and `error` when it never booted); its own `scenario`, `source`, `started_at` and `duration_ms` describe the whole run. For a station that never booted, `started_at` is the fleet start and `duration_ms` the fleet duration.
+The suite report adds `type: "suite_report"`, `counts`, the name lists below and `scenarios` (one entry per scenario with `name`, `scenario`, `status`, `ocpp_version`, `source`, `station`, `started_at`, `duration_ms`, `attempts`, `flaky`, `attempt_results` and `report`; see [Retries](#retries-and-flaky-scenarios)). The suite report also carries `retries` and `flaky_names`. The fleet report adds `type: "fleet_report"`, `counts`, the name lists below and `stations` (one entry per station with `station`, `schema`, `ocpp_version`, `tool_version`, `scenario`, `source`, `started_at`, `duration_ms`, `status`, `passed`, and `error` when it never booted); its own `scenario`, `source`, `started_at` and `duration_ms` describe the whole run. For a station that never booted, `started_at` is the fleet start and `duration_ms` the fleet duration.
 
 `counts` always matches the entries: `passed`, `failed` (scenarios or stations that ran and failed), `error` (never booted, or cut short) and `skipped` (not started). The name lists:
 
@@ -552,6 +604,7 @@ The suite report adds `type: "suite_report"`, `counts`, the name lists below and
 | `failed_names` | Only status `failed`; its length is `counts.failed`. |
 | `error_names` | Only status `error`; its length is `counts.error`. |
 | `skipped` | Suite only: names with status `skipped`; its length is `counts.skipped`. |
+| `flaky_names` | Suite only: names with status `passed` that failed at least once before (`--retries`); empty without retries. They are also in `counts.passed`. |
 
 ### JUnit XML (`--junit`)
 
@@ -562,7 +615,7 @@ Naming:
 * `name` of a test case is the step's stable `label`, never its position. Names are unique within a suite: a repeated label gets ` #2`, ` #3` (a number already taken by an explicit label is skipped), and steps in loops already carry their ` [n]` suffix.
 * The 1-based position is a `<property name="index">` of the test case, next to `action`.
 * `classname` is `ocpp1.6.<suite name>`, so a fleet run gives `ocpp1.6.scenario [CP-1]`. It is a grouping label, not a structure to parse: names may contain `.` and `]`, and control characters are replaced by spaces.
-* Each `<testsuite>` has `<properties>` `ocpp_version`, `station` (when known), `tool_version` and `source` (when known).
+* Each `<testsuite>` has `<properties>` `ocpp_version`, `station` (when known), `tool_version` and `source` (when known). A suite run with `--retries` above 0 adds `attempts` and, for a flaky pass, `flaky`; see [Retries](#retries-and-flaky-scenarios) for the `<flakyFailure>` and `<rerunFailure>` elements.
 * The text of a `<failure>` holds the reason, then `action:`, `params:`, `expected:` and `actual:` lines where the report has them (params and expected are clipped).
 
 ```xml
@@ -610,7 +663,7 @@ These are public contracts and follow Semantic Versioning:
 * The scenario and script file format. New optional keys and actions are minor changes. Removing or renaming a key, or changing what a valid file means, is a major change. The `schema` key names the format version; a build refuses a schema it does not know instead of guessing.
 * The JSON report. Fields are added in minor releases and never renamed or removed within one `schema`. Consumers must ignore fields they do not know. A breaking change increments `schema`.
 * The JUnit layout (suite and case names, properties) is part of the report contract. Test case names are stable labels so that CI history can follow a test across runs.
-* Flag names. A flag is not renamed within a major version. `--ocpp-version`, `--protocol` and `--format` are reserved for future use.
+* Flag names. A flag is not renamed within a major version. `--ocpp-version`, `--protocol` and `--format` are reserved for future use; `suite` therefore selects GitHub output with the plain switch `--github-annotations`.
 
 ## Related pages
 

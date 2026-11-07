@@ -2,7 +2,7 @@
 
 Every command-line flag and environment variable of `kirby-ocpp` and `kirby-csms`, with defaults, ranges, exit codes and the files they touch. The tables follow `--help` of the same version; if they ever disagree, `--help` and `cli.rs` are right and this page is a bug (see [Development](development.md#keeping-docs-in-step-with-code)).
 
-Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#kirby-ocpp) · [Subcommands](#kirby-ocpp-subcommands) · [Configuration file](#configuration-file) · [Id templates](#id-templates) · [Response rules](#response-rules---rule) · [State directory](#state-directory-and-files) · [kirby-csms](#kirby-csms) · [Exit codes](#exit-codes) · [Related pages](#related-pages)
+Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#kirby-ocpp) · [Subcommands](#kirby-ocpp-subcommands) · [Configuration file](#configuration-file) · [kirby-csms configuration file](#kirby-csms-configuration-file) · [Id templates](#id-templates) · [Response rules](#response-rules---rule) · [State directory](#state-directory-and-files) · [kirby-csms](#kirby-csms) · [Exit codes](#exit-codes) · [Related pages](#related-pages)
 
 ## Precedence and booleans
 
@@ -137,8 +137,16 @@ Plain headless mode (no subcommand) prints every event at any level. `--log-file
 | `--timeout <SECONDS>` | | `60` | Per scenario, connecting included; 1 to 86400 |
 | `--fail-fast` | | off | Stop after the first failed scenario; the rest are reported as SKIP |
 | `--var <NAME=VALUE>` | | none | Scenario variable for every scenario (repeatable), as for `run` |
+| `--filter <GLOB>` | | none | Run only scenarios whose name matches the glob (`*` any run of characters, `?` one character; repeatable, any match selects) |
+| `--skip <GLOB>` | | none | Leave out scenarios whose name matches the glob (repeatable); applied after `--filter` |
+| `--tag <TAG>` | | none | Run only scenarios that carry the tag (repeatable: a scenario needs every given tag) |
+| `--skip-tag <TAG>` | | none | Leave out scenarios that carry the tag (repeatable: any given tag leaves a scenario out) |
+| `--retries <N>` | | `0` | Run a failed scenario again up to N times, each on a fresh station; 0 to 10. A pass after a failure is reported as flaky and counts as passed |
+| `--jobs <N>` | | `1` | Run up to N scenarios at the same time; 1 to 16. Slot 2 and up append `-2`, `-3`, ... to the station id |
+| `--github-annotations` | | off | Print a GitHub Actions `::error` (failed) or `::warning` (flaky) workflow command per scenario; exit 2 together with `--json` |
+| `--summary-md <PATH>` | | none | Write a Markdown summary table; the table is also appended to the file named by `$GITHUB_STEP_SUMMARY` when that variable is set, with or without the flag |
 
-Exit codes: [Exit codes](#kirby-ocpp-suite). Details: [Scenarios](scenarios.md#suite-runs).
+None of the `suite` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-suite). Details: [Scenarios](scenarios.md#suite-runs).
 
 `kirby-ocpp scenarios list` lists the built-in scenarios; `kirby-ocpp scenarios show <NAME>` prints one as TOML. Scenario format: [Scenarios](scenarios.md).
 
@@ -310,7 +318,8 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--security-profile <0..3>` | `KIRBY_CSMS_SECURITY_PROFILE` | `0` | `0` none, `1` Basic Auth, `2` Basic Auth plus TLS, `3` TLS with client certificates (CN must equal the station id) |
 | `--auth-key <ID=KEY>` | `KIRBY_CSMS_AUTH_KEY` (`ID=KEY;ID=KEY`) | none | Basic Auth key of one station (repeatable). The environment variable is used only when no `--auth-key` is given. The flag value is visible in `ps`; prefer the variable or `--auth-keys-file` |
 | `--auth-keys-file <FILE>` | `KIRBY_CSMS_AUTH_KEYS_FILE` | none | Lines `ID=KEY`; blank lines and `#` comments are skipped. A leading UTF-8 BOM is ignored, leading spaces and the line end are dropped, trailing spaces belong to the key. At most 1 MiB. A startup warning is printed when the file is readable by group or others (Unix) |
-| `--default-auth-key <KEY>` | `KIRBY_CSMS_DEFAULT_AUTH_KEY` | none | Key for stations without an `ID=KEY` entry |
+| `--default-auth-key <KEY>` | `KIRBY_CSMS_DEFAULT_AUTH_KEY` | none | Key for stations without an `ID=KEY` entry; excludes `--default-auth-key-file` |
+| `--default-auth-key-file <FILE>` | `KIRBY_CSMS_DEFAULT_AUTH_KEY_FILE` | none | File holding the default key (read once, trailing line end dropped, must not be empty, at most 64 KiB; a warning on unix when group/world readable); excludes `--default-auth-key` |
 | `--subprotocol <POLICY>` | `KIRBY_CSMS_SUBPROTOCOL` | `require:ocpp1.6` | `require:NAME` (refuse clients that do not offer it), `select:NAME` (always select it), `omit` (select nothing), `reject` (refuse every upgrade) |
 | `--show-secrets` | `KIRBY_CSMS_SHOW_SECRETS` | off | Keep `AuthorizationKey` values in frame logs and history; by default replaced by `***` |
 
@@ -343,7 +352,132 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--licenses` | | | Print third-party license notices and exit |
 | `-V, --version`, `-h, --help` | | | |
 
+### Configuration
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `--config <FILE>` | `KIRBY_CSMS_CONFIG` | none | Read settings from a TOML [configuration file](#kirby-csms-configuration-file). Flags and environment variables win over the file; the file wins over defaults |
+| `--profile <NAME>` | `KIRBY_CSMS_PROFILE` | none | Overlay the `[profile.NAME]` tables of the configuration file on its top-level values; needs `--config` |
+| `--print-config[=<FORMAT>]` | | off | Print the effective configuration and exit 0 without binding a port. `json` (the default form) or `toml`, a file that `--config` accepts. Inline secrets are never printed and no file the settings point to is read; excludes `--check-config` |
+| `--check-config` | | off | Validate the configuration file, the selected profile and every flag, including the key files, the certificates and the script, then print one `OK:` line and exit 0, or print the error and exit 2. Never binds a port |
+
 CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md). The HTTP API: [api.md](api.md).
+
+## kirby-csms configuration file
+
+`kirby-csms --config FILE` (or `KIRBY_CSMS_CONFIG`) reads settings from a TOML file, so a server setup with its stations and response rules lives in one versionable file. `--profile NAME` (or `KIRBY_CSMS_PROFILE`) picks a named variant inside the file. The format follows the [emulator's configuration file](#configuration-file): the same file rules, `schema`, `protocol`, profiles, error style and exit codes.
+
+### Precedence and format
+
+For every setting: command-line flag, then environment variable, then the selected profile, then the top level of the file, then the built-in default. A flag or variable that is set always wins. `api_token_file` and `default_auth_key_file` of the file are dropped when `--api-token` / `KIRBY_CSMS_API_TOKEN` or `--default-auth-key` / `KIRBY_CSMS_DEFAULT_AUTH_KEY` is set, so the file never turns a set value into a conflict. A flag may be satisfied by the file: `--api-token-file` with `api_listen` in the file, or `--tls-cert` with `tls_key` in the file, is valid.
+
+* TOML, at most 1 MiB; a problem exits 2 with a message that names the file and the key path (`behavior.history_cap`, `profile.lab.rule[1].behavior`, `station[0].id`).
+* Top-level `schema = 1` and `protocol = "ocpp1.6"` are optional; no other value is accepted. Both are valid only at the top level.
+* Settings sit in tables named after the groups of `kirby-csms --help`, in lower case. The key of a setting is the long flag name with `-` replaced by `_`. Values have the type of the flag (text, integer, boolean); a value the flag would refuse is refused with the same message, and the message points at the key.
+* Unknown tables and keys are errors. A key in the wrong table is an unknown key.
+* Relative paths in the file resolve against the directory of the file; paths given by flag or variable resolve against the working directory.
+* Settings that exist for one OCPP version only belong to a version table below the section (reserved, none yet) or to a block with its own `protocol` key.
+* Not file keys: `--config`, `--profile`, `--print-config`, `--check-config`, `--licenses` and the script arguments `--script`, `--report`, `--junit`, `--var`, `--timeout`. They describe one invocation, not a server.
+
+| Table | Keys |
+| --- | --- |
+| `[listener]` | `listen`, `subprotocol` |
+| `[api]` | `api_listen`, `api_token_file` |
+| `[tls]` | `tls_cert`, `tls_key`, `tls_client_ca` |
+| `[security]` | `security_profile`, `auth_keys_file`, `default_auth_key_file`, `show_secrets` |
+| `[behavior]` | `transaction_ids`, `heartbeat_interval`, `validate_inbound`, `ping_interval`, `pong_timeout`, `call_timeout`, `history_cap`, `transaction_history_cap` |
+| `[output]` | `json`, `log_file`, `stdin`, `no_tui` |
+
+### Secrets
+
+A configuration file never carries a secret. The keys `api_token`, `auth_key` and `default_auth_key` exist only to refuse an inline value: the error names the key and the alternative, and never repeats the value.
+
+| Secret | In the file | Elsewhere |
+| --- | --- | --- |
+| API bearer token | `api_token_file` | `--api-token`, `KIRBY_CSMS_API_TOKEN`, `--api-token-file` |
+| Station keys | `auth_keys_file` (lines `ID=KEY`), or `auth_key_file` of a `[[station]]` block (the file holds one key) | `--auth-key`, `KIRBY_CSMS_AUTH_KEY` |
+| Default key | `default_auth_key_file` (the file holds one key) | `--default-auth-key`, `KIRBY_CSMS_DEFAULT_AUTH_KEY`, `--default-auth-key-file` |
+
+Key files are read at start (and by `--check-config`), never by `--print-config`. Keep them private: a startup warning appears when a key file is readable by group or others (Unix). `--print-config` leaves inline secrets out and says so in a comment; it prints the paths of the key files.
+
+### Blocks
+
+`[[station]]` and `[[rule]]` are arrays of tables for settings that belong to one station or one rule. Every block has the optional key `protocol = "ocpp1.6"` (the only accepted value), so a later release can scope a block to one OCPP version. An array in `[[profile.NAME.station]]` or `[[profile.NAME.rule]]` replaces the array of the top level as a whole when the profile is selected. Unknown keys are errors with the path of the element (`station[0].role`).
+
+`[[station]]` declares one station:
+
+| Key | Meaning |
+| --- | --- |
+| `id` | Required. The station id, exactly as it appears in the URL; patterns are not supported. Each id appears once |
+| `protocol` | Optional, `"ocpp1.6"` |
+| `auth_key_file` | Optional. File holding the Basic Auth key of the station (a trailing line end is dropped). Works like `--auth-key ID=KEY`; entries given with `--auth-key` or `KIRBY_CSMS_AUTH_KEY` win over a block of the same id, and a block wins over the same id in `--auth-keys-file`. Keys need `security_profile` 1 or 2 |
+
+`[[rule]]` answers a CALL that stations send, for all stations. It mirrors the [response rules and faults](csms.md#response-rules-and-fault-injection) of the TUI, the scripts and the HTTP API and is installed before the first station connects:
+
+| Key | Meaning |
+| --- | --- |
+| `action` | Required. The action name, 1 to 128 bytes without control characters |
+| `behavior` | Required. `respond` (answer every CALL of the action with `payload`), or a fault: `call_error`, `silence`, `close`, `invalid_payload` (CALLRESULT with `payload` as given) |
+| `payload` | JSON text. Required for `respond` (a JSON object) and `invalid_payload`; refused for the other behaviors |
+| `times` | Faults only: occurrences the fault applies to, 1 to 1000000, default 1. Refused for `respond` |
+| `protocol` | Optional, `"ocpp1.6"` |
+
+Faults are used in the order of the file and win over responses; at most 1000 faults are stored. The key `station` of a rule is reserved for per-station rules and is refused with an error until the engine supports them; blocks that list rules and faults per station and per protocol will use these same keys.
+
+### `--print-config` and `--check-config`
+
+`--print-config=toml` prints the effective configuration (flags, environment, file and defaults merged, the selected profile applied, no `[profile]` tables, blocks included) as a configuration file. Paths are printed absolute. The output is valid input for `--config`, and printing it again gives the same text. `--print-config` (or `=json`) prints the same content as one JSON object with a table per section and an array per block.
+
+```bash
+kirby-csms --config lab.toml --profile ci --print-config=toml > effective.toml
+kirby-csms --config effective.toml --print-config=toml | diff - effective.toml
+kirby-csms --config lab.toml --profile ci --check-config   # OK: /path/lab.toml (profile ci): configuration is valid
+```
+
+`--check-config` runs every check that happens before the server binds, including reading the key files, loading the certificates and the `--script` file, and exits 0 or 2. It does not open the listener or the API port, so it also works while the server runs.
+
+### Example
+
+```toml
+schema = 1
+protocol = "ocpp1.6"
+
+[listener]
+listen = "0.0.0.0:9000"
+
+[api]
+api_listen = "127.0.0.1:9100"
+api_token_file = "secrets/api.token"    # relative to the directory of this file
+
+[security]
+security_profile = 1
+default_auth_key_file = "secrets/default.key"
+
+[behavior]
+heartbeat_interval = 60
+
+[output]
+no_tui = true
+
+[[station]]
+id = "CP-001"
+auth_key_file = "secrets/cp-001.key"
+
+[[rule]]
+action = "Authorize"
+behavior = "respond"
+payload = '{"idTagInfo":{"status":"Blocked"}}'
+
+[[rule]]
+action = "Heartbeat"
+behavior = "call_error"
+times = 2
+
+[profile.ci.behavior]
+heartbeat_interval = 5
+```
+
+`kirby-csms --config lab.toml --profile ci` applies the profile; `--heartbeat-interval 10` on the command line wins over both.
 
 ## Exit codes
 
@@ -374,9 +508,9 @@ No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no termi
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Every scenario passed |
-| 1 | Any scenario failed, timed out or could not boot, or a report file could not be written |
-| 2 | Usage error: no source, empty directory, invalid scenario file, `--count` above 1 |
+| 0 | Every scenario passed (a scenario that passed on a retry counts as passed and is listed as flaky) |
+| 1 | Any scenario failed, timed out or could not boot (also after its retries), or a report file could not be written |
+| 2 | Usage error: no source, empty directory, invalid scenario file, `--count` above 1, a selection (`--filter`, `--skip`, `--tag`, `--skip-tag`) that leaves no scenario, `--github-annotations` with `--json`, `--summary-md` naming a scenario or report file |
 | 130 | SIGINT. The running scenario ends as an `error` row (`interrupted`), the rest are `skipped`, and `--report` and `--junit` are written for what finished. SIGTERM does the same and exits 1 |
 
 ### kirby-ocpp scenarios validate
@@ -392,7 +526,9 @@ No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no termi
 | --- | --- |
 | 0 | Clean shutdown |
 | 1 | Runtime error, for example the listener could not bind |
-| 2 | Usage or configuration error. Invalid flag combinations are found before the server binds |
+| 2 | Usage or configuration error. Invalid flag combinations and a bad configuration file or profile are found before the server binds |
+
+`--check-config` exits 0 after printing one `OK:` line, or 2 with the error; `--print-config` exits 0 with the settings, or 2 on an invalid flag combination.
 
 ### kirby-csms --script
 

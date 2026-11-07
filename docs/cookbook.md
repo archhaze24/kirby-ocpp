@@ -2,7 +2,7 @@
 
 Short, copy-pasteable recipes for the most common jobs. Each one states the goal, the commands, what you should see and where the details live. Commands assume `kirby-ocpp` and `kirby-csms` are on your `PATH` ([install](../README.md#install)) and use `127.0.0.1` with port 9000. Recipes that use `suite` need version 0.5.0 or newer.
 
-Contents: [First run](#first-run) · [Check a CSMS with the built-in scenarios](#check-a-csms-with-the-built-in-scenarios) · [Test a rejected tag](#test-a-rejected-tag) · [Lost connection and reconnect](#lost-connection-and-reconnect) · [Load test with a fleet](#load-test-with-a-fleet) · [Script the central system](#script-the-central-system) · [TLS and mutual TLS](#tls-and-mutual-tls) · [Variables, captures and loops](#variables-captures-and-loops) · [Related pages](#related-pages)
+Contents: [First run](#first-run) · [Check a CSMS with the built-in scenarios](#check-a-csms-with-the-built-in-scenarios) · [Test a rejected tag](#test-a-rejected-tag) · [Lost connection and reconnect](#lost-connection-and-reconnect) · [Load test with a fleet](#load-test-with-a-fleet) · [Keep a CSMS setup in a configuration file](#keep-a-csms-setup-in-a-configuration-file) · [Script the central system](#script-the-central-system) · [TLS and mutual TLS](#tls-and-mutual-tls) · [Variables, captures and loops](#variables-captures-and-loops) · [Related pages](#related-pages)
 
 ## First run
 
@@ -181,6 +181,49 @@ kirby-ocpp --config lab.toml --profile single --print-config=toml              #
 Expected: `fleet: 3/3 stations PASSED`, `PASSED in N ms` and `fleet: 2/2 stations PASSED` for the runs against a local `kirby-csms --listen 127.0.0.1:9000`; the last command prints the merged configuration and exits 0 without connecting. Unknown keys, wrong types and a password in the URL exit 2 with the file and key named. Put the URL password in `OCPP_URL` instead of the file.
 
 Reference: [Configuration file](configuration.md#configuration-file).
+
+## Keep a CSMS setup in a configuration file
+
+A server with a keyed station, a blocking rule and a fault, in one file. Secrets stay in separate files; the configuration only names them.
+
+```bash
+mkdir -p csms/secrets && cd csms
+printf 'cp-001-key-0123456789\n' > secrets/cp-001.key && chmod 600 secrets/cp-001.key
+cat > csms.toml <<'EOF'
+[listener]
+listen = "127.0.0.1:9000"
+
+[security]
+security_profile = 1
+
+[output]
+no_tui = true
+
+[[station]]
+id = "CP-001"
+auth_key_file = "secrets/cp-001.key"
+
+[[rule]]
+action = "Authorize"
+behavior = "respond"
+payload = '{"idTagInfo":{"status":"Blocked"}}'
+
+[[rule]]
+action = "Heartbeat"
+behavior = "call_error"
+times = 2
+
+[profile.fast.behavior]
+heartbeat_interval = 5
+EOF
+kirby-csms --config csms.toml --profile fast --check-config   # OK: ... (profile fast): configuration is valid
+kirby-csms --config csms.toml --profile fast --print-config=toml
+kirby-csms --config csms.toml --profile fast
+```
+
+Expected: the first command prints one `OK:` line and exits 0 without opening the port; the second prints the merged file (no secrets, absolute paths); the third serves on `127.0.0.1:9000`. A station with the key from `secrets/cp-001.key` connects (`kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-001`, key set through `ChangeConfiguration` of `AuthorizationKey`), its first two `Heartbeat` calls get a CALLERROR and every `Authorize` answers `Blocked`. An inline `default_auth_key = "..."` or `api_token = "..."` in the file exits 2 with the key and the `*_file` alternative named.
+
+Reference: [kirby-csms configuration file](configuration.md#kirby-csms-configuration-file).
 
 ## Script the central system
 
