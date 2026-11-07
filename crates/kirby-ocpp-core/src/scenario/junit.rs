@@ -31,6 +31,16 @@ pub struct JunitRun<'a> {
     pub duration_ms: u64,
 }
 
+/// What came before the final run of a scenario that was retried: the failed attempts, in
+/// order. See [`junit_xml_retried`].
+#[derive(Debug, Clone, Copy)]
+pub struct JunitRetries<'a> {
+    /// Attempts made in total, the final one included.
+    pub attempts: u32,
+    /// The failed attempts before the final one: a report, or why the run could not start.
+    pub earlier: &'a [Result<&'a ScenarioReport, &'a str>],
+}
+
 #[derive(Default, Clone, Copy)]
 struct Counts {
     tests: usize,
@@ -79,10 +89,32 @@ pub fn junit_xml(suites: &[JunitSuite<'_>]) -> String {
 /// property and the `time` of a suite that never produced a report.
 #[must_use]
 pub fn junit_xml_runs(runs: &[JunitRun<'_>]) -> String {
+    let runs: Vec<(JunitRun<'_>, Option<JunitRetries<'_>>)> =
+        runs.iter().map(|run| (*run, None)).collect();
+    render_document(&runs)
+}
+
+/// [`junit_xml_runs`] for runs that may have been retried. The suite of a retried scenario
+/// carries the properties `attempts` and, when the final attempt passed after a failure,
+/// `flaky=true`. Each failed earlier attempt is attached to the test case of its first failed
+/// step (the first case for a run that never started) as `<flakyFailure>` / `<flakyError>`
+/// when the final attempt passed, else as `<rerunFailure>` / `<rerunError>`, the elements
+/// Maven Surefire defines and most CI systems understand. Test case names, the class name
+/// and the counts describe the final attempt only.
+#[must_use]
+pub fn junit_xml_retried(runs: &[(JunitRun<'_>, JunitRetries<'_>)]) -> String {
+    let runs: Vec<(JunitRun<'_>, Option<JunitRetries<'_>>)> = runs
+        .iter()
+        .map(|(run, retries)| (*run, Some(*retries)))
+        .collect();
+    render_document(&runs)
+}
+
+fn render_document(runs: &[(JunitRun<'_>, Option<JunitRetries<'_>>)]) -> String {
     let mut total = Counts::default();
     let mut body = String::new();
-    for run in runs {
-        let (xml, counts) = render_suite(run);
+    for (run, retries) in runs {
+        let (xml, counts) = render_suite(run, retries.as_ref());
         total.add(counts);
         body.push_str(&xml);
     }
@@ -92,8 +124,83 @@ pub fn junit_xml_runs(runs: &[JunitRun<'_>]) -> String {
     )
 }
 
-fn render_suite(run: &JunitRun<'_>) -> (String, Counts) {
+/// The elements for the failed earlier attempts, keyed by the step index of the case that
+/// carries them (0 for the setup case of a run without a report).
+fn earlier_elements(retries: &JunitRetries<'_>, final_passed: bool) -> HashMap<usize, String> {
+    let (failure, error) = if final_passed {
+        ("flakyFailure", "flakyError")
+    } else {
+        ("rerunFailure", "rerunError")
+    };
+    let mut out: HashMap<usize, String> = HashMap::new();
+    for attempt in retries.earlier {
+        let (key, element) = match attempt {
+            Ok(report) => {
+                let failed = report
+                    .steps
+                    .iter()
+                    .find(|step| matches!(step.status, StepStatus::Failed(_)));
+                match failed {
+                    Some(step) => {
+                        let StepStatus::Failed(reason) = &step.status else {
+                            continue;
+                        };
+                        (
+                            step.index,
+                            format!(
+                                "      <{failure} message=\"{}\" type=\"StepFailed\">{}</{failure}>\n",
+                                escape(reason),
+                                escape(&failure_text(step, reason))
+                            ),
+                        )
+                    }
+                    None => (
+                        0,
+                        format!(
+                            "      <{error} message=\"the run did not complete\" type=\"RunFailed\"/>\n"
+                        ),
+                    ),
+                }
+            }
+            Err(message) => (
+                0,
+                format!(
+                    "      <{error} message=\"{}\" type=\"SetupError\">{}</{error}>\n",
+                    escape(message),
+                    escape(message)
+                ),
+            ),
+        };
+        out.entry(key).or_default().push_str(&element);
+    }
+    out
+}
+
+/// Moves the elements whose step index `report` lacks to its first case.
+fn reroute_strays(extras: &mut HashMap<usize, String>, report: &ScenarioReport) {
+    let Some(first) = report.steps.first().map(|step| step.index) else {
+        return;
+    };
+    let stray: Vec<usize> = extras
+        .keys()
+        .copied()
+        .filter(|key| report.steps.iter().all(|step| step.index != *key))
+        .collect();
+    for key in stray {
+        if let Some(text) = extras.remove(&key) {
+            extras.entry(first).or_default().push_str(&text);
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_suite(run: &JunitRun<'_>, retries: Option<&JunitRetries<'_>>) -> (String, Counts) {
     let suite = &run.suite;
+    let final_passed = suite.outcome.is_ok_and(|report| report.passed);
+    let mut extras = retries
+        .filter(|retries| !retries.earlier.is_empty())
+        .map(|retries| earlier_elements(retries, final_passed))
+        .unwrap_or_default();
     let name = match suite.station {
         Some(station) => clean(&format!("{} [{station}]", suite.scenario)),
         None => clean(suite.scenario),
@@ -112,6 +219,8 @@ fn render_suite(run: &JunitRun<'_>) -> (String, Counts) {
     match suite.outcome {
         Ok(report) => {
             counts.millis = report.duration_ms;
+            // An element whose step index the final run lacks goes to its first case.
+            reroute_strays(&mut extras, report);
             station = station.or_else(|| report.station.clone());
             tool_version.clone_from(&report.tool_version);
             if report.source.is_some() {
@@ -153,7 +262,8 @@ fn render_suite(run: &JunitRun<'_>) -> (String, Counts) {
                 } else {
                     base.to_owned()
                 };
-                render_case(&mut cases, &mut counts, &classname, step, &label);
+                let extra = extras.remove(&step.index).unwrap_or_default();
+                render_case(&mut cases, &mut counts, &classname, step, &label, &extra);
             }
         }
         Err(error) => {
@@ -162,9 +272,10 @@ fn render_suite(run: &JunitRun<'_>) -> (String, Counts) {
             counts.millis = run.duration_ms;
             let error = escape(error);
             let time = seconds(run.duration_ms);
+            let extra = extras.remove(&0).unwrap_or_default();
             let _ = writeln!(
                 cases,
-                "    <testcase classname=\"{classname}\" name=\"setup\" time=\"{time}\">\n      <error message=\"{error}\" type=\"SetupError\">{error}</error>\n    </testcase>"
+                "    <testcase classname=\"{classname}\" name=\"setup\" time=\"{time}\">\n      <error message=\"{error}\" type=\"SetupError\">{error}</error>\n{extra}    </testcase>"
             );
         }
     }
@@ -174,6 +285,12 @@ fn render_suite(run: &JunitRun<'_>) -> (String, Counts) {
     properties.push(("tool_version", tool_version));
     if let Some(source) = source {
         properties.push(("source", source));
+    }
+    if let Some(retries) = retries {
+        properties.push(("attempts", retries.attempts.to_string()));
+        if final_passed && !retries.earlier.is_empty() {
+            properties.push(("flaky", "true".to_owned()));
+        }
     }
     let mut props = String::from("    <properties>\n");
     for (key, value) in &properties {
@@ -198,6 +315,7 @@ fn render_case(
     classname: &str,
     step: &StepReport,
     label: &str,
+    extra: &str,
 ) {
     let case_name = escape(label);
     let time = seconds(step.duration_ms);
@@ -233,6 +351,7 @@ fn render_case(
             cases.push_str("      <skipped/>\n");
         }
     }
+    cases.push_str(extra);
     cases.push_str("    </testcase>\n");
 }
 
@@ -499,5 +618,90 @@ mod tests {
         // The cleaned labels collide and are made distinct.
         assert!(xml.contains("name=\"a b c #2\""), "{xml}");
         assert!(xml.contains("<testsuite name=\"de mo [CP 1]\""), "{xml}");
+    }
+
+    fn retried_xml(
+        earlier: &[Result<&ScenarioReport, &str>],
+        last: &ScenarioReport,
+        attempts: u32,
+    ) -> String {
+        let run = JunitRun {
+            suite: JunitSuite {
+                station: None,
+                scenario: "demo",
+                outcome: Ok(last),
+            },
+            source: None,
+            duration_ms: 0,
+        };
+        junit_xml_retried(&[(run, JunitRetries { attempts, earlier })])
+    }
+
+    #[test]
+    fn a_flaky_pass_keeps_its_names_and_carries_flaky_elements() {
+        let steps = |second: StepStatus| {
+            vec![
+                step(0, "boot", StepStatus::Passed, 1),
+                step(1, "start", second, 1),
+            ]
+        };
+        let failed = report(steps(StepStatus::Failed("no <ok>".to_owned())), false);
+        let passed = report(steps(StepStatus::Passed), true);
+        let plain = junit_xml(&[JunitSuite {
+            station: None,
+            scenario: "demo",
+            outcome: Ok(&passed),
+        }]);
+        let xml = retried_xml(&[Ok(&failed), Err("no boot")], &passed, 3);
+        assert!(
+            xml.contains("<property name=\"attempts\" value=\"3\"/>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<property name=\"flaky\" value=\"true\"/>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<testcase classname=\"ocpp1.6.demo\" name=\"start\""),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<flakyFailure message=\"no &lt;ok&gt;\" type=\"StepFailed\">"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<flakyError message=\"no boot\" type=\"SetupError\">"),
+            "{xml}"
+        );
+        // Counts and test case names are those of the final attempt.
+        assert!(xml.contains("<testsuites tests=\"2\" failures=\"0\" errors=\"0\" skipped=\"0\""));
+        let names = |text: &str| -> Vec<String> {
+            text.split("<testcase ")
+                .skip(1)
+                .map(|case| case.split(" time=").next().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(names(&xml), names(&plain));
+    }
+
+    #[test]
+    fn a_failure_after_retries_carries_rerun_elements() {
+        let failed = report(
+            vec![step(0, "boot", StepStatus::Failed("late".to_owned()), 1)],
+            false,
+        );
+        let xml = retried_xml(&[Ok(&failed)], &failed, 2);
+        assert!(
+            xml.contains("<rerunFailure message=\"late\" type=\"StepFailed\">"),
+            "{xml}"
+        );
+        assert!(xml.contains("<failure message=\"late\""), "{xml}");
+        assert!(!xml.contains("name=\"flaky\""), "{xml}");
+        assert!(xml.contains("<property name=\"attempts\" value=\"2\"/>"));
+        let single = retried_xml(&[], &failed, 1);
+        assert!(
+            !single.contains("rerun") && !single.contains("flaky"),
+            "{single}"
+        );
     }
 }

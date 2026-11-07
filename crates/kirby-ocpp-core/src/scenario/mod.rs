@@ -15,7 +15,9 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
 
-pub use self::junit::{JunitRun, JunitSuite, junit_xml, junit_xml_runs};
+pub use self::junit::{
+    JunitRetries, JunitRun, JunitSuite, junit_xml, junit_xml_retried, junit_xml_runs,
+};
 pub use self::model::{
     Action, Condition, DEFAULT_TIMEOUT_MS, Expect, Scenario, Step, read_scenario_file,
 };

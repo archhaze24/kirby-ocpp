@@ -317,6 +317,37 @@ fn unknown_profile_and_missing_config_exit_2() {
     assert!(message.contains("--config"), "{message}");
 }
 
+/// `suite` arguments are per invocation: no key of a configuration file stands for them.
+#[test]
+fn suite_arguments_have_no_configuration_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    for key in [
+        "filter",
+        "skip",
+        "tag",
+        "skip_tag",
+        "retries",
+        "jobs",
+        "fail_fast",
+        "summary_md",
+        "github_annotations",
+    ] {
+        let file = write(dir.path(), &format!("{key}.toml"), &format!("{key} = 1\n"));
+        let message = rejected(&["--config", &file, "--url", "ws://h:1/x"], &[]);
+        assert!(
+            message.contains(&format!("unknown key `{key}`")),
+            "{key}: {message}"
+        );
+        let nested = write(
+            dir.path(),
+            &format!("{key}-run.toml"),
+            &format!("[run]\n{key} = 1\n"),
+        );
+        let message = rejected(&["--config", &nested, "--url", "ws://h:1/x"], &[]);
+        assert!(message.contains("unknown table `run`"), "{key}: {message}");
+    }
+}
+
 #[test]
 fn file_errors_name_the_file_and_the_key_and_exit_2() {
     let dir = tempfile::tempdir().unwrap();

@@ -489,6 +489,50 @@ pub struct SuiteArgs {
     /// Set a scenario variable for every scenario (repeatable), see `run --var`
     #[arg(help_heading = "Scenarios", long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
     pub vars: Vec<ScenarioVar>,
+
+    /// Run only scenarios whose name matches this glob (`*` and `?`; repeatable, any match selects)
+    #[arg(help_heading = "Selection", long, value_name = "GLOB", value_parser = non_empty)]
+    pub filter: Vec<String>,
+
+    /// Leave out scenarios whose name matches this glob (repeatable), applied after `--filter`
+    #[arg(help_heading = "Selection", long, value_name = "GLOB", value_parser = non_empty)]
+    pub skip: Vec<String>,
+
+    /// Run only scenarios that carry this tag (repeatable: a scenario needs every given tag)
+    #[arg(help_heading = "Selection", long, value_name = "TAG", value_parser = non_empty)]
+    pub tag: Vec<String>,
+
+    /// Leave out scenarios that carry this tag (repeatable: any given tag leaves a scenario out)
+    #[arg(help_heading = "Selection", long, value_name = "TAG", value_parser = non_empty)]
+    pub skip_tag: Vec<String>,
+
+    /// Run a failed scenario again up to this many times on a fresh station; a scenario that passes
+    /// after a failure is reported as flaky and counts as passed
+    #[arg(
+        help_heading = "Scenarios",
+        long, value_name = "N", default_value_t = 0,
+        value_parser = clap::value_parser!(u32).range(0..=10)
+    )]
+    pub retries: u32,
+
+    /// Run up to this many scenarios at the same time; slot 2 and up use the station id with
+    /// `-2`, `-3`, ... appended. Reports keep the order of the selection
+    #[arg(
+        help_heading = "Scenarios",
+        long, value_name = "N", default_value_t = 1,
+        value_parser = clap::value_parser!(u32).range(1..=16)
+    )]
+    pub jobs: u32,
+
+    /// Print a GitHub Actions `::error` or `::warning` workflow command for every failed or
+    /// flaky scenario (not with `--json`)
+    #[arg(help_heading = "CI output", long)]
+    pub github_annotations: bool,
+
+    /// Write a Markdown summary table to this file; the summary is also appended to the file
+    /// named by `$GITHUB_STEP_SUMMARY` when that variable is set
+    #[arg(help_heading = "CI output", long, value_name = "PATH", value_parser = non_empty_path)]
+    pub summary_md: Option<PathBuf>,
 }
 
 impl SuiteArgs {
@@ -502,6 +546,14 @@ impl SuiteArgs {
             timeout: 60,
             fail_fast: false,
             vars: Vec::new(),
+            filter: Vec::new(),
+            skip: Vec::new(),
+            tag: Vec::new(),
+            skip_tag: Vec::new(),
+            retries: 0,
+            jobs: 1,
+            github_annotations: false,
+            summary_md: None,
         }
     }
 }

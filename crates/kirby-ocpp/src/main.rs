@@ -14,6 +14,7 @@ mod fleet;
 mod headless;
 mod settings;
 mod suite;
+mod suite_ci;
 
 use std::fmt::Write as _;
 use std::io::IsTerminal;
