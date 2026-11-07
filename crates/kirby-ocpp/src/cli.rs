@@ -486,7 +486,69 @@ pub enum ScenariosCmd {
     },
 }
 
+/// Shown at the end of `run --help` and `suite --help`.
+const STATION_FLAGS_NOTE: &str =
+    "Connection, station, TLS and output flags are listed in `kirby-ocpp --help`.";
+
+/// Subcommands that never connect: their help hides the global station flags.
+/// The flags still parse there, so existing command lines keep working.
+/// Each entry lists the global flags that stay visible.
+const OFFLINE_SUBCOMMANDS: &[(&str, &[&str])] = &[
+    ("scenarios", &[]),
+    ("completions", &[]),
+    ("version", &["json"]),
+];
+
+/// Redefines the global arguments `hidden` on `command` and its nested subcommands as
+/// hidden copies. (Clap propagates globals only while parsing, so `mut_arg` cannot reach
+/// them; a copy defined up front wins over the propagated one and parses identically.)
+fn hide_global_args(mut command: clap::Command, hidden: &[clap::Arg]) -> clap::Command {
+    for arg in hidden {
+        command = command.arg(arg.clone().hide(true));
+    }
+    let nested: Vec<String> = command
+        .get_subcommands()
+        .map(|sub| sub.get_name().to_owned())
+        .collect();
+    for name in nested {
+        command = command.mut_subcommand(name, |sub| hide_global_args(sub, hidden));
+    }
+    command
+}
+
+/// The clap command with per-subcommand help tuned: `run` and `suite` point at the
+/// top-level help for the station flags; offline subcommands do not list them.
+pub fn command() -> clap::Command {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    let globals: Vec<clap::Arg> = command
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .cloned()
+        .collect();
+    for name in ["run", "suite"] {
+        command = command.mut_subcommand(name, |sub| sub.after_help(STATION_FLAGS_NOTE));
+    }
+    for (name, keep) in OFFLINE_SUBCOMMANDS {
+        let hidden: Vec<clap::Arg> = globals
+            .iter()
+            .filter(|arg| !keep.contains(&arg.get_id().as_str()))
+            .cloned()
+            .collect();
+        command = command.mut_subcommand(*name, |sub| hide_global_args(sub, &hidden));
+    }
+    command
+}
+
 impl Cli {
+    /// Parses the process arguments with the tuned command; exits on `--help`,
+    /// `--version` and usage errors like `Parser::parse`.
+    pub fn parse_args() -> Self {
+        use clap::FromArgMatches;
+        let mut matches = command().get_matches();
+        Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|error| error.exit())
+    }
+
     /// The fleet this command line describes: the id template (`--id-template`, else
     /// `--id`), the first index, the count and the stagger.
     pub fn fleet_spec(&self) -> FleetSpec {

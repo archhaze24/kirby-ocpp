@@ -13,7 +13,7 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 
 ## kirby-ocpp
 
-`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand (`run`, `suite`), so `--help` of a subcommand lists them again. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Output and Scenarios; the tables below follow the same grouping.
+`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help` and `suite --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), and `version --help` shows only `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Output and Scenarios; the tables below follow the same grouping.
 
 ### Station and connection
 

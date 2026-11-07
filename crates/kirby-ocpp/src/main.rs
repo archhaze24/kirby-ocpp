@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{CommandFactory, Parser};
+use clap::CommandFactory;
 use kirby_ocpp_core::fleet::Fleet;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::scenario::{
@@ -48,7 +48,7 @@ async fn main() -> ExitCode {
 
 #[allow(clippy::too_many_lines)]
 async fn real_main() -> ExitCode {
-    let mut cli = Cli::parse();
+    let mut cli = Cli::parse_args();
     if cli.licenses {
         print_lossy(LICENSES);
         return ExitCode::SUCCESS;

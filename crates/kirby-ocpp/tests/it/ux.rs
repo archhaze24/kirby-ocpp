@@ -443,6 +443,49 @@ fn completions_are_generated_for_every_shell() {
     assert_eq!(output.status.code(), Some(2));
 }
 
+#[test]
+fn offline_subcommand_help_omits_station_flags() {
+    for args in [
+        &["completions", "--help"][..],
+        &["version", "--help"],
+        &["scenarios", "--help"],
+        &["scenarios", "list", "--help"],
+        &["scenarios", "validate", "--help"],
+    ] {
+        let text = stdout(&command(args).output().unwrap());
+        assert!(
+            !text.contains("--url") && !text.contains("--tls-ca"),
+            "{args:?}"
+        );
+    }
+    let version = stdout(&command(&["version", "--help"]).output().unwrap());
+    assert!(version.contains("--json"));
+    for args in [&["run", "--help"][..], &["suite", "--help"]] {
+        let text = stdout(&command(args).output().unwrap());
+        assert!(
+            text.contains("--url") && text.contains("--tls-ca"),
+            "{args:?}"
+        );
+        assert!(text.contains("kirby-ocpp --help"), "{args:?}");
+    }
+}
+
+#[test]
+fn hidden_station_flags_still_parse_on_offline_subcommands() {
+    let output = command(&["version", "--url", "ws://x", "--count", "2", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let output = command(&["scenarios", "list", "--id", "CP-9"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    let output = command(&["completions", "bash", "--no-tui"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+}
+
 fn write(dir: &TempDir, name: &str, text: &str) -> String {
     let path = dir.path().join(name);
     std::fs::write(&path, text).unwrap();
