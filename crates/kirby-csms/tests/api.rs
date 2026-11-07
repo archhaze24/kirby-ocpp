@@ -1722,9 +1722,7 @@ async fn hyper_answers_before_the_router_have_an_empty_body() {
             // on every platform, unlike a single huge header that depends on socket buffering.
             format!(
                 "GET /v1 HTTP/1.1\r\nHost: {addr}\r\n{}\r\n",
-                (0..300)
-                    .map(|n| format!("X-H{n}: a\r\n"))
-                    .collect::<String>()
+                "X-H: a\r\n".repeat(300)
             ),
             431,
         ),
