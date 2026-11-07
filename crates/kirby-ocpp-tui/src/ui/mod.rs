@@ -36,6 +36,12 @@ pub fn draw_fleet(f: &mut Frame<'_>, fleet: &FleetApp) {
         draw_in(f, fleet.current(), f.area());
         return;
     }
+    // The selector row takes one line: a fleet needs one more row than a single station.
+    let need = (MIN_SIZE.0, MIN_SIZE.1 + 1);
+    if f.area().width < need.0 || f.area().height < need.1 {
+        too_small(f, f.area(), need);
+        return;
+    }
     let [strip, rest] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(f.area());
     draw_selector(f, fleet, strip);
@@ -82,16 +88,32 @@ fn draw_selector(f: &mut Frame<'_>, fleet: &FleetApp, area: Rect) {
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Popup width: `want` cells, or the whole width when the terminal is barely wider, so the
+/// popup never leaves a one-cell strip of the pane borders behind it.
+pub fn popup_width(area_width: u16, want: u16) -> u16 {
+    if area_width < want.saturating_add(4) {
+        area_width
+    } else {
+        want
+    }
+}
+
+/// The notice drawn instead of the UI in a terminal below the minimum size. The needed size
+/// comes first, so it survives a very narrow terminal.
+pub fn too_small(f: &mut Frame<'_>, area: Rect, need: (u16, u16)) {
+    let msg = format!(
+        "need {}x{}, have {}x{}",
+        need.0, need.1, area.width, area.height
+    );
+    f.render_widget(
+        Paragraph::new(truncate(&msg, usize::from(area.width))),
+        area,
+    );
+}
+
 fn draw_in(f: &mut Frame<'_>, app: &App, area: Rect) {
     if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
-        let msg = format!(
-            "terminal too small ({}x{}, need {}x{})",
-            area.width, area.height, MIN_SIZE.0, MIN_SIZE.1
-        );
-        f.render_widget(
-            Paragraph::new(truncate(&msg, usize::from(area.width))),
-            area,
-        );
+        too_small(f, area, MIN_SIZE);
         return;
     }
     let [header, body, footer] = Layout::vertical([
@@ -163,14 +185,23 @@ fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
         None => ("not booted".to_owned(), Color::DarkGray),
     };
     let w = usize::from(area.width);
+    let conn_chip = chip(&conn_text, conn_color);
+    let reg_chip = chip(&reg_text, reg_color);
+    // A long id gives way (middle cut) so the connection state always stays visible.
+    let id_room = w
+        .saturating_sub(conn_chip.width() + reg_chip.width() + 3)
+        .max(8);
     let mut spans = vec![
         Span::styled(
-            format!(" {} ", crate::text::sanitize(&s.charge_point_id)),
+            format!(
+                " {} ",
+                crate::text::truncate_middle(&crate::text::sanitize(&s.charge_point_id), id_room)
+            ),
             Style::new().add_modifier(Modifier::BOLD),
         ),
-        chip(&conn_text, conn_color),
+        conn_chip,
         Span::raw(" "),
-        chip(&reg_text, reg_color),
+        reg_chip,
     ];
     let used: usize = spans.iter().map(Span::width).sum();
     if w > used + 4 {

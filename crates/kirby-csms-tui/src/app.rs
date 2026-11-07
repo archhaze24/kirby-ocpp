@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use kirby_csms_core::Direction as CsmsDir;
 use kirby_csms_core::{
     CsmsEvent, DisconnectReason, Frame, FrameEntry, StationInfo, StationState, TransactionStatus,
+    event_frame,
 };
 use kirby_ocpp_core::station::{Direction, Event, FrameRecord, LogLevel, LogRecord};
 use kirby_ocpp_tui::app::{Detail, NoticeLevel};
@@ -633,7 +634,8 @@ impl App {
         match self
             .dedupe
             .iter()
-            .position(|e| e.direction == direction && e.frame == *frame)
+            // Live events carry the cut form of a large frame, history the full one.
+            .position(|e| e.direction == direction && event_frame(&e.frame) == *frame)
         {
             Some(i) => {
                 self.dedupe.remove(i);
@@ -941,6 +943,10 @@ fn on_event(app: &mut App, event: CsmsEvent, fx: &mut Vec<Effect>) {
                     |s| kirby_ocpp_tui::text::truncate(&kirby_ocpp_tui::text::sanitize(&s), 40),
                 );
                 let reason = kirby_ocpp_tui::text::sanitize(&reason);
+                // Some reasons already start with `refused:`; do not say it twice.
+                let reason = reason
+                    .strip_prefix("refused:")
+                    .map_or(reason.as_str(), str::trim_start);
                 app.notify(
                     NoticeLevel::Error,
                     format!("refused {who} from {remote_addr}: {reason}"),

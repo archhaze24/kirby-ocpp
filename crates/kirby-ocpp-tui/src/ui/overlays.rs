@@ -4,11 +4,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
-use super::dim;
+use super::{dim, popup_width};
 use crate::app::{App, Confirm, ConfirmAction, Detail, Mode};
-use crate::forms::{Choice, Field, FieldKind, Form};
+use crate::forms::{Choice, Field, FieldKind, Form, SECRET_HINT};
 use crate::palette::Palette;
-use crate::text::{sanitize, truncate, width};
+use crate::text::{sanitize, truncate, width, wrap_help, wrap_text};
 
 pub(super) const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
@@ -119,26 +119,55 @@ fn field_value(fl: &Field, w: usize, focused: bool) -> (String, Option<usize>) {
             )
         }
         _ => {
-            let (shown, col) = fl.input.window(w);
+            let (shown, col) = if fl.secret {
+                fl.input.masked().window(w)
+            } else {
+                fl.input.window(w)
+            };
             (shown, focused.then_some(col))
         }
     }
 }
 
+/// Message lines under a form field: its error (wrapped, up to three lines) or, for a secret
+/// field, a hint that the value is hidden. At least one (possibly empty) line.
+fn field_notes(fl: &Field, w: usize) -> Vec<(String, bool)> {
+    if let Some(err) = &fl.error {
+        wrap_text(&sanitize(err), w, 3)
+            .into_iter()
+            .map(|l| (l, true))
+            .collect()
+    } else if fl.secret {
+        vec![(truncate(SECRET_HINT, w), false)]
+    } else {
+        vec![(String::new(), false)]
+    }
+}
+
 fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
-    let h = u16::try_from(form.fields.len() * 2 + 2).unwrap_or(u16::MAX);
-    let rect = centered(area, 76.min(area.width.saturating_sub(2)), h);
-    let inner = popup(f, rect, &form.title);
+    let width_cells = popup_width(area.width, 76);
+    let inner_w = usize::from(width_cells.saturating_sub(2));
     let label_w = form
         .fields
         .iter()
         .map(|x| width(x.label))
         .max()
         .unwrap_or(0)
+        .min(inner_w / 2)
         + 2;
+    let note_w = inner_w.saturating_sub(label_w).max(1);
+    let notes: Vec<Vec<(String, bool)>> = form
+        .fields
+        .iter()
+        .map(|fl| field_notes(fl, note_w))
+        .collect();
+    let rows: usize = notes.iter().map(|n| 1 + n.len()).sum();
+    let h = u16::try_from(rows + 2).unwrap_or(u16::MAX).min(area.height);
+    let rect = centered(area, width_cells, h);
+    let inner = popup(f, rect, &sanitize(&form.title));
     let value_w = usize::from(inner.width).saturating_sub(label_w);
+    let mut y = inner.y;
     for (i, fl) in form.fields.iter().enumerate() {
-        let y = inner.y + u16::try_from(i * 2).unwrap_or(0);
         if y >= inner.y + inner.height {
             break;
         }
@@ -149,30 +178,34 @@ fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
         } else {
             dim()
         };
+        let label = truncate(fl.label, label_w.saturating_sub(2));
         let line = Line::from(vec![
-            Span::styled(format!("{:<label_w$}", fl.label), label_style),
+            Span::styled(format!("{label:<label_w$}"), label_style),
             Span::raw(sanitize(&value)),
         ]);
         f.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
         if let Some(col) = cursor {
-            f.set_cursor_position(Position::new(
-                inner.x + u16::try_from(label_w + col).unwrap_or(0),
-                y,
-            ));
+            let x = inner.x + u16::try_from(label_w + col).unwrap_or(0);
+            f.set_cursor_position(Position::new(x.min(inner.right().saturating_sub(1)), y));
         }
-        if let Some(err) = &fl.error
-            && y + 1 < inner.y + inner.height
-        {
+        y += 1;
+        for (text, is_error) in notes.get(i).map(Vec::as_slice).unwrap_or_default() {
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let style = if *is_error {
+                Style::new().fg(Color::Red)
+            } else {
+                dim()
+            };
             f.render_widget(
                 Paragraph::new(Line::styled(
-                    truncate(
-                        &format!("{}{}", " ".repeat(label_w), sanitize(err)),
-                        usize::from(inner.width),
-                    ),
-                    Style::new().fg(Color::Red),
+                    format!("{}{text}", " ".repeat(label_w)),
+                    style,
                 )),
-                Rect::new(inner.x, y + 1, inner.width, 1),
+                Rect::new(inner.x, y, inner.width, 1),
             );
+            y += 1;
         }
     }
 }
@@ -194,9 +227,10 @@ fn choice(f: &mut Frame<'_>, c: &Choice, area: Rect) {
 }
 
 const HELP: &[&str] = &[
-    "First steps: the station starts offline. Press c on the Station tab to connect (the",
-    "     footer shows the state), then press : and type a name (BootNotification, Heartbeat,",
-    "     StartTransaction) to run it; tab 7 runs scenarios. Everything lands in the log.",
+    "First steps: the station connects and boots at startup (the header shows the state; on the",
+    "     Station tab x disconnects and c connects again). Press : and type a name",
+    "     (BootNotification, Heartbeat, StartTransaction) to run it; tab 7 runs scenarios.",
+    "     Everything lands in the log.",
     "",
     "1-7 / Tab / Shift-Tab   switch tab",
     "Up Down j k             move in the focused pane",
@@ -235,9 +269,14 @@ pub fn help_lines(fleet: bool) -> Vec<&'static str> {
 }
 
 fn help(f: &mut Frame<'_>, fleet: bool, area: Rect) {
-    let lines = help_lines(fleet);
+    let rect_w = popup_width(area.width, 96);
+    let mut lines = wrap_help(&help_lines(fleet), usize::from(rect_w.saturating_sub(2)));
+    if lines.len() + 2 > usize::from(area.height) {
+        // A short terminal: drop the spacer lines so more of the help fits.
+        lines.retain(|l| !l.is_empty());
+    }
     let h = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
-    let rect = centered(area, 80.min(area.width.saturating_sub(2)), h);
+    let rect = centered(area, rect_w, h);
     let inner = popup(f, rect, "Help");
     f.render_widget(
         Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>()),

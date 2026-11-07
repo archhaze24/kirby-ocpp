@@ -22,7 +22,7 @@ use kirby_ocpp_core::ocpp::types::{
 };
 use kirby_ocpp_tui::forms::{
     CAP_NOTICE, INPUT_CAP, PROFILE_TEMPLATE, data_transfer_error, insert_char_capped,
-    insert_str_capped, schemas,
+    insert_str_capped, is_secret_config_key, schemas,
 };
 use kirby_ocpp_tui::text::TextInput;
 use serde_json::Value;
@@ -1029,9 +1029,23 @@ impl Form {
         if f.input.text().len() < INPUT_CAP {
             f.capped = false;
         }
-        if f.capped && f.error.is_none() {
-            f.error = Some(CAP_NOTICE.to_owned());
+        if f.capped {
+            f.error = Some(match f.error.take() {
+                Some(e) => format!("{CAP_NOTICE}; {e}"),
+                None => CAP_NOTICE.to_owned(),
+            });
         }
+    }
+
+    /// Whether field `i` holds a secret that is drawn as `*`: the value of a
+    /// ChangeConfiguration whose key is a secret one (`AuthorizationKey`).
+    pub fn is_secret(&self, i: usize) -> bool {
+        self.kind == FormKind::ChangeConfiguration
+            && i == 1
+            && self
+                .fields
+                .first()
+                .is_some_and(|k| is_secret_config_key(k.input.text()))
     }
 
     /// Validates and converts the form. On failure the errors are set on the fields (or on

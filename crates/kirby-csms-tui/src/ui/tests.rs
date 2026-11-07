@@ -262,7 +262,7 @@ fn tiny_and_narrow_terminals_do_not_panic() {
     for (w, h) in [(24, 8), (40, 10), (120, 40)] {
         let _ = render(&app, w, h);
     }
-    assert!(render(&app, 20, 5).contains("too small"));
+    assert!(render(&app, 20, 5).contains("need 24x8, have 20x5"));
 }
 
 #[test]
@@ -307,6 +307,62 @@ mod commands {
             app,
             Msg::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
         );
+    }
+
+    #[test]
+    fn long_ids_with_a_shared_prefix_differ_in_the_list() {
+        let a = format!("{}-A", "L".repeat(60));
+        let b = format!("{}-B", "L".repeat(60));
+        let (app, _) = app_with(&[a.as_str(), b.as_str()]);
+        let screen = render(&app, 100, 30);
+        assert!(screen.contains("-A") && screen.contains("-B"), "{screen}");
+        assert!(screen.contains('…'), "{screen}");
+    }
+
+    #[test]
+    fn authorization_key_value_is_drawn_as_stars() {
+        let mut app = loaded();
+        open(&mut app, 'c');
+        type_text(&mut app, "AuthorizationKey");
+        update(
+            &mut app,
+            Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        update(&mut app, Msg::Paste("supersecretkey12345".into()));
+        let screen = render(&app, 100, 30);
+        assert!(!screen.contains("supersecret"), "{screen}");
+        assert!(screen.contains(&"*".repeat(19)), "{screen}");
+        assert!(screen.contains("hidden"), "{screen}");
+        // The key field itself and other keys stay readable.
+        assert!(screen.contains("AuthorizationKey"), "{screen}");
+        let mut app = loaded();
+        open(&mut app, 'c');
+        type_text(&mut app, "HeartbeatInterval");
+        update(
+            &mut app,
+            Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        update(&mut app, Msg::Paste("60".into()));
+        let screen = render(&app, 100, 30);
+        assert!(
+            screen.contains("60") && !screen.contains("hidden"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn schema_errors_wrap_onto_more_lines_in_the_raw_form() {
+        let mut app = loaded();
+        open(&mut app, 'w');
+        for (w, h) in [(60, 30), (80, 30), (120, 40)] {
+            let screen = render(&app, w, h);
+            assert!(screen.contains("violates"), "{w}x{h}\n{screen}");
+            // The cause after the first clause is visible too.
+            assert!(
+                screen.contains("Constraint") || screen.contains("required"),
+                "{w}x{h}\n{screen}"
+            );
+        }
     }
 
     #[test]
@@ -430,10 +486,20 @@ mod commands {
     fn help_lists_the_action_keys() {
         let mut app = loaded();
         open(&mut app, '?');
-        let screen = render(&app, 100, 50);
-        assert!(screen.contains("command palette"), "{screen}");
-        assert!(screen.contains("t remote start"), "{screen}");
-        assert!(screen.contains("m response rule"), "{screen}");
+        for (w, h) in [(100, 50), (80, 40)] {
+            let screen = render(&app, w, h);
+            // Wrapped text: compare the words, not the line breaks and borders.
+            let words = screen
+                .replace('│', " ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(words.contains("command palette"), "{w}x{h}\n{screen}");
+            assert!(words.contains("t remote start"), "{w}x{h}\n{screen}");
+            assert!(words.contains("m response rule"), "{w}x{h}\n{screen}");
+            assert!(words.contains("n copy station id"), "{w}x{h}\n{screen}");
+            assert!(screen.lines().all(|l| l.chars().count() <= usize::from(w)));
+        }
     }
 
     #[test]

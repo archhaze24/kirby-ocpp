@@ -70,6 +70,186 @@ pub fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// Cuts `s` to at most `max` cells by dropping the middle, so the head and the tail stay
+/// visible (`LLLL…éé`). Short texts are returned as they are.
+pub fn truncate_middle(s: &str, max: usize) -> String {
+    if width(s) <= max {
+        return s.to_owned();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    if max == 1 {
+        return "…".to_owned();
+    }
+    let budget = max - 1;
+    let head_budget = budget.div_ceil(2);
+    let tail_budget = budget - head_budget;
+    let mut head = String::new();
+    let mut used = 0;
+    for g in s.graphemes(true) {
+        let w = width(g);
+        if used + w > head_budget {
+            break;
+        }
+        head.push_str(g);
+        used += w;
+    }
+    let mut tail: Vec<&str> = Vec::new();
+    let mut used = 0;
+    for g in s.graphemes(true).rev() {
+        let w = width(g);
+        if used + w > tail_budget {
+            break;
+        }
+        tail.push(g);
+        used += w;
+    }
+    tail.reverse();
+    format!("{head}…{}", tail.concat())
+}
+
+/// Wraps help text to `max` cells. A line that starts with five or more spaces continues the
+/// paragraph above it. Continuation lines of a wrapped paragraph are indented under the
+/// description column (`key   description` rows) or by five spaces. Runs of spaces inside a
+/// line are kept, except at a break. No output line is wider than `max`.
+pub fn wrap_help(lines: &[&str], max: usize) -> Vec<String> {
+    let max = max.max(1);
+    let mut paragraphs: Vec<String> = Vec::new();
+    for line in lines {
+        let continues =
+            line.starts_with("     ") && paragraphs.last().is_some_and(|p| !p.is_empty());
+        if continues {
+            if let Some(last) = paragraphs.last_mut() {
+                last.push(' ');
+                last.push_str(line.trim());
+            }
+        } else {
+            paragraphs.push((*line).to_owned());
+        }
+    }
+    let mut out = Vec::new();
+    for p in &paragraphs {
+        wrap_paragraph(p, max, hang_indent(p).min(max / 2), &mut out);
+    }
+    out
+}
+
+fn hang_indent(p: &str) -> usize {
+    let mut seen_word = false;
+    let mut gap = 0;
+    for (col, c) in p.chars().enumerate().take(30) {
+        if c == ' ' {
+            gap += 1;
+        } else {
+            if seen_word && gap >= 2 {
+                return col;
+            }
+            seen_word = true;
+            gap = 0;
+        }
+    }
+    5
+}
+
+/// Wraps one message (an error, a notice) to `max` cells and at most `max_lines` lines; the
+/// last line ends in `…` when text was dropped. Control characters must be sanitized first.
+pub fn wrap_text(s: &str, max: usize, max_lines: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    wrap_paragraph(s.trim(), max.max(1), 0, &mut out);
+    if out.len() > max_lines.max(1) {
+        out.truncate(max_lines.max(1));
+        if let Some(last) = out.last_mut() {
+            let cut = truncate(&format!("{last} …"), max.max(1));
+            *last = if cut.ends_with('…') {
+                cut
+            } else {
+                format!("{cut}…")
+            };
+        }
+    }
+    out
+}
+
+fn wrap_paragraph(p: &str, max: usize, hang: usize, out: &mut Vec<String>) {
+    if p.is_empty() {
+        out.push(String::new());
+        return;
+    }
+    let start = out.len();
+    let mut line = String::new();
+    let mut line_w = 0;
+    let mut gap = 0;
+    let mut word = String::new();
+    let mut tokens: Vec<(usize, String)> = Vec::new();
+    for c in p.chars().chain(std::iter::once(' ')) {
+        if c == ' ' {
+            if !word.is_empty() {
+                tokens.push((gap, std::mem::take(&mut word)));
+                gap = 0;
+            }
+            gap += 1;
+        } else {
+            word.push(c);
+        }
+    }
+    for (gap, word) in tokens {
+        let mut word = word;
+        let ww = width(&word);
+        let need = gap + ww;
+        if line_w + need <= max {
+            line.push_str(&" ".repeat(gap));
+            line_w += gap;
+            line.push_str(&word);
+            line_w += ww;
+            continue;
+        }
+        if !line.trim().is_empty() {
+            out.push(std::mem::take(&mut line));
+        }
+        let indent = if out.len() == start { 0 } else { hang };
+        line = " ".repeat(indent);
+        line_w = indent;
+        while width(&word) > max - line_w {
+            let room = max - line_w;
+            let mut piece = String::new();
+            let mut used = 0;
+            let mut rest = String::new();
+            for g in word.graphemes(true) {
+                let w = width(g);
+                if rest.is_empty() && used + w <= room.max(1) {
+                    piece.push_str(g);
+                    used += w;
+                } else {
+                    rest.push_str(g);
+                }
+            }
+            line.push_str(&piece);
+            out.push(std::mem::take(&mut line));
+            line = " ".repeat(hang);
+            line_w = hang;
+            word = rest;
+            if word.is_empty() {
+                break;
+            }
+        }
+        line.push_str(&word);
+        line_w += width(&word);
+    }
+    if !line.trim().is_empty() {
+        out.push(line);
+    }
+}
+
+/// The failure text of a scenario step without a leading `<step name>: `, which the row or
+/// line that shows it already carries.
+pub fn without_step_prefix<'a>(name: &str, why: &'a str) -> &'a str {
+    why.strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix(": "))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(why)
+}
+
 /// A one-line editable string with a grapheme-aware cursor.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextInput {
@@ -144,6 +324,17 @@ impl TextInput {
 
     pub fn end(&mut self) {
         self.cursor = self.text.len();
+    }
+
+    /// A copy with every grapheme replaced by `*`, the cursor kept at the same grapheme.
+    /// Used to draw secret values.
+    pub fn masked(&self) -> TextInput {
+        let before = self.text[..self.cursor].graphemes(true).count();
+        let total = self.text.graphemes(true).count();
+        TextInput {
+            text: "*".repeat(total),
+            cursor: before,
+        }
     }
 
     /// Number of characters (not bytes, not graphemes).
@@ -254,7 +445,7 @@ mod tests {
 
 #[cfg(test)]
 mod redact_tests {
-    use super::redact_url;
+    use super::*;
 
     #[test]
     fn credentials_are_removed_from_urls() {
@@ -262,5 +453,77 @@ mod redact_tests {
         assert_eq!(redact_url("wss://tok@h/x"), "wss://h/x");
         assert_eq!(redact_url("ws://h/x@y"), "ws://h/x@y");
         assert_eq!(redact_url("garbage"), "garbage");
+    }
+
+    #[test]
+    fn wrap_help_never_exceeds_the_width_and_keeps_every_word() {
+        let src = [
+            "First steps: the station connects and boots at startup (the header shows the state).",
+            "     Press : and type a name (BootNotification, Heartbeat) to run it.",
+            "",
+            "q or Ctrl-C             quit (asks while a scenario or transaction runs, or in a fleet)",
+            "Station tab: K config keys, L local auth list, P charging profiles, Y certificates",
+            "averyveryverylongwordwithoutanyspacesthatcannotfitinanarrowpopup done",
+        ];
+        let words = |s: &str| s.split_whitespace().collect::<Vec<_>>().join("");
+        let expected = words(&src.join(" "));
+        for max in [8, 12, 20, 22, 40, 78, 94, 200] {
+            let out = wrap_help(&src, max);
+            assert!(out.iter().all(|l| width(l) <= max), "max {max}: {out:?}");
+            assert_eq!(words(&out.join(" ")), expected, "max {max}");
+        }
+        // Continuation lines of a key row hang under its description.
+        let out = wrap_help(&[src[3]], 50);
+        assert!(out.len() > 1);
+        assert!(out[1].starts_with(&" ".repeat(24)), "{out:?}");
+    }
+
+    #[test]
+    fn wrap_text_limits_lines_and_marks_the_cut() {
+        let out = wrap_text("alpha beta gamma delta epsilon zeta eta theta", 12, 2);
+        assert_eq!(out.len(), 2);
+        assert!(out[1].ends_with('…'), "{out:?}");
+        assert!(out.iter().all(|l| width(l) <= 12));
+        assert_eq!(wrap_text("short", 12, 3), ["short"]);
+    }
+
+    #[test]
+    fn truncate_middle_keeps_head_and_tail() {
+        assert_eq!(truncate_middle("short", 10), "short");
+        let out = truncate_middle("LLLLLLLLLLLLLLLLLLLLtail-1", 12);
+        assert_eq!(width(&out), 12);
+        assert!(
+            out.starts_with("LLLLLL") && out.ends_with("ail-1") && out.contains('…'),
+            "{out}"
+        );
+        assert_ne!(
+            truncate_middle(&format!("{}A", "L".repeat(40)), 12),
+            truncate_middle(&format!("{}B", "L".repeat(40)), 12)
+        );
+        assert_eq!(truncate_middle("abcdef", 1), "…");
+        assert_eq!(truncate_middle("abcdef", 0), "");
+    }
+
+    #[test]
+    fn masked_input_hides_text_and_keeps_the_cursor() {
+        let mut t = TextInput::new("a👍🏽bc");
+        t.left();
+        let m = t.masked();
+        assert_eq!(m.text(), "****");
+        assert_eq!(m.window(10), ("****".to_owned(), 3));
+        assert_eq!(t.text(), "a👍🏽bc", "the original is untouched");
+    }
+
+    #[test]
+    fn step_prefix_is_dropped_once() {
+        assert_eq!(
+            without_step_prefix("authorize", "authorize: Authorize failed"),
+            "Authorize failed"
+        );
+        assert_eq!(without_step_prefix("authorize", "other: x"), "other: x");
+        assert_eq!(
+            without_step_prefix("authorize", "authorize: "),
+            "authorize: "
+        );
     }
 }

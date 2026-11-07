@@ -100,7 +100,7 @@ pub fn connectors(f: &mut Frame<'_>, app: &App, area: Rect) {
 
 fn kv(k: &str, v: impl Into<String>) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{k:<14}"), dim()),
+        Span::styled(format!("{k:<16}"), dim()),
         Span::raw(v.into()),
     ])
 }
@@ -305,7 +305,14 @@ fn scenario_lines(app: &App) -> Vec<Line<'static>> {
             StepState::Pending => (" ", Color::DarkGray, String::new()),
             StepState::Running => (">", Color::Cyan, String::new()),
             StepState::Passed(ms) => ("+", Color::Green, format!(" ({ms} ms)")),
-            StepState::Failed(why) => ("x", Color::Red, format!(": {}", sanitize(why))),
+            StepState::Failed(why) => (
+                "x",
+                Color::Red,
+                format!(
+                    ": {}",
+                    sanitize(crate::text::without_step_prefix(name, why))
+                ),
+            ),
             StepState::Skipped => ("-", Color::DarkGray, " skipped".to_owned()),
         };
         v.push(Line::styled(

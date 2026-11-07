@@ -114,7 +114,17 @@ pub struct Field {
     pub error: Option<String>,
     /// Input was dropped at [`INPUT_CAP`]; shown as the field error until text is removed.
     pub capped: bool,
+    /// The value is a secret: it is drawn as `*` (copy, paste and editing work as usual).
+    pub secret: bool,
 }
+
+/// Configuration keys whose value is a secret and must not be drawn in clear text.
+pub fn is_secret_config_key(key: &str) -> bool {
+    key.trim().eq_ignore_ascii_case("AuthorizationKey")
+}
+
+/// Shown under a hidden field.
+pub const SECRET_HINT: &str = "hidden while typing; paste works";
 
 impl Field {
     fn new(label: &'static str, kind: FieldKind, value: &str) -> Self {
@@ -127,6 +137,7 @@ impl Field {
             checked: Vec::new(),
             error: None,
             capped: false,
+            secret: false,
         }
     }
 
@@ -385,6 +396,9 @@ impl Form {
             1,
         );
         form.context.clone_from(&item.key);
+        if let Some(field) = form.fields.first_mut() {
+            field.secret = is_secret_config_key(&item.key);
+        }
         form.checker = Some(Box::new(registry));
         form.validate_all();
         form
@@ -621,8 +635,11 @@ impl Form {
         if f.input.text().len() < INPUT_CAP {
             f.capped = false;
         }
-        if f.capped && f.error.is_none() {
-            f.error = Some(CAP_NOTICE.to_owned());
+        if f.capped {
+            f.error = Some(match f.error.take() {
+                Some(e) => format!("{CAP_NOTICE}; {e}"),
+                None => CAP_NOTICE.to_owned(),
+            });
         }
     }
 
@@ -1038,5 +1055,33 @@ mod tests {
         let mut f = Form::search("");
         f.paste(&"x".repeat(INPUT_CAP + 1));
         assert_eq!(f.fields[0].error.as_deref(), Some(CAP_NOTICE));
+    }
+
+    #[test]
+    fn capped_notice_comes_first_next_to_another_error() {
+        let mut f = Form::raw(None);
+        f.focus = 1;
+        f.paste(&"x".repeat(INPUT_CAP + 5));
+        let err = f.fields[1].error.clone().unwrap_or_default();
+        assert!(err.starts_with(CAP_NOTICE), "{err}");
+        assert!(
+            err.len() > CAP_NOTICE.len(),
+            "the other error follows: {err}"
+        );
+    }
+
+    #[test]
+    fn authorization_key_editor_hides_the_value() {
+        let config = StationConfig::new("ws://localhost/ocpp");
+        let snapshot = Snapshot::initial(&config);
+        let item = |key: &str| ConfigItem {
+            key: key.to_owned(),
+            value: String::new(),
+            readonly: false,
+            hint: "text".to_owned(),
+        };
+        assert!(Form::config_value(&item("AuthorizationKey"), &snapshot).fields[0].secret);
+        assert!(!Form::config_value(&item("HeartbeatInterval"), &snapshot).fields[0].secret);
+        assert!(is_secret_config_key(" authorizationkey "));
     }
 }

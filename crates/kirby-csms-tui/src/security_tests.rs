@@ -314,6 +314,24 @@ fn auth_failures_are_counted_and_noticed_once_per_second() {
     assert_eq!(app.auth_failures, 3);
 }
 
+#[test]
+fn refused_without_a_station_does_not_repeat_the_word_refused() {
+    let (mut app, _) = app_with(&["CP-1"]);
+    update(
+        &mut app,
+        Msg::Event(CsmsEvent::AuthFailed {
+            station: None,
+            remote_addr: "10.0.0.9:5001".parse().unwrap(),
+            reason: "refused: station id longer than 128 bytes".to_owned(),
+        }),
+    );
+    let text = notice(&app);
+    assert_eq!(
+        text,
+        "refused unknown station from 10.0.0.9:5001: station id longer than 128 bytes"
+    );
+}
+
 // ---- drawing ---------------------------------------------------------------------------------
 
 fn render(app: &App, w: u16, h: u16) -> String {

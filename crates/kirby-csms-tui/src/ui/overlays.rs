@@ -1,7 +1,8 @@
 //! Palette, form, confirmation and results list.
 
-use kirby_ocpp_tui::text::{sanitize, truncate, width};
-use kirby_ocpp_tui::ui::dim;
+use kirby_ocpp_tui::forms::SECRET_HINT;
+use kirby_ocpp_tui::text::{sanitize, truncate, width, wrap_text};
+use kirby_ocpp_tui::ui::{dim, popup_width};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -66,7 +67,7 @@ pub(super) fn palette(f: &mut Frame<'_>, app: &App, p: &Palette, area: Rect) {
     );
 }
 
-fn field_value(fl: &Field, w: usize, focused: bool) -> (String, Option<usize>) {
+fn field_value(fl: &Field, w: usize, focused: bool, secret: bool) -> (String, Option<usize>) {
     if fl.kind == FieldKind::Select {
         let cur = fl.chosen().unwrap_or("(none)");
         (
@@ -74,35 +75,64 @@ fn field_value(fl: &Field, w: usize, focused: bool) -> (String, Option<usize>) {
             None,
         )
     } else {
-        let (shown, col) = fl.input.window(w);
+        let (shown, col) = if secret {
+            fl.input.masked().window(w)
+        } else {
+            fl.input.window(w)
+        };
         (shown, focused.then_some(col))
     }
 }
 
+/// Lines under a field: its error wrapped to three lines, or the hint of a hidden value.
+fn field_notes(fl: &Field, secret: bool, w: usize) -> Vec<(String, bool)> {
+    if let Some(err) = &fl.error {
+        wrap_text(&sanitize(err), w, 3)
+            .into_iter()
+            .map(|l| (l, true))
+            .collect()
+    } else if secret {
+        vec![(truncate(SECRET_HINT, w), false)]
+    } else {
+        vec![(String::new(), false)]
+    }
+}
+
 pub(super) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
-    let h = u16::try_from(form.fields.len() * 2 + 3).unwrap_or(u16::MAX);
-    let rect = centered(
-        area,
-        90.min(area.width.saturating_sub(2)),
-        h.min(area.height),
-    );
-    let inner = popup(f, rect, &sanitize(&form.title));
+    let width_cells = popup_width(area.width, 90);
+    let inner_w = usize::from(width_cells.saturating_sub(2));
     let label_w = form
         .fields
         .iter()
         .map(|x| width(x.label))
         .max()
         .unwrap_or(0)
-        .min(usize::from(inner.width) / 2)
+        .min(inner_w / 2)
         + 2;
+    let note_w = inner_w.saturating_sub(label_w).max(1);
+    let notes: Vec<Vec<(String, bool)>> = form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, fl)| field_notes(fl, form.is_secret(i), note_w))
+        .collect();
+    let form_error: Vec<String> = form
+        .error
+        .as_deref()
+        .map(|e| wrap_text(&sanitize(e), inner_w.max(1), 3))
+        .unwrap_or_default();
+    let rows: usize = notes.iter().map(|n| 1 + n.len()).sum::<usize>() + form_error.len();
+    let h = u16::try_from(rows + 2).unwrap_or(u16::MAX).min(area.height);
+    let rect = centered(area, width_cells, h);
+    let inner = popup(f, rect, &sanitize(&form.title));
     let value_w = usize::from(inner.width).saturating_sub(label_w).max(1);
+    let mut y = inner.y;
     for (i, fl) in form.fields.iter().enumerate() {
-        let y = inner.y + u16::try_from(i * 2).unwrap_or(0);
         if y >= inner.y + inner.height {
             break;
         }
         let focused = i == form.focus;
-        let (value, cursor) = field_value(fl, value_w, focused);
+        let (value, cursor) = field_value(fl, value_w, focused, form.is_secret(i));
         let label_style = if focused {
             Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
         } else {
@@ -118,31 +148,36 @@ pub(super) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
             let x = inner.x + u16::try_from(label_w + col).unwrap_or(0);
             f.set_cursor_position(Position::new(x.min(inner.right().saturating_sub(1)), y));
         }
-        if let Some(err) = &fl.error
-            && y + 1 < inner.y + inner.height
-        {
-            error_line(f, err, label_w, Rect::new(inner.x, y + 1, inner.width, 1));
+        y += 1;
+        for (text, is_error) in notes.get(i).map(Vec::as_slice).unwrap_or_default() {
+            if y >= inner.y + inner.height {
+                break;
+            }
+            let style = if *is_error {
+                Style::new().fg(Color::Red)
+            } else {
+                dim()
+            };
+            f.render_widget(
+                Paragraph::new(Line::styled(
+                    format!("{}{text}", " ".repeat(label_w)),
+                    style,
+                )),
+                Rect::new(inner.x, y, inner.width, 1),
+            );
+            y += 1;
         }
     }
-    if let Some(err) = &form.error {
-        let y = inner.y + u16::try_from(form.fields.len() * 2).unwrap_or(0);
-        if y < inner.y + inner.height {
-            error_line(f, err, 0, Rect::new(inner.x, y, inner.width, 1));
+    for text in &form_error {
+        if y >= inner.y + inner.height {
+            break;
         }
+        f.render_widget(
+            Paragraph::new(Line::styled(text.clone(), Style::new().fg(Color::Red))),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+        y += 1;
     }
-}
-
-fn error_line(f: &mut Frame<'_>, err: &str, indent: usize, rect: Rect) {
-    f.render_widget(
-        Paragraph::new(Line::styled(
-            truncate(
-                &format!("{}{}", " ".repeat(indent), sanitize(err)),
-                usize::from(rect.width),
-            ),
-            Style::new().fg(Color::Red),
-        )),
-        rect,
-    );
 }
 
 pub(super) fn confirm(f: &mut Frame<'_>, c: &Confirm, area: Rect) {

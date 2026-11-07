@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use kirby_csms_core::{StationInfo, StationState, TransactionStatus};
 use kirby_ocpp_core::station::{Direction, LogLevel};
 use kirby_ocpp_tui::logview::{FrameKind, LogEntry};
-use kirby_ocpp_tui::text::{sanitize, truncate, width};
+use kirby_ocpp_tui::text::{sanitize, truncate, truncate_middle, width};
 use kirby_ocpp_tui::ui::dim;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -77,13 +77,20 @@ fn station_row(s: &Summary, inner_w: usize, selected: bool) -> Line<'static> {
     let id_w = inner_w
         .saturating_sub(2 + width(&model) + width(&tx))
         .max(1);
-    let id = pad(&truncate(&sanitize(&s.id), id_w), id_w);
+    // Middle cut: ids that share a long prefix still differ in the tail.
+    let id = pad(&truncate_middle(&sanitize(&s.id), id_w), id_w);
     let text_style = if s.connected { Style::new() } else { dim() };
+    // A transaction counter of a disconnected station is stale: draw it dim.
+    let tx_style = if s.connected {
+        Style::new().fg(Color::Cyan)
+    } else {
+        dim()
+    };
     let line = Line::from(vec![
         Span::styled(format!("{dot} "), Style::new().fg(color)),
         Span::styled(id, text_style),
         Span::styled(model, dim()),
-        Span::styled(tx, Style::new().fg(Color::Cyan)),
+        Span::styled(tx, tx_style),
     ]);
     if selected { line.style(SELECTED) } else { line }
 }

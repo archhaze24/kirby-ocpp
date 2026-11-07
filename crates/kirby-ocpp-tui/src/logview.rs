@@ -128,7 +128,7 @@ impl LogEntry {
         self.kind == Some(FrameKind::Error)
             || self
                 .station_line()
-                .is_some_and(|l| matches!(l.level, LogLevel::Warn | LogLevel::Error))
+                .is_some_and(|l| l.level == LogLevel::Error)
     }
 
     fn matches(&self, filter: LogFilter) -> bool {
@@ -569,6 +569,16 @@ mod tests {
         let mut log = LogStore::default();
         log.push(frame(0, Direction::In, "x", None, json!([3, "x", {}])));
         assert_eq!(log.visible()[0].rtt_ms, None);
+    }
+
+    #[test]
+    fn errors_filter_leaves_out_warnings_and_info() {
+        let mut log = LogStore::default();
+        log.push(line(0, LogLevel::Warn, "security event StartupOfTheDevice"));
+        log.push(line(1, LogLevel::Info, "hello"));
+        log.push(line(2, LogLevel::Error, "boom"));
+        log.set_filter(LogFilter::Errors);
+        assert_eq!(log.visible_count(), 1);
     }
 
     #[test]

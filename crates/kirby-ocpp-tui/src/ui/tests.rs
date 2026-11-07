@@ -236,7 +236,83 @@ fn tiny_and_odd_sizes_never_panic_in_any_mode() {
 
 #[test]
 fn too_small_terminal_says_so() {
-    assert!(render(&app(), 20, 6).contains("too small"));
+    let t = render(&app(), 20, 6);
+    assert!(t.contains("need 24x8, have 20x6"), "{t}");
+}
+
+fn config_form(a: &mut App, key: &str) {
+    use crate::app::Mode;
+    let item = kirby_ocpp_core::station::ConfigItem {
+        key: key.to_owned(),
+        value: String::new(),
+        readonly: false,
+        hint: "text".to_owned(),
+    };
+    a.mode = Mode::Form(crate::forms::Form::config_value(&item, &a.snapshot));
+}
+
+#[test]
+fn authorization_key_value_is_drawn_as_stars() {
+    let mut a = app();
+    config_form(&mut a, "AuthorizationKey");
+    update(&mut a, Msg::Paste("supersecretkey12345".into()));
+    let t = render(&a, 100, 30);
+    assert!(!t.contains("supersecret"), "{t}");
+    assert!(t.contains(&"*".repeat(19)), "{t}");
+    assert!(t.contains("hidden"), "{t}");
+    // Other keys stay readable.
+    let mut a = app();
+    config_form(&mut a, "HeartbeatInterval");
+    update(&mut a, Msg::Paste("60".into()));
+    assert!(render(&a, 100, 30).contains("60"));
+}
+
+#[test]
+fn long_form_errors_wrap_instead_of_being_cut() {
+    use crate::app::Mode;
+    let mut a = app();
+    let mut f = crate::forms::Form::search("");
+    f.fields[0].error = Some(format!("{} TAIL-OF-THE-ERROR", "word ".repeat(18)));
+    a.mode = Mode::Form(f);
+    for (w, h) in [(60, 24), (80, 24), (120, 36)] {
+        let t = render(&a, w, h);
+        assert!(t.contains("TAIL-OF-THE-ERROR"), "{w}x{h}\n{t}");
+    }
+}
+
+#[test]
+fn help_wraps_to_the_popup_and_shows_the_connected_start() {
+    use crate::app::Mode;
+    let mut a = app();
+    a.mode = Mode::Help;
+    for (w, h) in [(80, 24), (120, 36), (24, 8)] {
+        let t = render(&a, w, h);
+        if w >= 80 {
+            assert!(t.contains("connects and boots at startup"), "{w}x{h}\n{t}");
+            assert!(t.contains("Everything lands in the log."), "{w}x{h}\n{t}");
+        }
+        assert!(!t.contains("starts offline"));
+        assert!(t.lines().all(|l| l.chars().count() <= usize::from(w)));
+    }
+}
+
+#[test]
+fn forms_use_the_whole_width_of_a_narrow_terminal() {
+    let mut a = app();
+    keys(&mut a, "3a");
+    let t = render(&a, 40, 12);
+    assert!(!t.contains("┌┌") && !t.contains("┐┐"), "{t}");
+    assert!(t.contains("Authorize"), "{t}");
+}
+
+#[test]
+fn long_station_id_keeps_the_connection_state_visible() {
+    let mut a = app();
+    a.snapshot.charge_point_id = format!("{}-tail", "L".repeat(150));
+    let t = render(&a, 100, 24);
+    let first = t.lines().next().unwrap_or("");
+    assert!(first.contains("connected"), "{t}");
+    assert!(first.contains('…'), "{t}");
 }
 
 #[test]

@@ -22,14 +22,7 @@ pub const MIN_SIZE: (u16, u16) = (24, 8);
 pub fn draw(f: &mut Frame<'_>, app: &App) {
     let area = f.area();
     if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
-        let msg = format!(
-            "terminal too small ({}x{}, need {}x{})",
-            area.width, area.height, MIN_SIZE.0, MIN_SIZE.1
-        );
-        f.render_widget(
-            Paragraph::new(truncate(&msg, usize::from(area.width))),
-            area,
-        );
+        kirby_ocpp_tui::ui::too_small(f, area, MIN_SIZE);
         return;
     }
     let [header, body, footer] = Layout::vertical([
@@ -285,14 +278,18 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
             f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
         }
         Mode::Help => {
-            let h = u16::try_from(HELP.len() + 2).unwrap_or(u16::MAX);
-            let rect = centered(
-                area,
-                86.min(area.width.saturating_sub(2)),
-                h.min(area.height),
-            );
+            let rect_w = kirby_ocpp_tui::ui::popup_width(area.width, 96);
+            let wrapped =
+                kirby_ocpp_tui::text::wrap_help(HELP, usize::from(rect_w.saturating_sub(2)));
+            let mut wrapped = wrapped;
+            if wrapped.len() + 2 > usize::from(area.height) {
+                // A short terminal: drop the spacer lines so more of the help fits.
+                wrapped.retain(|l| !l.is_empty());
+            }
+            let h = u16::try_from(wrapped.len() + 2).unwrap_or(u16::MAX);
+            let rect = centered(area, rect_w, h.min(area.height));
             let inner = popup(f, rect, "Help");
-            let lines: Vec<Line<'_>> = HELP.iter().map(|l| Line::raw(*l)).collect();
+            let lines: Vec<Line<'_>> = wrapped.into_iter().map(Line::from).collect();
             f.render_widget(Paragraph::new(lines), inner);
         }
         Mode::Detail(d) => {

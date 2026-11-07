@@ -239,6 +239,36 @@ fn history_load_replaces_the_log_and_drops_duplicates_of_its_tail() {
 }
 
 #[test]
+fn a_cut_live_frame_matches_the_full_frame_in_the_history() {
+    let (mut app, _) = app_with(&["A"]);
+    let big = Frame::call(
+        "b1",
+        "DataTransfer",
+        json!({"vendorId": "v", "data": "x".repeat(100_000)}),
+    );
+    update(
+        &mut app,
+        Msg::Loaded {
+            id: "A".to_owned(),
+            history: vec![FrameEntry {
+                ts: at(1),
+                direction: Direction::In,
+                frame: big.clone(),
+            }],
+            info: None,
+            state: None,
+        },
+    );
+    assert_eq!(app.station_log.len(), 1);
+    // The event carries the cut form of the same frame.
+    update(
+        &mut app,
+        frame_msg("A", Direction::In, kirby_csms_core::event_frame(&big)),
+    );
+    assert_eq!(app.station_log.len(), 1, "not shown twice");
+}
+
+#[test]
 fn state_changes_are_coalesced_into_one_refresh_per_tick() {
     let (mut app, _) = app_with(&["A", "B"]);
     for station in ["B", "A", "B"] {

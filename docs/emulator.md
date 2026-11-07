@@ -49,7 +49,9 @@ Confirmations (quit, clear log, clear list, ...) accept only `y`/`Y`; any other 
 
 The footer always ends with the `? help` and `: palette` hints, even in a narrow terminal; other hints are dropped first. While a command that waits for the CSMS is in flight (from a key, the palette or a form), the footer shows `waiting... <action>` until the result arrives; a notice takes that line while it is shown, and the marker is dropped when the connection goes down.
 
-First steps: the station starts offline. On the Station tab press `c` to connect, then `:` and type an action name (BootNotification, Heartbeat, StartTransaction) to run it, or open the Scenarios tab (`7`). Every frame lands in the log. The help popup (`?`) opens with the same hints.
+First steps: the station connects and boots at startup, and the header shows the connection state. On the Station tab `x` disconnects and `c` connects again (pressing `c` while connected says so). Press `:` and type an action name (BootNotification, Heartbeat, StartTransaction) to run it, or open the Scenarios tab (`7`). Every frame lands in the log. The help popup (`?`) opens with the same hints; it wraps to the terminal width.
+
+The UI needs at least 24 columns by 8 rows (9 rows for a fleet, which adds the selector row; the CSMS UI needs 24 by 8); a smaller terminal shows `need 24x8, have WxH` until it is resized. Forms and popups use the full width of a narrow terminal, and long station ids are shortened in the middle so the connection state stays visible. The value of an `AuthorizationKey` is drawn as `*` while you type it (paste and editing work as usual). The log filter `errors` shows ERROR frames and error-level lines only.
 
 ### Actions by tab
 

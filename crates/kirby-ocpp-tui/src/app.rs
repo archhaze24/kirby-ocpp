@@ -797,7 +797,12 @@ fn first_failure(r: &ScenarioReport) -> String {
     r.steps
         .iter()
         .find_map(|s| match &s.status {
-            StepStatus::Failed(why) => Some(format!("step {} ({}): {why}", s.index + 1, s.name)),
+            StepStatus::Failed(why) => Some(format!(
+                "step {} ({}): {}",
+                s.index + 1,
+                s.name,
+                crate::text::without_step_prefix(&s.name, why)
+            )),
             _ => None,
         })
         .unwrap_or_else(|| "unknown".to_owned())
