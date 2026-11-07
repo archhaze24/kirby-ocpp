@@ -45,6 +45,26 @@ npm install -g kirby-ocpp kirby-csms
 cargo install kirby-ocpp kirby-csms
 ```
 
+**Homebrew** (macOS and Linux):
+
+```bash
+brew install archhaze24/tap/kirby-ocpp
+```
+
+**Scoop** (Windows):
+
+```powershell
+scoop bucket add archhaze24 https://github.com/archhaze24/scoop-bucket
+scoop install kirby-ocpp
+```
+
+**Docker** (`linux/amd64`, `linux/arm64`; the entrypoint starts the emulator, `kirby-csms` as the first argument starts the central system):
+
+```bash
+docker run --rm ghcr.io/archhaze24/kirby-ocpp --version
+docker run --rm -p 9000:9000 ghcr.io/archhaze24/kirby-ocpp kirby-csms --listen 0.0.0.0:9000
+```
+
 **Release archives**: download from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). Each archive holds both binaries, the license, the third-party notices and this README.
 
 | Platform | Target |
