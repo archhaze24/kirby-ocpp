@@ -206,6 +206,7 @@ The standalone CSMS answers the four charge-point security actions (`SignCertifi
 - **WebSocketPingInterval** is initialized from `--ws-ping` and read when a connection opens, so a change applies from the next (re)connect; `0` disables pings. State files older than version 6 stored an unused value for it, which is ignored on load.
 - **Restored stops**: a `StopTransaction` that was in flight at a crash is restored with its recorded stop time and meter reading (format version 6; older files fall back to the restore time and the connector's meter) and is queued per connector, so connectors sharing one CSMS transaction id each deliver their own stop.
 - **Secrets in schema errors**: schema violations of a `ChangeConfiguration` for `AuthorizationKey` never quote the value (generic messages), and `Debug` output of the configuration registry masks it.
+- **CSMS memory bounds**: history and frame events are bounded per station and per event, but station records are not evicted (`forget()` only), so the totals grow with the number of distinct station ids (`max_stations`, default 100000). `GET /v1/stations` copies every record, so keep `max_stations` low on an exposed listener. Control API request bodies (up to 1 MiB) are held per connection (up to 512 connections) before the call budget applies. The redaction of `AuthorizationKey` covers `ChangeConfiguration` CALLs and malformed text; a `GetConfiguration` result that echoes the value is shown as received.
 
 ## Intentional differences from the earlier TypeScript version
 
