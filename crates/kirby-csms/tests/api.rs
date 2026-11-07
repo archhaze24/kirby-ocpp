@@ -1718,9 +1718,13 @@ async fn hyper_answers_before_the_router_have_an_empty_body() {
     let cases = [
         ("GARBAGE\r\n\r\n".to_owned(), 400),
         (
+            // Far more headers than hyper accepts (its limit is 100): the answer is the same
+            // on every platform, unlike a single huge header that depends on socket buffering.
             format!(
-                "GET /v1 HTTP/1.1\r\nHost: {addr}\r\nX-Big: {}\r\n\r\n",
-                "a".repeat(500_000)
+                "GET /v1 HTTP/1.1\r\nHost: {addr}\r\n{}\r\n",
+                (0..300)
+                    .map(|n| format!("X-H{n}: a\r\n"))
+                    .collect::<String>()
             ),
             431,
         ),
