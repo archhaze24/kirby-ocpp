@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use kirby_csms_core::{CsmsError, CsmsHandle, Fault, Frame};
+use kirby_ocpp_core::text::is_unsafe_char;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
@@ -160,7 +161,12 @@ pub enum FaultKind {
 /// Largest `times` of one fault.
 pub const MAX_FAULT_TIMES: usize = 1_000_000;
 
-/// Checks the fields of an `inject_fault` request (script step and API alike).
+/// Longest action name of a fault, in bytes.
+pub const MAX_FAULT_ACTION_LEN: usize = 128;
+
+/// Checks the fields of an `inject_fault` request (script step and API alike). The action
+/// name may be any text without control characters, so faults can target actions the
+/// server does not know.
 pub fn check_fault(
     action: &str,
     kind: FaultKind,
@@ -169,6 +175,14 @@ pub fn check_fault(
 ) -> Result<(), String> {
     if action.is_empty() {
         return Err("`call` must not be empty".to_owned());
+    }
+    if action.len() > MAX_FAULT_ACTION_LEN {
+        return Err(format!(
+            "the action name must be at most {MAX_FAULT_ACTION_LEN} bytes"
+        ));
+    }
+    if action.chars().any(is_unsafe_char) {
+        return Err("the action name must not contain control characters".to_owned());
     }
     if times == 0 {
         return Err("`times` must be 1 or more".to_owned());
@@ -191,4 +205,24 @@ pub fn build_fault(action: &str, kind: FaultKind, payload: Option<Value>, times:
         FaultKind::InvalidPayload => Fault::invalid_payload(action, payload.unwrap_or_default()),
     };
     fault.times(times)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_fault_bounds_times_and_action_names() {
+        let ok = |action: &str, times: usize| check_fault(action, FaultKind::Silence, None, times);
+        assert!(ok("Heartbeat", 1).is_ok());
+        assert!(ok("NoSuchAction", MAX_FAULT_TIMES).is_ok());
+        assert!(ok("Heartbeat", 0).is_err());
+        assert!(ok("Heartbeat", MAX_FAULT_TIMES + 1).is_err());
+        assert!(ok("", 1).is_err());
+        assert!(ok("Heart\nbeat", 1).is_err());
+        assert!(ok("Heart\u{1b}[31mbeat", 1).is_err());
+        assert!(ok("Heart\u{202e}beat", 1).is_err());
+        assert!(ok(&"a".repeat(MAX_FAULT_ACTION_LEN), 1).is_ok());
+        assert!(ok(&"a".repeat(MAX_FAULT_ACTION_LEN + 1), 1).is_err());
+    }
 }

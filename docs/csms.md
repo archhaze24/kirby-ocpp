@@ -164,6 +164,8 @@ Both apply to all stations, not to the selected one, and to CALLs sent by statio
 | `close` | close the WebSocket with code 1011 without replying |
 | `invalid_payload` | CALLRESULT with the payload you give, as is (for example schema-invalid) |
 
+Scripts and the HTTP API check faults the same way: the action name is 1 to 128 bytes without control characters, `times` is 1 to 1 000 000, and at most 1000 faults (8 MiB of text) are stored at once.
+
 In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` steps, see [scenarios.md](scenarios.md). The emulator has the mirror feature for CSMS commands ([emulator.md](emulator.md)).
 
 ## Headless behavior

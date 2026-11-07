@@ -883,8 +883,7 @@ impl Runner<'_> {
                     .map(|v| self.sub("payload", v))
                     .transpose()?;
                 self.handle
-                    .inject(commands::build_fault(call, *kind, payload, *times));
-                Ok(())
+                    .try_inject(commands::build_fault(call, *kind, payload, *times))
             }
         }
     }
@@ -1090,6 +1089,12 @@ times = 2
             ))
             .contains("payload")
         );
+        for (call, times) in [("", 1), ("a\\nb", 1), ("X", 0), ("X", 1_000_001)] {
+            let text = format!(
+                "{head}action = \"inject_fault\"\ncall = \"{call}\"\nkind = \"silence\"\ntimes = {times}"
+            );
+            assert!(Script::from_toml(&text).is_err(), "{call:?} {times}");
+        }
         assert!(err("name = \"t\"").contains("at least one"));
     }
 

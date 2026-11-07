@@ -416,7 +416,7 @@ impl CsmsHandle {
 
     /// Like [`CsmsHandle::inject`], but refuses a fault that would take the stored faults over
     /// 1000 entries or 8 MiB of action and payload text. Only this method enforces the caps:
-    /// [`CsmsHandle::inject`] (used by scripts and stdin commands) stores any fault.
+    /// [`CsmsHandle::inject`] (used by the terminal UI) stores any fault.
     pub fn try_inject(&self, fault: Fault) -> Result<(), String> {
         if fault.remaining == 0 {
             return Ok(());

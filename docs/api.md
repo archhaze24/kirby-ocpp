@@ -125,7 +125,7 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/faults
 ```
 
 - `PUT /v1/rules/{action}`: `{action}` must be an action a charge point can send in the protocol of the engine's action table, today `ocpp1.6` (otherwise `400` `unsupported_action`); the body must be a JSON object (the whole CALLRESULT payload, not checked against the schema).
-- `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `times` defaults to 1 and must be 1 to 1000000 (`400` otherwise); at most 1000 faults and 8 MiB of action and payload text are stored at once (`409` with a JSON error beyond that; `DELETE /v1/faults` frees them). These caps apply to the API only: faults injected by scripts and stdin commands are not capped. Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
+- `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `action` is 1 to 128 bytes without control characters (any other name is accepted, so faults can target actions the server does not know; `400` otherwise); `times` defaults to 1 and must be 1 to 1000000 (`400` otherwise); at most 1000 faults and 8 MiB of action and payload text are stored at once (`409` with a JSON error beyond that; `DELETE /v1/faults` frees them). Scripts apply the same checks and caps (an `inject_fault` step fails the script when the store is full); the terminal UI form is bounded by the same `times` limit. Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
 
 ## Errors and limits
 

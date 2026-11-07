@@ -1063,6 +1063,34 @@ async fn limit_is_percent_decoded_like_station() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn fault_action_names_are_checked() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let long = "a".repeat(129);
+    for action in [
+        String::new(),
+        "Heart\\nbeat".to_owned(),
+        "Heart\\u001b[31mbeat".to_owned(),
+        long,
+    ] {
+        let body = format!(r#"{{"action":"{action}","kind":"silence"}}"#);
+        let (status, reply) = http(addr, "POST", "/v1/faults", &[], Some(&body)).await;
+        assert_eq!(status, 400, "{action:?}: {reply}");
+        assert_eq!(reply["error"]["code"], "bad_request");
+    }
+    let (status, reply) = http(
+        addr,
+        "POST",
+        "/v1/faults",
+        &[],
+        Some(r#"{"action":"NoSuchAction","kind":"silence"}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{reply}");
+    assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 1}));
+}
+
+#[tokio::test]
 async fn fault_sizes_and_counts_are_bounded() {
     let csms = Csms::start(&[]);
     let addr = &csms.api_addr;
