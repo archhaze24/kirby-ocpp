@@ -108,6 +108,7 @@ pub const SCHEMA: Schema = Schema {
             ],
         },
     ],
+    blocks: &[],
 };
 
 /// A command-line argument that was filled from the file.

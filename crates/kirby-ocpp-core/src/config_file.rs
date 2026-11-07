@@ -13,7 +13,10 @@
 //! * a [`Kind::Secret`] key is always an error: a file never carries a secret inline;
 //! * `[profile.NAME]` tables repeat the sections of the top level; the selected profile
 //!   replaces top-level values key by key;
-//! * relative [`Kind::Path`] values resolve against the directory of the file.
+//! * relative [`Kind::Path`] values resolve against the directory of the file;
+//! * a [`BlockSpec`] describes an array of tables (`[[station]]`): keys, required and reserved
+//!   keys, a unique key and a check per element; a selected profile that defines the array
+//!   replaces the top-level one.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -88,6 +91,27 @@ pub struct Section {
     pub keys: &'static [KeySpec],
 }
 
+/// Check of a whole block after its keys were converted: `Err` carries the reason.
+pub type BlockCheck = fn(&Block) -> Result<(), String>;
+
+/// An array of tables (`[[station]]`): every element holds the same keys.
+#[derive(Debug, Clone, Copy)]
+pub struct BlockSpec {
+    /// Name of the array at the top level (and inside a profile).
+    pub name: &'static str,
+    /// Keys of one element.
+    pub keys: &'static [KeySpec],
+    /// Keys every element must set.
+    pub required: &'static [&'static str],
+    /// Keys that are reserved for later releases: `(key, message)`. Using one is an error
+    /// that carries the message.
+    pub reserved: &'static [(&'static str, &'static str)],
+    /// A key whose value must differ between the elements of one array.
+    pub unique: Option<&'static str>,
+    /// Check of one element after its keys were converted.
+    pub check: Option<BlockCheck>,
+}
+
 /// All sections of one binary's configuration file.
 #[derive(Debug, Clone, Copy)]
 pub struct Schema {
@@ -95,6 +119,8 @@ pub struct Schema {
     pub protocol: &'static str,
     /// Sections in rendering order.
     pub sections: &'static [Section],
+    /// Arrays of tables in rendering order, after the sections.
+    pub blocks: &'static [BlockSpec],
 }
 
 impl Schema {
@@ -124,8 +150,15 @@ impl Schema {
             .map(|section| section.path.join("."))
     }
 
+    fn block(&self, name: &str) -> Option<&BlockSpec> {
+        self.blocks.iter().find(|block| block.name == name)
+    }
+
     fn table_names(&self, parent: &[&str]) -> Vec<&'static str> {
         let mut names: Vec<&'static str> = Vec::new();
+        if parent.is_empty() {
+            names.extend(self.blocks.iter().map(|block| block.name));
+        }
         for section in self.sections {
             if section.path.len() > parent.len()
                 && section.path.starts_with(parent)
@@ -151,13 +184,49 @@ pub enum Value {
     List(Vec<String>),
 }
 
+/// One element of an array of tables: key name to value.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Block {
+    values: BTreeMap<&'static str, Value>,
+}
+
+impl Block {
+    /// The value of `key`, if the element set it.
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.values.get(key)
+    }
+
+    /// The text value of `key`, if the element set it.
+    pub fn text(&self, key: &str) -> Option<&str> {
+        match self.values.get(key) {
+            Some(Value::Text(text)) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// The integer value of `key`, if the element set it.
+    pub fn integer(&self, key: &str) -> Option<i64> {
+        match self.values.get(key) {
+            Some(Value::Integer(number)) => Some(*number),
+            _ => None,
+        }
+    }
+}
+
 /// Merged settings of a file: key name to value.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
     values: BTreeMap<&'static str, Value>,
+    blocks: BTreeMap<&'static str, Vec<Block>>,
 }
 
 impl Settings {
+    /// The elements of the array of tables `name` (empty when the file has none). A selected
+    /// profile that defines the array replaces the one of the top level as a whole.
+    pub fn blocks(&self, name: &str) -> &[Block] {
+        self.blocks.get(name).map_or(&[], Vec::as_slice)
+    }
+
     /// The value of `key`, if the file set it.
     pub fn get(&self, key: &str) -> Option<&Value> {
         self.values.get(key)
@@ -170,7 +239,7 @@ impl Settings {
 
     /// Whether no key is set.
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty()
+        self.values.is_empty() && self.blocks.is_empty()
     }
 }
 
@@ -178,6 +247,12 @@ impl Settings {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct ConfigFileError(String);
+
+/// Arrays of tables by name.
+type Blocks = BTreeMap<&'static str, Vec<Block>>;
+
+/// Values and blocks one profile sets.
+type Profile = (BTreeMap<&'static str, Value>, Blocks);
 
 /// Reads, validates and merges `path`.
 ///
@@ -245,7 +320,8 @@ pub fn parse_str(
     };
 
     let mut top = BTreeMap::new();
-    let mut profiles: BTreeMap<String, BTreeMap<&'static str, Value>> = BTreeMap::new();
+    let mut top_blocks: BTreeMap<&'static str, Vec<Block>> = BTreeMap::new();
+    let mut profiles: BTreeMap<String, Profile> = BTreeMap::new();
     let mut top_tables = toml::Table::new();
     for (key, value) in &root {
         match key.as_str() {
@@ -283,10 +359,11 @@ pub fn parse_str(
                         return Err(fail(type_error(&shown, "a table", body)));
                     };
                     let mut values = BTreeMap::new();
+                    let mut blocks = BTreeMap::new();
                     checker
-                        .walk(body, &[], &shown, true, &mut values)
+                        .walk(body, &[], &shown, true, (&mut values, &mut blocks))
                         .map_err(fail)?;
-                    profiles.insert(name.clone(), values);
+                    profiles.insert(name.clone(), (values, blocks));
                 }
             }
             _ => {
@@ -295,7 +372,7 @@ pub fn parse_str(
         }
     }
     checker
-        .walk(&top_tables, &[], "", false, &mut top)
+        .walk(&top_tables, &[], "", false, (&mut top, &mut top_blocks))
         .map_err(fail)?;
 
     if let Some(name) = profile {
@@ -310,9 +387,13 @@ pub fn parse_str(
             };
             return Err(fail(format!("unknown profile `{name}`; {available}")));
         };
-        top.extend(chosen);
+        top.extend(chosen.0);
+        top_blocks.extend(chosen.1);
     }
-    Ok(Settings { values: top })
+    Ok(Settings {
+        values: top,
+        blocks: top_blocks,
+    })
 }
 
 fn base_dir(path: &Path) -> Result<PathBuf, String> {
@@ -354,21 +435,29 @@ impl Checker<'_> {
         section: &[&str],
         shown: &str,
         in_profile: bool,
-        out: &mut BTreeMap<&'static str, Value>,
+        out: (&mut BTreeMap<&'static str, Value>, &mut Blocks),
     ) -> Result<(), String> {
+        let (out, blocks_out) = out;
         for (key, value) in table {
             let key_path = if shown.is_empty() {
                 key.clone()
             } else {
                 format!("{shown}.{key}")
             };
+            if section.is_empty()
+                && let Some(spec) = self.schema.block(key)
+            {
+                let list = self.block_list(spec, &key_path, value)?;
+                blocks_out.insert(spec.name, list);
+                continue;
+            }
             let mut child: Vec<&str> = section.to_vec();
             child.push(key);
             if self.schema.has_table(&child) {
                 let Some(inner) = value.as_table() else {
                     return Err(type_error(&key_path, "a table", value));
                 };
-                self.walk(inner, &child, &key_path, in_profile, out)?;
+                self.walk(inner, &child, &key_path, in_profile, (out, blocks_out))?;
                 continue;
             }
             let spec = self
@@ -382,6 +471,63 @@ impl Checker<'_> {
             out.insert(spec.name, converted);
         }
         Ok(())
+    }
+
+    /// Validates an array of tables.
+    fn block_list(
+        &self,
+        spec: &BlockSpec,
+        key_path: &str,
+        value: &toml::Value,
+    ) -> Result<Vec<Block>, String> {
+        let Some(items) = value.as_array() else {
+            return Err(type_error(key_path, "an array of tables", value));
+        };
+        let mut list: Vec<Block> = Vec::with_capacity(items.len());
+        for (index, item) in items.iter().enumerate() {
+            let shown = format!("{key_path}[{index}]");
+            let Some(table) = item.as_table() else {
+                return Err(type_error(&shown, "a table", item));
+            };
+            let mut block = Block::default();
+            for (name, entry) in table {
+                let entry_path = format!("{shown}.{name}");
+                if let Some((_, message)) = spec.reserved.iter().find(|(key, _)| key == name) {
+                    return Err(format!("key `{entry_path}`: {message}"));
+                }
+                let Some(key_spec) = spec.keys.iter().find(|key| key.name == name) else {
+                    let valid: Vec<&str> = spec.keys.iter().map(|key| key.name).collect();
+                    return Err(format!(
+                        "unknown key `{entry_path}`; expected one of: {}",
+                        valid.join(", ")
+                    ));
+                };
+                let converted = self.convert(key_spec, &entry_path, entry)?;
+                block.values.insert(key_spec.name, converted);
+            }
+            if let Some(missing) = spec
+                .required
+                .iter()
+                .find(|name| !block.values.contains_key(*name))
+            {
+                return Err(format!("`{shown}`: the key `{missing}` is required"));
+            }
+            if let Some(check) = spec.check {
+                check(&block).map_err(|reason| format!("`{shown}`: {reason}"))?;
+            }
+            if let Some(unique) = spec.unique
+                && let Some(value) = block.values.get(unique)
+                && list
+                    .iter()
+                    .any(|other| other.values.get(unique) == Some(value))
+            {
+                return Err(format!(
+                    "`{shown}`: the value of `{unique}` repeats an earlier element of `{key_path}`"
+                ));
+            }
+            list.push(block);
+        }
+        Ok(list)
     }
 
     fn unknown(
@@ -486,6 +632,20 @@ impl Checker<'_> {
 /// out. `comments` become `#` lines at the top. The text is accepted by [`parse_str`] with
 /// the same schema.
 pub fn render(schema: &Schema, values: &[(&str, Value)], comments: &[String]) -> String {
+    render_with_blocks(schema, values, &[], comments)
+}
+
+/// One element of an array of tables to render: key name and value, in any order.
+pub type BlockValues<'a> = Vec<(&'a str, Value)>;
+
+/// Like [`render`], with arrays of tables: `blocks` maps an array name of the schema to its
+/// elements. Each element is written as `[[name]]` with its keys in schema order.
+pub fn render_with_blocks(
+    schema: &Schema,
+    values: &[(&str, Value)],
+    blocks: &[(&str, Vec<BlockValues<'_>>)],
+    comments: &[String],
+) -> String {
     let mut out = String::new();
     for line in comments {
         let _ = writeln!(out, "# {}", line.replace(['\n', '\r'], " "));
@@ -512,7 +672,86 @@ pub fn render(schema: &Schema, values: &[(&str, Value)], comments: &[String]) ->
             let _ = writeln!(out, "{line}");
         }
     }
+    for spec in schema.blocks {
+        let Some((_, elements)) = blocks.iter().find(|(name, _)| *name == spec.name) else {
+            continue;
+        };
+        for element in elements {
+            let _ = writeln!(out, "\n[[{}]]", spec.name);
+            for key in spec.keys {
+                if let Some((_, value)) = element.iter().find(|(name, _)| *name == key.name) {
+                    let _ = writeln!(out, "{} = {}", key.name, toml_value(value));
+                }
+            }
+        }
+    }
     out
+}
+
+/// The settings as a JSON object: `schema`, `protocol`, one object per table of the schema
+/// (keys that `values` lacks are left out) and one array per block name.
+pub fn render_json(
+    schema: &Schema,
+    values: &[(&str, Value)],
+    blocks: &[(&str, Vec<BlockValues<'_>>)],
+) -> serde_json::Value {
+    let json_value = |value: &Value| match value {
+        Value::Text(text) => serde_json::Value::from(text.as_str()),
+        Value::Integer(number) => serde_json::Value::from(*number),
+        Value::Bool(flag) => serde_json::Value::from(*flag),
+        Value::List(items) => serde_json::Value::from(items.clone()),
+    };
+    let mut root = serde_json::Map::new();
+    root.insert("schema".to_owned(), SCHEMA_VERSION.into());
+    root.insert("protocol".to_owned(), schema.protocol.into());
+    for section in schema.sections {
+        let mut table = serde_json::Map::new();
+        for spec in section.keys {
+            if let Some((_, value)) = values.iter().find(|(name, _)| *name == spec.name) {
+                table.insert(spec.name.to_owned(), json_value(value));
+            }
+        }
+        if table.is_empty() {
+            continue;
+        }
+        if let Some(target) = json_table_at(&mut root, section.path) {
+            target.extend(table);
+        }
+    }
+    for spec in schema.blocks {
+        let Some((_, elements)) = blocks.iter().find(|(name, _)| *name == spec.name) else {
+            continue;
+        };
+        let list: Vec<serde_json::Value> = elements
+            .iter()
+            .map(|element| {
+                let mut object = serde_json::Map::new();
+                for key in spec.keys {
+                    if let Some((_, value)) = element.iter().find(|(name, _)| *name == key.name) {
+                        object.insert(key.name.to_owned(), json_value(value));
+                    }
+                }
+                serde_json::Value::Object(object)
+            })
+            .collect();
+        root.insert(spec.name.to_owned(), list.into());
+    }
+    serde_json::Value::Object(root)
+}
+
+/// The JSON object at `path` below `root`, created on the way; `None` when a value is in
+/// the way.
+fn json_table_at<'a>(
+    root: &'a mut serde_json::Map<String, serde_json::Value>,
+    path: &[&str],
+) -> Option<&'a mut serde_json::Map<String, serde_json::Value>> {
+    let Some((first, rest)) = path.split_first() else {
+        return Some(root);
+    };
+    let entry = root
+        .entry((*first).to_owned())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    json_table_at(entry.as_object_mut()?, rest)
 }
 
 fn toml_value(value: &Value) -> String {
@@ -625,6 +864,22 @@ mod tests {
                 keys: &[],
             },
         ],
+        blocks: &[BlockSpec {
+            name: "entry",
+            keys: &[
+                KeySpec::new("id", Kind::Text),
+                KeySpec::new("count", Kind::Integer),
+                KeySpec::new("file", Kind::Path),
+                KeySpec::new("token", Kind::Secret { hint: "use `file`" }),
+            ],
+            required: &["id"],
+            reserved: &[("scope", "per-scope entries are not supported yet")],
+            unique: Some("id"),
+            check: Some(|block| match block.integer("count") {
+                Some(number) if number < 0 => Err("`count` must not be negative".to_owned()),
+                _ => Ok(()),
+            }),
+        }],
     };
 
     fn parse(text: &str, profile: Option<&str>) -> Result<Settings, String> {
@@ -859,6 +1114,69 @@ mod tests {
             &["first".to_owned(), "second\nline".to_owned()],
         );
         assert_eq!(again, text);
+    }
+
+    #[test]
+    fn blocks_are_validated_and_profiles_replace_them() {
+        let text = "[[entry]]\nid = \"a\"\nfile = \"k/a.key\"\n\n[[entry]]\nid = \"b\"\ncount = 2\n\n\
+                    [[profile.p.entry]]\nid = \"z\"\n";
+        let plain = parse(text, None).expect("valid");
+        let list = plain.blocks("entry");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].text("id"), Some("a"));
+        assert_eq!(list[0].text("file"), Some("/etc/k/k/a.key"));
+        assert_eq!(list[1].integer("count"), Some(2));
+        let chosen = parse(text, Some("p")).expect("valid");
+        assert_eq!(chosen.blocks("entry").len(), 1);
+        assert_eq!(chosen.blocks("entry")[0].text("id"), Some("z"));
+        assert_eq!(plain.blocks("other").len(), 0);
+    }
+
+    #[test]
+    fn block_errors_name_the_element_and_key() {
+        assert!(err("[[entry]]\ncount = 1\n").contains("`entry[0]`: the key `id` is required"));
+        assert!(err("[[entry]]\nid = \"a\"\nnope = 1\n").contains("unknown key `entry[0].nope`"));
+        assert!(
+            err("[[entry]]\nid = \"a\"\nscope = \"x\"\n")
+                .contains("key `entry[0].scope`: per-scope entries are not supported yet")
+        );
+        assert!(
+            err("[[entry]]\nid = \"a\"\n[[entry]]\nid = \"a\"\n")
+                .contains("`entry[1]`: the value of `id` repeats")
+        );
+        assert!(err("[[entry]]\nid = \"a\"\ncount = -1\n").contains("`entry[0]`: `count` must"));
+        assert!(err("entry = 3\n").contains("key `entry`: expected an array of tables"));
+        assert!(err("[[profile.p.entry]]\ncount = 1\n").contains("`profile.p.entry[0]`"));
+        let secret = err("[[entry]]\nid = \"a\"\ntoken = \"hunter2\"\n");
+        assert!(secret.contains("key `entry[0].token`"), "{secret}");
+        assert!(secret.contains("use `file`"), "{secret}");
+        assert!(!secret.contains("hunter2"), "{secret}");
+    }
+
+    #[test]
+    fn blocks_render_and_round_trip() {
+        let values = [("ws_ping", Value::Integer(5))];
+        let blocks = [(
+            "entry",
+            vec![
+                vec![
+                    ("file", Value::Text("/x/a.key".to_owned())),
+                    ("id", Value::Text("a".to_owned())),
+                ],
+                vec![
+                    ("id", Value::Text("b".to_owned())),
+                    ("count", Value::Integer(3)),
+                ],
+            ],
+        )];
+        let text = render_with_blocks(&SCHEMA, &values, &blocks, &[]);
+        let parsed = parse(&text, None).expect("rendered text parses");
+        assert_eq!(parsed.blocks("entry").len(), 2);
+        assert_eq!(parsed.blocks("entry")[0].text("file"), Some("/x/a.key"));
+        let json = render_json(&SCHEMA, &values, &blocks);
+        assert_eq!(json["connection"]["ws_ping"], 5);
+        assert_eq!(json["entry"][1]["count"], 3);
+        assert_eq!(json["protocol"], "ocpp1.6");
     }
 
     #[test]
