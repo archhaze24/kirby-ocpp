@@ -616,7 +616,7 @@ impl Ctx<'_> {
                         expected["direction"] = serde_json::to_value(direction).unwrap_or_default();
                     }
                     if let Some(matches) = matches {
-                        expected["match"] = matches.clone();
+                        expected["match"] = super::redacted(matches);
                     }
                     self.evidence.expected = Some(expected);
                     // The latest frame of that action that did not match, if any.
@@ -625,7 +625,11 @@ impl Ctx<'_> {
                         .iter()
                         .rev()
                         .find(|(record, _)| record.frame.get(2).and_then(Value::as_str) == Some(call))
-                        .map(|(record, _)| vars::clip_json(record.frame.get(3).unwrap_or(&Value::Null)));
+                        .map(|(record, _)| {
+                            vars::clip_json(&super::redacted(
+                                record.frame.get(3).unwrap_or(&Value::Null),
+                            ))
+                        });
                     return Err(format!("timed out after {timeout_ms} ms waiting for a {call} CALL"));
                 }
                 () = self.cancel.cancelled() => return Err("cancelled".to_owned()),
@@ -784,13 +788,14 @@ fn check(
         match &outcome {
             Outcome::Response { payload } if json_subset(wanted, payload) => {}
             Outcome::Response { payload } => {
+                let (wanted, payload) = (super::redacted(wanted), super::redacted(payload));
                 evidence.expected = Some(wanted.clone());
-                evidence.actual = Some(vars::clip_json(payload));
+                evidence.actual = Some(vars::clip_json(&payload));
                 return Err(format!(
                     "{}: response {} does not contain {}",
                     action.name(),
-                    vars::clip_json(payload),
-                    vars::clip_json(wanted)
+                    vars::clip_json(&payload),
+                    vars::clip_json(&wanted)
                 ));
             }
             _ => {

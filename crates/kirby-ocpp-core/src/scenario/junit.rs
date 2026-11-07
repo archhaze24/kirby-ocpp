@@ -1,9 +1,10 @@
 //! JUnit XML rendering of scenario reports, for CI systems.
 //!
-//! One `<testsuite>` per station run, one `<testcase>` per step. A run that never produced a
+//! One `<testsuite>` per station run, one `<testcase>` per step. The `classname` is a grouping
+//! label (`ocpp<version>.<scenario> [<station>]`), not a structure to parse. A run that never produced a
 //! report (the station could not connect or boot) is a suite with a single errored `setup` case.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use super::runner::{ScenarioReport, StepReport, StepStatus};
@@ -74,7 +75,8 @@ fn render_suite(suite: &JunitSuite<'_>) -> (String, Counts) {
     let ocpp_version = suite
         .outcome
         .map_or(OCPP_VERSION, |r| r.ocpp_version.as_str());
-    let classname = escape(&format!("ocpp{ocpp_version}.{name}"));
+    // A label for grouping, not a parsed structure: names may contain `.` and `]`.
+    let classname = escape(&single_line(&format!("ocpp{ocpp_version}.{name}")));
     let mut cases = String::new();
     let mut counts = Counts::default();
     let mut properties = vec![("ocpp_version", ocpp_version.to_owned())];
@@ -87,18 +89,36 @@ fn render_suite(suite: &JunitSuite<'_>) -> (String, Counts) {
             station = station.or_else(|| report.station.clone());
             tool_version.clone_from(&report.tool_version);
             source.clone_from(&report.source);
-            let mut seen: HashMap<String, usize> = HashMap::new();
-            for step in &report.steps {
+            let bases: Vec<&str> = report
+                .steps
+                .iter()
+                .map(|step| {
+                    if step.detail.label.is_empty() {
+                        step.name.as_str()
+                    } else {
+                        step.detail.label.as_str()
+                    }
+                })
+                .collect();
+            // Every written label is taken up front, so a generated ` #N` never collides with
+            // an explicit label, whichever comes first.
+            let mut taken: HashSet<String> = bases.iter().map(|b| (*b).to_owned()).collect();
+            let mut seen: HashMap<&str, usize> = HashMap::new();
+            for (step, base) in report.steps.iter().zip(bases) {
                 counts.tests += 1;
-                let base = if step.detail.label.is_empty() {
-                    step.name.as_str()
-                } else {
-                    step.detail.label.as_str()
-                };
-                let seen_before = seen.entry(base.to_owned()).or_default();
-                *seen_before += 1;
-                let label = if *seen_before > 1 {
-                    format!("{base} #{seen_before}")
+                let count = seen.entry(base).or_default();
+                *count += 1;
+                let label = if *count > 1 {
+                    let mut n = *count;
+                    let label = loop {
+                        let candidate = format!("{base} #{n}");
+                        if taken.insert(candidate.clone()) {
+                            break candidate;
+                        }
+                        n += 1;
+                    };
+                    *count = n;
+                    label
                 } else {
                     base.to_owned()
                 };
@@ -199,6 +219,13 @@ fn failure_text(step: &StepReport, reason: &str) -> String {
         let _ = write!(text, "\nactual: {actual}");
     }
     text
+}
+
+/// `text` with control characters replaced by spaces.
+fn single_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
 }
 
 fn seconds(millis: u64) -> String {
@@ -348,5 +375,39 @@ mod tests {
         );
         assert!(xml.contains("&#10;expected: "));
         assert!(xml.contains("&#10;actual: {&quot;x&quot;:1}"));
+    }
+
+    #[test]
+    fn generated_suffix_never_collides_with_an_explicit_label() {
+        let report = report(
+            vec![
+                step(0, "heartbeat", StepStatus::Passed, 1),
+                step(1, "heartbeat", StepStatus::Passed, 1),
+                step(2, "heartbeat #2", StepStatus::Passed, 1),
+            ],
+            true,
+        );
+        let xml = junit_xml(&[JunitSuite {
+            station: None,
+            scenario: "demo",
+            outcome: Ok(&report),
+        }]);
+        let names: Vec<&str> = xml
+            .split("<testcase ")
+            .skip(1)
+            .filter_map(|c| c.split(" name=\"").nth(1)?.split('"').next())
+            .collect();
+        assert_eq!(names, ["heartbeat", "heartbeat #3", "heartbeat #2"]);
+    }
+
+    #[test]
+    fn classname_has_no_line_breaks() {
+        let report = report(vec![step(0, "a", StepStatus::Passed, 1)], true);
+        let xml = junit_xml(&[JunitSuite {
+            station: Some("CP\n1"),
+            scenario: "de.mo]",
+            outcome: Ok(&report),
+        }]);
+        assert!(xml.contains("classname=\"ocpp1.6.de.mo] [CP 1]\""), "{xml}");
     }
 }

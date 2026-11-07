@@ -416,7 +416,7 @@ pub const MAX_SCENARIO_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Reads a regular file of at most [`MAX_SCENARIO_FILE_BYTES`] as UTF-8 (a FIFO or device
 /// would block or never end).
-fn read_scenario_file(path: &Path) -> std::io::Result<String> {
+pub fn read_scenario_file(path: &Path) -> std::io::Result<String> {
     use std::io::{Error, ErrorKind, Read};
     if !std::fs::metadata(path)?.is_file() {
         return Err(Error::new(ErrorKind::InvalidInput, "not a regular file"));
@@ -453,6 +453,7 @@ impl Scenario {
     }
 
     fn parse(text: &str) -> Result<Self, Located> {
+        super::precheck_contract(text).map_err(Located::plain)?;
         let raw: RawScenario = toml::from_str(text).map_err(|e| Located {
             message: super::with_suggestion(e.message().to_owned()),
             offset: e.span().map(|span| span.start),
@@ -893,6 +894,7 @@ fn parse_repeat(
 
 /// `open_loops` is the number of `repeat` steps around this one.
 fn parse_step(mut table: toml::Table, open_loops: usize) -> Result<Step, String> {
+    super::check_reserved_keys(&table)?;
     let name = match table.remove("name") {
         None => None,
         Some(toml::Value::String(s)) => Some(s),
@@ -1393,6 +1395,39 @@ call = "Heartbeat"
         assert!(
             matches!(&s.steps[1].action, Action::Authorize { id_tag } if id_tag.as_str() == "B")
         );
+    }
+
+    #[test]
+    fn version_keys_win_over_unknown_fields_and_types_are_friendly() {
+        let step = "[[steps]]\naction = \"heartbeat\"\n";
+        let e = err(&format!("name = \"t\"\nschema = 2\nfuture_key = 1\n{step}"));
+        assert!(e.contains("unsupported schema 2"), "{e}");
+        let e = err(&format!(
+            "name = \"t\"\nocpp_version = \"2.0.1\"\nfuture_key = 1\n{step}"
+        ));
+        assert!(e.contains("OCPP 1.6 only"), "{e}");
+        let e = err(&format!("name = \"t\"\nschema = \"1\"\n{step}"));
+        assert!(e.contains("`schema` must be an integer"), "{e}");
+        let e = err(&format!("name = \"t\"\nocpp_version = 1.6\n{step}"));
+        assert!(e.contains("`ocpp_version` must be a string"), "{e}");
+        let e = err(&format!("name = \"t\"\ntags = \"x\"\n{step}"));
+        assert!(e.contains("`tags` must be an array of strings"), "{e}");
+    }
+
+    #[test]
+    fn reserved_step_keys_have_their_own_message() {
+        for text in [
+            "[[steps]]\naction = \"heartbeat\"\nevse = 1\n",
+            "[[steps]]\naction = \"plug\"\nconnector = 1\nid_token = \"x\"\n",
+            "[[steps]]\naction = \"repeat\"\ncount = 2\nevse = 1\n[[steps.steps]]\naction = \"heartbeat\"\n",
+        ] {
+            let e = err(&format!("name = \"t\"\n{text}"));
+            assert!(
+                e.contains("is reserved for OCPP 2.x steps; not supported in this build"),
+                "{e}"
+            );
+            assert!(!e.contains("unknown field"), "{e}");
+        }
     }
 
     #[test]

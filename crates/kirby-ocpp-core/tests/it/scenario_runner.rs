@@ -665,3 +665,29 @@ expect = { status = "Never" }
     assert_eq!(json["steps"][0]["status"], "failed");
     rig.shutdown().await;
 }
+
+#[tokio::test]
+async fn expected_payload_evidence_is_redacted() {
+    let rig = booted_rig().await;
+    let s = scenario(
+        r#"
+[[steps]]
+action = "send_raw"
+call = "ChangeConfiguration"
+payload = { key = "AuthorizationKey", value = "hunter2hunter2" }
+expect = { payload = { key = "AuthorizationKey", value = "hunter2hunter2" } }
+"#,
+    );
+    let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+    let step = &report.steps[0];
+    assert!(matches!(step.status, StepStatus::Failed(_)), "{report:#?}");
+    let text = serde_json::to_string(&report).unwrap();
+    assert!(!text.contains("hunter2hunter2"), "{text}");
+    let junit = kirby_ocpp_core::scenario::junit_xml(&[kirby_ocpp_core::scenario::JunitSuite {
+        station: None,
+        scenario: "t",
+        outcome: Ok(&report),
+    }]);
+    assert!(!junit.contains("hunter2hunter2"), "{junit}");
+    rig.shutdown().await;
+}
