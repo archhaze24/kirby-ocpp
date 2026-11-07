@@ -988,6 +988,71 @@ async fn huge_frames_are_truncated_in_events() {
 }
 
 #[tokio::test]
+async fn event_frame_matches_the_frame_events_and_the_history() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    let mut raw = raw_connect(&csms, "/CP-DUP").await;
+    let huge = json!([2, "huge", "DataTransfer", {"vendorId": "V", "data": "y".repeat(100_000)}]);
+    raw_send(&mut raw, &huge.to_string()).await;
+    raw_recv(&mut raw).await;
+    let event_frame = loop {
+        let event = timeout(STEP, events.recv()).await.unwrap().unwrap();
+        if let CsmsEvent::Frame {
+            direction: Direction::In,
+            frame,
+            ..
+        } = event
+            && matches!(&frame, Frame::Call { id, .. } if id.as_str() == "huge")
+        {
+            break frame;
+        }
+    };
+    let stored = csms
+        .history("CP-DUP")
+        .unwrap()
+        .into_iter()
+        .find(|e| matches!(&e.frame, Frame::Call { id, .. } if id.as_str() == "huge"))
+        .unwrap()
+        .frame;
+    // The history keeps the full frame; the event carries the marker; one helper maps both
+    // to the same value, so a UI can tell they are the same frame.
+    assert_ne!(stored, event_frame);
+    assert_eq!(kirby_csms_core::event_frame(&stored), event_frame);
+    assert_eq!(kirby_csms_core::event_frame(&event_frame), event_frame);
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn refused_station_ids_are_reported() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    for path in [
+        format!("/{}", "a".repeat(129)), // over 128 bytes
+        "/CP%0A1".to_owned(),
+        "/".to_owned(),
+    ] {
+        let mut request = format!("{}{path}", csms.url())
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("Sec-WebSocket-Protocol", "ocpp1.6".parse().unwrap());
+        assert!(tokio_tungstenite::connect_async(request).await.is_err());
+        let event = timeout(STEP, events.recv()).await.unwrap().unwrap();
+        match event {
+            CsmsEvent::AuthFailed {
+                station, reason, ..
+            } => {
+                assert_eq!(station, None);
+                assert!(reason.contains("station id"), "{reason}");
+            }
+            other => panic!("expected AuthFailed for {path:?}, got {other:?}"),
+        }
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test]
 async fn malformed_events_do_not_carry_the_authorization_key() {
     let csms = start(|_| {}).await;
     let mut events = csms.subscribe();

@@ -394,6 +394,9 @@ fn validate(action: &Action) -> Result<(), String> {
         Action::Respond { call, .. } | Action::ClearRespond { call } if call.is_empty() => {
             return bad("`call` must not be empty");
         }
+        Action::Respond { payload, .. } if !payload.is_object() => {
+            return bad("`payload` of `respond` must be a table (the CALLRESULT payload object)");
+        }
         Action::Sleep { .. } | Action::Respond { .. } | Action::ClearRespond { .. } => {}
         Action::InjectFault {
             call,
@@ -468,6 +471,9 @@ struct Seen {
     payload: Value,
     /// A `wait_call` took it already.
     consumed: bool,
+    /// Original size when the payload was cut by the event size limit and could not be
+    /// recovered from the history.
+    truncated: Option<u64>,
     /// Approximate memory of the entry.
     bytes: usize,
 }
@@ -486,6 +492,8 @@ struct Backlog {
     /// Other CALLs are not remembered at all.
     wanted: HashMap<String, bool>,
     max_bytes: usize,
+    /// For the full payload of a CALL whose event carried the truncation marker.
+    handle: Option<CsmsHandle>,
     /// How many times events were lost to a slow receiver. A `wait_call` that started before
     /// a loss may have missed a CALL; one that started after cannot have.
     losses: AtomicU64,
@@ -499,6 +507,8 @@ struct Backlog {
 enum WaitLost {
     Timeout,
     Lagged,
+    /// The payload was cut by the event size limit and is no longer in the history.
+    Truncated(u64),
 }
 
 /// Moves engine events into the [`Backlog`] continuously, also during long steps, so the
@@ -558,6 +568,7 @@ impl Backlog {
             seen: Mutex::new(SeenStore::default()),
             wanted,
             max_bytes,
+            handle: None,
             losses: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             wake: Notify::new(),
@@ -579,6 +590,9 @@ impl Backlog {
             if let Some(payload) = self.take_call(station, call, payload_contains) {
                 return Ok(payload);
             }
+            if let Some(bytes) = self.take_truncated(station, call) {
+                return Err(WaitLost::Truncated(bytes));
+            }
             if self.losses.load(Ordering::Relaxed) != started_at {
                 return Err(WaitLost::Lagged);
             }
@@ -599,15 +613,23 @@ impl Backlog {
         if let CsmsEvent::Frame {
             station,
             direction: Direction::In,
-            frame: Frame::Call {
-                action, payload, ..
-            },
+            frame:
+                Frame::Call {
+                    id,
+                    action,
+                    payload,
+                    ..
+                },
         } = event
         {
             let Some(&needs_payload) = self.wanted.get(&action) else {
                 return;
             };
-            let payload = if needs_payload { payload } else { Value::Null };
+            let (payload, truncated) = if needs_payload {
+                self.full_payload(&station, id.as_str(), payload)
+            } else {
+                (Value::Null, None)
+            };
             let bytes = station.len()
                 + action.len()
                 + 64
@@ -623,6 +645,7 @@ impl Backlog {
                 action,
                 payload,
                 consumed: false,
+                truncated,
                 bytes,
             });
             if store.calls.len() > SEEN_CAP || store.bytes > self.max_bytes {
@@ -640,6 +663,52 @@ impl Backlog {
         }
     }
 
+    /// The payload of an event frame. Events carry `{"truncated":true,"originalBytes":N}` for
+    /// frames above the event size limit; the full frame is then read from the station's
+    /// history (written before the event is sent). When the history no longer holds it, the
+    /// waiting step fails with the size instead of timing out.
+    fn full_payload(&self, station: &str, id: &str, payload: Value) -> (Value, Option<u64>) {
+        let Some(bytes) = (payload["truncated"] == true)
+            .then(|| payload["originalBytes"].as_u64())
+            .flatten()
+        else {
+            return (payload, None);
+        };
+        let found = self
+            .handle
+            .as_ref()
+            .and_then(|handle| handle.history_tail(station, 256))
+            .and_then(|entries| {
+                entries
+                    .into_iter()
+                    .rev()
+                    .find_map(|entry| match entry.frame {
+                        Frame::Call {
+                            id: found, payload, ..
+                        } if found.as_str() == id && payload["truncated"] != true => Some(payload),
+                        _ => None,
+                    })
+            });
+        match found {
+            Some(full) => (full, None),
+            None => (payload, Some(bytes)),
+        }
+    }
+
+    /// Consumes the oldest unconsumed CALL that matches `station` and `call` and whose payload
+    /// was cut and not recoverable; returns its original size.
+    fn take_truncated(&self, station: Option<&str>, call: &str) -> Option<u64> {
+        let mut store = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
+        let found = store.calls.iter_mut().find(|seen| {
+            !seen.consumed
+                && seen.truncated.is_some()
+                && seen.action == call
+                && station.is_none_or(|id| seen.station == id)
+        })?;
+        found.consumed = true;
+        found.truncated
+    }
+
     /// Consumes the oldest unconsumed CALL that fits and returns its kept payload.
     fn take_call(
         &self,
@@ -650,6 +719,7 @@ impl Backlog {
         let mut store = self.seen.lock().unwrap_or_else(PoisonError::into_inner);
         let found = store.calls.iter_mut().find(|seen| {
             !seen.consumed
+                && seen.truncated.is_none()
                 && seen.action == call
                 && station.is_none_or(|id| seen.station == id)
                 && contains.is_none_or(|expected| json_subset(expected, &seen.payload))
@@ -690,7 +760,9 @@ pub async fn run(
 ) -> ScenarioReport {
     let started = Instant::now();
     let started_at = now_rfc3339();
-    let backlog = Arc::new(Backlog::new(script));
+    let mut backlog = Backlog::new(script);
+    backlog.handle = Some(handle.clone());
+    let backlog = Arc::new(backlog);
     let mut runner = Runner {
         evidence: Evidence::default(),
         handle,
@@ -804,6 +876,9 @@ impl Runner<'_> {
                         WaitLost::Timeout => {
                             format!("no matching {call} CALL within {timeout_ms} ms")
                         }
+                        WaitLost::Truncated(bytes) => format!(
+                            "payload truncated ({bytes} bytes): a {call} CALL was too large to match, and the frame history no longer holds it"
+                        ),
                         WaitLost::Lagged => format!(
                             "events were lost (the event stream lagged), so a {call} CALL may have been missed"
                         ),
@@ -1096,6 +1171,36 @@ times = 2
             assert!(Script::from_toml(&text).is_err(), "{call:?} {times}");
         }
         assert!(err("name = \"t\"").contains("at least one"));
+    }
+
+    #[test]
+    fn respond_needs_an_object_payload() {
+        let head = "name = \"t\"\n[[steps]]\naction = \"respond\"\ncall = \"Heartbeat\"\n";
+        for bad in ["payload = 3", "payload = \"x\"", "payload = [1]"] {
+            let message = err(&format!("{head}{bad}"));
+            assert!(
+                message.contains("step 1") && message.contains("table"),
+                "{message}"
+            );
+        }
+        assert!(Script::from_toml(&format!("{head}payload = {{ currentTime = \"x\" }}")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn wait_call_fails_clearly_on_a_truncated_payload() {
+        let script = Script::from_toml(
+            "name = \"t\"\n[[steps]]\naction = \"wait_call\"\ncall = \"Authorize\"\npayload_contains = { idTag = \"A\" }\n",
+        )
+        .unwrap();
+        let backlog = Backlog::new(&script);
+        backlog.record(inbound(
+            "CP-1",
+            "Authorize",
+            serde_json::json!({"truncated": true, "originalBytes": 70000}),
+        ));
+        let end = tokio::time::Instant::now() + Duration::from_secs(5);
+        let out = backlog.wait_call(None, "Authorize", None, end).await;
+        assert!(matches!(out, Err(WaitLost::Truncated(70000))));
     }
 
     #[test]

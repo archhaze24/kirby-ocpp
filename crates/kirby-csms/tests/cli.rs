@@ -378,6 +378,38 @@ expect_error = true
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wait_call_matches_a_call_above_the_event_size_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut csms = script_run(
+        dir.path(),
+        r#"
+name = "big"
+[[steps]]
+action = "wait_station"
+station = "CP-1"
+[[steps]]
+action = "wait_call"
+call = "DataTransfer"
+payload_contains = { vendorId = "bigvendor" }
+timeout_ms = 20000
+"#,
+        &["--timeout", "30"],
+    );
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    station
+        .send(StationCommand::DataTransfer {
+            vendor_id: "bigvendor".to_owned(),
+            message_id: None,
+            data: Some("x".repeat(70 * 1024)),
+        })
+        .await
+        .unwrap();
+    let printed = csms.wait(|v| v["type"] == "report");
+    assert_eq!(printed["passed"], true, "{printed}");
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn script_failure_skips_the_rest_and_exits_1() {
     let dir = tempfile::tempdir().unwrap();
     let junit = dir.path().join("junit.xml");
@@ -1215,7 +1247,7 @@ fn startup_lines_are_whole_and_ordered_on_one_stream() {
             "{lines:?}"
         );
         assert!(
-            lines[1].starts_with("stations connect to ws://"),
+            lines[1].starts_with("note: stations connect to ws://"),
             "{lines:?}"
         );
         assert!(
@@ -1242,7 +1274,7 @@ fn startup_lines_are_whole_and_ordered_with_a_script() {
             "{lines:?}"
         );
         assert!(
-            lines[1].starts_with("stations connect to ws://"),
+            lines[1].starts_with("note: stations connect to ws://"),
             "{lines:?}"
         );
     }

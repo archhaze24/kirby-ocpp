@@ -18,13 +18,13 @@ Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhos
 
 ## Connecting stations
 
-- URL: `ws(s)://HOST:PORT/<any prefix>/<station id>`. The station id is the last path segment.
+- URL: `ws(s)://HOST:PORT/<any prefix>/<station id>`. The station id is the last path segment, 1 to 128 bytes after percent-decoding, without control characters, line separators or bidi overrides (and not `.` or `..`). A connection whose URL holds no such id is refused with HTTP 400 and reported as an `auth_failed` event with `station` `null` and the reason `refused: no valid station id in the URL path (1 to 128 bytes, no control characters)`.
 - A second connection with the same id replaces the first one (the old one shows as "replaced"). At security profile 0 nothing authenticates the new connection, so anybody who can reach the listener can take over a live station's id; use a profile or a firewall (see [security.md](security.md)).
 - Default WebSocket subprotocol policy is `require:ocpp1.6` (`--subprotocol`: `require:NAME`, `select:NAME`, `omit`, `reject`).
 - TLS and authentication: [security.md](security.md).
 - Inbound CALLs are validated against the OCPP 1.6J schemas by default (`--validate-inbound`). An invalid payload gets a CALLERROR (`OccurenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormationViolation`) and is not tracked. A fault on the same action wins; unknown actions are not checked.
 - Actions a charge point may not send get a CALLERROR: `NotSupported` for known action names, `NotImplemented` for unknown ones.
-- Per station the server keeps the last `--history-cap` frames (default 1000, also capped at 8 MiB of text; a frame above that cap is kept as the marker `{"truncated":true,"originalBytes":N}`) and the last `--transaction-history-cap` stopped transactions (default 100). Frame events (`--json`, the HTTP event stream, `CsmsEvent::Frame`) carry the same marker for a frame above 64 KiB, so a stalled event consumer cannot hold large frames. A malformed text that mentions `AuthorizationKey` is shown as `<redacted: mentions AuthorizationKey>`. Records are never evicted automatically; `F` in the TUI (or `CsmsHandle::forget`) removes a disconnected station.
+- Per station the server keeps the last `--history-cap` frames (default 1000, also capped at 8 MiB of text; a frame above that cap is kept as the marker `{"truncated":true,"originalBytes":N}`) and the last `--transaction-history-cap` stopped transactions (default 100). Frame events (`--json`, the HTTP event stream, `CsmsEvent::Frame`) carry the same marker for a frame above 64 KiB, so a stalled event consumer cannot hold large frames. Scripts (`wait_call` with `payload_contains` or `capture`) still see the full payload of such a frame: it is read from the station's history. If the history no longer holds it, the step fails with `payload truncated (N bytes)` instead of waiting for the timeout. A malformed text that mentions `AuthorizationKey` is shown as `<redacted: mentions AuthorizationKey>`. Records are never evicted automatically; `F` in the TUI (or `CsmsHandle::forget`) removes a disconnected station.
 
 ## Output
 
@@ -37,7 +37,7 @@ listening on ws://127.0.0.1:41234
 
 Under the TUI the `listening on ...` line goes to stderr before the screen opens.
 
-After it come up to two more lines. With security profile 0 on a non-loopback listen address: `warning: security profile 0 on a non-loopback address: any peer can connect and take over a station id; see docs/security.md` (with `--json`: `{"type":"warning","text":"security profile 0 on a non-loopback address: ..."}`). Without `--json`: `stations connect to ws://<host>:<port>/<prefix>/<station id>`, where an unspecified listen host (`0.0.0.0`, `::`) is shown as `<this-host>`.
+After it come up to two more lines. With security profile 0 on a non-loopback listen address: `warning: security profile 0 on a non-loopback address: any peer can connect and take over a station id; see docs/security.md` (with `--json`: `{"type":"warning","text":"security profile 0 on a non-loopback address: ..."}`). Without `--json`: `note: stations connect to ws://<host>:<port>/<prefix>/<station id>`, where an unspecified listen host (`0.0.0.0`, `::`) is shown as `<this-host>`.
 
 In headless runs (`--no-tui`, `--script`, a pipe) all of these lines go to stdout, through the same ordered queue as the events, so each line is whole and `listening on ...` is always first, also when stderr is redirected into the same file (`kirby-csms ... > csms.log 2>&1`). Under the TUI they go to stderr, before the screen opens. Errors always go to stderr.
 
@@ -51,16 +51,18 @@ Then one line per event:
 | `state` | `... CP-1 state: connectors [1=Available] active transactions [123]` | only when connector statuses or active transactions changed |
 | `malformed` | `... CP-1 sent malformed text: ...` | |
 | `forgotten` | `... CP-1 forgotten` | |
-| `auth_failed` | `... CP-1 refused (reason) from ADDR` | JSON: `{"type":"auth_failed","station":..,"remote_addr":..,"reason":..}`; `station` is `null` when the TLS handshake failed |
-| `note` | `note: ...` | for example lines dropped because the output could not keep up |
+| `auth_failed` | `... CP-1 refused (reason) from ADDR` | JSON: `{"type":"auth_failed","station":..,"remote_addr":..,"reason":..}`; `station` is `null` when the TLS handshake failed or the URL holds no valid station id |
+| `listening`, `api_listening` | `listening on URL`, `api listening on URL` | startup lines, see above; JSON has `addr` and `url` |
+| `warning` | `warning: ...` | the security profile 0 warning at startup; JSON `{"type":"warning","text":..}` |
+| `note` | `note: ...` | for example lines dropped because the output could not keep up, or the `stations connect to ...` startup line; JSON `{"type":"note","text":..}` |
 
-JSON events carry `ts` (RFC 3339, milliseconds). Text supplied by stations is shown with control characters replaced, because station ids and payloads are attacker-controlled. `AuthorizationKey` values in frames are replaced by `***` unless `--show-secrets` is set; see [security.md](security.md#redaction-and---show-secrets).
+JSON events carry `ts` (RFC 3339, milliseconds), except the startup and housekeeping events `listening`, `api_listening`, `warning` and `note`, which have none. Text supplied by stations is shown with control characters replaced, because station ids and payloads are attacker-controlled. `AuthorizationKey` values in frames are replaced by `***` unless `--show-secrets` is set; see [security.md](security.md#redaction-and---show-secrets).
 
 `--log-file PATH` appends every event as a JSON line, also under the TUI. Stdout and the log file are written by helper threads: if nobody reads stdout, the process keeps running, the log file keeps being written, and the lines that did not fit are dropped with a `note` line saying how many.
 
 ## Terminal UI
 
-With a terminal on both stdin and stdout and none of `--no-tui`, `--json`, `--script`, `--stdin`, the UI opens. `--no-tui` (or `KIRBY_CSMS_NO_TUI=1`) keeps it headless. If the terminal cannot be set up, the server runs headless and says so. Quitting the UI (`q`, `Ctrl-C`) shuts the server down.
+With a terminal on both stdin and stdout and none of `--no-tui`, `--json`, `--script`, `--stdin`, the UI opens. `--no-tui` (or `KIRBY_CSMS_NO_TUI=1`) keeps it headless. If the terminal cannot be set up, the server runs headless and says so. Quitting the UI (`q`, `Ctrl-C`) shuts the server down at once, without a confirmation.
 
 Layout:
 
@@ -68,6 +70,7 @@ Layout:
 - Right, top: details of the selected station (boot info, remote address, subprotocol, connectors, transactions with energy and power, last heartbeat, firmware and diagnostics status, counters).
 - Right, bottom: the frame log of that station with CALL/RESULT correlation and round-trip times.
 - Before any station has connected the details pane shows the listen address, a station URL to copy (`ws://<this-host>:9000/<station id>` for an unspecified listen host; a path prefix before the id is accepted) and, at security profile 0, a dim note that any peer can connect. The footer always ends with the `? help` and `: actions` hints, even in a narrow terminal, and the help popup opens with a short "First steps" paragraph.
+- The UI needs at least 24 columns by 8 rows; a smaller terminal shows `need 24x8, have WxH` until it is resized. The help popup wraps to the terminal width, and long station ids are shortened in the middle so ids with a common prefix stay apart.
 - Header chips: `security profile N`, `N auth failures` (refused connections also show as a status-line notice, at most one per second), `N pending` commands, and the pending fault count and rule actions while any is active.
 
 Navigation:

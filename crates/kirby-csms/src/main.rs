@@ -241,13 +241,16 @@ fn print_startup_notes(handle: &kirby_csms_core::CsmsHandle, json: bool, out: Op
         }
     }
     if !json {
-        let line = format!(
+        let text = format!(
             "stations connect to {}",
             kirby_csms_tui::ui::station_url_example(&handle.url(), true)
         );
         match out {
-            Some(out) => out.event(&serde_json::json!({"type": "note", "text": line}), &line),
-            None => stderr_line(&line),
+            Some(out) => out.event(
+                &serde_json::json!({"type": "note", "text": text}),
+                &format!("note: {text}"),
+            ),
+            None => stderr_line(&format!("note: {text}")),
         }
     }
 }

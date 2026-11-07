@@ -304,6 +304,17 @@ async fn oversized_station_ids_are_refused_before_anything_is_recorded() {
         400
     );
     assert_eq!(csms.stations().len(), 0);
+    // Each refusal is reported (without the unusable id); nothing else is emitted.
+    for _ in 0..2 {
+        match events.try_recv() {
+            Ok(CsmsEvent::AuthFailed {
+                station: None,
+                reason,
+                ..
+            }) => assert!(reason.contains("station id"), "{reason}"),
+            other => panic!("expected an AuthFailed event, got {other:?}"),
+        }
+    }
     assert!(events.try_recv().is_err());
     assert!(raw_handshake(&csms, "CP-OK", None).await.is_ok());
     csms.shutdown().await;

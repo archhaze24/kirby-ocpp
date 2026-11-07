@@ -57,7 +57,7 @@ pub use event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo}
 pub use fault::{Fault, Reply, Responder};
 pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 pub use policy::{SubprotocolPolicy, TransactionIdAllocator, TransactionIds};
-pub use server::{CsmsHandle, CsmsServer, station_id_from_path};
+pub use server::{CsmsHandle, CsmsServer, event_frame, station_id_from_path};
 pub use state::{
     BootInfo, CertificateRequest, ConnectorState, InstalledCertificates, LogReport,
     MAX_ACTIVE_TRANSACTIONS, MAX_CONNECTORS, MAX_INSTALLED_CERTIFICATES, MAX_SECURITY_EVENTS,

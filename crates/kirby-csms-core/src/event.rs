@@ -64,8 +64,9 @@ pub enum CsmsEvent {
     /// (before its reply is written), or when a CSMS call to it failed. Read the new state
     /// with [`crate::CsmsHandle::state`].
     StateChanged { station: String },
-    /// A connection was refused by the [`crate::SecurityPolicy`]. `station` is the id from the
-    /// URL (attacker controlled: sanitise it before printing). `reason` is one of a few fixed
+    /// A connection was refused by the [`crate::SecurityPolicy`], or because the URL holds no
+    /// valid station id (`station` is `None` then). `station` is the id from the URL
+    /// (attacker controlled: sanitise it before printing). `reason` is one of a few fixed
     /// phrases and never contains key material.
     AuthFailed {
         station: Option<String>,

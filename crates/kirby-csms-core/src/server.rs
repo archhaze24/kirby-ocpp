@@ -753,16 +753,10 @@ impl Inner {
             }
         }
         if self.events.receiver_count() > 0 {
-            let bytes = frame.to_json_string().len();
-            let shown = if bytes > EVENT_FRAME_MAX_BYTES {
-                truncated_frame(frame, bytes)
-            } else {
-                frame.clone()
-            };
             self.emit(CsmsEvent::Frame {
                 station: station.to_owned(),
                 direction,
-                frame: shown,
+                frame: event_frame(frame),
             });
         }
     }
@@ -967,8 +961,15 @@ async fn run_session<S>(
     // `ErrorResponse` (the refusal) is large, but its type is fixed by tungstenite's `Callback`.
     #[allow(clippy::result_large_err)]
     let callback = |request: &Request, mut response: Response| -> Result<Response, ErrorResponse> {
-        let id = station_id_from_path(request.uri().path())
-            .ok_or_else(|| refusal("no valid charge point id in the URL path"))?;
+        let Some(id) = station_id_from_path(request.uri().path()) else {
+            // Reported with the fixed phrase only: the id is attacker controlled and unusable.
+            inner.emit(CsmsEvent::AuthFailed {
+                station: None,
+                remote_addr: peer,
+                reason: "refused: no valid station id in the URL path (1 to 128 bytes, no control characters)".to_owned(),
+            });
+            return Err(refusal("no valid charge point id in the URL path"));
+        };
         if let Err(denied) = auth::check(&inner.config.security, request, &id, &identity) {
             inner.emit(CsmsEvent::AuthFailed {
                 station: Some(id),
@@ -1366,6 +1367,30 @@ fn malformed_text(text: &str, show_secrets: bool) -> String {
 /// Largest frame (as JSON text) that an event carries in full; bigger ones are replaced by the
 /// marker of [`truncated_frame`], so a stalled event consumer cannot pin large frames.
 const EVENT_FRAME_MAX_BYTES: usize = 64 * 1024;
+
+/// The form of a frame in a [`CsmsEvent::Frame`]: the frame itself, or for a frame above
+/// 64 KiB as JSON the same frame with its payload replaced by
+/// `{"truncated": true, "originalBytes": n}`. The frame history keeps the full frame (within
+/// its byte cap), so to tell a history entry from the event of the same frame, compare
+/// `event_frame(&entry.frame)` with the event's frame.
+#[must_use]
+pub fn event_frame(frame: &Frame) -> Frame {
+    let bytes = frame.to_json_string().len();
+    if bytes > EVENT_FRAME_MAX_BYTES && !is_truncated_marker(frame) {
+        truncated_frame(frame, bytes)
+    } else {
+        frame.clone()
+    }
+}
+
+/// Whether the frame already carries the truncation marker.
+fn is_truncated_marker(frame: &Frame) -> bool {
+    let payload = match frame {
+        Frame::Call { payload, .. } | Frame::CallResult { payload, .. } => payload,
+        Frame::CallError { details, .. } => details,
+    };
+    payload["truncated"] == true
+}
 
 /// Replaces the payload of a frame that is too big for the history by a small marker object
 /// (`{"truncated": true, "originalBytes": n}`); a CALLERROR keeps its code and a cut description.
