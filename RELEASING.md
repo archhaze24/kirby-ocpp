@@ -14,14 +14,7 @@ Do it from a machine where you are logged in to crates.io and npm. Replace `0.2.
 
 1. Get the release commit onto `main`: from the development branch (e.g. `dev-0.5`) merge it into `main` (`git switch main && git pull --ff-only && git merge dev-0.5`; fast-forward or merge commit), push, and wait until CI on `main` is green.
 2. Bump the version in the root `Cargo.toml`: `[workspace.package] version` and the `version = "…"` of all four internal crates in `[workspace.dependencies]`: `kirby-ocpp-core`, `kirby-ocpp-tui`, `kirby-csms-core`, `kirby-csms-tui` (drop the `-dev` suffix, e.g. `0.4.0-dev` -> `0.4.0`; `kirby-ocpp-testkit` has no version and stays unpublished). Run `cargo check --workspace` so `Cargo.lock` follows.
-3. Update the "Install" section of `README.md` (these channels exist only after the release):
-   ```
-   npx kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001     # or: npm install -g kirby-ocpp
-   cargo install kirby-ocpp
-   npx kirby-csms --listen 0.0.0.0:9000                       # or: npm install -g kirby-csms
-   cargo install kirby-csms
-   # prebuilt binaries: https://github.com/archhaze24/kirby-ocpp/releases
-   ```
+3. Check the "Install" section of `README.md`: it lists only channels that work after the release (npm, Cargo, release archives). Docker, Homebrew and Scoop stay in `docs/distribution.md` until the image, the tap and the bucket exist; add them to the README only after that.
 4. Finish `CHANGELOG.md`: the section `## [0.2.0] - <date>` must exist with the release date and the notes (they become the GitHub release text; check the numbers in the statistics table), and keep an empty `## [Unreleased]` heading above it plus the compare links at the bottom of the file. Preview with `.github/scripts/release-notes.sh v0.2.0`.
 5. `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
 6. `cargo publish --dry-run -p kirby-ocpp-core` (must succeed). The other crates can only be dry-run after the crates they depend on are on crates.io (`kirby-csms-core` needs `kirby-ocpp-core`; `kirby-ocpp-tui` needs `kirby-ocpp-core`; `kirby-csms-tui` needs `kirby-csms-core` and `kirby-ocpp-tui`; `kirby-ocpp` needs `-core` and `-tui`; `kirby-csms` needs all four libraries). `cargo package --list -p <crate>` works for all of them at any time: check that `THIRD_PARTY_NOTICES.md` is in `kirby-ocpp` and `kirby-csms`, and that `LICENSE` is in every published crate. The per-crate `LICENSE` files are plain copies of the root one and must stay identical: `for c in kirby-ocpp-core kirby-csms-core kirby-ocpp-tui kirby-csms-tui kirby-ocpp kirby-csms; do cmp LICENSE crates/$c/LICENSE; done`.
