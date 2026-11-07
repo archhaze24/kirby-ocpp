@@ -19,6 +19,10 @@ tag as the GitHub release notes.
 | ✏️ Lines of code | **+21.6k / −1.6k** across 144 files; Rust grew from 70.6k to **86.9k** lines |
 | 🧪 Tests | **+283** new test functions: 1,047 → **1,330** (all run in the `nextest` gate) |
 | 📦 Crates | 7 → **7** (new dependencies: `axum`, `hyper`, `hyper-util`, `clap_complete`) |
+| 🔎 Reviews | **11** review rounds, including product reviews that played the real binaries and both terminal UIs |
+| ✨ New features | **39** |
+| 🔧 Changes | **25** |
+| 🐛 Fixes and hardening | **35** |
 
 ### ✨ Added
 
