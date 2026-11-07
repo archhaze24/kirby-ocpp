@@ -1445,9 +1445,11 @@ async fn connected_event_ids_and_string_transaction_ids() {
             .starts_with("127.0.0.1:")
     );
     // Every message has an increasing numeric `id:`.
+    // Only whole lines count: a read can end in the middle of the last one.
     let ids: Vec<u64> = events
         .buf
-        .lines()
+        .split_inclusive('\n')
+        .filter_map(|line| line.strip_suffix('\n'))
         .filter_map(|line| line.strip_prefix("id: "))
         .map(|id| id.parse().unwrap())
         .collect();
