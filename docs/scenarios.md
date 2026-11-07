@@ -21,7 +21,7 @@ The allowed top-level keys are `name`, `description`, `vars`, `steps` and three 
 | --- | --- | --- | --- |
 | `ocpp_version` | string | `"1.6"` | Protocol the file is written for. Any other value is a load error (`this build supports OCPP 1.6 only`, naming the value). |
 | `schema` | integer | `1` | Version of the file format. Any other value is a load error (`unsupported schema N`). |
-| `tags` | array of strings | none | Free-form labels. They are validated and kept, but nothing filters on them yet. |
+| `tags` | array of strings | none | Free-form labels. Each entry must be a string (any other type is a load error); the text is not checked further. They are kept, but nothing filters on them yet. |
 
 Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key. The version keys are read and checked before anything else, so a file written for a later version fails with `unsupported schema N` or `this build supports OCPP 1.6 only` even when it also uses keys this build does not know. A value of the wrong type fails with a plain message such as `` `schema` must be an integer``.
 
@@ -117,7 +117,7 @@ id_tag = "${tag}"
 Rules:
 
 - `${name}` is replaced right before the step runs, so a variable captured by an earlier step is visible. An unknown variable, a malformed `${` or a bad result fails that step with a message naming the variable.
-- A string that is exactly `${name}` takes the variable's JSON type (`connectorId = "${n}"` sends a number when `n` is a number). Inside longer text the variable becomes text: strings without quotes, numbers and booleans as written. An object or array inside longer text is an error.
+- A string that is exactly `${name}` takes the variable's JSON type (`connectorId = "${n}"` sends a number when `n` is a number). Inside longer text the variable becomes text: strings without quotes, booleans as `true` or `false`, and numbers as written on the command line (`--var n=1.50` gives `1.50`, `--var n=1e3` gives `1e3`); a number declared in `[vars]` prints in its canonical form (`1.5`). An exact `"${n}"` still sends the number as a JSON number. An object or array inside longer text is an error.
 - `$${` is a literal `${`.
 - Substituted fields: the JSON of `payload` and `match`, `expect.status`, `expect.payload`, and the string fields `id_tag`, `call`, `vendor_id`, `message_id`, `data`, `info`, `tech_info`, `event_type`, `rule`.
   - Typed fields (`connector`, `reason`, `status`, `error_code`, `wh_delta`, `ms`, `timeout_ms`, `condition`, `direction`, `validate`) are never substituted: a variable cannot make a connector number or a timeout.
@@ -165,7 +165,7 @@ Rules:
 
 ### Actions
 
-Every step has `action` plus the fields of that action, and may add `name` (shown in reports; the default report label is derived from the action, see [JUnit XML](#junit-xml---junit)) and `expect` (see [Expect](#expect)). Fields without a default are required.
+Every step has `action` plus the fields of that action, and may add `name` (shown in reports; the default report label is derived from the action, see [JUnit XML](#junit-xml---junit); an empty or blank `name` counts as absent) and `expect` (see [Expect](#expect)). Fields without a default are required.
 
 | Action | Fields | What it does |
 | --- | --- | --- |
@@ -231,7 +231,7 @@ If events were lost because the runner fell behind and the wanted CALL is not am
 | --- | --- |
 | `status` | The `status` of the answer must equal this (for `authorize`, the idTag status; for `start_tx`, `Accepted` or the rejection status) |
 | `payload` | The CALLRESULT payload must contain this subset. Only steps that return the raw answer have one, for example `send_raw` and `data_transfer`; elsewhere the step fails |
-| `error` | The step must fail with a station error (for example a CALLERROR or a timeout). If it succeeds the step fails |
+| `error` | The step must fail with a station error (for example a CALLERROR or a timeout). If it succeeds the step fails. Combined with `status` or `payload` it is a load error (`error = true` excludes them) |
 
 `authorize` and `start_tx` imply `status = "Accepted"` unless the step sets another status, so a rejected tag stops the scenario; set `expect = { status = "Blocked" }` to test rejection. `expect` on `sleep`, `wait_for` and `expect_call` is accepted but has no effect.
 

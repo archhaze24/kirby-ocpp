@@ -126,6 +126,7 @@ Timeouts, from the inside out:
 * `--call-timeout-ms` (default 30000) is how long the station waits for one answer from the CSMS.
 * `wait_for` and `expect_call` steps have their own `timeout_ms` (default 5000).
 * `--timeout SECONDS` limits a whole scenario, connecting included (`run`, and per scenario in `suite`; for a fleet run it covers the whole fleet). When it expires the running step fails with `cancelled` and the rest are skipped. For `kirby-csms --script` it limits the whole script.
+* A CSMS that is down costs the full `--timeout` for every scenario of a `suite`: the station keeps retrying the connection until the timeout ends the scenario. For CI pass `--no-reconnect` and `--fail-fast`: a refused connection then fails the scenario at once (`reconnect stopped (automatic reconnect is disabled)`), and `--fail-fast` reports the remaining scenarios as `SKIP`. `--no-reconnect` also applies during a scenario: an unexpected disconnect fails the run instead of being retried.
 * The job timeout (`timeout-minutes`, `timeout:`) is the last guard. A run stopped by SIGINT or SIGTERM from the runner still writes the `suite` report; see the signal rules in [configuration.md](configuration.md#kirby-ocpp-suite).
 
 ## Reports

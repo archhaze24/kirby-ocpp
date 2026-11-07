@@ -184,6 +184,71 @@ timeout_ms = 4000
 }
 
 #[tokio::test]
+async fn expect_call_in_sees_a_call_that_arrived_before_the_runner_started() {
+    // The subscription is taken before connecting (as `connect_and_run` does); the CSMS
+    // calls right after the boot, while nothing runs the scenario yet.
+    let mut rig = Rig::with(incrementing(), |c| c).await;
+    let events = rig.station.subscribe();
+    rig.connect_booted().await;
+    let reply = rig
+        .csms
+        .send_call("Reset", serde_json::json!({"type": "Soft"}))
+        .await
+        .unwrap();
+    drop(reply);
+    let s = scenario(
+        r#"
+[[steps]]
+action = "expect_call"
+call = "Reset"
+direction = "in"
+match = { type = "Soft" }
+timeout_ms = 3000
+"#,
+    );
+    let report = kirby_ocpp_core::scenario::run_scenario_subscribed(
+        &rig.station,
+        &s,
+        &CancelToken::new(),
+        None,
+        &kirby_ocpp_core::scenario::Vars::default(),
+        1,
+        events,
+    )
+    .await;
+    assert!(report.passed, "{report:#?}");
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_raw_boot_notification_still_logs_its_result() {
+    use crate::station_support::Observed;
+    let rig = booted_rig().await;
+    let mut seen = Observed::new(rig.station.subscribe());
+    let boot = scenario(
+        r#"
+[[steps]]
+action = "send_raw"
+call = "BootNotification"
+payload = { chargePointVendor = "v", chargePointModel = "m" }
+"#,
+    );
+    for status in ["Accepted", "Rejected"] {
+        rig.csms.respond("BootNotification", move |_| {
+            kirby_ocpp_testkit::Reply::Result(serde_json::json!({
+                "status": status,
+                "currentTime": "2026-01-01T00:00:00Z",
+                "interval": 300
+            }))
+        });
+        let report = run_scenario(&rig.station, &boot, &CancelToken::new(), None).await;
+        assert!(report.passed, "{status}: {report:#?}");
+        seen.wait_log("BootNotification accepted").await;
+    }
+    rig.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_cancel_after_the_last_step_does_not_mark_the_report_cancelled() {
     let rig = booted_rig().await;
     // Nothing is left to cut short, so a fired token changes nothing: passed, not cancelled.

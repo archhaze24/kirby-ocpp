@@ -21,19 +21,18 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::CommandFactory;
 use kirby_ocpp_core::fleet::Fleet;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::scenario::{
-    CancelToken, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin, junit_xml,
-    run_scenario_with_vars,
+    CancelToken, JunitRun, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin,
+    junit_xml_runs, run_scenario_subscribed,
 };
 use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
 use kirby_ocpp_tui::stdout_pump::print_lossy;
 use kirby_ocpp_tui::{TuiError, TuiOptions};
 use tokio::task::JoinHandle;
 
-use crate::cli::{Cli, Cmd, RunArgs, ScenariosCmd, SuiteArgs};
+use crate::cli::{Cli, Cmd, RunArgs, ScenarioVar, ScenariosCmd, SuiteArgs};
 use crate::headless::{Level, LinkWatch, Sink};
 
 /// Project license line and third-party notices (`--licenses`).
@@ -110,7 +109,7 @@ async fn real_main() -> ExitCode {
         config.persist = false;
     }
     config.normalize();
-    if let Err(error) = config.validate().and_then(|()| config.check_tls_files()) {
+    if let Err(error) = config.validate() {
         return usage_error(&error.to_string());
     }
     headless::init_connect_context(&config.url, &config.ws_subprotocol);
@@ -145,6 +144,10 @@ async fn real_main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+    // Only a command that connects needs the TLS files (`--print-config` does not).
+    if let Err(error) = config.check_tls_files() {
+        return usage_error(&error.to_string());
     }
 
     match command {
@@ -303,7 +306,12 @@ fn print_version(json: bool) -> ExitCode {
 /// `completions SHELL`: the completion script on stdout.
 fn print_completions(shell: clap_complete::Shell) -> ExitCode {
     let mut script = Vec::new();
-    clap_complete::generate(shell, &mut Cli::command(), "kirby-ocpp", &mut script);
+    clap_complete::generate(
+        shell,
+        &mut cli::completion_command(),
+        "kirby-ocpp",
+        &mut script,
+    );
     print_lossy(&String::from_utf8_lossy(&script));
     ExitCode::SUCCESS
 }
@@ -363,7 +371,7 @@ fn load_scenario(
     spec: &str,
     connector: ConnectorId,
     id_tag: Option<&str>,
-    vars: &[(String, serde_json::Value)],
+    vars: &[ScenarioVar],
 ) -> Result<Scenario, String> {
     let id_tag = id_tag
         .map(IdTag::new)
@@ -386,7 +394,10 @@ fn load_scenario(
     };
     // Built-ins target connector 1; files say what they mean.
     scenario.retarget(is_builtin.then_some(connector), id_tag.as_ref());
-    if let Some((name, _)) = vars.iter().find(|(name, _)| !scenario.uses_variable(name)) {
+    if let Some((name, _, _)) = vars
+        .iter()
+        .find(|(name, _, _)| !scenario.uses_variable(name))
+    {
         return Err(format!(
             "unknown variable `{name}`: scenario `{}` neither declares it in `[vars]` nor uses `${{{name}}}`",
             scenario.name
@@ -576,6 +587,13 @@ async fn run(
         Ok(scenario) => scenario,
         Err(error) => return usage_error(&error),
     };
+    if let Err(error) = check_output_paths(
+        args.report.as_deref(),
+        args.junit.as_deref(),
+        scenario.source.as_deref().as_slice(),
+    ) {
+        return usage_error(&error);
+    }
     let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
     let sink = match spawn_sink(&handle, json, log_file, headless::events_on_stdout(json)) {
         Ok(sink) => sink,
@@ -598,6 +616,7 @@ async fn run(
     let overrides = override_vars(&args.vars);
     let mut interrupted = false;
     let mut shutdown = Shutdown::new();
+    let run_started = std::time::Instant::now();
     let outcome = tokio::select! {
         outcome = connect_and_run(&handle, &scenario, &cancel, &overrides, 1) => outcome,
         sigint = shutdown.recv() => {
@@ -627,12 +646,16 @@ async fn run(
         write_failed = true;
     }
     if !interrupted && let Some(path) = &args.junit {
-        let suite = JunitSuite {
-            station: None,
-            scenario: &scenario.name,
-            outcome: report
-                .as_ref()
-                .ok_or_else(|| setup_error.as_deref().unwrap_or("no report")),
+        let suite = JunitRun {
+            suite: JunitSuite {
+                station: None,
+                scenario: &scenario.name,
+                outcome: report
+                    .as_ref()
+                    .ok_or_else(|| setup_error.as_deref().unwrap_or("no report")),
+            },
+            source: scenario.source.as_deref(),
+            duration_ms: u64::try_from(run_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
         if let Err(error) = write_junit(path, &[suite]) {
             eprintln!("error: cannot write the JUnit report: {error}");
@@ -662,6 +685,9 @@ pub(crate) async fn connect_and_run(
 ) -> Result<ScenarioReport, String> {
     // Subscribed before connecting: a connection that fails at once must not be missed.
     let mut link = LinkWatch::new(handle);
+    // The scenario's own subscription, also taken before connecting: a CSMS CALL that
+    // arrives right after the boot must still be seen by `expect_call direction = "in"`.
+    let events = handle.subscribe();
     handle.connect().await.map_err(|e| e.to_string())?;
     let mut snapshots = handle.watch_snapshot();
     tokio::select! {
@@ -682,7 +708,7 @@ pub(crate) async fn connect_and_run(
     }
     // The link can also go away while the scenario runs: end the run with that reason.
     tokio::select! {
-        report = run_scenario_with_vars(handle, scenario, cancel, None, overrides, index) => {
+        report = run_scenario_subscribed(handle, scenario, cancel, None, overrides, index, events) => {
             Ok(report)
         }
         dead = link.dead() => Err(format!("connection lost: {dead}")),
@@ -690,11 +716,16 @@ pub(crate) async fn connect_and_run(
 }
 
 /// The `--var` overrides of a `run` or `suite` command.
-pub(crate) fn override_vars(vars: &[(String, serde_json::Value)]) -> Vars {
+pub(crate) fn override_vars(vars: &[ScenarioVar]) -> Vars {
     let mut out = Vars::new();
-    for (name, value) in vars {
-        // Names were validated by the argument parser.
-        let _ = out.insert(name, value.clone());
+    for (name, value, written) in vars {
+        // Names were validated by the argument parser. A number keeps the text it was
+        // written with for interpolation into longer text.
+        let _ = if value.is_number() {
+            out.insert_with_text(name, value.clone(), written.clone())
+        } else {
+            out.insert(name, value.clone())
+        };
     }
     out
 }
@@ -742,11 +773,124 @@ pub(crate) fn print_report(report: &ScenarioReport, json: bool, station: Option<
     say(verdict);
 }
 
-pub(crate) fn write_junit(path: &Path, suites: &[JunitSuite<'_>]) -> std::io::Result<()> {
-    std::fs::write(path, junit_xml(suites))
+pub(crate) fn write_junit(path: &Path, runs: &[JunitRun<'_>]) -> std::io::Result<()> {
+    write_atomic(path, junit_xml_runs(runs).as_bytes())
 }
 
-fn write_report(path: &Path, report: &ScenarioReport) -> std::io::Result<()> {
+pub(crate) fn write_report(path: &Path, report: &ScenarioReport) -> std::io::Result<()> {
     let text = serde_json::to_string_pretty(report).map_err(std::io::Error::other)?;
-    std::fs::write(path, text + "\n")
+    write_atomic(path, (text + "\n").as_bytes())
+}
+
+/// Writes `bytes` to a temporary file next to `path` and renames it over `path`, so a reader
+/// never sees half a report. An existing file keeps its permissions; a new one gets the
+/// default mode, as with a plain write.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| std::io::Error::other("the path has no file name"))?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(file_name);
+    temp_name.push(format!(".{}.tmp", std::process::id()));
+    let temp = path.with_file_name(temp_name);
+    let written = (|| {
+        let mut file = std::fs::File::create(&temp)?;
+        file.write_all(bytes)?;
+        if let Ok(existing) = std::fs::metadata(path) {
+            file.set_permissions(existing.permissions())?;
+        }
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temp, path)
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
+}
+
+/// Checks the `--report` and `--junit` paths before anything runs: the directory exists and
+/// accepts a new file, the two paths differ, and neither is one of the scenario files
+/// (`sources`). An unwritable path then fails with exit 2 up front instead of costing the
+/// result of a finished run.
+///
+/// # Errors
+/// A one-line message naming the flag.
+pub(crate) fn check_output_paths(
+    report: Option<&Path>,
+    junit: Option<&Path>,
+    sources: &[&str],
+) -> Result<(), String> {
+    for (flag, path) in [("--report", report), ("--junit", junit)] {
+        let Some(path) = path else { continue };
+        if path.is_dir() {
+            return Err(format!("{flag} {}: is a directory", path.display()));
+        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        if !parent.is_dir() {
+            return Err(format!(
+                "{flag} {}: the directory {} does not exist",
+                path.display(),
+                parent.display()
+            ));
+        }
+        let probe = parent.join(format!(".kirby-ocpp-probe-{}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+        {
+            Ok(file) => {
+                drop(file);
+                let _ = std::fs::remove_file(&probe);
+            }
+            Err(error) => {
+                return Err(format!(
+                    "{flag} {}: cannot write to the directory {}: {error}",
+                    path.display(),
+                    parent.display()
+                ));
+            }
+        }
+        if let Some(source) = sources
+            .iter()
+            .find(|source| Path::new(source).is_file() && same_file(path, Path::new(source)))
+        {
+            return Err(format!(
+                "{flag} {}: is the scenario file {source}; it would be overwritten",
+                path.display()
+            ));
+        }
+    }
+    if let (Some(report), Some(junit)) = (report, junit)
+        && same_file(report, junit)
+    {
+        return Err(format!(
+            "--report and --junit name the same file ({})",
+            report.display()
+        ));
+    }
+    Ok(())
+}
+
+/// Whether two paths name the same file, also when neither exists yet.
+fn same_file(a: &Path, b: &Path) -> bool {
+    fn resolve(path: &Path) -> std::path::PathBuf {
+        if let Ok(real) = std::fs::canonicalize(path) {
+            return real;
+        }
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        match (std::fs::canonicalize(parent), path.file_name()) {
+            (Ok(parent), Some(name)) => parent.join(name),
+            _ => path.to_path_buf(),
+        }
+    }
+    resolve(a) == resolve(b)
 }

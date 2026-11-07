@@ -2,14 +2,14 @@
 
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
 use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::fleet::{FleetEvents, FleetItem};
 use kirby_ocpp_core::station::{Direction, Event, Snapshot};
-use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file};
+use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file, print_lossy};
 use kirby_ocpp_tui::text::{escape_json_unsafe, sanitize};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot, watch};
@@ -22,6 +22,60 @@ const STDOUT_FLUSH: Duration = Duration::from_secs(2);
 const FILE_FLUSH: Duration = Duration::from_secs(5);
 
 static STDOUT: OnceLock<StdoutPump> = OnceLock::new();
+
+/// Set once the stdout queue was closed by [`flush_stdout`].
+static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// A queue entry that is not printed: the writer thread reports it as reached, which tells
+/// [`drain_stdout`] that every line queued before it was written.
+const BARRIER_MARK: &str = "\u{0}kirby-barrier:";
+static BARRIER_NEXT: AtomicU64 = AtomicU64::new(0);
+static BARRIER_SEEN: Mutex<u64> = Mutex::new(0);
+static BARRIER_REACHED: Condvar = Condvar::new();
+
+/// The stdout side of the queue: prints lines, answers barriers.
+struct StdoutWriter;
+
+impl io::Write for StdoutWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let text = String::from_utf8_lossy(buf);
+        if let Some(number) = text.trim_end().strip_prefix(BARRIER_MARK) {
+            if let Ok(number) = number.parse::<u64>() {
+                let mut seen = BARRIER_SEEN.lock().unwrap_or_else(PoisonError::into_inner);
+                *seen = (*seen).max(number);
+                BARRIER_REACHED.notify_all();
+            }
+        } else {
+            print_lossy(&text);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn new_stdout_pump(json: bool) -> StdoutPump {
+    LinePump::to_writer(json, StdoutWriter)
+}
+
+/// Waits (bounded) until the stdout lines queued so far are written, so a line written to
+/// stderr next cannot overtake them or be torn into them when both share a pipe.
+fn drain_stdout() {
+    if STDOUT_CLOSED.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(pump) = STDOUT.get() else { return };
+    let number = BARRIER_NEXT.fetch_add(1, Ordering::Relaxed) + 1;
+    pump.send(&format!("{BARRIER_MARK}{number}"));
+    let seen = BARRIER_SEEN.lock().unwrap_or_else(PoisonError::into_inner);
+    let _ = BARRIER_REACHED.wait_timeout_while(seen, BARRIER_WAIT, |seen| *seen < number);
+}
+
+/// How long a stderr line waits for the queued stdout lines (a stalled reader must not hold
+/// the process back).
+const BARRIER_WAIT: Duration = Duration::from_millis(500);
 
 /// How much `run` and `suite` print (`-q`, default, `-v`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,7 +361,7 @@ impl LinkWatch {
 
 /// Sets up the stdout queue; `json` picks the form of its "lines dropped" note.
 pub fn init_stdout(json: bool) {
-    let _ = STDOUT.set(StdoutPump::new(json));
+    let _ = STDOUT.set(new_stdout_pump(json));
 }
 
 /// Queues one stdout line, made safe for a terminal: control characters, line separators and
@@ -320,13 +374,15 @@ pub fn stdout_line(line: &str, json: bool) {
     } else {
         sanitize(line)
     };
-    STDOUT.get_or_init(|| StdoutPump::new(json)).send(&line);
+    STDOUT.get_or_init(|| new_stdout_pump(json)).send(&line);
 }
 
 /// Writes one line to stderr with a single `write` call (see the `eprintln!` macro of
 /// `main.rs`), ignoring errors such as a closed stderr.
 pub fn stderr_line(line: &str) {
     use std::io::Write as _;
+    // Queued stdout events come first: the final error must not overtake them.
+    drain_stdout();
     let mut text = String::with_capacity(line.len() + 1);
     text.push_str(line);
     text.push('\n');
@@ -336,6 +392,7 @@ pub fn stderr_line(line: &str) {
 /// Writes out the queued stdout lines (bounded wait); call before the process exits.
 pub fn flush_stdout() {
     if let Some(pump) = STDOUT.get() {
+        STDOUT_CLOSED.store(true, Ordering::Relaxed);
         pump.finish(STDOUT_FLUSH);
     }
 }

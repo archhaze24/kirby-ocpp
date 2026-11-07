@@ -21,6 +21,16 @@ pub struct JunitSuite<'a> {
     pub outcome: Result<&'a ScenarioReport, &'a str>,
 }
 
+/// A [`JunitSuite`] with what is known about the run even when it produced no report: the
+/// scenario's `source` (file path or built-in name) and the time spent. A suite that has a
+/// report takes both from the report.
+#[derive(Debug, Clone, Copy)]
+pub struct JunitRun<'a> {
+    pub suite: JunitSuite<'a>,
+    pub source: Option<&'a str>,
+    pub duration_ms: u64,
+}
+
 #[derive(Default, Clone, Copy)]
 struct Counts {
     tests: usize,
@@ -54,10 +64,25 @@ impl Counts {
 /// Renders the suites as one JUnit XML document (`<testsuites>` root).
 #[must_use]
 pub fn junit_xml(suites: &[JunitSuite<'_>]) -> String {
+    let runs: Vec<JunitRun<'_>> = suites
+        .iter()
+        .map(|suite| JunitRun {
+            suite: *suite,
+            source: None,
+            duration_ms: 0,
+        })
+        .collect();
+    junit_xml_runs(&runs)
+}
+
+/// [`junit_xml`] for runs that also know their source and duration, which fill the `source`
+/// property and the `time` of a suite that never produced a report.
+#[must_use]
+pub fn junit_xml_runs(runs: &[JunitRun<'_>]) -> String {
     let mut total = Counts::default();
     let mut body = String::new();
-    for suite in suites {
-        let (xml, counts) = render_suite(suite);
+    for run in runs {
+        let (xml, counts) = render_suite(run);
         total.add(counts);
         body.push_str(&xml);
     }
@@ -67,39 +92,45 @@ pub fn junit_xml(suites: &[JunitSuite<'_>]) -> String {
     )
 }
 
-fn render_suite(suite: &JunitSuite<'_>) -> (String, Counts) {
+fn render_suite(run: &JunitRun<'_>) -> (String, Counts) {
+    let suite = &run.suite;
     let name = match suite.station {
-        Some(station) => format!("{} [{station}]", suite.scenario),
-        None => suite.scenario.to_owned(),
+        Some(station) => clean(&format!("{} [{station}]", suite.scenario)),
+        None => clean(suite.scenario),
     };
     let ocpp_version = suite
         .outcome
         .map_or(OCPP_VERSION, |r| r.ocpp_version.as_str());
     // A label for grouping, not a parsed structure: names may contain `.` and `]`.
-    let classname = escape(&single_line(&format!("ocpp{ocpp_version}.{name}")));
+    let classname = escape(&clean(&format!("ocpp{ocpp_version}.{name}")));
     let mut cases = String::new();
     let mut counts = Counts::default();
     let mut properties = vec![("ocpp_version", ocpp_version.to_owned())];
     let mut station = suite.station.map(str::to_owned);
     let mut tool_version = TOOL_VERSION.to_owned();
-    let mut source = None;
+    let mut source = run.source.map(str::to_owned);
     match suite.outcome {
         Ok(report) => {
             counts.millis = report.duration_ms;
             station = station.or_else(|| report.station.clone());
             tool_version.clone_from(&report.tool_version);
-            source.clone_from(&report.source);
-            let bases: Vec<&str> = report
+            if report.source.is_some() {
+                source.clone_from(&report.source);
+            }
+            // Cleaned before the uniqueness pass, so two labels that differ only in
+            // invisible characters get distinct ` #N` suffixes.
+            let bases: Vec<String> = report
                 .steps
                 .iter()
                 .map(|step| {
-                    if step.detail.label.is_empty() {
+                    clean(if step.detail.label.is_empty() {
                         step.name.as_str()
                     } else {
                         step.detail.label.as_str()
-                    }
+                    })
                 })
                 .collect();
+            let bases: Vec<&str> = bases.iter().map(String::as_str).collect();
             // Every written label is taken up front, so a generated ` #N` never collides with
             // an explicit label, whichever comes first.
             let mut taken: HashSet<String> = bases.iter().map(|b| (*b).to_owned()).collect();
@@ -128,10 +159,12 @@ fn render_suite(suite: &JunitSuite<'_>) -> (String, Counts) {
         Err(error) => {
             counts.tests = 1;
             counts.errors = 1;
+            counts.millis = run.duration_ms;
             let error = escape(error);
+            let time = seconds(run.duration_ms);
             let _ = writeln!(
                 cases,
-                "    <testcase classname=\"{classname}\" name=\"setup\" time=\"0.000\">\n      <error message=\"{error}\" type=\"SetupError\">{error}</error>\n    </testcase>"
+                "    <testcase classname=\"{classname}\" name=\"setup\" time=\"{time}\">\n      <error message=\"{error}\" type=\"SetupError\">{error}</error>\n    </testcase>"
             );
         }
     }
@@ -147,7 +180,7 @@ fn render_suite(suite: &JunitSuite<'_>) -> (String, Counts) {
         let _ = writeln!(
             props,
             "      <property name=\"{key}\" value=\"{}\"/>",
-            escape(value)
+            escape(&clean(value))
         );
     }
     props.push_str("    </properties>\n");
@@ -221,10 +254,18 @@ fn failure_text(step: &StepReport, reason: &str) -> String {
     text
 }
 
-/// `text` with control characters replaced by spaces.
-fn single_line(text: &str) -> String {
+/// `text` with every character that is unsafe in a terminal or invisible (controls, line
+/// separators, bidirectional and zero-width marks) replaced by a space, for names and
+/// labels.
+fn clean(text: &str) -> String {
     text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
+        .map(|c| {
+            if crate::text::is_unsafe_char(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect()
 }
 
@@ -409,5 +450,54 @@ mod tests {
             outcome: Ok(&report),
         }]);
         assert!(xml.contains("classname=\"ocpp1.6.de.mo] [CP 1]\""), "{xml}");
+    }
+
+    #[test]
+    fn setup_error_suites_carry_source_and_time_when_known() {
+        let run = JunitRun {
+            suite: JunitSuite {
+                station: None,
+                scenario: "demo",
+                outcome: Err("never booted"),
+            },
+            source: Some("scenarios/demo.toml"),
+            duration_ms: 2345,
+        };
+        let xml = junit_xml_runs(&[run]);
+        assert!(
+            xml.contains("<property name=\"source\" value=\"scenarios/demo.toml\"/>"),
+            "{xml}"
+        );
+        assert!(xml.contains("name=\"setup\" time=\"2.345\""), "{xml}");
+        assert!(xml.contains("<testsuite name=\"demo\" tests=\"1\" failures=\"0\" errors=\"1\" skipped=\"0\" time=\"2.345\">"), "{xml}");
+        // Without the extra facts the output is what `junit_xml` always produced.
+        let plain = junit_xml(&[run.suite]);
+        assert!(
+            plain.contains("time=\"0.000\"") && !plain.contains("\"source\""),
+            "{plain}"
+        );
+    }
+
+    #[test]
+    fn names_lose_invisible_and_bidi_characters() {
+        let report = report(
+            vec![
+                step(0, "a\u{202e}b\u{200b}c", StepStatus::Passed, 1),
+                step(1, "a b c", StepStatus::Passed, 1),
+            ],
+            true,
+        );
+        let xml = junit_xml(&[JunitSuite {
+            station: Some("CP\u{feff}1"),
+            scenario: "de\u{2067}mo",
+            outcome: Ok(&report),
+        }]);
+        for c in ['\u{202e}', '\u{200b}', '\u{feff}', '\u{2067}'] {
+            assert!(!xml.contains(c), "{c:?} in {xml}");
+        }
+        assert!(xml.contains("name=\"a b c\""), "{xml}");
+        // The cleaned labels collide and are made distinct.
+        assert!(xml.contains("name=\"a b c #2\""), "{xml}");
+        assert!(xml.contains("<testsuite name=\"de mo [CP 1]\""), "{xml}");
     }
 }

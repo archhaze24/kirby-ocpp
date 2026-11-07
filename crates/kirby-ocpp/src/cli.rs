@@ -409,8 +409,11 @@ pub struct RunArgs {
     /// Overrides `[vars]`; `true`/`false`/numbers keep their type. `station_id` and `index`
     /// are built in and cannot be set.
     #[arg(help_heading = "Scenarios", long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
-    pub vars: Vec<(String, serde_json::Value)>,
+    pub vars: Vec<ScenarioVar>,
 }
+
+/// A parsed `--var`: name, typed value and the value as written.
+pub type ScenarioVar = (String, serde_json::Value, String);
 
 #[derive(Debug, Args)]
 pub struct SuiteArgs {
@@ -445,7 +448,7 @@ pub struct SuiteArgs {
 
     /// Set a scenario variable for every scenario (repeatable), see `run --var`
     #[arg(help_heading = "Scenarios", long = "var", value_name = "NAME=VALUE", value_parser = scenario_var)]
-    pub vars: Vec<(String, serde_json::Value)>,
+    pub vars: Vec<ScenarioVar>,
 }
 
 impl SuiteArgs {
@@ -464,12 +467,12 @@ impl SuiteArgs {
 }
 
 /// Parses a `--var` argument.
-fn scenario_var(text: &str) -> Result<(String, serde_json::Value), String> {
-    let (name, value) = kirby_ocpp_core::scenario::vars::parse_assignment(text)?;
+fn scenario_var(text: &str) -> Result<ScenarioVar, String> {
+    let (name, value, written) = kirby_ocpp_core::scenario::vars::parse_assignment_text(text)?;
     if kirby_ocpp_core::scenario::vars::is_builtin(&name) {
         return Err(format!("`{name}` is a built-in variable and cannot be set"));
     }
-    Ok((name, value))
+    Ok((name, value, written))
 }
 
 #[derive(Debug, Subcommand)]
@@ -545,6 +548,33 @@ pub fn command() -> clap::Command {
             .help("Print the version details as one JSON object")
             .long_help("Print the version details as one JSON object");
         command = command.mut_subcommand("version", |sub| sub.arg(json));
+    }
+    command
+}
+
+/// The command shell completion is generated from. `clap_complete` offers hidden flags and
+/// every global flag under every subcommand, so here the station flags are plain (non-global)
+/// arguments of the root, `run` and `suite` only; `version` keeps `--json`. Never used to parse.
+pub fn completion_command() -> clap::Command {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    let globals: Vec<clap::Arg> = command
+        .get_arguments()
+        .filter(|arg| arg.is_global_set())
+        .cloned()
+        .collect();
+    for arg in &globals {
+        command = command.mut_arg(arg.get_id().clone(), |arg| arg.global(false));
+    }
+    for name in ["run", "suite"] {
+        command = command.mut_subcommand(name, |sub| {
+            globals
+                .iter()
+                .fold(sub, |sub, arg| sub.arg(arg.clone().global(false)))
+        });
+    }
+    if let Some(json) = globals.iter().find(|arg| arg.get_id() == "json") {
+        command = command.mut_subcommand("version", |sub| sub.arg(json.clone().global(false)));
     }
     command
 }

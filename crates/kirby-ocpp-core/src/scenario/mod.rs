@@ -15,13 +15,14 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::watch;
 
-pub use self::junit::{JunitSuite, junit_xml};
+pub use self::junit::{JunitRun, JunitSuite, junit_xml, junit_xml_runs};
 pub use self::model::{
     Action, Condition, DEFAULT_TIMEOUT_MS, Expect, Scenario, Step, read_scenario_file,
 };
 pub use self::runner::{
     RunStatus, ScenarioProgress, ScenarioReport, ScenarioRunner, StepDetail, StepReport,
-    StepStatus, run_scenario, run_scenario_with_events, run_scenario_with_vars,
+    StepStatus, run_scenario, run_scenario_subscribed, run_scenario_with_events,
+    run_scenario_with_vars,
 };
 pub use self::vars::Vars;
 

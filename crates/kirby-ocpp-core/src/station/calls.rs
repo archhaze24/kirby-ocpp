@@ -62,6 +62,7 @@ pub enum Origin {
 /// A CALL that has been handed to the connection and not completed yet.
 pub(super) struct PendingCall {
     pub(super) action: String,
+    pub(super) origin: Origin,
     pub(super) task: tokio::task::JoinHandle<()>,
     pub(super) continuation: Continuation,
     /// `MeterValues` with retries: set once the transaction's `StopTransaction` was queued.
@@ -274,6 +275,7 @@ impl StationActor {
             token,
             PendingCall {
                 action: name,
+                origin,
                 task,
                 continuation,
                 retry_guard,
@@ -334,10 +336,11 @@ impl StationActor {
             return;
         };
         match &result {
-            // The BootNotification handler logs the outcome itself (accepted with the heartbeat
-            // and clock details, or pending/rejected): a generic line would repeat it, and
-            // would read "accepted" for a rejected boot.
-            Ok(_) if call.action == "BootNotification" => {}
+            // The station's own BootNotification handler logs the outcome itself (accepted
+            // with the heartbeat and clock details, or pending/rejected): a generic line
+            // would repeat it, and would read "accepted" for a rejected boot. A raw or
+            // triggered one has no such handler line and keeps the generic one.
+            Ok(_) if call.action == "BootNotification" && call.origin == Origin::Station => {}
             Ok(_) => self.log(LogLevel::Success, format!("{} accepted", call.action)),
             Err(error) => self.log(LogLevel::Error, error.to_string()),
         }

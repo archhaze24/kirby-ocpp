@@ -112,8 +112,8 @@ Plain headless mode (no subcommand) prints every event at any level. `--log-file
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `--scenario <FILE\|NAME>` | | required | Built-in scenario name or a TOML file |
-| `--report <PATH>` | | none | Write the report as JSON. In fleet mode one file per station: `out.CP-001.json` (characters of the id other than letters, digits, `-`, `_` become `_`) |
-| `--junit <PATH>` | | none | Write a JUnit XML report; one file, one test suite per station in a fleet |
+| `--report <PATH>` | | none | Write the report as JSON. In fleet mode one file per station: `out.CP-001.json` (characters of the id other than letters, digits, `-`, `_` become `_`). See [Report files](#report-files) |
+| `--junit <PATH>` | | none | Write a JUnit XML report; one file, one test suite per station in a fleet. See [Report files](#report-files) |
 | `--persist` | | off | Read and write the station state file like a plain station; excludes `--no-persist` (usage error, exit 2) |
 | `--timeout <SECONDS>` | | `60` | Give up and fail after this long, connecting included; 1 to 86400. In fleet mode it covers the whole fleet, stagger included |
 | `--id-tag <IDTAG>` | | none | Replace the `idTag` of the scenario's `authorize`, `start_tx`, `stop_tx` steps (non-empty) |
@@ -140,6 +140,16 @@ Exit codes: [Exit codes](#kirby-ocpp-suite). Details: [Scenarios](scenarios.md#s
 `kirby-ocpp version` prints the tool version, the git commit, the build date, the target triple and the supported protocols (`OCPP 1.6J`); with `--json` one JSON object with the keys `name`, `version`, `commit`, `build_date`, `target` and `protocols`. The commit is `unknown` in a build without git. `kirby-ocpp --version` stays a single line.
 
 `kirby-ocpp completions <bash|zsh|fish|powershell|elvish>` prints a shell completion script to stdout; installation hints are in [emulator.md](emulator.md#shell-completions).
+
+### Report files
+
+`run`, `suite` and a fleet `run` check `--report` and `--junit` before anything connects, and exit 2 with a one-line message naming the flag when:
+
+* the directory of the path does not exist or does not accept a new file, or the path is a directory;
+* `--report` and `--junit` name the same file;
+* a path is one of the scenario files being run (it would be overwritten).
+
+Each file is written to a temporary file in the same directory and renamed over the target, so a reader never sees a half-written report. An existing file keeps its permissions. A write that fails after the run (a full disk) still exits 1 with `cannot write the report`.
 
 ## Id templates
 

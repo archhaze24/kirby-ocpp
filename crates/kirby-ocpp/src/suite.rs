@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 use futures_util::FutureExt;
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::scenario::{
-    CancelToken, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, Scenario, ScenarioReport, StepStatus,
-    TOOL_VERSION, Vars, builtin, now_rfc3339,
+    CancelToken, JunitRun, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, Scenario, ScenarioReport,
+    StepStatus, TOOL_VERSION, Vars, builtin, now_rfc3339,
 };
 use kirby_ocpp_core::{Station, StationConfig, SystemClock};
 use serde_json::{Value, json};
@@ -23,8 +23,9 @@ use serde_json::{Value, json};
 use crate::cli::SuiteArgs;
 use crate::headless::stdout_line;
 use crate::{
-    EXIT_INTERRUPTED, Shutdown, connect_and_run, names_a_path, override_vars, print_report,
-    spawn_sink, stop_station, unknown_scenario_message, usage_error, write_junit,
+    EXIT_INTERRUPTED, Shutdown, check_output_paths, connect_and_run, names_a_path, override_vars,
+    print_report, spawn_sink, stop_station, unknown_scenario_message, usage_error, write_atomic,
+    write_junit,
 };
 
 /// Built-ins that need a transaction left by an earlier run; they cannot pass on a fresh
@@ -278,11 +279,16 @@ pub async fn run(
         Ok(entries) => entries,
         Err(error) => return usage_error(&error),
     };
+    let sources: Vec<&str> = entries.iter().map(|entry| entry.source.as_str()).collect();
+    if let Err(error) = check_output_paths(args.report.as_deref(), args.junit.as_deref(), &sources)
+    {
+        return usage_error(&error);
+    }
     let names = unique_names(&entries);
     config.persist = false;
     let overrides = override_vars(&args.vars);
     for entry in &entries {
-        for (name, _) in &args.vars {
+        for (name, _, _) in &args.vars {
             if !entry.scenario.uses_variable(name) {
                 eprintln!(
                     "warning: scenario `{}` does not use the variable `{name}` (--var ignored)",
@@ -364,26 +370,29 @@ pub async fn run(
         // error row, the unstarted ones are skipped).
         if let Some(path) = &args.report {
             let text = serde_json::to_string_pretty(&summary).unwrap_or_default() + "\n";
-            if let Err(error) = std::fs::write(path, text) {
+            if let Err(error) = write_atomic(path, text.as_bytes()) {
                 eprintln!("error: cannot write the report: {error}");
                 write_failed = true;
             }
         }
         if let Some(path) = &args.junit {
-            let suites: Vec<JunitSuite<'_>> = rows
+            let suites: Vec<JunitRun<'_>> = rows
                 .iter()
-                .filter_map(|row| match &row.outcome {
-                    Outcome::Done(report) => Some(JunitSuite {
-                        station: None,
-                        scenario: &row.name,
-                        outcome: Ok(report),
-                    }),
-                    Outcome::Error(error) => Some(JunitSuite {
-                        station: None,
-                        scenario: &row.name,
-                        outcome: Err(error),
-                    }),
-                    Outcome::Skipped => None,
+                .filter_map(|row| {
+                    let outcome = match &row.outcome {
+                        Outcome::Done(report) => Ok(report),
+                        Outcome::Error(error) => Err(error.as_str()),
+                        Outcome::Skipped => return None,
+                    };
+                    Some(JunitRun {
+                        suite: JunitSuite {
+                            station: None,
+                            scenario: &row.name,
+                            outcome,
+                        },
+                        source: row.source.as_deref(),
+                        duration_ms: row.duration_ms,
+                    })
                 })
                 .collect();
             if let Err(error) = write_junit(path, &suites) {

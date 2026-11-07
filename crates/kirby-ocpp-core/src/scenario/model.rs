@@ -313,17 +313,22 @@ impl Action {
 impl Step {
     /// The name shown in reports: the explicit `name`, else the action name.
     pub fn label(&self) -> String {
-        self.name
-            .clone()
-            .unwrap_or_else(|| self.action.name().to_owned())
+        self.explicit_name()
+            .map_or_else(|| self.action.name().to_owned(), str::to_owned)
+    }
+
+    /// The `name` of the step unless it is empty or only whitespace (then the derived label
+    /// is used, so a report row is never nameless).
+    fn explicit_name(&self) -> Option<&str> {
+        self.name.as_deref().filter(|name| !name.trim().is_empty())
     }
 
     /// The stable label used in machine-readable reports: the explicit `name`, else the action
     /// name plus its main parameters, for example `expect_call Heartbeat out`,
     /// `wait_for tx_active c1` or `start_tx c1 TAG`. Never just a position.
     pub fn stable_label(&self) -> String {
-        if let Some(name) = &self.name {
-            return name.clone();
+        if let Some(name) = self.explicit_name() {
+            return name.to_owned();
         }
         let Ok(Value::Object(fields)) = serde_json::to_value(&self.action) else {
             return self.action.name().to_owned();
@@ -916,6 +921,12 @@ fn parse_step(mut table: toml::Table, open_loops: usize) -> Result<Step, String>
                 .map_err(|e| format!("`expect`: {}", e.message()))?,
         ),
     };
+    if let Some(expect) = &expect
+        && expect.error
+        && (expect.status.is_some() || expect.payload.is_some())
+    {
+        return Err("`expect`: `error = true` excludes `status` and `payload`".to_owned());
+    }
     let capture = match table.remove("capture") {
         None => BTreeMap::new(),
         Some(value) => parse_capture(value)?,
@@ -1412,6 +1423,42 @@ call = "Heartbeat"
         assert!(e.contains("`ocpp_version` must be a string"), "{e}");
         let e = err(&format!("name = \"t\"\ntags = \"x\"\n{step}"));
         assert!(e.contains("`tags` must be an array of strings"), "{e}");
+    }
+
+    #[test]
+    fn blank_step_names_fall_back_to_the_derived_label() {
+        for name in ["", "   ", "\t"] {
+            let s = Scenario::from_toml(&format!(
+                "name = \"t\"\n[[steps]]\naction = \"heartbeat\"\nname = \"{name}\"\n"
+            ))
+            .unwrap();
+            assert_eq!(s.steps[0].label(), "heartbeat");
+            assert_eq!(s.steps[0].stable_label(), "heartbeat");
+            let flat = s.expanded_steps();
+            assert!(!flat[0].name.trim().is_empty() && !flat[0].label.trim().is_empty());
+        }
+    }
+
+    #[test]
+    fn expect_error_excludes_status_and_payload() {
+        for expect in [
+            "{ error = true, status = \"x\" }",
+            "{ error = true, payload = { a = 1 } }",
+        ] {
+            let e = err(&format!(
+                "name = \"t\"\n[[steps]]\naction = \"heartbeat\"\nexpect = {expect}\n"
+            ));
+            assert!(
+                e.contains("step 1") && e.contains("`error = true` excludes"),
+                "{e}"
+            );
+        }
+        assert!(
+            Scenario::from_toml(
+                "name = \"t\"\n[[steps]]\naction = \"heartbeat\"\nexpect = { error = true }\n"
+            )
+            .is_ok()
+        );
     }
 
     #[test]

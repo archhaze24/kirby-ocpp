@@ -12,7 +12,7 @@ use futures_util::future::join_all;
 use kirby_ocpp_core::fleet::{Fleet, FleetSpec};
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::scenario::{
-    CancelToken, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, ScenarioReport, TOOL_VERSION,
+    CancelToken, JunitRun, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, ScenarioReport, TOOL_VERSION,
     now_rfc3339,
 };
 use kirby_ocpp_core::{Clock, StationConfig, SystemClock};
@@ -23,8 +23,8 @@ use serde_json::{Value, json};
 use crate::cli::RunArgs;
 use crate::headless::{self, LinkWatch, Sink, stdout_line};
 use crate::{
-    EXIT_INTERRUPTED, EXIT_USAGE, connect_and_run, load_scenario, override_vars, print_report,
-    usage_error, write_junit, write_report,
+    EXIT_INTERRUPTED, EXIT_USAGE, check_output_paths, connect_and_run, load_scenario,
+    override_vars, print_report, usage_error, write_junit, write_report,
 };
 
 fn clock() -> Arc<dyn Clock> {
@@ -179,6 +179,15 @@ pub async fn run(
         Ok(scenario) => scenario,
         Err(error) => return usage_error(&error),
     };
+    // The per-station reports are `<stem>.<id>.<ext>` next to `--report`: that directory is
+    // the one checked.
+    if let Err(error) = check_output_paths(
+        args.report.as_deref(),
+        args.junit.as_deref(),
+        scenario.source.as_deref().as_slice(),
+    ) {
+        return usage_error(&error);
+    }
     let mut fleet = match Fleet::spawn(&config, &spec, &clock()) {
         Ok(fleet) => fleet,
         Err(error) => return usage_error(&error.to_string()),
@@ -299,10 +308,16 @@ pub async fn run(
             }
         }
     }
-    write_failed |= args
-        .junit
-        .as_ref()
-        .is_some_and(|path| !write_fleet_junit(path, &scenario.name, &ids, &outcomes));
+    write_failed |= args.junit.as_ref().is_some_and(|path| {
+        !write_fleet_junit(
+            path,
+            &scenario.name,
+            scenario.source.as_deref(),
+            total_ms,
+            &ids,
+            &outcomes,
+        )
+    });
     // Files first: a closed stdout must not cost the machine-readable reports.
     for (id, outcome) in ids.iter().zip(&outcomes) {
         if let Ok(report) = outcome {
@@ -338,16 +353,22 @@ async fn wait_or_cancel(delay: Duration, cancel: &CancelToken) {
 fn write_fleet_junit(
     path: &Path,
     scenario: &str,
+    source: Option<&str>,
+    duration_ms: u64,
     ids: &[String],
     outcomes: &[Result<ScenarioReport, String>],
 ) -> bool {
-    let suites: Vec<JunitSuite<'_>> = ids
+    let suites: Vec<JunitRun<'_>> = ids
         .iter()
         .zip(outcomes)
-        .map(|(id, outcome)| JunitSuite {
-            station: Some(id),
-            scenario,
-            outcome: outcome.as_ref().map_err(String::as_str),
+        .map(|(id, outcome)| JunitRun {
+            suite: JunitSuite {
+                station: Some(id),
+                scenario,
+                outcome: outcome.as_ref().map_err(String::as_str),
+            },
+            source,
+            duration_ms,
         })
         .collect();
     match write_junit(path, &suites) {

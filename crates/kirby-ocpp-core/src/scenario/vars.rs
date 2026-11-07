@@ -66,6 +66,15 @@ pub fn check_pointer(pointer: &str) -> Result<(), String> {
 /// # Errors
 /// A bad name or a missing `=`.
 pub fn parse_assignment(text: &str) -> Result<(String, Value), String> {
+    parse_assignment_text(text).map(|(name, value, _)| (name, value))
+}
+
+/// Like [`parse_assignment`], also returning the value as written (`1.50`, `1e3`, `-0`):
+/// pass it to [`Vars::insert_with_text`] so a number inside longer text keeps its form.
+///
+/// # Errors
+/// A bad name or a missing `=`.
+pub fn parse_assignment_text(text: &str) -> Result<(String, Value, String), String> {
     let (name, raw) = text
         .split_once('=')
         .ok_or_else(|| format!("`{text}` is not NAME=VALUE"))?;
@@ -78,13 +87,19 @@ pub fn parse_assignment(text: &str) -> Result<(String, Value), String> {
         Ok(v @ (Value::Bool(_) | Value::Number(_))) if raw.trim() == raw => v,
         _ => Value::String(raw.to_owned()),
     };
-    Ok((name.to_owned(), value))
+    Ok((name.to_owned(), value, raw.to_owned()))
 }
 
 /// A map of variables.
+///
+/// A number may also carry the text it was written with ([`Vars::insert_with_text`]); that
+/// text, not the re-printed number, is what `${name}` inside longer text produces.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Vars(BTreeMap<String, Value>);
+pub struct Vars(
+    BTreeMap<String, Value>,
+    #[serde(skip)] BTreeMap<String, String>,
+);
 
 impl Vars {
     #[must_use]
@@ -100,8 +115,33 @@ impl Vars {
         if !is_valid_name(name) {
             return Err(format!("`{name}` is not a valid variable name"));
         }
+        self.1.remove(name);
         self.0.insert(name.to_owned(), value);
         Ok(())
+    }
+
+    /// Sets a variable that was written as `text` (a number such as `1.50` or `1e3`): the
+    /// value keeps its JSON type for an exact `"${name}"`, and `text` is used when the
+    /// variable is interpolated into longer text.
+    ///
+    /// # Errors
+    /// The name is not valid.
+    pub fn insert_with_text(
+        &mut self,
+        name: &str,
+        value: Value,
+        text: String,
+    ) -> Result<(), String> {
+        self.insert(name, value)?;
+        self.1.insert(name.to_owned(), text);
+        Ok(())
+    }
+
+    /// The text a variable was written with, when it was set with
+    /// [`Vars::insert_with_text`].
+    #[must_use]
+    pub fn written_text(&self, name: &str) -> Option<&str> {
+        self.1.get(name).map(String::as_str)
     }
 
     #[must_use]
@@ -244,7 +284,11 @@ pub fn substitute_str(text: &str, vars: &Vars) -> Result<String, String> {
             }
             match lookup(vars, name)? {
                 Value::String(s) => out.push_str(s),
-                v @ (Value::Number(_) | Value::Bool(_)) => out.push_str(&v.to_string()),
+                Value::Number(n) => match vars.written_text(name) {
+                    Some(written) => out.push_str(written),
+                    None => out.push_str(&n.to_string()),
+                },
+                v @ Value::Bool(_) => out.push_str(&v.to_string()),
                 _ => {
                     return Err(format!(
                         "variable `{name}` is not text, a number or a boolean; use it as the whole value (`\"${{{name}}}\"`)"
@@ -308,6 +352,30 @@ mod tests {
         assert!(e.len() < 400, "{}", e.len());
         assert_eq!(clip_text("short"), "short");
         assert!(clip_text(&"é".repeat(500)).contains("..."));
+    }
+
+    #[test]
+    fn command_line_numbers_keep_their_written_form_in_text() {
+        for written in ["-0", "1.50", "1e3", "100000000000000000000000"] {
+            let (name, value, text) = parse_assignment_text(&format!("n={written}")).unwrap();
+            assert!(value.is_number(), "{written}");
+            let mut v = Vars::new();
+            v.insert_with_text(&name, value.clone(), text).unwrap();
+            assert_eq!(
+                substitute_str("x${n}y", &v).unwrap(),
+                format!("x{written}y"),
+                "{written}"
+            );
+            // An exact reference keeps the typed value.
+            assert_eq!(substitute(&json!("${n}"), &v).unwrap(), value);
+        }
+        // A plain `insert` forgets an earlier text; values set without text print as before.
+        let mut v = Vars::new();
+        v.insert_with_text("n", json!(1.5), "1.50".to_owned())
+            .unwrap();
+        v.insert("n", json!(2)).unwrap();
+        assert_eq!(substitute_str("${n}", &v).unwrap(), "2");
+        assert_eq!(parse_assignment("n=1.50").unwrap().1, json!(1.5));
     }
 
     #[test]

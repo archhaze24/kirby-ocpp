@@ -238,12 +238,37 @@ pub async fn run_scenario_with_vars(
     overrides: &Vars,
     index: u64,
 ) -> ScenarioReport {
+    run_scenario_subscribed(
+        handle,
+        scenario,
+        cancel,
+        progress,
+        overrides,
+        index,
+        handle.subscribe(),
+    )
+    .await
+}
+
+/// [`run_scenario_with_vars`] over an event subscription the caller took earlier, for example
+/// before connecting: `expect_call` steps then also see CALLs that arrived while the caller
+/// waited for the boot, before the scenario started. The receiver's queue is bounded (the
+/// station's broadcast capacity); events lost to lag are reported like any other.
+pub async fn run_scenario_subscribed(
+    handle: &StationHandle,
+    scenario: &Scenario,
+    cancel: &CancelToken,
+    progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
+    overrides: &Vars,
+    index: u64,
+    events: broadcast::Receiver<Event>,
+) -> ScenarioReport {
     run_inner(
         handle,
         scenario,
         cancel,
         progress,
-        handle.subscribe(),
+        events,
         initial_vars(handle, scenario, overrides, index),
     )
     .await
@@ -252,7 +277,10 @@ pub async fn run_scenario_with_vars(
 fn initial_vars(handle: &StationHandle, scenario: &Scenario, overrides: &Vars, index: u64) -> Vars {
     let mut vars = scenario.vars.clone();
     for (name, value) in overrides.iter() {
-        let _ = vars.insert(name, value.clone());
+        let _ = match overrides.written_text(name) {
+            Some(text) => vars.insert_with_text(name, value.clone(), text.to_owned()),
+            None => vars.insert(name, value.clone()),
+        };
     }
     let _ = vars.insert("station_id", handle.snapshot().charge_point_id.into());
     let _ = vars.insert("index", index.into());

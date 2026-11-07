@@ -207,6 +207,48 @@ fn missing_tls_files_fail_at_startup_naming_the_flag() {
 }
 
 #[test]
+fn print_config_does_not_need_readable_tls_files() {
+    let output = command(&[
+        "--url",
+        "wss://127.0.0.1:1/ocpp",
+        "--tls-ca",
+        "/nonexistent/ca.pem",
+        "--print-config",
+    ])
+    .output()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["tls"]["ca_file"], "/nonexistent/ca.pem");
+}
+
+#[test]
+fn completions_follow_the_tuned_help() {
+    let script = stdout(&command(&["completions", "fish"]).output().unwrap());
+    let mut checked = 0;
+    for line in script.lines() {
+        let offline = ["completions", "version", "scenarios"]
+            .iter()
+            .any(|name| line.contains(&format!("using_subcommand {name}")));
+        if offline {
+            checked += 1;
+            assert!(
+                !line.contains("-l url") && !line.contains("-l tls-ca"),
+                "{line}"
+            );
+        }
+    }
+    assert!(checked > 0, "no offline subcommand lines in the script");
+    // The station flags are still offered for `run`.
+    assert!(
+        script
+            .lines()
+            .any(|l| l.contains("using_subcommand run") && l.contains("-l url")),
+        "{script}"
+    );
+}
+
+#[test]
 fn over_long_boot_fields_fail_at_startup() {
     let url = ["--url", "ws://127.0.0.1:1/ocpp", "--no-tui"];
     for (flag, ok, bad, limit) in [
@@ -286,6 +328,9 @@ fn merged_stdout_and_stderr_keep_whole_lines() {
         assert_eq!(output.status.code(), Some(1));
         let text = stdout(&output);
         assert!(text.contains("reconnect stopped"), "{text}");
+        // The final error is the last line: queued event lines are written before it.
+        let last = text.lines().last().unwrap_or_default();
+        assert!(last.starts_with("error: reconnect stopped"), "{text}");
         for line in text.lines() {
             let is_error = line.starts_with("error: ");
             assert!(
@@ -380,6 +425,171 @@ async fn boot_accepted_is_logged_once() {
     assert_eq!(boots.len(), 1, "{text}");
     assert!(boots[0].contains("heartbeat every"), "{text}");
     csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn var_numbers_keep_their_written_form_in_text() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        &dir,
+        "vars.toml",
+        "name = \"v\"\n[vars]\nn = 0\n[[steps]]\naction = \"data_transfer\"\nvendor_id = \"v-${n}\"\n",
+    );
+    for written in ["-0", "1.50", "1e3", "100000000000000000000000"] {
+        let mark = csms.mark();
+        let var = format!("n={written}");
+        let output = run(args(
+            csms.url(),
+            &["run", "--scenario", &file, "--var", &var],
+        ))
+        .await;
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{written}: {}",
+            stderr(&output)
+        );
+        let sent = csms.calls_since(mark);
+        let call = sent
+            .iter()
+            .find(|c| c.action == "DataTransfer")
+            .unwrap_or_else(|| panic!("no DataTransfer for {written}"));
+        assert_eq!(
+            call.payload["vendorId"],
+            format!("v-{written}"),
+            "{written}"
+        );
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expect_call_in_sees_a_call_sent_right_after_the_boot() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        &dir,
+        "in.toml",
+        "name = \"in\"\n[[steps]]\naction = \"expect_call\"\ncall = \"GetConfiguration\"\ndirection = \"in\"\ntimeout_ms = 10000\n",
+    );
+    for round in 0..10 {
+        let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+        let station = run(args(csms.url(), &["run", "--scenario", &file]));
+        let caller = async {
+            // The CALL leaves as soon as the BootNotification arrived, before the scenario
+            // could have started on a late subscription.
+            csms.wait_for_call("BootNotification", std::time::Duration::from_secs(10))
+                .await
+                .unwrap();
+            let _ = csms
+                .send_call("GetConfiguration", serde_json::json!({}))
+                .await;
+        };
+        let (output, ()) = tokio::join!(station, caller);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "round {round}: {}{}",
+            stdout(&output),
+            stderr(&output)
+        );
+        csms.shutdown().await;
+    }
+}
+
+#[test]
+fn report_paths_are_checked_before_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = write(
+        &dir,
+        "s.toml",
+        "name = \"s\"\n[[steps]]\naction = \"heartbeat\"\n",
+    );
+    let before = std::fs::read_to_string(&scenario).unwrap();
+    let report = dir.path().join("r.json");
+    let report = report.to_str().unwrap();
+    let missing = dir.path().join("no-such-dir").join("r.json");
+    let missing = missing.to_str().unwrap();
+    let url = dead_url();
+    for (extra, needle) in [
+        (vec!["--report", report, "--junit", report], "same file"),
+        (vec!["--report", missing], "does not exist"),
+        (vec!["--junit", missing], "does not exist"),
+        (vec!["--report", &scenario], "scenario file"),
+    ] {
+        for subcommand in [
+            vec!["run", "--scenario", &scenario],
+            vec!["suite", &scenario],
+        ] {
+            let mut all = vec!["--url", &url, "--no-tui", "--no-reconnect"];
+            all.extend(subcommand.iter().copied());
+            all.extend(extra.iter().copied());
+            let (code, err) = startup_failure(&all);
+            assert_eq!(code, Some(2), "{all:?}: {err}");
+            assert!(err.contains(needle), "{all:?}: {err}");
+        }
+    }
+    assert_eq!(std::fs::read_to_string(&scenario).unwrap(), before);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reports_are_written_atomically_without_leftovers() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.json");
+    let junit = dir.path().join("junit.xml");
+    let output = run(args(
+        csms.url(),
+        &[
+            "run",
+            "--scenario",
+            "heartbeat-and-status",
+            "--report",
+            report.to_str().unwrap(),
+            "--junit",
+            junit.to_str().unwrap(),
+        ],
+    ))
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let mut names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["junit.xml", "report.json"]);
+    serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    csms.shutdown().await;
+}
+
+#[test]
+fn junit_of_a_setup_error_names_the_scenario_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = write(
+        &dir,
+        "s.toml",
+        "name = \"s\"\n[[steps]]\naction = \"heartbeat\"\n",
+    );
+    let junit = dir.path().join("junit.xml");
+    let url = dead_url();
+    let (code, _) = startup_failure(&[
+        "--url",
+        &url,
+        "--no-tui",
+        "--no-reconnect",
+        "run",
+        "--scenario",
+        &scenario,
+        "--junit",
+        junit.to_str().unwrap(),
+    ]);
+    assert_eq!(code, Some(1));
+    let xml = std::fs::read_to_string(&junit).unwrap();
+    assert!(
+        xml.contains("name=\"source\"") && xml.contains("s.toml"),
+        "{xml}"
+    );
+    assert!(xml.contains("SetupError"), "{xml}");
 }
 
 #[tokio::test(flavor = "multi_thread")]
