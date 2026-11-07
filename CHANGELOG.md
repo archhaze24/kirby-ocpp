@@ -15,7 +15,7 @@ tag as the GitHub release notes.
 
 | Metric | Since 0.4.0 |
 | --- | --- |
-| 🧾 Commits | **89** in three days (5 to 7 November 2026) |
+| 🧾 Commits | **91** in three days (5 to 7 November 2026) |
 | ✏️ Lines of code | **+21.6k / −1.6k** across 144 files; Rust grew from 70.6k to **86.9k** lines |
 | 🧪 Tests | **+283** new test functions: 1,047 → **1,330** (all run in the `nextest` gate) |
 | 📦 Crates | 7 → **7** (new dependencies: `axum`, `hyper`, `hyper-util`, `clap_complete`) |
