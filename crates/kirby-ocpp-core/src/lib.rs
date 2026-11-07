@@ -8,6 +8,7 @@
 
 pub mod clock;
 pub mod config;
+pub mod config_file;
 pub mod error;
 pub mod fleet;
 pub mod ids;
