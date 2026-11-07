@@ -60,7 +60,21 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 Status of a call: `200` also when the station answered with a CALLERROR or the call timed out (`"ok":false` and `outcome` `call_error` or `timeout` in the body); `404` `unknown_station` when the id was never seen; `409` `station_not_connected` when the station is known but has no open connection (or the connection closed before the answer); `400` for a bad body; `413` above 1 MiB; `429` `too_many_requests` when 256 commands (stdin and API together) are already in flight, or when the request bodies of the calls in flight already hold 32 MiB (a body counts while its call runs; only the payload is kept in memory, the rest of the body is dropped before the call starts).
 - The 256 slots are shared with the stdin handler: when they are full the API answers `429` at once, while a stdin line waits for a free slot.
 
-A station object always has `id`, `connected`, `protocol` (string or `null`), `received_calls`, `remote_addr` (string or `null`), `vendor` and `model` (strings, `null` until the station sent a `BootNotification`), `connectors` (connector id to status, `{}` until known), `active_transactions` (`[]` until known) and `security_events` (a count, `0` until known). `GET /v1/stations/{id}` adds `state` (`null` when the engine holds no state for the station).
+A station object always has these fields:
+
+| Field | Value |
+| --- | --- |
+| `id` | Station id |
+| `connected` | `true` while a connection is open |
+| `protocol` | Negotiated subprotocol (string) or `null` |
+| `received_calls` | Count of CALLs received from the station |
+| `remote_addr` | Peer address (string) or `null` |
+| `vendor`, `model` | Strings, `null` until the station sent a `BootNotification` |
+| `connectors` | Connector id to status, `{}` until known |
+| `active_transactions` | List of `{"id","connector"}`, `[]` until known |
+| `security_events` | Count of security events, `0` until known |
+
+`GET /v1/stations/{id}` adds `state` (`null` when the engine holds no state for the station).
 
 ### Ids
 
@@ -68,7 +82,7 @@ Protocol ids are strings in the API, so that OCPP 2.x transaction ids (strings) 
 
 ```text
 $ curl -s http://127.0.0.1:9100/v1/stations
-{"stations":[{"id":"CP-1","connected":true,"protocol":"ocpp1.6","vendor":"Kirby","model":"Emu","connectors":{"1":"Available"},"active_transactions":[]}]}
+{"stations":[{"active_transactions":[],"connected":true,"connectors":{"1":"Available"},"id":"CP-1","model":"Emu","protocol":"ocpp1.6","received_calls":3,"remote_addr":"127.0.0.1:4242","security_events":0,"vendor":"Kirby"}]}
 
 $ curl -s -X POST http://127.0.0.1:9100/v1/stations/CP-1/calls \
     -H 'Authorization: Bearer '"$TOKEN" \
@@ -82,7 +96,10 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/stations/CP-1
 ## Event stream
 
 `GET /v1/events` is a Server-Sent Events stream of everything the server sees, from the moment of the request.
-- Each SSE message has an `id:` line (a counter that increases for every message the server sends on any stream, starting at 1), `event: <type>` and one `data:` line holding the same JSON object that `--json` prints for that event (types `connected`, `disconnected`, `frame`, `state`, `malformed`, `forgotten`, `auth_failed`; text is escaped the same way and `AuthorizationKey` values are redacted unless `--show-secrets`).
+- Each SSE message has an `id:` line, an `event: <type>` line and one `data:` line. The `id:` is a counter that increases for every message the server sends on any stream, starting at 1.
+- The `data:` line holds the same JSON object that `--json` prints for that event. Event types are `connected`, `disconnected`, `frame`, `state`, `malformed`, `forgotten` and `auth_failed`.
+- Text is escaped the same way as in `--json`, and `AuthorizationKey` values are redacted unless `--show-secrets` is set (a `malformed` text that mentions `AuthorizationKey` is replaced by `<redacted: mentions AuthorizationKey>`).
+- A `frame` event whose frame is larger than 64 KiB as JSON carries the payload marker `{"truncated":true,"originalBytes":N}` instead of the payload, like the frame history does above its own 8 MiB cap; `GET .../history` still returns the frame in full while it fits that cap.
 - `Last-Event-ID` is ignored: a reconnecting client gets no replay and the counter does not restart. Use `/history` to fill gaps.
 - The optional `station=ID` (percent-encoded, at most once; a repeated or any other parameter is `400`) shows only that station's events; an id that does not exist is fine and matches nothing. Nothing is replayed: use `/history` for the past.
 
@@ -153,7 +170,8 @@ New codes may be added within `/v1`; clients must treat an unknown `code` by its
 Connection limits: at most 512 connections at once (extra ones are closed immediately; more than the 256 command slots plus 16 streams, so `429` stays reachable); a client has 10 s to send the complete request head (hyper's `header_read_timeout`: it starts at connect, blank lines before the request line do not stop it, any line ending is accepted; the connection is cut otherwise) and 10 s to send the body (`408`).
 - Every response produced by a route carries `Connection: close`, so a connection serves one request (hyper's own `400`/`431` answers and cuts by the head timeout do not carry the header).
 - A call waits as long as its `timeout_ms`, which also counts the time it spends queued behind other calls of the same station; once the answer is ready its writing has a total limit of 60 s from the first byte (a client draining a byte at a time is cut), and a write that makes no progress for 30 s ends the connection.
-- An event stream is exempt from the 60 s limit (see above). After a response the server shuts down its side and reads, for up to 100 ms and 64 KiB, what the client is still sending, so that an early `401`, `403` or `413` reaches a client that is mid-upload instead of being lost to a connection reset.
+- An event stream is exempt from the 60 s limit (see above). After a response the server shuts down its side and reads, for up to 100 ms and 64 KiB, what the client is still sending. This lets an early `401`, `403` or `413` reach a client that is mid-upload.
+- A request body is buffered in memory before the request is routed, up to 1 MiB per connection; with 512 connections open at once the API can hold up to 512 MiB of request bodies. The 32 MiB budget above applies only to the payloads of calls in flight.
 - More than one `Host` header is `400`. On shutdown the listener closes at once, open connections get 3 s, then every one is dropped (closed) and awaited: none outlives the API.
 
 ## Related pages

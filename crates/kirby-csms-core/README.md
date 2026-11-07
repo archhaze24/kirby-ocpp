@@ -53,6 +53,6 @@ Pre-1.0: the API may change between minor versions.
 - [HTTP control API](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/api.md) (of the `kirby-csms` binary)
 - API reference: <https://docs.rs/kirby-csms-core>
 
-## Licence
+## License
 
 MIT. The bundled OCPP JSON schemas belong to the Open Charge Alliance and are used under CC BY-ND 4.0, see the `kirby-ocpp-core` crate.

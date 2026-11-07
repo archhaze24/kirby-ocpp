@@ -42,6 +42,6 @@ Pre-1.0 and mainly an internal part of the tool: the API may change between mino
 - [CSMS guide](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/csms.md) (keys, forms), [HTTP control API](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/api.md)
 - API reference: <https://docs.rs/kirby-csms-tui>
 
-## Licence
+## License
 
 MIT.

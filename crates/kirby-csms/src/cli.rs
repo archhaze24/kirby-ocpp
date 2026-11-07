@@ -97,7 +97,7 @@ pub struct Cli {
     pub auth_keys: Vec<(String, String)>,
 
     /// File with Basic Auth keys: lines `ID=KEY` (blank lines and `#` comments are skipped). Keep
-    /// it private (not readable by others); the file's permissions are not checked
+    /// it private: a warning is printed when it is readable by group or others (Unix)
     #[arg(long, env = "KIRBY_CSMS_AUTH_KEYS_FILE", value_name = "FILE", value_parser = non_empty_path)]
     pub auth_keys_file: Option<PathBuf>,
 
@@ -237,7 +237,7 @@ pub struct Cli {
     )]
     pub timeout: u64,
 
-    /// Print the third-party licence notices and exit
+    /// Print the third-party license notices and exit
     #[arg(long)]
     pub licenses: bool,
 }

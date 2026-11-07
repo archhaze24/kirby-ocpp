@@ -753,10 +753,16 @@ impl Inner {
             }
         }
         if self.events.receiver_count() > 0 {
+            let bytes = frame.to_json_string().len();
+            let shown = if bytes > EVENT_FRAME_MAX_BYTES {
+                truncated_frame(frame, bytes)
+            } else {
+                frame.clone()
+            };
             self.emit(CsmsEvent::Frame {
                 station: station.to_owned(),
                 direction,
-                frame: frame.clone(),
+                frame: shown,
             });
         }
     }
@@ -1271,7 +1277,7 @@ where
             Err(error) => {
                 self.inner.emit(CsmsEvent::Malformed {
                     station: self.station.clone(),
-                    text: text.chars().take(MALFORMED_TEXT_CHARS).collect(),
+                    text: malformed_text(text, self.inner.config.show_secrets),
                 });
                 // Only a CALL with a readable id gets a FormationViolation; the rest is dropped.
                 return match error.reply() {
@@ -1346,6 +1352,20 @@ fn sanitize_action(action: &str) -> String {
         .map(|c| if c.is_control() { '?' } else { c })
         .collect()
 }
+
+/// The text kept in a [`CsmsEvent::Malformed`]: cut to 512 characters. A frame that does not
+/// parse cannot be redacted field by field, so a text that mentions `AuthorizationKey` is
+/// replaced by a placeholder unless secrets are shown.
+fn malformed_text(text: &str, show_secrets: bool) -> String {
+    if !show_secrets && text.to_ascii_lowercase().contains("authorizationkey") {
+        return "<redacted: mentions AuthorizationKey>".to_owned();
+    }
+    text.chars().take(MALFORMED_TEXT_CHARS).collect()
+}
+
+/// Largest frame (as JSON text) that an event carries in full; bigger ones are replaced by the
+/// marker of [`truncated_frame`], so a stalled event consumer cannot pin large frames.
+const EVENT_FRAME_MAX_BYTES: usize = 64 * 1024;
 
 /// Replaces the payload of a frame that is too big for the history by a small marker object
 /// (`{"truncated": true, "originalBytes": n}`); a CALLERROR keeps its code and a cut description.

@@ -1063,21 +1063,22 @@ async fn unread_stdout_does_not_stall_the_log_file_or_the_shutdown() {
     let value: Value = serde_json::from_str(&first).unwrap();
     let addr = value["addr"].as_str().unwrap().to_owned();
     let station = station(&addr, "CP-1", false).await;
-    for _ in 0..3 {
+    // Frames just under the 64 KiB event limit (bigger ones are cut to a marker).
+    for _ in 0..40 {
         station
             .send(StationCommand::DataTransfer {
                 vendor_id: "v".to_owned(),
                 message_id: None,
-                data: Some("x".repeat(300_000)),
+                data: Some("x".repeat(50_000)),
             })
             .await
             .unwrap();
     }
-    // The file must get all three big frames although the pipe is full.
+    // The file must get all the big frames although the pipe is full.
     let start = std::time::Instant::now();
     loop {
         let logged = std::fs::read_to_string(&log).unwrap_or_default();
-        if logged.len() > 900_000 {
+        if logged.len() > 1_900_000 {
             break;
         }
         assert!(
@@ -1166,4 +1167,110 @@ fn oversized_auth_keys_file_is_refused_and_a_shared_one_is_warned_about() {
     assert!(!stderr.contains("kkkkkkkk"), "{stderr}");
     #[cfg(unix)]
     assert!(stderr.contains("readable by group or others"), "{stderr}");
+}
+
+/// Runs the binary with stderr merged into stdout (one pipe, like `> file 2>&1`) and returns
+/// the first `count` lines.
+#[cfg(unix)]
+fn merged_lines(args: &[&str], count: usize) -> Vec<String> {
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg("exec \"$0\" \"$@\" 2>&1")
+        .arg(env!("CARGO_BIN_EXE_kirby-csms"))
+        .args(args)
+        .env_remove("KIRBY_CSMS_JSON")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, lines) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let mut seen = Vec::new();
+    while seen.len() < count {
+        match lines.recv_timeout(WAIT) {
+            Ok(line) => seen.push(line),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    seen
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_lines_are_whole_and_ordered_on_one_stream() {
+    for _ in 0..10 {
+        let lines = merged_lines(&["--listen", "127.0.0.1:0", "--no-tui"], 2);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("listening on ws://127.0.0.1:"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("stations connect to ws://"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].contains("<station id>") || lines[1].contains("CP"),
+            "{lines:?}"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_lines_are_whole_and_ordered_with_a_script() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = write(
+        dir.path(),
+        "script.toml",
+        "name = \"s\"\n[[steps]]\naction = \"sleep\"\nms = 60000\n",
+    );
+    for _ in 0..10 {
+        let lines = merged_lines(&["--listen", "127.0.0.1:0", "--script", script.as_str()], 2);
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(
+            lines[0].starts_with("listening on ws://127.0.0.1:"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].starts_with("stations connect to ws://"),
+            "{lines:?}"
+        );
+    }
+}
+
+#[test]
+fn bind_error_names_the_address() {
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = taken.local_addr().unwrap().to_string();
+    let output = command(&["--listen", &addr, "--no-tui"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("failed to bind the CSMS listener {addr}")),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn help_texts_match_the_behavior() {
+    let output = command(&["--help"]).output().unwrap();
+    let help = String::from_utf8_lossy(&output.stdout).to_lowercase();
+    assert!(!help.contains("licence"), "{help}");
+    assert!(!help.contains("permissions are not checked"), "{help}");
+    let output = command(&["--licenses"]).output().unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("distributed under the MIT license"), "{text}");
 }

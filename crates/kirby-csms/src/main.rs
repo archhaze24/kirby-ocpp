@@ -26,9 +26,9 @@ use crate::cli::Cli;
 use crate::headless::{Output, Sink, sanitize};
 use crate::script::Script;
 
-/// Project licence line and third-party notices (`--licenses`).
+/// Project license line and third-party notices (`--licenses`).
 const LICENSES: &str = concat!(
-    "kirby-csms is distributed under the MIT licence (see LICENSE in the source repository).\n\n",
+    "kirby-csms is distributed under the MIT license (see LICENSE in the source repository).\n\n",
     include_str!("../THIRD_PARTY_NOTICES.md")
 );
 
@@ -69,12 +69,9 @@ async fn main() -> ExitCode {
         Err(error) => return usage_error(&format!("cannot open the log file: {error}")),
     };
 
-    let handle = match CsmsServer::start(config).await {
+    let handle = match start_server(config).await {
         Ok(handle) => handle,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return ExitCode::FAILURE;
-        }
+        Err(code) => return code,
     };
     // The terminal UI is for interactive runs only. The `listening` line goes to stderr before
     // the alternate screen opens, so it is still in the scrollback after the UI ends.
@@ -86,7 +83,7 @@ async fn main() -> ExitCode {
         if let Some(plan) = &api_plan {
             eprintln!("api listening on http://{}", plan.addr);
         }
-        startup_notes(&handle, cli.json);
+        startup_notes(&handle, cli.json, None);
         match kirby_csms_tui::Session::enter() {
             Ok(session) => Some(session),
             Err(error) => {
@@ -112,7 +109,7 @@ async fn main() -> ExitCode {
     if let Some(plan) = &api_plan {
         headless::announce_api(&out, plan.addr);
     }
-    startup_notes(&handle, cli.json);
+    startup_notes(&handle, cli.json, Some(&out));
     let slots = commands::new_slots();
     let api =
         api_plan.map(|plan| api::spawn(plan.listener, handle.clone(), slots.clone(), plan.token));
@@ -223,23 +220,59 @@ fn merge_auth_keys_file(config: &mut CsmsConfig, path: &Path) -> Result<(), Stri
 /// Extra startup lines on stderr, after the `listening` line: a warning for an open profile 0
 /// listener on a non-loopback address, and how stations connect (omitted with `--json`).
 /// Printed once, whichever path reaches it first (the TUI path prints before the screen opens).
-fn startup_notes(handle: &kirby_csms_core::CsmsHandle, json: bool) {
+fn startup_notes(handle: &kirby_csms_core::CsmsHandle, json: bool, out: Option<&Output>) {
     static ONCE: std::sync::Once = std::sync::Once::new();
-    ONCE.call_once(|| print_startup_notes(handle, json));
+    ONCE.call_once(|| print_startup_notes(handle, json, out));
 }
 
-fn print_startup_notes(handle: &kirby_csms_core::CsmsHandle, json: bool) {
+/// Headless runs print the notes through `out` (the same ordered queue as the `listening`
+/// line, so the lines are whole and in order on one stream); the terminal UI path prints them
+/// on stderr before the screen opens. Each line goes out in one write.
+fn print_startup_notes(handle: &kirby_csms_core::CsmsHandle, json: bool, out: Option<&Output>) {
     let addr = handle.local_addr();
     if handle.security_profile().number() == 0 && !addr.ip().is_loopback() {
-        eprintln!(
-            "warning: security profile 0 on a non-loopback address: any peer can connect and take over a station id; see docs/security.md"
-        );
+        let text = "security profile 0 on a non-loopback address: any peer can connect and take over a station id; see docs/security.md";
+        match out {
+            Some(out) => out.event(
+                &serde_json::json!({"type": "warning", "text": text}),
+                &format!("warning: {text}"),
+            ),
+            None => stderr_line(&format!("warning: {text}")),
+        }
     }
     if !json {
-        eprintln!(
+        let line = format!(
             "stations connect to {}",
             kirby_csms_tui::ui::station_url_example(&handle.url(), true)
         );
+        match out {
+            Some(out) => out.event(&serde_json::json!({"type": "note", "text": line}), &line),
+            None => stderr_line(&line),
+        }
+    }
+}
+
+/// Writes one line to stderr in a single write, so it cannot be split by another writer.
+fn stderr_line(line: &str) {
+    use std::io::Write as _;
+    let _ = std::io::stderr().write_all(format!("{line}\n").as_bytes());
+}
+
+/// Starts the server; a bind error names the address that could not be bound.
+async fn start_server(
+    config: kirby_csms_core::CsmsConfig,
+) -> Result<kirby_csms_core::CsmsHandle, ExitCode> {
+    let listen = config.listen;
+    match CsmsServer::start(config).await {
+        Ok(handle) => Ok(handle),
+        Err(kirby_csms_core::CsmsError::Bind(error)) => {
+            eprintln!("error: failed to bind the CSMS listener {listen}: {error}");
+            Err(ExitCode::FAILURE)
+        }
+        Err(error) => {
+            eprintln!("error: {error}");
+            Err(ExitCode::FAILURE)
+        }
     }
 }
 

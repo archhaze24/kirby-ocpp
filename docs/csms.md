@@ -24,7 +24,7 @@ Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhos
 - TLS and authentication: [security.md](security.md).
 - Inbound CALLs are validated against the OCPP 1.6J schemas by default (`--validate-inbound`). An invalid payload gets a CALLERROR (`OccurenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormationViolation`) and is not tracked. A fault on the same action wins; unknown actions are not checked.
 - Actions a charge point may not send get a CALLERROR: `NotSupported` for known action names, `NotImplemented` for unknown ones.
-- Per station the server keeps the last `--history-cap` frames (default 1000, also capped at 8 MiB of text) and the last `--transaction-history-cap` stopped transactions (default 100). Records are never evicted automatically; `F` in the TUI (or `CsmsHandle::forget`) removes a disconnected station.
+- Per station the server keeps the last `--history-cap` frames (default 1000, also capped at 8 MiB of text; a frame above that cap is kept as the marker `{"truncated":true,"originalBytes":N}`) and the last `--transaction-history-cap` stopped transactions (default 100). Frame events (`--json`, the HTTP event stream, `CsmsEvent::Frame`) carry the same marker for a frame above 64 KiB, so a stalled event consumer cannot hold large frames. A malformed text that mentions `AuthorizationKey` is shown as `<redacted: mentions AuthorizationKey>`. Records are never evicted automatically; `F` in the TUI (or `CsmsHandle::forget`) removes a disconnected station.
 
 ## Output
 
@@ -37,7 +37,9 @@ listening on ws://127.0.0.1:41234
 
 Under the TUI the `listening on ...` line goes to stderr before the screen opens.
 
-After it, on stderr only, come up to two more lines. With security profile 0 on a non-loopback listen address: `warning: security profile 0 on a non-loopback address: any peer can connect and take over a station id; see docs/security.md` (also with `--json`). Without `--json`: `stations connect to ws://<host>:<port>/<prefix>/<station id>`, where an unspecified listen host (`0.0.0.0`, `::`) is shown as `<this-host>`. Stdout, including the first `listening on ...` line, is unchanged.
+After it come up to two more lines. With security profile 0 on a non-loopback listen address: `warning: security profile 0 on a non-loopback address: any peer can connect and take over a station id; see docs/security.md` (with `--json`: `{"type":"warning","text":"security profile 0 on a non-loopback address: ..."}`). Without `--json`: `stations connect to ws://<host>:<port>/<prefix>/<station id>`, where an unspecified listen host (`0.0.0.0`, `::`) is shown as `<this-host>`.
+
+In headless runs (`--no-tui`, `--script`, a pipe) all of these lines go to stdout, through the same ordered queue as the events, so each line is whole and `listening on ...` is always first, also when stderr is redirected into the same file (`kirby-csms ... > csms.log 2>&1`). Under the TUI they go to stderr, before the screen opens. Errors always go to stderr.
 
 Then one line per event:
 
@@ -126,7 +128,7 @@ Without `--script`, when stdin is not a terminal (or with `--stdin`), each input
 -> {"type":"result","station":"CP-1","action":"ChangeConfiguration","ok":true,"result":{"status":"Accepted"},"id":"my-tag"}
 -> {"type":"result","station":"CP-1","action":"Reset","ok":false,"error":"CALLERROR NotSupported: ..."}
 {"cmd":"stations"}
--> {"type":"stations","stations":[{"id":"CP-1","connected":true,"protocol":"ocpp1.6","vendor":"...","model":"...","connectors":{"1":"Available"},"active_transactions":[]}]}
+-> {"type":"stations","stations":[{"active_transactions":[],"connected":true,"connectors":{"1":"Available"},"id":"CP-1","model":"...","protocol":"ocpp1.6","received_calls":3,"remote_addr":"127.0.0.1:4242","security_events":0,"vendor":"..."}]}
 ```
 
 | Field | Meaning |

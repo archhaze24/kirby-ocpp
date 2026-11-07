@@ -947,6 +947,70 @@ async fn history_is_capped_in_bytes_and_huge_frames_are_truncated() {
 }
 
 #[tokio::test]
+async fn huge_frames_are_truncated_in_events() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    let mut raw = raw_connect(&csms, "/CP-EVT").await;
+    let small = json!([2, "small", "DataTransfer", {"vendorId": "V", "data": "z".repeat(1000)}]);
+    raw_send(&mut raw, &small.to_string()).await;
+    raw_recv(&mut raw).await;
+    let huge = json!([2, "huge", "DataTransfer", {"vendorId": "V", "data": "y".repeat(200_000)}]);
+    raw_send(&mut raw, &huge.to_string()).await;
+    raw_recv(&mut raw).await;
+    let (mut small_ok, mut huge_marked) = (false, false);
+    while !(small_ok && huge_marked) {
+        let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("frame events")
+            .unwrap();
+        let CsmsEvent::Frame {
+            direction: Direction::In,
+            frame: Frame::Call { id, payload, .. },
+            ..
+        } = event
+        else {
+            continue;
+        };
+        match id.as_str() {
+            "small" => {
+                assert_eq!(payload["data"].as_str().map(str::len), Some(1000));
+                small_ok = true;
+            }
+            "huge" => {
+                assert_eq!(payload["truncated"], true, "{payload}");
+                assert!(payload["originalBytes"].as_u64().unwrap() > 200_000);
+                huge_marked = true;
+            }
+            _ => {}
+        }
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn malformed_events_do_not_carry_the_authorization_key() {
+    let csms = start(|_| {}).await;
+    let mut events = csms.subscribe();
+    let mut raw = raw_connect(&csms, "/CP-MAL").await;
+    // One element too many: the frame does not parse, so the redaction of parsed frames
+    // never sees it.
+    let text =
+        r#"[2,"k1","ChangeConfiguration",{"key":"AuthorizationKey","value":"TOPSECRETVALUE"},1]"#;
+    raw_send(&mut raw, text).await;
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("malformed event")
+            .unwrap();
+        if let CsmsEvent::Malformed { text, .. } = event {
+            assert!(!text.contains("TOPSECRETVALUE"), "{text}");
+            break;
+        }
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test]
 async fn long_action_names_are_counted_as_other() {
     let csms = start(|_| {}).await;
     let mut raw = raw_connect(&csms, "/CP-LONG").await;
