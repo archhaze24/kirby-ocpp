@@ -29,7 +29,7 @@ tag as the GitHub release notes.
 
 - `kirby-csms --api-listen ADDR` starts a local HTTP control API (JSON, plain HTTP, off by default) with `GET /v1/health`, `GET /v1/stations`, `GET /v1/stations/{id}`, `GET /v1/stations/{id}/history?limit=N`, `POST /v1/stations/{id}/calls` (same result object as the stdin commands, shared 256-command limit, 429 when full) and `DELETE /v1/stations/{id}` (forget a disconnected station).
 - `GET /v1/events?station=ID` streams Server-Sent Events: one `--json` event object per message, redacted like `--json`, keep-alive every 15 s, a `note` event when the client lags, at most 16 streams (503 beyond).
-- `GET /v1/rules`, `PUT`/`DELETE /v1/rules/{action}` (fixed CALLRESULT, like the `respond` script step) and `POST`/`GET`/`DELETE /v1/faults` (like `inject_fault`).
+- `GET /v1/rules`, `PUT`/`DELETE /v1/rules/{action}` (fixed CALLRESULT, like the `respond` script step) and `POST`/`GET`/`DELETE /v1/faults` (like `inject_fault`). Fault action names (1 to 128 bytes, no control characters), `times` and the stored-fault caps are checked identically for the API and `inject_fault` script steps.
 - `--api-token` / `--api-token-file` (env `KIRBY_CSMS_API_TOKEN`, `KIRBY_CSMS_API_TOKEN_FILE`) require a bearer token. A non-loopback address needs one. Without a token, requests with an `Origin` header, `Sec-Fetch-Site: cross-site` or a non-loopback `Host` (DNS rebinding) are refused. See `docs/api.md`.
 - The API caps connections (512) and the request data held by calls in flight (32 MiB), times out slow request heads and bodies (10 s), limits the writing of a response (60 s total, 30 s without progress; event streams end after 1 hour with a note), enables TCP keepalive, closes every connection after one response, bounds injected faults (1000 faults, `times` up to 1000000, 8 MiB) and ends event streams after the shutdown events.
 - New dependency: `axum` (HTTP/1 only) with `hyper` and `tower` crates.
@@ -54,6 +54,7 @@ tag as the GitHub release notes.
 
 - `kirby-ocpp version` prints the tool version, git commit, build date, target triple and supported protocols (`--json` gives one JSON object); `--version` stays one line. A `build.rs` embeds the commit and the date (`SOURCE_DATE_EPOCH` is honored).
 - `kirby-ocpp completions <bash|zsh|fish|powershell|elvish>` prints a shell completion script (new dependency `clap_complete`).
+- `version --help`, `completions --help` and `scenarios --help` no longer repeat the station flags (they still parse there); `run --help` and `suite --help` point to `kirby-ocpp --help` for them.
 - `kirby-ocpp scenarios validate FILE|DIR|NAME...` parses scenarios without connecting: `ok PATH (N steps)` or the load error with the path, exit 0 or 2.
 - `-v/--verbose`, `-q/--quiet` and `--color auto|always|never` (`NO_COLOR` is honored) for `run` and `suite` output, and `run --persist`.
 - Connection errors carry a one-line hint: connection refused, TLS against a plain server, unknown CA, HTTP 400/401/403/404 and subprotocol refusals (with the offered subprotocol).
@@ -69,7 +70,7 @@ tag as the GitHub release notes.
 - `kirby-csms` scripts reject unknown top-level keys (they were ignored before), like emulator scenarios. The allowed keys are `name`, `description`, `vars`, `steps`, `ocpp_version`, `schema` and `tags`.
 - JUnit test case names are the step's stable label (`expect_call Heartbeat out`, `start_tx c1 TAG`) instead of `<number>. <name>`, `classname` is `ocpp1.6.<scenario>`, the position moves to a test case property and each suite has properties (`ocpp_version`, `station`, `tool_version`, `source`). Duplicate labels in a suite get ` #2`.
 - `StepReport` and `ScenarioReport` in `kirby-ocpp-core` have new fields; build them with `StepReport::new` and `ScenarioReport::new`.
-- Headless mode, `run` and `suite` exit with code 1 when the station gives up reconnecting (`--no-reconnect`, or `--reconnect-max-attempts` used up), printing `reconnect stopped (...)` with the last connect error; before, the process idled until interrupted or timed out. A fleet exits 1 when every station gave up.
+- Headless mode, `run` and `suite` exit with code 1 when the station gives up reconnecting (`--no-reconnect`, or `--reconnect-max-attempts` used up), printing `reconnect stopped (...)` with the last connect error; before, the process idled until interrupted or timed out. A fleet exits 1 when every station gave up. The station snapshot has a new field `reconnect_stopped` (reason text or `null`) that records the give-up explicitly.
 - `run` and `suite` print only the report by default; the frame and log lines need `-v` (`--json` still prints events). `-q` prints only errors and the verdict line.
 - `run` is ephemeral like `suite`: it neither reads nor writes the state file unless `--persist` is given.
 - A missing `--url` shows an example and names `kirby-csms --listen 127.0.0.1:9000`; an unknown `--scenario` name says so and suggests the closest built-in.
