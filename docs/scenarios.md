@@ -347,7 +347,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 --stagger-ms 
 ## CSMS scripts
 
 `kirby-csms --script FILE` starts the server, runs the script against the stations that connect, prints the report and exits with its verdict. The stations are external processes (for example `kirby-ocpp`) that connect while the script waits. Steps run in order and the first failing step stops the run (later steps are `SKIP`).
-- Top-level keys are `name` (required, not empty), an optional `[vars]` table (see [Variables, capture and payload checks](#script-variables-capture-and-payload-checks)) and `[[steps]]` (at least one); other top-level keys are ignored. Unknown fields inside a step are rejected, naming the step.
+- Top-level keys are `name` (required, not empty), an optional `[vars]` table (see [Variables, capture and payload checks](#script-variables-capture-and-payload-checks)) and `[[steps]]` (at least one); other top-level keys are rejected, except `description`, `ocpp_version`, `schema` and `tags`. Unknown fields inside a step are rejected, naming the step.
 
 ### Example
 

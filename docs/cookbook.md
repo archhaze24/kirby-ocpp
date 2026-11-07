@@ -266,7 +266,7 @@ kirby-ocpp scenarios validate loop-and-capture.toml
 kirby-ocpp --url ws://127.0.0.1:9000/ocpp run --scenario loop-and-capture.toml --var tag=ACME
 ```
 
-`validate` needs no connection and prints `ok loop-and-capture.toml (7 steps)`. The run reports flat step names: `data_transfer [1]`, `heartbeat [1]`, `data_transfer [2]`, and so on. `--var tag=ACME` replaces the `[vars]` value, so the tag becomes `ACME-1`. A `--var` for a name the scenario does not use is a usage error (exit 2). In a fleet each station gets its own `${index}` and `${station_id}`.
+`validate` needs no connection and prints `ok loop-and-capture.toml (8 steps)`. The run reports flat step names: `data_transfer [1]`, `heartbeat [1]`, `data_transfer [2]`, and so on. `--var tag=ACME` replaces the `[vars]` value, so the tag becomes `ACME-1`. A `--var` for a name the scenario does not use is a usage error (exit 2). In a fleet each station gets its own `${index}` and `${station_id}`.
 
 Reference: [Variables](scenarios.md#variables), [Loops](scenarios.md#loops).
 

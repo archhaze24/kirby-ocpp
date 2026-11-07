@@ -45,7 +45,7 @@ npm install -g kirby-ocpp kirby-csms
 cargo install kirby-ocpp kirby-csms
 ```
 
-**Release archives**: download from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). Each archive holds both binaries, the licence, the third-party notices and this README.
+**Release archives**: download from the [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases). Each archive holds both binaries, the license, the third-party notices and this README.
 
 | Platform | Target |
 | --- | --- |
@@ -124,7 +124,7 @@ The engines are also published as libraries: `kirby-ocpp-core` (station) and `ki
 | 0 | Success (scenario or script passed, normal shutdown) |
 | 1 | Scenario or script failed or timed out, or a runtime error |
 | 2 | Usage or configuration error |
-| 130 | Interrupted by SIGINT during `run` or `--script` |
+| 130 | Interrupted by SIGINT during `run`, `suite` or `--script` |
 
 Details per binary: [docs/configuration.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/configuration.md).
 
@@ -140,4 +140,4 @@ Workspace crates and conventions: [docs/architecture.md](https://github.com/arch
 
 ## License
 
-MIT, see [LICENSE](https://github.com/archhaze24/kirby-ocpp/blob/main/LICENSE). The bundled OCPP JSON schemas belong to the Open Charge Alliance; see [THIRD_PARTY_NOTICES.md](https://github.com/archhaze24/kirby-ocpp/blob/main/crates/kirby-ocpp/THIRD_PARTY_NOTICES.md) or run `kirby-ocpp --licenses`. Crate licences are recorded in `Cargo.lock` and the crates' metadata.
+MIT, see [LICENSE](https://github.com/archhaze24/kirby-ocpp/blob/main/LICENSE). The bundled OCPP JSON schemas belong to the Open Charge Alliance; see [THIRD_PARTY_NOTICES.md](https://github.com/archhaze24/kirby-ocpp/blob/main/crates/kirby-ocpp/THIRD_PARTY_NOTICES.md) or run `kirby-ocpp --licenses`. Crate licenses are recorded in `Cargo.lock` and the crates' metadata.

@@ -43,10 +43,12 @@ What the CSMS does for the whitepaper messages:
 
 There is no flag that sets the security profile (`--security-profile-fallback` only controls the fallback, below). The station follows the registry keys `SecurityProfile` and `AuthorizationKey`, which a CSMS sets with `ChangeConfiguration` as the whitepaper describes.
 
-**Profile fallback (`A05.FR.08`, SHOULD).** After an accepted change of `SecurityProfile` the station remembers the profile that was in force (and the previous `AuthorizationKey` in the secrets file when the key changed in the meantime). If it then fails 3 times in a row to connect with the new profile before its first successful connection, it goes back to the previous profile (and key), logs a warning, queues a `ReconfigurationOfSecurityParameters` security event whose `techInfo` names the fallback, and reconnects at once.
+**Profile fallback (`A05.FR.08`, SHOULD).** After an accepted change of `SecurityProfile` the station remembers the profile that was in force (and the previous `AuthorizationKey` in the secrets file when the key changed in the meantime). If it then fails 3 times in a row to connect with the new profile before its first successful connection, it goes back to the previous profile (and key). It logs a warning, queues a `ReconfigurationOfSecurityParameters` security event whose `techInfo` names the fallback, and reconnects at once.
 
 * Only evidence that the CSMS refused our credentials counts: an HTTP 401/403 upgrade answer or a TLS alert that rejects our client certificate.
-* Server-certificate errors, generic TLS errors, closes, resets, timeouts, refused TCP and DNS errors never count (the CSMS may just be offline, and a man in the middle or a broken proxy can forge all of those, which would force a downgrade and overwrite the `AuthorizationKey` with the previous one: downgrade resistance). Any failure that does not count restarts the count, so the 3 are really in a row.
+* Never counted: server-certificate errors, generic TLS errors, closes, resets, timeouts, refused TCP and DNS errors.
+* The reason is downgrade resistance. The CSMS may just be offline, and a man in the middle or a broken proxy can forge all of those failures. Counting them would force a downgrade and overwrite the `AuthorizationKey` with the previous one.
+* Any failure that does not count restarts the count, so the 3 are really in a row.
 * The previous key is restored only when the target profile is 1 or 2, and a state file with a previous profile above 3 is dropped with a warning.
 * The window ends when the WebSocket upgrade succeeds (that is "connected" for `A05.FR.09`), whether or not the boot is accepted; the previous key is then deleted from the secrets file. A successful connection with the new profile ends the window for good (`A05.FR.09`: the station never falls back later).
 * A key change at profile 0 keeps no previous key (nothing uses it), and a stored previous key without a pending switch at profile 0 is dropped at startup. With the fallback off, a pending record found in the state file is dropped.
@@ -178,7 +180,7 @@ The CSMS keeps nothing on disk. Its keys come from flags, the environment or `--
 
 Intentional or open points; see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md) for the complete list.
 
-| Item | Behaviour |
+| Item | Behavior |
 | --- | --- |
 | A00.FR.205 hex key | The `AuthorizationKey` is used as given, not hex-decoded; non-hex printable keys are accepted |
 | A05.FR.03 | An installed Central System root is not required for profile 2 or 3 (public CA setups are legitimate) |
@@ -188,7 +190,7 @@ Intentional or open points; see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE
 | Last root | `DeleteCertificate` of the last Central System root is `Failed` only under profile 2 or 3 |
 | Profile 2 | The station does not require TLS verification to be on (`--tls-skip-verify` still works) |
 | CSMS keys | No eviction of station records (`forget()` only); default listener is unauthenticated (profile 0), so a peer can replace a live station by connecting with the same id; `--auth-key` is visible in `ps` |
-| Firmware and logs | Simulated; signatures are not verified, no `RevokedCertificate`, a cancelled signed update sends no further status |
+| Firmware and logs | Simulated; signatures are not verified, no `RevokedCertificate`, a canceled signed update sends no further status |
 
 ## Related pages
 

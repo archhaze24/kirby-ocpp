@@ -7,7 +7,7 @@ Summary: of the 28 OCPP 1.6J actions, 19 are fully implemented, 5 partly and 4 s
 
 Legend: **full** = implemented as specified for emulator purposes; **partial** = implemented for common cases, see notes; **simulated** = the state machine and messages are real, the underlying action (upload, download, power flow) is not.
 
-Validation: outgoing and incoming CALL and CALLRESULT payloads are validated against the schemas (the Rust build embeds them). An incoming CALL that fails validation gets a CALLERROR (unknown actions are answered with a CALLERROR). Behaviour is covered by the unit and integration tests in `crates/kirby-ocpp-core` and `crates/kirby-ocpp/tests`, driven by the in-process mock CSMS in `crates/kirby-ocpp-testkit`.
+Validation: outgoing and incoming CALL and CALLRESULT payloads are validated against the schemas (the Rust build embeds them). An incoming CALL that fails validation gets a CALLERROR (unknown actions are answered with a CALLERROR). Behavior is covered by the unit and integration tests in `crates/kirby-ocpp-core` and `crates/kirby-ocpp/tests`, driven by the in-process mock CSMS in `crates/kirby-ocpp-testkit`.
 
 Contents: [Profiles](#profiles) · [Charge point to central system](#charge-point-to-central-system) · [Central system to charge point](#central-system-to-charge-point) · [Configuration keys](#configuration-keys) · [Testing aids](#testing-aids-deliberate-non-conformance) · [Security Whitepaper](#security-whitepaper-behavior-certificates-logs-extended-trigger) · [Known limits](#known-limits) · [Differences from the TypeScript version](#intentional-differences-from-the-earlier-typescript-version) · [CSMS engine](#csms-engine-behavior-kirby-csms-core)
 
@@ -28,13 +28,13 @@ Contents: [Profiles](#profiles) · [Charge point to central system](#charge-poin
 
 | Action | Status | Notes |
 | --- | --- | --- |
-| Authorize | full | Online; offline decision order: `LocalAuthorizeOffline`, local list (if `LocalAuthListEnabled`), cache (if `AuthorizationCacheEnabled`), `AllowOfflineTxForUnknownId`. `LocalPreAuthorize`, parent tags, expiry and `ConcurrentTx` honoured. |
+| Authorize | full | Online; offline decision order: `LocalAuthorizeOffline`, local list (if `LocalAuthListEnabled`), cache (if `AuthorizationCacheEnabled`), `AllowOfflineTxForUnknownId`. `LocalPreAuthorize`, parent tags, expiry and `ConcurrentTx` honored. |
 | BootNotification | full | Pending and Rejected: retried after the CSMS interval. Required before other messages are triggered. |
 | DataTransfer | full | Free-form payload. |
 | DiagnosticsStatusNotification | simulated | Upload lifecycle with selectable outcome and bounded retries. |
 | FirmwareStatusNotification | simulated | Download/install lifecycle with selectable outcome and bounded retries. |
 | Heartbeat | full | |
-| MeterValues | full (simulated meter) | `MeterValuesSampledData`, `MeterValuesAlignedData`, `MeterValueSampleInterval`, `ClockAlignedDataInterval` honoured; values come from a simulated energy meter that follows the power model below. |
+| MeterValues | full (simulated meter) | `MeterValuesSampledData`, `MeterValuesAlignedData`, `MeterValueSampleInterval`, `ClockAlignedDataInterval` honored; values come from a simulated energy meter that follows the power model below. |
 | StartTransaction | full | Reservation consumption, idTagInfo statuses. A non-`Accepted` `StartTransaction.conf` follows `StopTransactionOnInvalidId` / `MaxEnergyOnInvalidId` (see below). |
 | StatusNotification | full | Fault metadata, `MinimumStatusDuration`, duplicate suppression. |
 | StopTransaction | full | `StopTxnSampledData`/`StopTxnAlignedData` in `transactionData`, `StopTransactionOnEVSideDisconnect`. |
@@ -78,7 +78,14 @@ Transaction messages (`StartTransaction`, `StopTransaction`, `MeterValues`) are 
 
 ## Configuration keys
 
-Registry keys, seeded from the station config: AllowOfflineTxForUnknownId, AuthorizationCacheEnabled, AuthorizeRemoteTxRequests, BlinkRepeat, ChargePointModel, ChargePointSerialNumber, ChargePointVendor, ChargeProfileMaxStackLevel, ChargingScheduleAllowedChargingRateUnit, ChargingScheduleMaxPeriods, ClockAlignedDataInterval, ConnectionTimeOut, ConnectorPhaseRotation, ConnectorPhaseRotationMaxLength, GetConfigurationMaxKeys, HeartbeatInterval, LightIntensity, LocalAuthListEnabled, LocalAuthListMaxLength, LocalAuthorizeOffline, LocalPreAuthorize, MaxChargingProfilesInstalled, MaxEnergyOnInvalidId, MeterValuesAlignedData(+MaxLength), MeterValuesSampledData(+MaxLength), MeterValueSampleInterval, MinimumStatusDuration, NumberOfConnectors, ReserveConnectorZeroSupported, ResetRetries, SendLocalListMaxLength, StopTransactionOnEVSideDisconnect, StopTransactionOnInvalidId, StopTxnAlignedData(+MaxLength), StopTxnSampledData(+MaxLength), SupportedFeatureProfiles(+MaxLength), TransactionMessageAttempts, TransactionMessageRetryInterval, UnlockConnectorOnEVSideDisconnect, WebSocketPingInterval; and the Security Whitepaper keys: SecurityProfile (writable, 0-3, can only be raised), AuthorizationKey (write-only), CpoName, CertificateStoreMaxLength (8), CertificateSignedMaxChainSize (10000), AdditionalRootCertificateCheck (false), and the edition 4 keys AllowSecurityProfileDowngrade (writable boolean, default `false`), AllowCentralSystemTLSWildcards (writable boolean, default `false`), CertSigningWaitMinimum (writable, seconds, default 20, values below 1 act as 1) and CertSigningRepeatTimes (writable, default 5).
+Registry keys:
+
+| Group | Keys |
+| --- | --- |
+| Station config (seeded from the station config) | AllowOfflineTxForUnknownId, AuthorizationCacheEnabled, AuthorizeRemoteTxRequests, BlinkRepeat, ChargePointModel, ChargePointSerialNumber, ChargePointVendor, ChargeProfileMaxStackLevel, ChargingScheduleAllowedChargingRateUnit, ChargingScheduleMaxPeriods, ClockAlignedDataInterval, ConnectionTimeOut, ConnectorPhaseRotation, ConnectorPhaseRotationMaxLength, GetConfigurationMaxKeys, HeartbeatInterval, LightIntensity, LocalAuthListEnabled, LocalAuthListMaxLength, LocalAuthorizeOffline, LocalPreAuthorize, MaxChargingProfilesInstalled, MaxEnergyOnInvalidId, MeterValuesAlignedData(+MaxLength), MeterValuesSampledData(+MaxLength), MeterValueSampleInterval, MinimumStatusDuration, NumberOfConnectors, ReserveConnectorZeroSupported, ResetRetries, SendLocalListMaxLength, StopTransactionOnEVSideDisconnect, StopTransactionOnInvalidId, StopTxnAlignedData(+MaxLength), StopTxnSampledData(+MaxLength), SupportedFeatureProfiles(+MaxLength), TransactionMessageAttempts, TransactionMessageRetryInterval, UnlockConnectorOnEVSideDisconnect, WebSocketPingInterval |
+| Security Whitepaper | SecurityProfile (writable, 0-3, can only be raised), AuthorizationKey (write-only), CpoName, CertificateStoreMaxLength (8), CertificateSignedMaxChainSize (10000), AdditionalRootCertificateCheck (false) |
+| Whitepaper edition 4 | AllowSecurityProfileDowngrade (writable boolean, default `false`), AllowCentralSystemTLSWildcards (writable boolean, default `false`), CertSigningWaitMinimum (writable, seconds, default 20, values below 1 act as 1) and CertSigningRepeatTimes (writable, default 5) |
+
 - The whitepaper names no defaults for the last two; the values are this emulator's choice.
 
 Capability and limit keys (for example `NumberOfConnectors`, the `*MaxLength` keys, `SupportedFeatureProfiles`) are read-only. Writable values are persisted per charge point. Some keys (for example `BlinkRepeat`, `LightIntensity`) are stored and reported but drive no behavior. Vendor-specific keys are not supported (`NotSupported`).
@@ -100,7 +107,8 @@ Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`,
   - Certificate hashes follow the OCSP CertID rules (hash of the issuer name DER and of the issuer key bits, serial in lowercase hex without leading zeros, compared case-insensitively); `GetInstalledCertificateIds` answers SHA-256 data, `DeleteCertificate` accepts SHA-256/384/512.
   - With `SecurityProfile` 2 or 3 the last Central System root cannot be deleted (`Failed`).
   - The whitepaper (edition 4) contradicts itself here: requirement `M04.FR.06` says that deleting the `CentralSystemRootCertificate` via `DeleteCertificate` SHALL answer `Failed`, while the remark of use case M04 says that deleting the last root is possible.
-  - The station follows `M04.FR.06` only for the *last* Central System root and only with `SecurityProfile` 2 or 3 (with profile 0 or 1, or while a second Central System root exists, the deletion is `Accepted`), which keeps a station from locking itself out of TLS; this is a choice, not a spec statement.
+  - The station follows `M04.FR.06` only for the *last* Central System root and only with `SecurityProfile` 2 or 3. This keeps a station from locking itself out of TLS; it is a choice, not a spec statement.
+  - With profile 0 or 1, or while a second Central System root exists, the deletion is `Accepted`.
   - With a fallback root present (below) deleting the new root is `Accepted` and the fallback becomes the normal root.
   - Installed Central System roots become the TLS trust anchors (in addition to `--tls-ca`); once one is installed the system roots are no longer used (deliberate: with an installed Central System root, a server certificate chaining only to a system root is refused; delete the installed root to go back to the system roots).
   - A `CertificateSigned` chain must be linked: each certificate signed by the next one (no trust anchor or name check).
@@ -113,7 +121,8 @@ Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`,
   - Hash data of a root that is not self-signed names the certificate itself as its issuer (the real issuer's key is not kept; deviation from the OCSP `CertID` rules, only relevant for cross-signed roots). Manufacturer roots are not affected. Format version 5 added the fallback flag.
 - **Certificate signing**: `RequestCertificate` creates an ECDSA P-256 key and a CSR (`CN` = charge point id, `O` = `CpoName` or `Kirby`) and sends `SignCertificate`.
   - `CertificateSigned` is `Accepted` only if a request is pending, the chain parses, fits `CertificateSignedMaxChainSize`, every certificate is currently valid and the leaf carries the pending public key; otherwise it is `Rejected` and an `InvalidChargePointCertificate` security event follows. Chain trust is not verified.
-  - The leaf Common Name is not checked: `A00.FR.511` says the CN SHALL be the Charge Point's unique serial number (not a URL or IP address) and `A00.FR.405` has the Central System check it, but the whitepaper does not say that this equals the charge point identity, so the station does not enforce it (the CSR it creates uses the charge point id).
+  - The leaf Common Name is not checked. `A00.FR.511` says the CN SHALL be the Charge Point's unique serial number (not a URL or IP address), and `A00.FR.405` has the Central System check it.
+  - The whitepaper does not say that the serial number equals the charge point identity, so the station does not enforce it (the CSR it creates uses the charge point id).
   - **Back-off** (`A02.FR.17` to `A02.FR.20`, `A03.FR.17` to `A03.FR.19`): after a `SignCertificate`, if no `CertificateSigned` arrives within `CertSigningWaitMinimum` seconds the same CSR is sent again, then after twice, four times, ... that wait, at most `CertSigningRepeatTimes` repeats; then the station gives up until a new `RequestCertificate` or `ExtendedTriggerMessage` (`SignChargePointCertificate`) starts a fresh series.
   - A `CertificateSigned` ends the series, also a `Rejected` one (`A02.FR.20`). Beyond the whitepaper text, a `Rejected` or timed-out `SignCertificate` answer is repeated the same way. If the timer fires while the station is not registered, the repeat is postponed by the same wait without being counted.
   - The series is runtime state: a restart forgets it. A rejected or timed-out `SignCertificate` forgets its key and restores the previous pending key, unless a newer request has replaced it meanwhile (the whitepaper does not say what a new `SignCertificate` while one is open should do; requests are not refused).
@@ -126,9 +135,9 @@ Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`,
   - After an accepted change of `SecurityProfile` or `AuthorizationKey`, and after `CertificateSigned` `Accepted`, the station sends the reply, then disconnects and reconnects at once so the new parameters are used (`A05.FR.06`/`FR.07`, `A02.FR.08`, `A01`; same wait for in-flight CALLs as a hard Reset, and it reconnects even with automatic reconnect off).
   - Setting `SecurityProfile` to its current value is `Rejected` for 2 and 3 (`A05.FR.01`; no `AllowSecurityProfileDowngrade`), a no-op `Accepted` for 0 and 1, whatever `AllowSecurityProfileDowngrade` says.
   - **Fallback** (`A05.FR.08`, SHOULD; flag `--security-profile-fallback`, default `true`): an accepted change of `SecurityProfile` stores the previous profile (and the previous `AuthorizationKey`, in the secrets file, when the key changed since the last proven connection) as a pending switch.
-  - Every failed connection attempt counts that the profile can explain (HTTP 401/403, TLS errors, a TLS alert or a close/reset right after the TLS handshake); timeouts, refused TCP and DNS errors do not count (the CSMS may be offline).
-  - Only HTTP 401/403 upgrade answers and TLS alerts rejecting our client certificate count, in a row (anything else restarts the count; see `docs/security.md`, downgrade resistance).
-  - After 3 counted failures the station restores the previous profile (and key) bypassing the lowering rule, logs a warning, queues a `ReconfigurationOfSecurityParameters` event (`techInfo`: `SecurityProfile fell back from N to M ...`, no secrets) and reconnects at once (when automatic reconnect is on).
+  - Only failures that show the CSMS refused our credentials count: HTTP 401/403, or a TLS alert rejecting the client certificate. Timeouts, refused TCP, DNS errors, closes, resets and server-certificate errors never count (the CSMS may be offline, and a man in the middle can forge them).
+  - The failures must come in a row: any failure that does not count restarts the count (see `docs/security.md`, downgrade resistance).
+  - After 3 counted failures the station restores the previous profile (and key) bypassing the lowering rule, logs a warning, queues a `ReconfigurationOfSecurityParameters` event (`techInfo`: `SecurityProfile fell back from N to M ...`, no secrets) and reconnects at once, also when automatic reconnect is off.
   - The first successful connection clears the record (`A05.FR.09`: no fallback after the new profile worked); a second change before that keeps the oldest previous profile. The record is part of the state file (format 9). With the flag off nothing is remembered and the station keeps retrying.
   - Deviation: `A05.FR.03` (profile 2 or 3 needs an installed `CentralSystemRootCertificate`) is not enforced, because setups with a public CA (system roots, `--tls-ca`) are legitimate.
   - Profile 1 and 2 send HTTP Basic Auth (user = charge point id, password = `AuthorizationKey` as given, 16-40 printable ASCII characters) unless the URL already carries a password; profile 3 uses the stored certificate unless `--tls-cert` is given.
@@ -138,7 +147,10 @@ Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`,
   - The key is read when a connection is opened. Deviation: the Common Name is not matched against the FQDN (webpki checks the SAN and the name, as RFC 6125 does).
   - **Old/new client certificate** (`A02.FR.28`/`A02.FR.29`, `A03.FR.24`/`A03.FR.25`, both SHOULD): when `CertificateSigned` replaces a certificate, the old chain and key are kept (the key in the secrets file; older state files load without them). With profile 3 the new certificate is tried first.
   - A failed attempt switches to the other certificate, alternating for as long as attempts go on (the station never stops reconnecting).
-  - The switch is immediate after a refusal: a TLS alert about the client certificate (`BadCertificate`, `UnknownCA`, `CertificateExpired`, `CertificateRevoked`, `CertificateUnknown`, `UnsupportedCertificate`, `CertificateRequired`, `AccessDenied`, from the handshake or, with TLS 1.3, from the reading of the upgrade answer), an HTTP 401/403 answer to the upgrade, or a close or reset right after the TLS handshake.
+  - The switch is immediate after a refusal. A refusal is one of:
+    - a TLS alert about the client certificate, from the handshake or, with TLS 1.3, from the reading of the upgrade answer (`BadCertificate`, `UnknownCA`, `CertificateExpired`, `CertificateRevoked`, `CertificateUnknown`, `UnsupportedCertificate`, `CertificateRequired`, `AccessDenied`);
+    - an HTTP 401/403 answer to the upgrade;
+    - a close or reset right after the TLS handshake.
   - Any other failure (timeout, refused TCP, DNS, server certificate errors) switches after 3 consecutive failed attempts, so a short outage does not flip the choice constantly but a silent rejection is still covered; the counter is runtime state, reset on a switch and on a successful connection.
   - Alternation only runs while a previous certificate exists (a renewal pending its first successful connection) and nothing is discarded without a successful connection.
   - The first successful connection with the new certificate discards the old one; the first with the old one discards the new one (the old one is current again) and queues `DiscardedRenewedClientCertificate`. `--tls-cert` files take no part. The choice restarts with the new certificate after a restart.
@@ -152,7 +164,7 @@ Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`,
 - **GetLog / LogStatusNotification**: simulated, nothing is read or sent anywhere. `remoteLocation` must be an absolute URL with a host and scheme ftp, ftps, http, https or sftp, else `Rejected` (no `filename`).
   - `Accepted` carries a generated `filename` (`diagnostics-log-<id>-<time>.log` or `security-log-...`; `logType` only changes the name).
   - The reply comes first, then `LogStatusNotification` `Uploading` then `Uploaded` (100 ms apart) with the `requestId`; the diagnostics outcome knob (`SetDiagnosticsOutcome`) selects `UploadFailure` instead, with `retries` / `retryInterval` (at most 5 retries, at most 1 s apart) as for `GetDiagnostics`.
-  - A `GetLog` while an upload runs is `AcceptedCanceled`; the cancelled upload sends no further status (`UploadLogStatusEnumType` has no cancelled value; deviation: no `Idle`/other final report). A disconnect or `Reset` drops the remaining statuses. `PermissionDenied`, `BadMessage` and `NotSupportedOperation` are never produced.
+  - A `GetLog` while an upload runs is `AcceptedCanceled`; the canceled upload sends no further status (`UploadLogStatusEnumType` has no canceled value; deviation: no `Idle`/other final report). A disconnect or `Reset` drops the remaining statuses. `PermissionDenied`, `BadMessage` and `NotSupportedOperation` are never produced.
   - Snapshot: `log_status`, `log_request_id`.
 - **ExtendedTriggerMessage**: same gate as `TriggerMessage` (only `BootNotification` before the station is `Accepted` or `Pending`, else `Rejected`; `connectorId` of `StatusNotification` / `MeterValues` must exist, else `Rejected`; it is ignored for the other messages).
   - `BootNotification`, `Heartbeat`, `StatusNotification`, `MeterValues`, `FirmwareStatusNotification` behave as in `TriggerMessage` (firmware status is the current one). `LogStatusNotification` reports `Uploading` (with `requestId`) while a `GetLog` runs, otherwise `Idle` without `requestId`.
@@ -164,7 +176,7 @@ Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`,
   - A retrieve or install time in the future adds the scheduled status and holds the next step (at most 1 s, as for `UpdateFirmware`).
   - Failures: `DownloadFailed` and `InstallationFailed` repeat per `retries`/`retryInterval` (at most 5, at most 1 s apart); `InvalidSignature` (after `Downloaded`) and `InstallVerificationFailed` (after `InstallRebooting`) are final.
   - `InstallRebooting` is only a status, the emulator does not restart; `DownloadPaused` and `Idle` reports are not produced by an update. Security events: `InvalidFirmwareSignature` on `InvalidSignature`, `FirmwareUpdated` after `Installed`.
-  - A request while a signed update runs is `AcceptedCanceled`; the cancelled update sends no further status (the enum has no cancelled value; deviation). A disconnect or `Reset` drops the remaining statuses. A signed update runs next to diagnostics and plain firmware plans (own queue).
+  - A request while a signed update runs is `AcceptedCanceled`; the canceled update sends no further status (the enum has no canceled value; deviation). A disconnect or `Reset` drops the remaining statuses. A signed update runs next to diagnostics and plain firmware plans (own queue).
   - `ExtendedTriggerMessage` `FirmwareStatusNotification` sends a `SignedFirmwareStatusNotification` with the current status when the last update was a signed one. Snapshot: `signed_firmware_status`, `signed_firmware_request_id`.
 - **Response rules** can also target `GetLog`, `ExtendedTriggerMessage` and `SignedUpdateFirmware` (`reject` answers `Rejected`).
 
@@ -181,7 +193,7 @@ The standalone CSMS answers the four charge-point security actions (`SignCertifi
   - See "Security Whitepaper behavior" above.
 - No OCPP 2.x, no JSON-over-SOAP; one WebSocket connection, subprotocol `ocpp1.6` by default.
 - Meter, power, SoC and temperature values are simulated.
-- Offline `MeterValues`: a sample of a running transaction that cannot be sent (the station is offline or not registered, or the transaction still has a local id because its start waits in the offline queue) goes to a separate persisted sample queue (state file `offline_samples`, format 8), bounded at 1000 samples (the oldest sample is dropped first, with a warning; start and stop entries are never touched).
+- Offline `MeterValues`: a sample of a running transaction that cannot be sent (the station is offline or not registered, or the transaction still has a local id because its start waits in the offline queue) goes to a separate persisted sample queue (state file `offline_samples`, format 8). At most 1000 samples are kept; the oldest is dropped first, with a warning. Start and stop entries are never touched.
   - After the reconnect the samples of a transaction are sent with its real `transactionId`, in the order taken, after its `StartTransaction` was synchronized and before its `StopTransaction`; a sample stays persisted until its CALL ended, and one the CSMS rejects after the retry attempts is dropped with a warning.
   - Samples of a transaction whose queued entry is dropped (rejected start, given-up stop, queue overflow) are dropped too. Which samples queue depends on the transaction only, not on the reading context: clock-aligned samples (`Sample.Clock`) of a connector with a transaction queue too.
   - Samples of an idle connector and samples taken while an online `StartTransaction` is still in flight are dropped. The 1000-sample cap is global: there is no per-transaction share, so one long offline transaction can push out the oldest samples of another. While samples queue the state file is rewritten (debounced, 200 ms).
@@ -191,7 +203,7 @@ The standalone CSMS answers the four charge-point security actions (`SignCertifi
 
 - **GetCompositeSchedule bounds**: a `duration` above 7 days is clamped to 7 days and the reply carries the clamped `duration`; at most 1000 periods are returned (the tail is cut and `duration` ends where the first cut period would have started).
 - **Connection limits**: every WebSocket write (frame, ping, pong flush, close frame) has a 10 s timeout; a peer that stops reading is treated as a lost connection (normal reconnect). Messages and frames from the CSMS are limited to 4 MiB. `call_timeout_ms` is at most 24 h (`ConfigError::TooLarge`).
-- **WebSocketPingInterval** is initialized from `--ws-ping-interval` and read when a connection opens, so a change applies from the next (re)connect; `0` disables pings. State files older than version 6 stored an unused value for it, which is ignored on load.
+- **WebSocketPingInterval** is initialized from `--ws-ping` and read when a connection opens, so a change applies from the next (re)connect; `0` disables pings. State files older than version 6 stored an unused value for it, which is ignored on load.
 - **Restored stops**: a `StopTransaction` that was in flight at a crash is restored with its recorded stop time and meter reading (format version 6; older files fall back to the restore time and the connector's meter) and is queued per connector, so connectors sharing one CSMS transaction id each deliver their own stop.
 - **Secrets in schema errors**: schema violations of a `ChangeConfiguration` for `AuthorizationKey` never quote the value (generic messages), and `Debug` output of the configuration registry masks it.
 
@@ -201,8 +213,8 @@ Changes in behavior:
 
 - Strict boolean parsing and CLI > env > default precedence
 - `GetConfiguration` key limit
-- `TriggerMessage` reports the real diagnostics/firmware status and honours the registration gate
-- Maintenance timers are cancelled on disconnect
+- `TriggerMessage` reports the real diagnostics/firmware status and honors the registration gate
+- Maintenance timers are canceled on disconnect
 - `ChangeAvailability` on connector 0 also changes all connectors
 - The reply to a CSMS command is sent before follow-up messages
 - Atomic, versioned state files (directory fsynced, long ids get a hashed file name, a `Scheduled` `ChangeAvailability` survives a restart) with `.bak` recovery
@@ -232,7 +244,9 @@ Changes in behavior:
   - The station limit is re-checked when the session registers; a connection that lost that race gets a close frame (1013) after the upgrade instead of HTTP 503. The default listener is unauthenticated (profile 0): anybody who can reach it can register stations, so use a security profile or a firewall.
 - **Duplicate inbound CALL ids**: a CSMS CALL whose id is still being handled is ignored with a warning (the single reply goes out when the handler answers). Once it has been answered, the same id is treated as a new CALL and handled again. OCPP-J 1.6 defines no reply cache for retransmissions, so the station does not keep one.
 - **Transaction messages that never get through**: `StartTransaction`, `StopTransaction` and `MeterValues` are retried `TransactionMessageAttempts` times, `TransactionMessageRetryInterval` apart.
-  - A start that still fails online is discarded (the connector returns to `Preparing`; the CSMS may keep an open transaction if it processed the request but its answer was lost), a failed stop is queued and re-sent after the next accepted boot, and the stop the station sends to close a transaction the CSMS opened for a tag it refused is not retried or queued.
+  - A start that still fails online is discarded. The connector returns to `Preparing`; the CSMS may keep an open transaction if it processed the request but its answer was lost.
+  - A failed stop is queued and re-sent after the next accepted boot.
+  - The stop the station sends to close a transaction the CSMS opened for a tag it refused is not retried or queued.
   - Retries are queued again after the interval, so a retried `StartTransaction` or `StopTransaction` can arrive after later CALLs, and a retried `MeterValues` after a later sample. A retried `MeterValues` is dropped (Info log) once the `StopTransaction` of its transaction was queued, so no sample reaches the CSMS after the stop.
   - A request the station cannot queue (schema or serialization error) is not retried.
 - **One outstanding CALL**: dropping the `call` future after the CALL was written keeps the slot until the station answers or the call's timeout expires, but for at most the default call timeout (`--call-timeout`, 30 s) after the drop; then the next queued CALL is written and a late answer is ignored.

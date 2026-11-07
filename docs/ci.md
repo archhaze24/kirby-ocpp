@@ -2,7 +2,7 @@
 
 Use `kirby-ocpp` and `kirby-csms` as test runners: the exit code gates the job, JUnit XML feeds the test report, and the JSON report keeps the evidence. This page has ready workflows for GitHub Actions and GitLab CI, the exit-code and timeout rules, and a guide to reading failures.
 
-Contents: [Overview](#overview) · [GitHub Actions](#github-actions) · [Container image](#container-image) · [GitLab CI](#gitlab-ci) · [Exit codes and timeouts](#exit-codes-and-timeouts) · [Reports](#reports) · [Read a failure](#read-a-failure) · [Avoid flaky runs](#avoid-flaky-runs) · [Related pages](#related-pages)
+Contents: [Overview](#overview) · [GitHub Actions](#github-actions) · [GitLab CI](#gitlab-ci) · [Exit codes and timeouts](#exit-codes-and-timeouts) · [Reports](#reports) · [Read a failure](#read-a-failure) · [Avoid flaky runs](#avoid-flaky-runs) · [Related pages](#related-pages)
 
 ## Overview
 
@@ -83,25 +83,6 @@ Notes:
 * `suite --all-builtins` runs every built-in except `finish-session`. Add your own scenarios by naming files or a directory (`suite --all-builtins scenarios/`, every `*.toml` directly inside). A step that fails fails the job; the `if: always()` steps still publish what exists.
 * The two action steps use `mikepenz/action-junit-report`; any reporter that reads JUnit XML works, for example `dorny/test-reporter` with `reporter: java-junit`. Action names and versions here were current when this page was written; pin the ones you use.
 * A CSMS you test on a network host needs no `kirby-csms` steps: put its URL in `--url` and add `--id`, `--tls-*` or Basic Auth credentials in the URL as needed ([Security](security.md)).
-
-## Container image
-
-Once the container image is published with a release (see [distribution.md](distribution.md#docker)), the central system can run from it instead of npm. Replace the install and start steps:
-
-```yaml
-      - name: Start the central system
-        run: |
-          docker run -d --name csms -p 127.0.0.1:9000:9000 \
-            ghcr.io/archhaze24/kirby-ocpp kirby-csms --listen 0.0.0.0:9000
-          for _ in $(seq 50); do
-            docker logs csms 2>&1 | grep -q '^listening on' && exit 0
-            sleep 0.2
-          done
-          docker logs csms
-          exit 1
-```
-
-A GitHub `services:` container cannot take command arguments, so use `docker run` as above. Stop it with `docker rm -f csms`. The emulator can run from the same image (`ghcr.io/archhaze24/kirby-ocpp --url ... suite ...`); the container then needs a route to the CSMS, see the notes in [distribution.md](distribution.md#docker).
 
 ## GitLab CI
 

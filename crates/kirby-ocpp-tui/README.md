@@ -46,6 +46,6 @@ Pre-1.0 and mainly an internal part of the tool: the API may change between mino
 - [Emulator guide](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/emulator.md) (keys, actions)
 - API reference: <https://docs.rs/kirby-ocpp-tui>
 
-## Licence
+## License
 
 MIT.

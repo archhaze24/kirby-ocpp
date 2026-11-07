@@ -1,6 +1,6 @@
 # Architecture
 
-This page is self-contained: read it first, then open only the topic page or source directory you need. It describes the code as of 0.5.0-dev (OCPP 1.6J plus the Security Whitepaper).
+This page is self-contained: read it first, then open only the topic page or source directory you need. It describes the code as of 0.5 (OCPP 1.6J plus the Security Whitepaper).
 
 Contents: [Crate map](#crate-map) · [Layer contracts](#layer-contracts) · [Emulator internals](#emulator-internals) · [CSMS internals](#csms-internals) · [Data flow](#data-flow) · [Invariants](#invariants) · [Where each concern lives](#where-each-concern-lives) · [Tests](#tests) · [Related pages](#related-pages)
 

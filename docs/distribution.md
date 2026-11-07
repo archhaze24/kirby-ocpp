@@ -25,7 +25,7 @@ Needs Rust 1.88 or newer.
 
 ## Release archives
 
-[GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases) carry one archive per target, `kirby-ocpp-<tag>-<target>.tar.gz` (`.zip` on Windows) plus a `.sha256` file each. Targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. The musl builds are fully static (Alpine, minimal containers). Each archive holds both binaries, the licence, the third-party notices and the README.
+[GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases) carry one archive per target, `kirby-ocpp-<tag>-<target>.tar.gz` (`.zip` on Windows) plus a `.sha256` file each. Targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. The musl builds are fully static (Alpine, minimal containers). Each archive holds both binaries, the license, the third-party notices and the README.
 
 ## Docker
 
@@ -57,6 +57,7 @@ Notes:
 * Inside a container `kirby-csms` must listen on `0.0.0.0` (its default); publish with `-p HOST:9000`. Bind the host side to `127.0.0.1` (`-p 127.0.0.1:9000:9000`) unless other machines should reach it: at security profile 0 any peer can connect.
 * On Linux `host.docker.internal` needs `--add-host host.docker.internal:host-gateway`, or use `--network host` for the emulator.
 * The HTTP control API (`--api-listen`) needs a token for a non-loopback address; inside a container publish it with `-p 127.0.0.1:8080:8080` and pass `--api-token-file`.
+* In CI the central system can run from the image instead of npm. A GitHub `services:` container cannot take command arguments, so start it with `docker run -d --name csms -p 127.0.0.1:9000:9000 ghcr.io/archhaze24/kirby-ocpp kirby-csms --listen 0.0.0.0:9000`, wait for `listening on` in `docker logs csms`, and stop it with `docker rm -f csms`. The emulator can run from the same image; the container then needs a route to the CSMS (see above).
 * A named volume starts owned by `kirby`. For a bind mount (`-v "$PWD/state:/data"`) the host directory must be writable by uid 10001.
 * `--state-dir` and `--no-persist` behave as in [configuration.md](configuration.md#state-directory-and-files).
 
