@@ -115,6 +115,11 @@ pub struct Snapshot {
     pub certificate_request_pending: bool,
     /// Connectors `1..=n`, ordered by id.
     pub connectors: Vec<ConnectorSnapshot>,
+    /// Why the automatic reconnect loop ended (for example `after 3 failed attempt(s)` or
+    /// `automatic reconnect is disabled`); `None` while the link is up, retrying or closed on
+    /// purpose. Cleared by the next `Connect`.
+    #[serde(default)]
+    pub reconnect_stopped: Option<String>,
 }
 
 impl Snapshot {
@@ -153,6 +158,7 @@ impl Snapshot {
             connectors: (1..=count)
                 .map(|id| ConnectorSnapshot::new(ConnectorId::new(id)))
                 .collect(),
+            reconnect_stopped: None,
         }
     }
 

@@ -76,6 +76,7 @@ impl StationActor {
     pub(super) fn disconnect(&mut self) {
         self.link.wanted = false;
         self.link.attempts = 0;
+        self.state.reconnect_stopped = None;
         self.timers.cancel(&TimerKey::Reconnect);
         if let Some(handle) = self.link.connecting.take() {
             handle.abort();
@@ -105,6 +106,7 @@ impl StationActor {
     }
 
     fn start_connect(&mut self) {
+        self.state.reconnect_stopped = None;
         self.link.generation += 1;
         let generation = self.link.generation;
         self.state.connection = ConnectionState::Connecting;
@@ -248,6 +250,7 @@ impl StationActor {
             };
             self.log(LogLevel::Error, format!("reconnect stopped: {reason}"));
             self.state.connection = ConnectionState::Disconnected;
+            self.state.reconnect_stopped = Some(reason);
             return;
         }
         self.link.attempts = attempt;

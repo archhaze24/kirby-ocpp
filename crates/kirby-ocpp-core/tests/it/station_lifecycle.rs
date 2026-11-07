@@ -303,6 +303,66 @@ async fn backoff_doubles_and_stops_after_max_attempts() {
 }
 
 #[tokio::test]
+async fn snapshot_records_that_the_reconnect_loop_stopped() {
+    let url = dead_url().await;
+    let rig = Rig::with(CsmsOptions::default(), |mut config| {
+        config.url = url;
+        config.reconnect = ReconnectConfig {
+            enabled: true,
+            initial_delay_ms: 20,
+            max_delay_ms: 20,
+            max_attempts: 2,
+        };
+        config
+    })
+    .await;
+    assert_eq!(rig.station.snapshot().reconnect_stopped, None);
+    rig.station.connect().await.unwrap();
+    let snapshot = wait_state(&rig.station, "reconnect stopped", |s| {
+        s.reconnect_stopped.is_some()
+    })
+    .await;
+    assert_eq!(
+        snapshot.reconnect_stopped.as_deref(),
+        Some("after 2 failed attempt(s)")
+    );
+    assert_eq!(snapshot.connection, ConnectionState::Disconnected);
+    // A manual connect restarts the loop, and a deliberate disconnect clears the reason.
+    rig.station.connect().await.unwrap();
+    wait_state(&rig.station, "stopped again", |s| {
+        s.reconnect_stopped.is_some()
+    })
+    .await;
+    rig.station.disconnect().await.unwrap();
+    wait_state(&rig.station, "cleared by disconnect", |s| {
+        s.reconnect_stopped.is_none()
+    })
+    .await;
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn disabled_reconnect_sets_the_stopped_reason() {
+    let mut rig = Rig::with(CsmsOptions::default(), |mut config| {
+        config.reconnect.enabled = false;
+        config
+    })
+    .await;
+    rig.connect_booted().await;
+    assert_eq!(rig.station.snapshot().reconnect_stopped, None);
+    rig.csms.drop_connection().unwrap();
+    let snapshot = wait_state(&rig.station, "reconnect stopped", |s| {
+        s.reconnect_stopped.is_some()
+    })
+    .await;
+    assert_eq!(
+        snapshot.reconnect_stopped.as_deref(),
+        Some("automatic reconnect is disabled")
+    );
+    rig.shutdown().await;
+}
+
+#[tokio::test]
 async fn manual_connect_resets_the_attempt_counter() {
     let url = dead_url().await;
     let rig = Rig::with(CsmsOptions::default(), |mut config| {

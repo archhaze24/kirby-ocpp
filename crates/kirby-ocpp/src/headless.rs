@@ -8,12 +8,11 @@ use std::time::Duration;
 
 use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::fleet::{FleetEvents, FleetItem};
-use kirby_ocpp_core::station::ConnectionState;
-use kirby_ocpp_core::station::{Direction, Event};
+use kirby_ocpp_core::station::{Direction, Event, Snapshot};
 use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file};
 use kirby_ocpp_tui::text::{escape_json_unsafe, sanitize};
 use serde_json::{Value, json};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot, watch};
 use tokio::task::JoinHandle;
 
 /// How long the process waits at exit for queued stdout lines to be written.
@@ -212,25 +211,44 @@ pub fn with_hint(error: &str) -> String {
     }
 }
 
-/// How long a link must stay down after lost events before it counts as given up.
-const LAG_GRACE: Duration = Duration::from_secs(2);
-
-/// Watches a station's log for the end of the reconnect loop, so a headless run can fail
-/// instead of idling forever, and remembers the last connection error for messages.
+/// Watches a station for the end of the reconnect loop, so a headless run can fail instead of
+/// idling forever. The end is read from the snapshot (`reconnect_stopped`), which a lagging
+/// event stream cannot lose; the log only supplies the last connection error for messages.
 #[derive(Debug)]
 pub struct LinkWatch {
-    handle: StationHandle,
     rx: broadcast::Receiver<Event>,
+    state: watch::Receiver<Snapshot>,
     last_error: Option<String>,
+}
+
+/// What one wait of [`LinkWatch::dead`] saw.
+enum Step {
+    /// The snapshot flag is set (`None`: the station is gone).
+    Stopped(Option<String>),
+    Event(Result<Event, broadcast::error::RecvError>),
 }
 
 impl LinkWatch {
     /// Subscribes now: create it before the station connects, or the first failure is missed.
     pub fn new(handle: &StationHandle) -> Self {
+        Self::from_parts(handle.subscribe(), handle.watch_snapshot())
+    }
+
+    fn from_parts(rx: broadcast::Receiver<Event>, state: watch::Receiver<Snapshot>) -> Self {
         Self {
-            handle: handle.clone(),
-            rx: handle.subscribe(),
+            rx,
+            state,
             last_error: None,
+        }
+    }
+
+    fn note(&mut self, event: &Event) {
+        if let Event::Log(record) = event {
+            if let Some(error) = record.text.strip_prefix("connection failed: ") {
+                self.last_error = Some(error.to_owned());
+            } else if record.text.starts_with("disconnected") {
+                self.last_error = Some(record.text.clone());
+            }
         }
     }
 
@@ -242,37 +260,26 @@ impl LinkWatch {
     /// Resolves with a description when the station gives up reconnecting (`--no-reconnect` or
     /// `--reconnect-max-attempts` used up), or when the station ends.
     pub async fn dead(&mut self) -> String {
+        let mut events_open = true;
         loop {
-            match self.rx.recv().await {
-                Ok(Event::Log(record)) => {
-                    if let Some(error) = record.text.strip_prefix("connection failed: ") {
-                        self.last_error = Some(error.to_owned());
-                    } else if record.text.starts_with("disconnected") {
-                        self.last_error = Some(record.text.clone());
-                    } else if let Some(reason) = record.text.strip_prefix("reconnect stopped: ") {
-                        return self.describe(reason);
+            let step = tokio::select! {
+                state = self.state.wait_for(|s| s.reconnect_stopped.is_some()) => {
+                    Step::Stopped(state.ok().and_then(|s| s.reconnect_stopped.clone()))
+                }
+                event = self.rx.recv(), if events_open => Step::Event(event),
+            };
+            match step {
+                Step::Stopped(None) => return "the station stopped".to_owned(),
+                Step::Stopped(Some(reason)) => {
+                    // The failure log precedes the snapshot change: pick up what is queued.
+                    while let Ok(event) = self.rx.try_recv() {
+                        self.note(&event);
                     }
+                    return self.describe(&reason);
                 }
-                Ok(_) => {}
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // Events were lost, so "reconnect stopped" may be gone. The state tells
-                    // only that the link is down; a deliberate disconnect looks the same for a
-                    // moment. A link that stays down for the grace period has given up.
-                    if self.handle.snapshot().connection == ConnectionState::Disconnected {
-                        let mut state = self.handle.watch_snapshot();
-                        let moved = tokio::time::timeout(
-                            LAG_GRACE,
-                            state.wait_for(|s| s.connection != ConnectionState::Disconnected),
-                        )
-                        .await;
-                        if moved.is_err() {
-                            return self.describe("the connection is down");
-                        }
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    return "the station stopped".to_owned();
-                }
+                Step::Event(Ok(event)) => self.note(&event),
+                Step::Event(Err(broadcast::error::RecvError::Lagged(_))) => {}
+                Step::Event(Err(broadcast::error::RecvError::Closed)) => events_open = false,
             }
         }
     }
@@ -682,5 +689,52 @@ mod tests {
             None
         );
         assert_eq!(hint("connection attempt timed out", &plain), None);
+    }
+
+    fn log_event(text: &str) -> Event {
+        Event::Log(kirby_ocpp_core::station::LogRecord {
+            ts: chrono::Utc::now(),
+            level: kirby_ocpp_core::station::LogLevel::Info,
+            text: text.to_owned(),
+        })
+    }
+
+    const WAIT: Duration = Duration::from_secs(10);
+
+    #[tokio::test]
+    async fn link_watch_ends_on_the_snapshot_flag_after_lost_events() {
+        let config = kirby_ocpp_core::config::StationConfig::new("ws://h/p");
+        let (state_tx, state_rx) = watch::channel(Snapshot::initial(&config));
+        // A one-slot channel that overflowed: the receiver has lost events, including any
+        // "reconnect stopped" line.
+        let (event_tx, event_rx) = broadcast::channel(1);
+        for _ in 0..3 {
+            event_tx.send(log_event("noise")).unwrap();
+        }
+        let mut watch = LinkWatch::from_parts(event_rx, state_rx);
+        // Down without the flag (a deliberate disconnect) is not a give-up, however long.
+        let early = tokio::time::timeout(Duration::from_millis(300), watch.dead()).await;
+        assert!(early.is_err(), "reported a give-up without the flag");
+        event_tx
+            .send(log_event("connection failed: refused"))
+            .unwrap();
+        state_tx.send_modify(|s| s.reconnect_stopped = Some("after 2 failed attempt(s)".into()));
+        let text = tokio::time::timeout(WAIT, watch.dead()).await.unwrap();
+        assert!(
+            text.contains("reconnect stopped (after 2 failed attempt(s))"),
+            "{text}"
+        );
+        assert!(text.contains("last error: refused"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn link_watch_reports_a_stopped_station() {
+        let config = kirby_ocpp_core::config::StationConfig::new("ws://h/p");
+        let (state_tx, state_rx) = watch::channel(Snapshot::initial(&config));
+        let (_event_tx, event_rx) = broadcast::channel(4);
+        let mut watch = LinkWatch::from_parts(event_rx, state_rx);
+        drop(state_tx);
+        let text = tokio::time::timeout(WAIT, watch.dead()).await.unwrap();
+        assert_eq!(text, "the station stopped");
     }
 }
