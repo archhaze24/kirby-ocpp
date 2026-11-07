@@ -7,6 +7,19 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-07
+
+**The polish release: documentation as a first-class deliverable, a stronger scenario engine, a local HTTP control API for `kirby-csms`, prepared distribution channels and a long list of hardening and usability fixes.**
+
+### 0.5.0 in numbers
+
+| Metric | Since 0.4.0 |
+| --- | --- |
+| 🧾 Commits | **89** in three days (5 to 7 November 2026) |
+| ✏️ Lines of code | **+21.6k / −1.6k** across 144 files; Rust grew from 70.6k to **86.9k** lines |
+| 🧪 Tests | **+283** new test functions: 1,047 → **1,330** (all run in the `nextest` gate) |
+| 📦 Crates | 7 → **7** (new dependencies: `axum`, `hyper`, `hyper-util`, `clap_complete`) |
+
 ### ✨ Added
 
 #### Scenarios and scripts
@@ -289,5 +302,6 @@ New binary `kirby-csms` (default listen `0.0.0.0:9000`) and the new crates `kirb
 - SIGTERM during `kirby-csms --script` still writes the JUnit report.
 - A scenario `lagged` failure no longer sticks for the rest of the run.
 
-[Unreleased]: https://github.com/archhaze24/kirby-ocpp/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/archhaze24/kirby-ocpp/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.3.0...v0.4.0

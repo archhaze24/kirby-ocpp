@@ -74,7 +74,7 @@ cargo install kirby-ocpp --version X.Y.Z --force && kirby-ocpp --version
 cargo install kirby-csms --version X.Y.Z --force && kirby-csms --version
 ```
 Docker (from a logged-out machine, after the package is public): `docker run --rm ghcr.io/archhaze24/kirby-ocpp:X.Y.Z --version` and `docker run --rm ghcr.io/archhaze24/kirby-ocpp:X.Y.Z kirby-csms --version`.
-Then bump `main` to the next development version (e.g. `0.5.0-dev`) when you start the next cycle.
+Then bump `main` to the next development version (e.g. `0.6.0-dev`) when you start the next cycle.
 
 ## 6. Homebrew and Scoop
 
