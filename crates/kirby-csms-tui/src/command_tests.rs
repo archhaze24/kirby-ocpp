@@ -25,7 +25,7 @@ use crate::actions::{ActionId, Rules};
 use crate::app::{App, ConfirmAction, Effect, Mode, Msg, update};
 use crate::command::{CmdError, CmdOutcome, Command};
 use crate::form::FaultKind;
-use crate::tests::{app_with, at, info, press, type_text};
+use crate::tests::{app_with, at, info, press, type_text, wait_booted};
 use crate::ui::tests::loaded;
 use crate::{Exec, TuiOptions, drive, execute};
 
@@ -638,6 +638,7 @@ async fn executor_drives_a_real_station() {
     );
     station.connect().await.expect("connect");
     wait_state(&csms, &mut events, "CP-E", |s| s.boot.is_some()).await;
+    wait_booted(&station).await;
 
     let (mut app, _) = app_with(&["CP-E"]);
     let (mut exec, mut rx) = Exec::new();
@@ -810,6 +811,7 @@ async fn run_loop_executes_a_hotkey_command_in_the_background() {
     );
     station.connect().await.expect("connect");
     wait_state(&csms, &mut events, "CP-K", |s| s.boot.is_some()).await;
+    wait_booted(&station).await;
 
     let (key_tx, mut key_rx) = mpsc::unbounded_channel::<std::io::Result<TermEvent>>();
     let keys = Box::pin(futures_util::stream::poll_fn(move |cx| {

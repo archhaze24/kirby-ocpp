@@ -17,7 +17,7 @@ use kirby_csms_core::{
 };
 use kirby_ocpp_core::config::ReconnectConfig;
 use kirby_ocpp_core::ocpp::types::RegistrationStatus;
-use kirby_ocpp_core::{Station, StationConfig, SystemClock};
+use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use serde_json::json;
@@ -25,6 +25,20 @@ use tokio::sync::mpsc;
 
 use crate::app::{App, Effect, Focus, LogView, Mode, Msg, update};
 use crate::{TuiOptions, drive};
+
+/// Waits until the station itself has processed the accepted `BootNotification` answer. The
+/// CSMS sees the boot request earlier, and a station that is not registered yet rejects
+/// triggered messages.
+pub(crate) async fn wait_booted(station: &StationHandle) {
+    let mut snapshots = station.watch_snapshot();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        snapshots.wait_for(kirby_ocpp_core::station::Snapshot::booted),
+    )
+    .await
+    .expect("station registered in time")
+    .expect("station running");
+}
 
 pub(crate) fn at(secs: i64) -> DateTime<Utc> {
     Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap()

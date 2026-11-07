@@ -26,7 +26,7 @@ use tokio::time::timeout;
 
 use crate::app::{App, Effect, Mode, Msg, update};
 use crate::command::Command;
-use crate::tests::{app_with, at, press, type_text};
+use crate::tests::{app_with, at, press, type_text, wait_booted};
 use crate::ui::draw;
 use crate::ui::tests::{loaded, screen, state};
 use crate::{Exec, execute};
@@ -477,6 +477,7 @@ async fn security_commands_run_against_a_real_station() {
     );
     station.connect().await.expect("connect");
     wait_state(&csms, &mut events, "CP-S", |s| s.boot.is_some()).await;
+    wait_booted(&station).await;
 
     let (mut app, _) = app_with(&["CP-S"]);
     let (mut exec, mut rx) = Exec::new();
