@@ -20,7 +20,7 @@ fn command(args: &[&str]) -> Command {
 async fn run(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        command(&args).output().expect("binary runs")
+        crate::support::output(command(&args))
     })
     .await
     .unwrap()
@@ -284,10 +284,9 @@ async fn an_existing_path_beats_a_built_in_name_and_repeats_run_once() {
     args.push("--json".to_owned());
     let output = tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        command(&args)
-            .current_dir(dir.path())
-            .output()
-            .expect("binary runs")
+        let mut command = command(&args);
+        command.current_dir(dir.path());
+        crate::support::output(command)
     })
     .await
     .unwrap();
@@ -405,25 +404,30 @@ async fn signalled_suite(signal: &str) -> (Option<i32>, Value) {
     );
     let child = {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        command(&args)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("binary runs")
+        crate::support::ChildGuard::spawn(
+            command(&args).stdout(Stdio::piped()).stderr(Stdio::piped()),
+        )
     };
-    // Two connections: the quick scenario finished, the slow one is sleeping.
-    while csms.connections() < 2 {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    // The second scenario's station has connected and booted: the quick scenario finished and
+    // the slow one is running (the signal streams exist since before the first scenario).
+    csms.wait_for_connection_count(2, std::time::Duration::from_secs(30))
+        .await
+        .expect("second connection");
+    csms.wait_for_call_count_after(
+        0,
+        "BootNotification",
+        2,
+        |_| true,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .expect("second boot");
     let sent = Command::new("kill")
         .args([signal, &child.id().to_string()])
         .status()
         .expect("kill");
     assert!(sent.success());
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = crate::support::finish(child).await;
     let text = std::fs::read_to_string(&report).expect("the report is written after a signal");
     assert!(junit.exists(), "the JUnit report is written after a signal");
     csms.shutdown().await;
@@ -451,4 +455,87 @@ async fn sigterm_writes_the_reports_and_exits_1() {
     let (code, summary) = signalled_suite("-TERM").await;
     assert_eq!(code, Some(1));
     assert_eq!(summary["scenarios"][1]["status"], "error", "{summary}");
+}
+
+/// Top-level keys and JSON types of the suite report are a public contract.
+#[tokio::test(flavor = "multi_thread")]
+async fn suite_report_has_the_contract_shape() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let output = run(suite_args(&csms, &["charge-session", "--json"])).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let summary: Value = stdout(&output)
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .next_back()
+        .unwrap();
+    let mut keys: Vec<&str> = summary
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "counts",
+            "duration_ms",
+            "error_names",
+            "failed",
+            "failed_names",
+            "ocpp_version",
+            "passed",
+            "passed_count",
+            "scenarios",
+            "schema",
+            "skipped",
+            "started_at",
+            "status",
+            "tool_version",
+            "total",
+            "type",
+        ]
+    );
+    for key in [
+        "ocpp_version",
+        "started_at",
+        "status",
+        "tool_version",
+        "type",
+    ] {
+        assert!(summary[key].is_string(), "{key}");
+    }
+    assert!(summary["schema"].is_u64() && summary["duration_ms"].is_u64());
+    assert!(summary["total"].is_u64() && summary["passed_count"].is_u64());
+    assert!(summary["passed"].is_boolean());
+    for key in [
+        "failed",
+        "failed_names",
+        "error_names",
+        "skipped",
+        "scenarios",
+    ] {
+        assert!(summary[key].is_array(), "{key}");
+    }
+    assert_eq!(summary["counts"].as_object().unwrap().len(), 4);
+    let entry = summary["scenarios"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "duration_ms",
+            "name",
+            "ocpp_version",
+            "report",
+            "scenario",
+            "source",
+            "started_at",
+            "station",
+            "status",
+        ]
+    );
+    assert_eq!(entry["scenario"], entry["name"]);
+    assert_eq!(entry["started_at"], entry["report"]["started_at"]);
+    csms.shutdown().await;
 }

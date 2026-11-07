@@ -20,7 +20,7 @@ fn command(args: &[&str]) -> Command {
 async fn run(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        command(&args).output().expect("binary runs")
+        crate::support::output(command(&args))
     })
     .await
     .unwrap()

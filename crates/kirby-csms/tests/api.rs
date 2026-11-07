@@ -368,11 +368,16 @@ async fn station_calls_history_and_forget() {
     assert_eq!(body["error"]["code"], "conflict");
 
     let _ = station.shutdown().await;
+    let disconnect_deadline = tokio::time::Instant::now() + WAIT;
     loop {
         let (_, body) = csms.get("/v1/stations/CP-1").await;
         if body["connected"] == false {
             break;
         }
+        assert!(
+            tokio::time::Instant::now() < disconnect_deadline,
+            "station never seen as disconnected"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     // Known but disconnected: 409.
@@ -663,7 +668,7 @@ async fn event_stream_limit_is_sixteen_and_slots_are_freed() {
             break;
         }
         assert!(tokio::time::Instant::now() < deadline, "slot never freed");
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -809,7 +814,10 @@ async fn silent_station(addr: &str, id: &str) -> TcpStream {
     let mut head = Vec::new();
     let mut byte = [0_u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        stream.read_exact(&mut byte).await.unwrap();
+        tokio::time::timeout(WAIT, stream.read_exact(&mut byte))
+            .await
+            .expect("handshake response timeout")
+            .unwrap();
         head.push(byte[0]);
     }
     assert!(String::from_utf8_lossy(&head).contains(" 101 "));
@@ -823,7 +831,7 @@ async fn too_many_commands_in_flight_get_429() {
     let deadline = tokio::time::Instant::now() + WAIT;
     while csms.get("/v1/stations/CP-1").await.0 != 200 {
         assert!(tokio::time::Instant::now() < deadline, "station not seen");
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     let pending: Vec<_> = (0..256)
         .map(|_| {
@@ -842,7 +850,7 @@ async fn too_many_commands_in_flight_get_429() {
                     if answer.0 != 429 {
                         return answer;
                     }
-                    tokio::task::yield_now().await;
+                    tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             })
         })
@@ -857,7 +865,7 @@ async fn too_many_commands_in_flight_get_429() {
         }
         assert_eq!(status, 404, "{body}");
         assert!(tokio::time::Instant::now() < deadline, "never saw 429");
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     drop(csms);
     for task in pending {
@@ -1147,7 +1155,14 @@ async fn slow_clients_and_connection_flood_are_cut() {
     // More than 512 idle connections: the extra ones are closed at once.
     let mut open = Vec::new();
     for _ in 0..512 {
-        open.push(TcpStream::connect(addr).await.unwrap());
+        match TcpStream::connect(addr).await {
+            Ok(stream) => open.push(stream),
+            Err(error) if is_fd_limit(&error) => {
+                eprintln!("skipping the connection flood: descriptor limit reached ({error})");
+                return;
+            }
+            Err(error) => panic!("connect: {error}"),
+        }
     }
     // Give the accept loop time to take all of them.
     let mut extra = TcpStream::connect(addr).await.unwrap();
@@ -1158,6 +1173,14 @@ async fn slow_clients_and_connection_flood_are_cut() {
     assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
     drop(open);
     assert_eq!(csms.get("/v1/health").await.0, 200);
+}
+
+/// `EMFILE` ("Too many open files"): a low `ulimit -n` on the runner, not a product failure.
+fn is_fd_limit(error: &std::io::Error) -> bool {
+    error
+        .to_string()
+        .to_lowercase()
+        .contains("too many open files")
 }
 
 /// Reads until the peer closes or `limit` passes; whether it was still open at the end.
@@ -1423,4 +1446,290 @@ async fn connected_event_ids_and_string_transaction_ids() {
         detail["state"]["transactions"][0]["id"].is_string(),
         "{detail}"
     );
+}
+
+/// The sorted top-level keys of a JSON object.
+fn keys(value: &Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap_or_else(|| panic!("not an object: {value}"))
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    keys
+}
+
+/// The value of the `Allow` header of a raw answer, if any (header name case-insensitive).
+fn allow_of(answer: &str) -> Option<String> {
+    let head = answer.split("\r\n\r\n").next().unwrap_or_default();
+    head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("allow")
+            .then(|| value.trim().to_owned())
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn allow_header_is_set_on_405_and_options_only() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let exchange = |method: &'static str, path: &'static str, extra: &'static str| async move {
+        raw_exchange(
+            addr,
+            &format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n{extra}\r\n"),
+        )
+        .await
+    };
+    // 405: same format as OPTIONS, sorted, HEAD and OPTIONS included.
+    let answer = exchange("POST", "/v1/health", "").await;
+    assert_eq!(status_of(&answer), 405, "{answer}");
+    assert_eq!(allow_of(&answer).as_deref(), Some("GET, HEAD, OPTIONS"));
+    let answer = exchange("PATCH", "/v1/faults", "").await;
+    assert_eq!(
+        allow_of(&answer).as_deref(),
+        Some("DELETE, GET, HEAD, OPTIONS, POST")
+    );
+    let answer = exchange("GET", "/v1/stations/X/calls", "").await;
+    assert_eq!(status_of(&answer), 405, "{answer}");
+    assert_eq!(allow_of(&answer).as_deref(), Some("OPTIONS, POST"));
+    // 204 for OPTIONS: identical value.
+    let answer = exchange("OPTIONS", "/v1/health", "").await;
+    assert_eq!(status_of(&answer), 204, "{answer}");
+    assert_eq!(allow_of(&answer).as_deref(), Some("GET, HEAD, OPTIONS"));
+    let answer = exchange("OPTIONS", "/v1/rules/Heartbeat", "").await;
+    assert_eq!(allow_of(&answer).as_deref(), Some("DELETE, OPTIONS, PUT"));
+    // Other statuses carry none: 200, 404 and the refusals of the auth layer.
+    for (method, path, extra, status) in [
+        ("GET", "/v1/health", "", 200),
+        ("GET", "/v1/nope", "", 404),
+        ("OPTIONS", "/v1/nope", "", 404),
+        ("OPTIONS", "/v1", "Host: evil.com\r\n", 400),
+        ("POST", "/v1/health", "Origin: http://x\r\n", 403),
+    ] {
+        let answer = exchange(method, path, extra).await;
+        if status == 400 {
+            continue; // two Host headers: only checks that nothing panics
+        }
+        assert_eq!(status_of(&answer), status, "{method} {path}: {answer}");
+        assert_eq!(allow_of(&answer), None, "{method} {path}: {answer}");
+    }
+    let answer = raw_exchange(addr, "OPTIONS /v1 HTTP/1.1\r\nHost: evil.com\r\n\r\n").await;
+    assert_eq!(status_of(&answer), 403, "{answer}");
+    assert_eq!(allow_of(&answer), None, "{answer}");
+
+    // With a token: 401 on an unauthenticated OPTIONS, 405/204 once authenticated.
+    let csms = Csms::start(&["--api-token", "sekret"]);
+    let addr = &csms.api_addr;
+    for (method, path) in [("OPTIONS", "/v1/health"), ("POST", "/v1/health")] {
+        let answer = raw_exchange(
+            addr,
+            &format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\n\r\n"),
+        )
+        .await;
+        assert_eq!(status_of(&answer), 401, "{answer}");
+        assert_eq!(allow_of(&answer), None, "{answer}");
+    }
+    let answer = raw_exchange(
+        addr,
+        &format!(
+            "POST /v1/health HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer sekret\r\n\r\n"
+        ),
+    )
+    .await;
+    assert_eq!(status_of(&answer), 405, "{answer}");
+    assert_eq!(allow_of(&answer).as_deref(), Some("GET, HEAD, OPTIONS"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeated_query_parameters_are_refused() {
+    let csms = Csms::start(&[]);
+    let _station = station(&csms.station_addr, "CP-1").await;
+    for path in [
+        "/v1/stations/CP-1/history?limit=1&limit=2",
+        "/v1/events?station=a&station=b",
+    ] {
+        let (status, body) = csms.get(path).await;
+        assert_eq!(status, 400, "{path}: {body}");
+        assert_eq!(body["error"]["code"], "bad_request");
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("limit") || message.contains("station"),
+            "{message}"
+        );
+    }
+    let (status, _) = csms.get("/v1/stations/CP-1/history?limit=1").await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn listed_methods_are_the_routers_methods() {
+    let csms = Csms::start(&[]);
+    let (_, index) = csms.get("/v1").await;
+    for resource in index["resources"].as_array().unwrap() {
+        let path = resource["path"]
+            .as_str()
+            .unwrap()
+            .replace("{id}", "X")
+            .replace("{action}", "Heartbeat");
+        let listed: Vec<&str> = resource["methods"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap())
+            .collect();
+        for method in ["GET", "POST", "PUT", "DELETE"] {
+            if listed.contains(&method) {
+                // The event stream never ends; the 405 check of the others covers the route.
+                if method == "GET" && path == "/v1/events" {
+                    continue;
+                }
+                let (status, body) = http(&csms.api_addr, method, &path, &[], Some("{}")).await;
+                assert_ne!(status, 405, "{method} {path} is listed but not routed");
+                assert_ne!(
+                    body["error"]["code"], "not_found",
+                    "{method} {path} is listed but not routed"
+                );
+                continue;
+            }
+            let (status, body) = http(&csms.api_addr, method, &path, &[], Some("{}")).await;
+            assert_eq!(
+                status, 405,
+                "{method} {path} is routed but not listed: {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn golden_key_sets_of_the_shapes() {
+    const STATION: [&str; 10] = [
+        "active_transactions",
+        "connected",
+        "connectors",
+        "id",
+        "model",
+        "protocol",
+        "received_calls",
+        "remote_addr",
+        "security_events",
+        "vendor",
+    ];
+    let csms = Csms::start(&[]);
+    let (_, mut events) = Sse::open(&csms.api_addr, "/v1/events", &[]).await;
+
+    let (_, health) = csms.get("/v1/health").await;
+    assert_eq!(keys(&health), ["api_version", "ok", "stations", "version"]);
+    let (_, index) = csms.get("/v1").await;
+    assert_eq!(keys(&index), ["api_version", "resources", "version"]);
+    for resource in index["resources"].as_array().unwrap() {
+        assert_eq!(keys(resource), ["methods", "path"]);
+    }
+
+    // A station that never booted: every key is there, unknown values are null or empty.
+    let _silent = silent_station(&csms.station_addr, "RAW-1").await;
+    events.read_until("\"station\":\"RAW-1\"").await;
+    let (_, list) = csms.get("/v1/stations").await;
+    let raw = &list["stations"][0];
+    assert_eq!(keys(raw), STATION, "{raw}");
+    assert_eq!(raw["vendor"], Value::Null);
+    assert_eq!(raw["model"], Value::Null);
+    assert!(raw["remote_addr"].is_string());
+    let (_, detail) = csms.get("/v1/stations/RAW-1").await;
+    let mut with_state = STATION.to_vec();
+    with_state.push("state");
+    with_state.sort_unstable();
+    assert_eq!(keys(&detail), with_state, "{detail}");
+
+    // A booted one.
+    let _booted = station(&csms.station_addr, "CP-1").await;
+    let (_, detail) = csms.get("/v1/stations/CP-1").await;
+    assert_eq!(keys(&detail), with_state, "{detail}");
+    assert!(detail["vendor"].is_string() && detail["model"].is_string());
+    let (_, list) = csms.get("/v1/stations").await;
+    for item in list["stations"].as_array().unwrap() {
+        assert_eq!(keys(item), STATION, "{item}");
+    }
+    let (_, no_state) = csms.get("/v1/stations/NOPE").await;
+    assert_eq!(keys(&no_state), ["error"]);
+    assert_eq!(keys(&no_state["error"]), ["code", "message"]);
+
+    // `state` (as serialized by the engine) keeps its keys, with explicit nulls.
+    assert_eq!(
+        keys(&detail["state"]),
+        [
+            "boot",
+            "certificate_request",
+            "connectors",
+            "diagnostics_status",
+            "failed_calls",
+            "firmware_status",
+            "installed_certificates",
+            "last_heartbeat_at",
+            "log_status",
+            "security_events",
+            "security_events_total",
+            "signed_firmware_status",
+            "transactions",
+            "unknown_stops",
+        ]
+    );
+    assert_eq!(detail["state"]["log_status"], Value::Null);
+
+    // History frames and events.
+    let (_, history) = csms.get("/v1/stations/CP-1/history").await;
+    assert_eq!(keys(&history), ["frames", "station"]);
+    let frame = &history["frames"][0];
+    assert_eq!(
+        keys(frame),
+        [
+            "action",
+            "direction",
+            "id",
+            "kind",
+            "payload",
+            "station",
+            "ts",
+            "type"
+        ]
+    );
+    events.read_until("event: state").await;
+    let data = events.data();
+    let by_type = |kind: &str| data.iter().find(|event| event["type"] == kind).unwrap();
+    assert_eq!(
+        keys(by_type("connected")),
+        ["protocol", "remote_addr", "station", "ts", "type"]
+    );
+    assert_eq!(
+        keys(by_type("state")),
+        ["active_transactions", "connectors", "station", "ts", "type"]
+    );
+    let call = data
+        .iter()
+        .find(|event| event["type"] == "frame" && event["kind"] == "call")
+        .unwrap();
+    assert_eq!(keys(call), keys(frame));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hyper_answers_before_the_router_have_an_empty_body() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let cases = [
+        ("GARBAGE\r\n\r\n".to_owned(), 400),
+        (
+            format!(
+                "GET /v1 HTTP/1.1\r\nHost: {addr}\r\nX-Big: {}\r\n\r\n",
+                "a".repeat(500_000)
+            ),
+            431,
+        ),
+    ];
+    for (request, status) in cases {
+        let answer = raw_exchange(addr, &request).await;
+        assert_eq!(status_of(&answer), status, "{answer:.200}");
+        let (head, body) = answer.split_once("\r\n\r\n").unwrap();
+        assert!(body.is_empty(), "{answer:.200}");
+        assert!(!head.to_lowercase().contains("application/json"), "{head}");
+    }
 }

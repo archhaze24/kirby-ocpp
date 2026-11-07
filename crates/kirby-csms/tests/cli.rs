@@ -1040,13 +1040,26 @@ async fn unread_stdout_does_not_stall_the_log_file_or_the_shutdown() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    // The first line is read by hand; the rest of stdout is never read.
-    let stdout = child.stdout.as_mut().unwrap();
-    let mut first = String::new();
-    let mut byte = [0u8; 1];
-    while std::io::Read::read(stdout, &mut byte).unwrap() == 1 && byte[0] != b'\n' {
-        first.push(char::from(byte[0]));
-    }
+    // The first line is read on a thread (with a deadline); the rest of stdout is never read,
+    // but the pipe stays open until `_hold` drops.
+    let stdout = child.stdout.take().unwrap();
+    let (first_tx, first_rx) = mpsc::channel();
+    let (_hold, hold_rx) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        let mut first = String::new();
+        let _ = reader.read_line(&mut first);
+        let _ = first_tx.send(first);
+        let _ = hold_rx.recv();
+    });
+    let first = match first_rx.recv_timeout(WAIT) {
+        Ok(first) => first,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("no first stdout line: {error:?}");
+        }
+    };
     let value: Value = serde_json::from_str(&first).unwrap();
     let addr = value["addr"].as_str().unwrap().to_owned();
     let station = station(&addr, "CP-1", false).await;
@@ -1072,7 +1085,7 @@ async fn unread_stdout_does_not_stall_the_log_file_or_the_shutdown() {
             "log file stalled at {} bytes",
             logged.len()
         );
-        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
     }
     let pid = child.id().to_string();
     assert!(
@@ -1093,7 +1106,7 @@ async fn unread_stdout_does_not_stall_the_log_file_or_the_shutdown() {
                 let _ = child.wait();
                 return None;
             }
-            std::thread::yield_now();
+            std::thread::sleep(Duration::from_millis(20));
         }
     })
     .await

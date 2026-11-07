@@ -20,7 +20,7 @@ jobs:
   check:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
@@ -51,5 +51,19 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Test
-        run: cargo test --workspace
+      - name: Install nextest
+        uses: taiki-e/install-action@v2.90.1
+        with:
+          tool: nextest
+
+      # One process per test (the `ci` profile in .config/nextest.toml kills hung tests).
+      - name: Test (nextest)
+        run: cargo nextest run --workspace --profile ci
+
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+      # Tests of a crate share one process under `cargo test`: keep one run of that mode.
+      - name: Test (shared process)
+        if: runner.os == 'Linux'
+        run: cargo test --workspace --tests

@@ -101,6 +101,9 @@ async fn main() -> ExitCode {
         // The screen belongs to the UI; `--log-file` still gets every event.
         out.set_stdout(false);
     }
+    // Headless runs: register the signal handlers before `listening` is printed, so a signal
+    // sent after that line is never lost to the default action.
+    let mut shutdown = session.is_none().then(Shutdown::install);
     // Subscribe first, print `listening`, then start printing events: that line always comes
     // first and nothing is missed.
     let sink_events = handle.subscribe();
@@ -135,9 +138,9 @@ async fn main() -> ExitCode {
             }
         }
     } else if let (Some(script), Some(events)) = (&script, script_events) {
-        run_script(&cli, script, &handle, events, &out).await
+        run_script(&cli, script, &handle, events, &out, shutdown.as_mut()).await
     } else {
-        let _ = shutdown_signal().await;
+        let _ = wait_shutdown(shutdown.as_mut()).await;
         ExitCode::SUCCESS
     };
     // The API stops last: event streams then still get the closing `disconnected` events.
@@ -263,25 +266,67 @@ fn load_tls(
     Ok(())
 }
 
-/// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C).
-async fn shutdown_signal() -> bool {
+/// SIGINT and SIGTERM, registered up front so no signal is lost between startup and the wait.
+struct Shutdown {
     #[cfg(unix)]
-    {
-        use tokio::signal::unix::{SignalKind, signal};
-        if let Ok(mut term) = signal(SignalKind::terminate()) {
-            tokio::select! {
-                _ = tokio::signal::ctrl_c() => true,
-                _ = term.recv() => false,
+    term: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    int: Option<tokio::signal::unix::Signal>,
+}
+
+impl Shutdown {
+    fn install() -> Self {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{SignalKind, signal};
+            Self {
+                term: signal(SignalKind::terminate()).ok(),
+                int: signal(SignalKind::interrupt()).ok(),
             }
-        } else {
+        }
+        #[cfg(not(unix))]
+        {
+            Self {}
+        }
+    }
+
+    /// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C).
+    async fn wait(&mut self) -> bool {
+        #[cfg(unix)]
+        {
+            async fn recv(signal: &mut Option<tokio::signal::unix::Signal>) {
+                match signal {
+                    Some(signal) => {
+                        signal.recv().await;
+                    }
+                    None => std::future::pending().await,
+                }
+            }
+            if self.int.is_none() {
+                // No SIGINT stream: fall back to the lazy Ctrl-C future.
+                return tokio::select! {
+                    _ = tokio::signal::ctrl_c() => true,
+                    () = recv(&mut self.term) => false,
+                };
+            }
+            tokio::select! {
+                () = recv(&mut self.int) => true,
+                () = recv(&mut self.term) => false,
+            }
+        }
+        #[cfg(not(unix))]
+        {
             let _ = tokio::signal::ctrl_c().await;
             true
         }
     }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
-        true
+}
+
+/// Waits for a signal; never resolves without handlers (the terminal UI owns the signals then).
+async fn wait_shutdown(shutdown: Option<&mut Shutdown>) -> bool {
+    match shutdown {
+        Some(shutdown) => shutdown.wait().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -292,6 +337,7 @@ async fn run_script(
     handle: &CsmsHandle,
     events: broadcast::Receiver<CsmsEvent>,
     out: &Output,
+    shutdown: Option<&mut Shutdown>,
 ) -> ExitCode {
     // `--timeout` is range-checked by clap; `checked_add` keeps a future change from panicking.
     let deadline = Instant::now()
@@ -300,7 +346,7 @@ async fn run_script(
     let mut interrupted = false;
     let report = tokio::select! {
         report = script::run(script, handle, events, deadline) => Some(report),
-        sigint = shutdown_signal() => {
+        sigint = wait_shutdown(shutdown) => {
             interrupted = sigint;
             None
         }

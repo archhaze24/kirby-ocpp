@@ -26,7 +26,7 @@ fn command(args: &[&str]) -> Command {
 async fn run(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        command(&args).output().expect("binary runs")
+        crate::support::output(command(&args))
     })
     .await
     .unwrap()
@@ -308,11 +308,11 @@ async fn headless_fleet_tags_lines_and_shuts_down_on_sigterm() {
         "3",
         &["--log-file", log.to_str().unwrap(), "--stagger-ms", "5"],
     );
-    let child = command(&args.iter().map(String::as_str).collect::<Vec<_>>())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = crate::support::ChildGuard::spawn(
+        command(&args.iter().map(String::as_str).collect::<Vec<_>>())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
     let pid = child.id().to_string();
     csms.wait_for_connection_count(3, STEP).await.unwrap();
     csms.wait_for_call_count_after(0, "BootNotification", 3, |_| true, STEP)
@@ -321,9 +321,7 @@ async fn headless_fleet_tags_lines_and_shuts_down_on_sigterm() {
 
     let status = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
     assert!(status.success());
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = crate::support::finish(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     csms.wait_for_disconnect(STEP).await.unwrap();
 
@@ -342,5 +340,90 @@ async fn headless_fleet_tags_lines_and_shuts_down_on_sigterm() {
         text.lines().count(),
         "log file mirrors stdout"
     );
+    csms.shutdown().await;
+}
+
+/// Top-level keys and JSON types of the fleet report are a public contract.
+#[tokio::test(flavor = "multi_thread")]
+async fn fleet_report_has_the_contract_shape() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let output = run(fleet_args(
+        &csms,
+        "2",
+        &["run", "--scenario", "charge-session", "--json"],
+    ))
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let lines = jsonl(&output);
+    let report = lines.last().unwrap();
+    let mut keys: Vec<&str> = report
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "counts",
+            "duration_ms",
+            "error_names",
+            "failed",
+            "failed_names",
+            "ocpp_version",
+            "passed",
+            "passed_count",
+            "scenario",
+            "schema",
+            "source",
+            "started_at",
+            "stations",
+            "status",
+            "tool_version",
+            "total",
+            "type",
+        ]
+    );
+    for key in [
+        "ocpp_version",
+        "scenario",
+        "source",
+        "started_at",
+        "status",
+        "tool_version",
+        "type",
+    ] {
+        assert!(report[key].is_string(), "{key}");
+    }
+    assert!(report["schema"].is_u64() && report["duration_ms"].is_u64());
+    assert!(report["total"].is_u64() && report["passed_count"].is_u64());
+    assert!(report["passed"].is_boolean());
+    for key in ["failed", "failed_names", "error_names", "stations"] {
+        assert!(report[key].is_array(), "{key}");
+    }
+    let counts = report["counts"].as_object().unwrap();
+    assert_eq!(counts.len(), 4);
+    assert_eq!(counts["skipped"], 0);
+    assert_eq!(counts["passed"], 2);
+    let entry = report["stations"][0].as_object().unwrap();
+    let mut keys: Vec<&str> = entry.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "duration_ms",
+            "ocpp_version",
+            "passed",
+            "scenario",
+            "schema",
+            "source",
+            "started_at",
+            "station",
+            "status",
+            "tool_version",
+        ]
+    );
+    assert!(entry["duration_ms"].is_u64() && entry["passed"].is_boolean());
     csms.shutdown().await;
 }

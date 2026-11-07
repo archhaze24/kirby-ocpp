@@ -28,7 +28,7 @@ fn command(args: &[&str]) -> Command {
 async fn run(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        command(&args).output().expect("binary runs")
+        crate::support::output(command(&args))
     })
     .await
     .unwrap()
@@ -251,11 +251,11 @@ async fn headless_logs_jsonl_and_shuts_down_on_sigterm() {
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("events.jsonl");
     let args = station_args(&csms, &["--json", "--log-file", log.to_str().unwrap()]);
-    let child = command(&args.iter().map(String::as_str).collect::<Vec<_>>())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = crate::support::ChildGuard::spawn(
+        command(&args.iter().map(String::as_str).collect::<Vec<_>>())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
     let pid = child.id().to_string();
     csms.wait_for_call("BootNotification", STEP).await.unwrap();
     csms.wait_for_call("StatusNotification", STEP)
@@ -264,9 +264,7 @@ async fn headless_logs_jsonl_and_shuts_down_on_sigterm() {
 
     let status = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
     assert!(status.success());
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = crate::support::finish(child).await;
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     csms.wait_for_disconnect(STEP).await.unwrap();
 
@@ -293,11 +291,11 @@ async fn run_exits_130_on_sigint() {
         "name = \"slow\"\n[[steps]]\naction = \"sleep\"\nms = 60000\n",
     );
     let args = station_args(&csms, &["run", "--scenario", &slow, "--json"]);
-    let child = command(&args.iter().map(String::as_str).collect::<Vec<_>>())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+    let child = crate::support::ChildGuard::spawn(
+        command(&args.iter().map(String::as_str).collect::<Vec<_>>())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
     let pid = child.id().to_string();
     csms.wait_for_call("BootNotification", STEP).await.unwrap();
     csms.wait_for_call("StatusNotification", STEP)
@@ -306,9 +304,7 @@ async fn run_exits_130_on_sigint() {
 
     let status = Command::new("kill").args(["-INT", &pid]).status().unwrap();
     assert!(status.success());
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = crate::support::finish(child).await;
     assert_eq!(output.status.code(), Some(130), "{}", stderr(&output));
     assert!(stderr(&output).contains("interrupted"));
     csms.wait_for_disconnect(STEP).await.unwrap();
@@ -376,5 +372,53 @@ async fn run_var_overrides_scenario_vars_and_bad_names_exit_2() {
         .await;
         assert_eq!(output.status.code(), Some(2), "{bad}");
     }
+    csms.shutdown().await;
+}
+
+/// Top-level keys and JSON types of the single-run report are a public contract.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_report_has_the_contract_shape() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let report_path = dir.path().join("report.json");
+    let mut args = station_args(&csms, &["run", "--scenario", "charge-session", "--report"]);
+    args.push(report_path.to_str().unwrap().to_owned());
+    let output = run(args).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let saved: Value = serde_json::from_slice(&std::fs::read(&report_path).unwrap()).unwrap();
+    let object = saved.as_object().unwrap();
+    let keys: Vec<&str> = object.keys().map(String::as_str).collect();
+    let mut expected = vec![
+        "cancelled",
+        "duration_ms",
+        "ocpp_version",
+        "passed",
+        "scenario",
+        "schema",
+        "source",
+        "started_at",
+        "station",
+        "status",
+        "steps",
+        "tool_version",
+    ];
+    expected.sort_unstable();
+    let mut keys = keys;
+    keys.sort_unstable();
+    assert_eq!(keys, expected);
+    for key in [
+        "ocpp_version",
+        "scenario",
+        "source",
+        "started_at",
+        "station",
+        "status",
+        "tool_version",
+    ] {
+        assert!(saved[key].is_string(), "{key}");
+    }
+    assert!(saved["schema"].is_u64() && saved["duration_ms"].is_u64());
+    assert!(saved["passed"].is_boolean() && saved["cancelled"].is_boolean());
+    assert!(saved["steps"].is_array());
     csms.shutdown().await;
 }

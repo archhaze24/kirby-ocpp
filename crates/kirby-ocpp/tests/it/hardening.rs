@@ -27,7 +27,7 @@ fn command(args: &[&str]) -> Command {
 async fn run(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        command(&args).output().expect("binary runs")
+        crate::support::output(command(&args))
     })
     .await
     .unwrap()
@@ -66,7 +66,7 @@ fn wait_exit(child: &mut std::process::Child) -> Option<i32> {
             let _ = child.wait();
             return None;
         }
-        std::thread::yield_now();
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
@@ -174,15 +174,12 @@ fn help_shows_the_id_placeholder_and_the_licenses_rule() {
 
 /// Spawns with a stdout whose reader is already gone.
 #[cfg(unix)]
-fn spawn_closed_stdout(args: &[String]) -> std::process::Child {
+fn spawn_closed_stdout(args: &[String]) -> crate::support::ChildGuard {
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let mut child = command(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    drop(child.stdout.take());
-    child
+    // A pipe whose read end is closed: every write to stdout fails with EPIPE.
+    let (read, write) = std::io::pipe().expect("pipe");
+    drop(read);
+    crate::support::ChildGuard::spawn(command(&args).stdout(write).stderr(Stdio::piped()))
 }
 
 #[cfg(unix)]
@@ -211,9 +208,7 @@ async fn closed_stdout_still_writes_reports(count: Option<&str>) {
         args.drain(at - 1..=at);
     }
     let child = spawn_closed_stdout(&args);
-    let output = tokio::task::spawn_blocking(move || child.wait_with_output().unwrap())
-        .await
-        .unwrap();
+    let output = crate::support::finish(child).await;
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("panicked"), "{stderr}");
     assert!(!stderr.contains("Broken pipe"), "{stderr}");

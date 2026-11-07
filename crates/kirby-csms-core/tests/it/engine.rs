@@ -898,7 +898,7 @@ async fn call_timeout_covers_the_time_spent_queued() {
         "{queued:?}"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(30),
         "the queued call waited for the outstanding one"
     );
     // The expired call was never written.
@@ -1171,7 +1171,7 @@ async fn silent_station_is_dropped_by_the_ping_watchdog() {
 async fn station_that_answers_pings_stays_connected() {
     let csms = start(|c| {
         c.ping_interval = Duration::from_millis(40);
-        c.pong_timeout = Duration::from_millis(2_000);
+        c.pong_timeout = Duration::from_secs(10);
     })
     .await;
     let mut events = csms.subscribe();

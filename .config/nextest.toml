@@ -1,0 +1,15 @@
+# cargo-nextest settings. The `ci` profile is what CI runs: `cargo nextest run --workspace --profile ci`.
+# Details: docs/testing.md.
+
+[profile.ci]
+# Report every failing test, not just the first.
+fail-fast = false
+# A flaky test must fail the build, not pass on a retry.
+retries = 0
+# A test that runs longer than 3 x 20 s is a hang: terminate it so the job fails fast.
+slow-timeout = { period = "20s", terminate-after = 3 }
+
+[[profile.ci.overrides]]
+# These two tests wait for the HTTP API head timeout (10 s) on purpose.
+filter = "binary_id(kirby-csms::api) & (test(slow_clients_and_connection_flood_are_cut) | test(head_timer_only_stops_for_a_real_request))"
+slow-timeout = { period = "45s", terminate-after = 2 }
