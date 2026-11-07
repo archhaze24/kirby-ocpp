@@ -102,6 +102,8 @@ The full index is in [docs/README.md](https://github.com/archhaze24/kirby-ocpp/b
 
 | Topic | Page |
 | --- | --- |
+| Copy-pasteable recipes for common jobs | [docs/cookbook.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/cookbook.md) |
+| Run kirby in GitHub Actions or GitLab CI | [docs/ci.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/ci.md) |
 | Charge point emulator: TUI keys, headless mode, fleet, state, response rules | [docs/emulator.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/emulator.md) |
 | Central system: TUI, stdin commands, rules, fault injection | [docs/csms.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/csms.md) |
 | Scenarios, suites and CSMS scripts: variables, loops, JSON and JUnit reports | [docs/scenarios.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/scenarios.md) |

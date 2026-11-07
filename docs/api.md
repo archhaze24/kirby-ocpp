@@ -12,6 +12,9 @@ The shapes in this page are a public contract, versioned by the path prefix and 
 - The API is protocol-neutral. A station object carries `protocol`, the WebSocket subprotocol negotiated for its connection (`"ocpp1.6"` today, `null` when the subprotocol policy selected none), so that stations of other OCPP versions can be served on the same listener without a new API version. Protocol ids are strings in the API (see [Ids](#ids)).
 - Protocol-level outcomes of a call (the station answered with a CALLERROR, or did not answer in time) are HTTP `200` with `"ok":false`; HTTP errors mean the request was not delivered or was not valid, see [Errors and limits](#errors-and-limits).
 - Browsers are refused by design: there are no CORS headers, and a request with an `Origin` header is refused without a token. `OPTIONS` answers `204` with an `Allow` header for every known path (behind the same token and `Host` checks) and is meant for tools, not for browser preflights.
+- `Allow` is derived from the route table that `GET /v1` lists and appears only on a `405` and on the `204` answer to `OPTIONS`, in one format: the route's methods plus `HEAD` (for a `GET` route) and `OPTIONS`, sorted, joined by a comma and a space (`GET, HEAD, OPTIONS`). No other status (`200`, `401`, `403`, `404`, ...) carries it.
+- Absent and `null`: a field that exists in a shape is always present. A value that is not known yet is an explicit `null` (a station that never booted has `"vendor":null`), a collection that is empty is `[]` or `{}`, a counter is `0`. A key that is missing means the field does not exist in this version of the API: clients must tolerate keys they do not know and must not rely on a key being absent. Optional extension fields that are not defined yet are simply not sent.
+- Golden shapes (top-level keys, checked by the test suite): health `ok`, `api_version`, `version`, `stations`; index `api_version`, `version`, `resources` (each `path`, `methods`); station object (in the list and in `GET /v1/stations/{id}`) `id`, `connected`, `protocol`, `received_calls`, `remote_addr`, `vendor`, `model`, `connectors`, `active_transactions`, `security_events`, and `state` in `GET /v1/stations/{id}` only; history `station`, `frames`; frames and events as in [Event stream](#event-stream).
 
 ## Start
 
@@ -43,7 +46,7 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `GET /v1/health` | `{"ok":true,"api_version":1,"version":"...","stations":N}` |
 | `GET /v1/stations` | `{"stations":[...]}`, the station objects (below) |
 | `GET /v1/stations/{id}` | The station object plus `state` (boot info, connectors, transactions, ...); `404` `unknown_station` if never seen |
-| `GET /v1/stations/{id}/history?limit=N` | `{"station":..,"frames":[...]}`, oldest first, only the newest `N` with `limit` (`0` gives none; ASCII decimal digits only (`+5`, `-1` and an empty value are `400`), `%XX` escapes are decoded like `station=`; other parameters are `400`); frames are shaped like the `--json` frame lines; `AuthorizationKey` values are redacted unless `--show-secrets`; `404` `unknown_station` if never seen |
+| `GET /v1/stations/{id}/history?limit=N` | `{"station":..,"frames":[...]}`, oldest first, only the newest `N` with `limit` (`0` gives none; ASCII decimal digits only (`+5`, `-1` and an empty value are `400`), `%XX` escapes are decoded like `station=`; other or repeated parameters are `400`); frames are shaped like the `--json` frame lines; `AuthorizationKey` values are redacted unless `--show-secrets`; `404` `unknown_station` if never seen |
 | `POST /v1/stations/{id}/calls` | Sends a CALL; body `{"action":"Reset","payload":{...},"timeout_ms":5000}` (`payload` default `{}`, `timeout_ms` 1..=86400000, default `--call-timeout`). Answers with `outcome` (`"result"`, `"call_error"` or `"timeout"`), `ok` and `result` or `error` (plus `code`, `details` for a CALLERROR); no `type`, `station` or `action` (the request names them), see below |
 | `DELETE /v1/stations/{id}` | Forgets a disconnected station (`{"station":..,"forgotten":true}`); `409` `conflict` while it is connected (decided atomically with the removal), `404` `unknown_station` if never seen |
 | `GET /v1/events?station=ID` | Server-Sent Events, see [Event stream](#event-stream) |
@@ -57,7 +60,7 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 Status of a call: `200` also when the station answered with a CALLERROR or the call timed out (`"ok":false` and `outcome` `call_error` or `timeout` in the body); `404` `unknown_station` when the id was never seen; `409` `station_not_connected` when the station is known but has no open connection (or the connection closed before the answer); `400` for a bad body; `413` above 1 MiB; `429` `too_many_requests` when 256 commands (stdin and API together) are already in flight, or when the request bodies of the calls in flight already hold 32 MiB (a body counts while its call runs; only the payload is kept in memory, the rest of the body is dropped before the call starts).
 - The 256 slots are shared with the stdin handler: when they are full the API answers `429` at once, while a stdin line waits for a free slot.
 
-A station object: `id`, `connected`, `protocol`, `received_calls`, and once known `remote_addr`, `vendor`, `model`, `connectors` (connector id to status), `active_transactions` and `security_events`.
+A station object always has `id`, `connected`, `protocol` (string or `null`), `received_calls`, `remote_addr` (string or `null`), `vendor` and `model` (strings, `null` until the station sent a `BootNotification`), `connectors` (connector id to status, `{}` until known), `active_transactions` (`[]` until known) and `security_events` (a count, `0` until known). `GET /v1/stations/{id}` adds `state` (`null` when the engine holds no state for the station).
 
 ### Ids
 
@@ -81,7 +84,7 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/stations/CP-1
 `GET /v1/events` is a Server-Sent Events stream of everything the server sees, from the moment of the request.
 - Each SSE message has an `id:` line (a counter that increases for every message the server sends on any stream, starting at 1), `event: <type>` and one `data:` line holding the same JSON object that `--json` prints for that event (types `connected`, `disconnected`, `frame`, `state`, `malformed`, `forgotten`, `auth_failed`; text is escaped the same way and `AuthorizationKey` values are redacted unless `--show-secrets`).
 - `Last-Event-ID` is ignored: a reconnecting client gets no replay and the counter does not restart. Use `/history` to fill gaps.
-- The optional `station=ID` (percent-encoded) shows only that station's events; an id that does not exist is fine and matches nothing. Nothing is replayed: use `/history` for the past.
+- The optional `station=ID` (percent-encoded, at most once; a repeated or any other parameter is `400`) shows only that station's events; an id that does not exist is fine and matches nothing. Nothing is replayed: use `/history` for the past.
 
 ```text
 $ curl -N http://127.0.0.1:9100/v1/events?station=CP-1
@@ -126,11 +129,11 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/faults
 
 ## Errors and limits
 
-Every error the API produces has the body `{"error":{"code":"<code>","message":"<text>"}}` and `Content-Type: application/json`. The `code` is stable (snake_case); the `message` is for people and may change. (Answers that hyper itself produces for a malformed request head, `400` and `431`, and cuts by the head timeout, have no JSON body.)
+Every error the API produces has the body `{"error":{"code":"<code>","message":"<text>"}}` and `Content-Type: application/json`. The `code` is stable (snake_case); the `message` is for people and may change. One exception: what hyper answers before the request reaches the router has an empty body and no `Content-Type`: `400` for a malformed request line or head (and for an invalid `Host`/header syntax hyper rejects), `431` for a head that is too large, and a connection closed without any answer when the head is not complete within the head timeout. Clients must not parse the body of those answers.
 
 | Status | `code` | When |
 | --- | --- | --- |
-| 400 | `bad_request` | Invalid JSON or fields, bad `timeout_ms`, bad `limit`, unknown query parameter, unsafe station id, more than one `Host` header, bad fault, a rule body that is not an object |
+| 400 | `bad_request` | Invalid JSON or fields, bad `timeout_ms`, bad `limit`, unknown or repeated query parameter, unsafe station id, more than one `Host` header, bad fault, a rule body that is not an object |
 | 400 | `unsupported_action` | `PUT`/`DELETE /v1/rules/{action}` with an action that is not a known charge-point action for the protocol (`ocpp1.6` today) |
 | 401 | `unauthorized` | Token configured and missing or wrong |
 | 403 | `forbidden` | No token configured and the request has an `Origin` header, `Sec-Fetch-Site: cross-site` or a non-loopback `Host` |

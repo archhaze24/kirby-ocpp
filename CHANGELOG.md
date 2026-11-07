@@ -11,6 +11,7 @@ tag as the GitHub release notes.
 
 #### Scenarios and scripts
 
+- Report vocabulary is consistent across the run, suite and fleet reports: fleet reports and their station entries carry `scenario`, `source`, `started_at` and `duration_ms`; suite entries add `scenario` (next to `name`) and `started_at`; `ocpp_version` comes from each run's own report; fleet `counts.skipped` is computed; `failed_names` and `error_names` list the two kinds of failure while `failed` keeps both.
 - Emulator scenarios have variables: an optional `[vars]` table (strings, numbers, booleans) and `${name}` substitution in the string fields and JSON payloads of a step. An exact `"${name}"` keeps the JSON type, `$${` is a literal `${`, and `${station_id}` and `${index}` are built in.
 - `capture = { name = "/json/pointer" }` on `send_raw`, `data_transfer` and `expect_call` steps stores a value of the answer for later steps; a missing pointer fails the step.
 - `kirby-ocpp run --var NAME=VALUE` (repeatable) overrides scenario variables, also in fleet runs. A name the scenario never uses is a usage error in `run` (exit 2) and a warning in `suite`.
@@ -64,6 +65,7 @@ tag as the GitHub release notes.
 
 ### 🔧 Changed
 
+- Station objects of the control API (and of `kirby-csms --json` and `{"cmd":"stations"}`) always carry every field: `remote_addr`, `vendor` and `model` are `null` while unknown, `connectors` is `{}`, `active_transactions` is `[]` and `security_events` is `0` before the engine has state; `GET /v1/stations/{id}` always has `state` (`null` without state). A key in a shape is always present; a key that is missing is unknown to this version (`docs/api.md`).
 - `kirby-csms` scripts reject unknown top-level keys (they were ignored before), like emulator scenarios. The allowed keys are `name`, `description`, `vars`, `steps`, `ocpp_version`, `schema` and `tags`.
 - JUnit test case names are the step's stable label (`expect_call Heartbeat out`, `start_tx c1 TAG`) instead of `<number>. <name>`, `classname` is `ocpp1.6.<scenario>`, the position moves to a test case property and each suite has properties (`ocpp_version`, `station`, `tool_version`, `source`). Duplicate labels in a suite get ` #2`.
 - `StepReport` and `ScenarioReport` in `kirby-ocpp-core` have new fields; build them with `StepReport::new` and `ScenarioReport::new`.
@@ -86,6 +88,8 @@ tag as the GitHub release notes.
 
 ### 🐛 Fixed
 
+- The control API sets `Allow` in one place, derived from the route table: only on a `405` and on the `204` answer to `OPTIONS`, as `GET, HEAD, OPTIONS` (sorted, comma and space). `401`, `403` and other answers no longer carry axum's own `Allow`.
+- A repeated query parameter of the control API (`limit=1&limit=2`, `station=a&station=b`) is `400` `bad_request` instead of silently taking the last value.
 - `--id .` and `--id ..` are refused (exit 2): the URL layer drops such path segments, so the station connected to the bare base path under the wrong id. `--ws-subprotocol` must be an RFC 6455 token. Non-UTF-8 percent-encoded bytes in URL credentials reach the Basic `Authorization` header unchanged, an unparsable URL in an error text loses everything before its last `@`, and the status line of a refused upgrade is sanitised and cut to 200 characters in the error.
 - A secrets file that is unreadable or written by a newer build is never overwritten; the station keeps running without persisting secrets.
 - The emulator keeps the queue entry of a still running offline transaction when the queue overflows, closes an unkept start with a matching stop reason, and ends delayed-reply tasks with the connection.
@@ -97,6 +101,14 @@ tag as the GitHub release notes.
 - Stdin commands and the control API share one command executor in `kirby-csms`.
 - Release tooling: the npm builder verifies archives against their `.sha256` assets, the launcher does not forward SIGINT twice on a terminal, the container image is pushed only after the GitHub release succeeded, and `latest` only moves for the highest final version.
 - Windows CI test made independent of the OS send buffer size.
+- Connection error text from the central system is sanitized in every stderr line and in the fleet report. `run` and `suite` end with `connection lost: ...` (exit 1) when the link is gone for good while a scenario runs, and the headless give-up check no longer mistakes a short deliberate disconnect for it.
+- Ctrl-C inside a form or browser asks before quitting when work would be lost, and declining brings the view back; it no longer replaces another open question. `q` also confirms the quit question, a notice takes the footer line before the `waiting...` marker, and the marker clears when the connection drops.
+- `kirby-ocpp version` reports a commit only for a checkout of this workspace (not an enclosing repository), and rebuilds on worktrees and packed refs.
+- Connection hints: 401 and 403 point to the credentials and the security profile, a missing client certificate to `--tls-cert`/`--tls-key`, a name mismatch to `--tls-server-name`.
+- `run` notes an ignored `--state-dir`, and `scenarios validate` checks a repeated file once, warns about a scenario name used twice and notes skipped non-regular `*.toml` entries. The `kirby-csms` TUI builds the example station URL correctly for addresses without a port and for IPv6.
+- Scenario and script reports and JUnit output redact an `AuthorizationKey` value in the expected and actual payloads and in the failure reason, not only in `params`. Script reports show resolved `params`.
+- A scenario or script written for a later `schema` or another `ocpp_version` fails with the version message even when it uses newer keys; `schema`, `ocpp_version` and `tags` of the wrong type and the reserved `evse` and `id_token` step keys get dedicated messages. `kirby-csms --script` reads files with the same size limit and regular-file check as scenarios.
+- JUnit test case names stay unique when an explicit label looks like a generated ` #N` one, and the `classname` has no control characters. Did-you-mean suggestions are bounded in time and length, and error positions inside a multi-byte character no longer drop the line and column.
 
 ### 🔒 Security
 

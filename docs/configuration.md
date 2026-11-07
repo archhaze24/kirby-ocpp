@@ -107,7 +107,7 @@ Plain headless mode (no subcommand) prints every event at any level. `--log-file
 
 ## kirby-ocpp subcommands
 
-`kirby-ocpp run --scenario <FILE|NAME>` connects, waits for an accepted BootNotification, runs the scenario and prints the report. A `run` is ephemeral: it neither reads nor writes a state file, so a scenario starts from a clean station every time (`--state-dir` has no effect without `--persist`). It accepts every option above plus:
+`kirby-ocpp run --scenario <FILE|NAME>` connects, waits for an accepted BootNotification, runs the scenario and prints the report. A `run` is ephemeral: it neither reads nor writes a state file, so a scenario starts from a clean station every time (`--state-dir` has no effect without `--persist`; `run` prints a note when one is given). It accepts every option above plus:
 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
@@ -131,7 +131,7 @@ Plain headless mode (no subcommand) prints every event at any level. `--log-file
 | `--fail-fast` | | off | Stop after the first failed scenario; the rest are reported as SKIP |
 | `--var <NAME=VALUE>` | | none | Scenario variable for every scenario (repeatable), as for `run` |
 
-Exit codes of `suite`: 0 all scenarios passed; 1 any failed, timed out or could not boot, or a report file could not be written; 2 usage error; 130 SIGINT (both signals still write `--report`/`--junit` for what finished; SIGTERM exits 1). See [Scenarios](scenarios.md#suite-runs).
+Exit codes: [Exit codes](#kirby-ocpp-suite). Details: [Scenarios](scenarios.md#suite-runs).
 
 `kirby-ocpp scenarios list` lists the built-in scenarios; `kirby-ocpp scenarios show <NAME>` prints one as TOML. Scenario format: [Scenarios](scenarios.md).
 
@@ -235,12 +235,61 @@ CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md). Th
 
 ## Exit codes
 
-| Code | `kirby-ocpp` | `kirby-csms` |
-| --- | --- | --- |
-| 0 | Success (scenario passed, normal shutdown) | Success or clean shutdown |
-| 1 | Scenario step failed or timed out, or runtime error; the connection was lost for good (`--no-reconnect`, or `--reconnect-max-attempts` used up: the process prints `reconnect stopped (...)` with the last connect error and a hint, then exits; in a fleet when every station gave up); in fleet mode, any station failed | Script failed or timed out, or runtime error |
-| 2 | Usage or configuration error | Usage or configuration error |
-| 130 | `run` or `suite` interrupted by SIGINT (SIGTERM still ends with 1; `suite` writes its reports on both signals) | Script interrupted by SIGINT |
+This section is the single reference for exit codes; other pages link here. Code `2` always means a usage or configuration error found before the run starts (bad flag, bad value, invalid scenario or script file). Code `130` is SIGINT; SIGTERM ends a run with `1`.
+
+### kirby-ocpp, plain station
+
+No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no terminal). A fleet (`--count` above 1) follows the same rules.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Normal shutdown (quit in the UI, SIGINT or SIGTERM in headless mode). `--print-config`, `--licenses`, `version`, `completions` and `scenarios list|show` also exit 0 |
+| 1 | Headless only: the connection was lost for good (`--no-reconnect`, or `--reconnect-max-attempts` used up). The process prints `reconnect stopped (...)` with the last connect error and a hint. A fleet exits 1 when every station gave up. `run` and `suite` also exit 1 with `connection lost: ...` when that happens while a scenario is running. The UI keeps running instead |
+| 2 | Usage or configuration error |
+
+### kirby-ocpp run
+
+`run --scenario`, one station or a fleet.
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every step passed (fleet: every station passed) |
+| 1 | A step failed, the run timed out (`--timeout`), the station could not connect or boot, the connection was lost for good, or a report file could not be written (fleet: any station failed) |
+| 2 | Usage or configuration error, including an invalid scenario file or an unknown `--var` |
+| 130 | SIGINT. No JUnit file is written (fleet: no report files). SIGTERM exits 1 and still writes the single-station JUnit file |
+
+### kirby-ocpp suite
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every scenario passed |
+| 1 | Any scenario failed, timed out or could not boot, or a report file could not be written |
+| 2 | Usage error: no source, empty directory, invalid scenario file, `--count` above 1 |
+| 130 | SIGINT. The running scenario ends as an `error` row (`interrupted`), the rest are `skipped`, and `--report` and `--junit` are written for what finished. SIGTERM does the same and exits 1 |
+
+### kirby-ocpp scenarios validate
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every file is valid |
+| 2 | At least one file is not |
+
+### kirby-csms, plain server
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Clean shutdown |
+| 1 | Runtime error, for example the listener could not bind |
+| 2 | Usage or configuration error. Invalid flag combinations are found before the server binds |
+
+### kirby-csms --script
+
+| Code | Meaning |
+| --- | --- |
+| 0 | The script passed |
+| 1 | A step failed or timed out (`--timeout`), the server could not start, or a report file could not be written. On SIGTERM the `--junit` file still gets one failed suite (`interrupted`) |
+| 2 | Usage, configuration or script error |
+| 130 | SIGINT, no report |
 
 ## Related pages
 

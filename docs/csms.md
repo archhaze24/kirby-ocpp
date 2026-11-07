@@ -176,12 +176,7 @@ In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` s
 
 ## Exit codes
 
-| Code | Meaning |
-| --- | --- |
-| 0 | success or clean shutdown |
-| 1 | script failed or timed out, or the server could not start / runtime error |
-| 2 | usage, configuration or script error (invalid flag combinations are found before the server binds) |
-| 130 | script interrupted by SIGINT |
+`kirby-csms` exits 0 on success or a clean shutdown, 1 when a script fails or times out or the server cannot start, 2 on usage, configuration or script errors, and 130 when a script is interrupted by SIGINT. The full table is in [configuration.md](configuration.md#exit-codes).
 
 ## Use as a library
 

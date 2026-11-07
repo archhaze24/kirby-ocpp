@@ -8,7 +8,9 @@ Contents: [Start here](#start-here) · [Pages](#pages)
 
 | You are | Read in this order |
 | --- | --- |
-| A user of the emulator (`kirby-ocpp`) | [README](../README.md) quick start, [Emulator](emulator.md), [Scenarios](scenarios.md), [Configuration](configuration.md) |
+| New to the tools | [README](../README.md) quick start, then the [Cookbook](cookbook.md) |
+| Running kirby in CI | [Run kirby in CI](ci.md), [Scenarios](scenarios.md#suite-runs), [Exit codes](configuration.md#exit-codes) |
+| A user of the emulator (`kirby-ocpp`) | [Emulator](emulator.md), [Scenarios](scenarios.md), [Configuration](configuration.md) |
 | A user of the CSMS (`kirby-csms`) | [README](../README.md), [CSMS](csms.md), [HTTP API](api.md), [Scenarios](scenarios.md) (scripts), [Security](security.md), [Configuration](configuration.md) |
 | Testing TLS, Basic Auth or certificates | [Security](security.md), then [Configuration](configuration.md) |
 | A contributor | [Architecture](architecture.md), [Development](development.md), [Testing](testing.md), then the topic page you change |
@@ -19,6 +21,8 @@ Contents: [Start here](#start-here) · [Pages](#pages)
 | Page | Content |
 | --- | --- |
 | [architecture.md](architecture.md) | Crate map, layer contracts, data flow, invariants, where each concern lives, test layout |
+| [cookbook.md](cookbook.md) | Eight copy-pasteable recipes: first run, built-in suite, rejected tag, reconnect, fleet load, scripted CSMS, TLS, variables and loops |
+| [ci.md](ci.md) | Workflows for GitHub Actions and GitLab CI, exit codes, timeouts, reports and reading failures |
 | [emulator.md](emulator.md) | Using the charge point emulator: TUI, headless mode, fleet, state |
 | [csms.md](csms.md) | Using the central system: TUI, stdin commands, rules, fault injection, scripts |
 | [api.md](api.md) | Local HTTP control API of `kirby-csms`: endpoints, auth model, curl examples |

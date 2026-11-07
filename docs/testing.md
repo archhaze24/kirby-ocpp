@@ -64,7 +64,7 @@ Environment variables cannot be set inside a test (edition 2024 makes `std::env:
 ## Nextest vs cargo test
 
 * `cargo nextest run` runs every test of every binary in parallel across processes: about 15 s against about 60 s for `cargo test` on a warm target directory. It does not run doctests, so add `cargo test --workspace --doc`.
-* CI and the final gate before a push use plain `cargo test --workspace`. A test that only passes under nextest (process per test) but fails under `cargo test` (shared process) breaks the "no globals" rule; fix the test.
+* CI runs nextest everywhere and plain `cargo test --workspace --tests` once on Linux; the final gate before a push uses plain `cargo test --workspace`. A test that only passes under nextest (process per test) but fails under `cargo test` (shared process) breaks the "no globals" rule; fix the test.
 * Use a separate `CARGO_TARGET_DIR` per parallel checkout and set `CARGO_INCREMENTAL=0` to keep build directories small.
 
 ## Windows trap and emulation
@@ -85,13 +85,33 @@ RUSTFLAGS='-D warnings' cargo clippy --workspace --all-targets -- -D warnings
 
 ## CI
 
-`.github/workflows/rust.yml` runs on pushes to `main`, `ci-check/**` and `dev-*`, on pull requests and manually. One matrix job named by OS (`ubuntu-latest`, `macos-latest`, `windows-latest`, `fail-fast: false`, 30 min timeout), with `RUSTFLAGS=-D warnings`:
+`.github/workflows/rust.yml` runs on pushes to `main`, `ci-check/**` and `dev-*`, on pull requests and manually. One matrix job named by OS (`ubuntu-latest`, `macos-latest`, `windows-latest`, `fail-fast: false`, 40 min timeout), with `RUSTFLAGS=-D warnings`:
 
 1. `git config --global core.autocrlf false` (keep line endings as committed).
 2. Checkout, stable Rust with `clippy` and `rustfmt`, `Swatinem/rust-cache`.
 3. `cargo fmt --all --check`
 4. `cargo clippy --workspace --all-targets -- -D warnings`
-5. `cargo test --workspace`
+5. Install nextest (`taiki-e/install-action`).
+6. `cargo nextest run --workspace --profile ci`
+7. `cargo test --workspace --doc`
+8. On Linux only: `cargo test --workspace --tests`, one run in the shared-process mode of `cargo test` (see [Nextest vs cargo test](#nextest-vs-cargo-test)).
+
+### The `ci` nextest profile
+
+Defined in `.config/nextest.toml`:
+
+* `fail-fast = false`: every failing test is reported, not only the first.
+* `retries = 0`: a flaky test fails the build instead of passing on a retry.
+* `slow-timeout = { period = "20s", terminate-after = 3 }`: a test that runs for 60 s is treated as hung and terminated, so a hang fails the job in a minute instead of at the job timeout.
+* Two tests of `kirby-csms::api` wait for the 10 s HTTP head timeout on purpose (`slow_clients_and_connection_flood_are_cut`, `head_timer_only_stops_for_a_real_request`); they get `period = "45s", terminate-after = 2`.
+
+Run it locally the way CI does:
+
+```bash
+cargo nextest run --workspace --profile ci && cargo test --workspace --doc
+```
+
+Tests that spawn a binary must not wait without a deadline. In `kirby-ocpp` use `tests/it/support.rs` (`ChildGuard` kills the child on drop, `finish` and `output` kill it after 60 s); in `kirby-csms` read child output on a thread with `recv_timeout`. Wait for an event that proves a step started (a counted CALL, a `listening` line), not for a fixed sleep, before sending a signal.
 
 `.github/workflows/release.yml` builds and publishes release artifacts; see [RELEASING.md](../RELEASING.md).
 

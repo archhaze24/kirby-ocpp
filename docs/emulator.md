@@ -43,11 +43,11 @@ Seven tabs, switched with `1`-`7` or `Tab`/`Shift-Tab`: Station, Connector, Tran
 | `/`, `:` or `Ctrl-P` | Command palette (fuzzy search over all actions); `/` searches the log when the log pane is focused on the Logs tab |
 | `Esc` | Close a dialog; in the main view, clear the log search |
 | `?` | Help (`Esc`, `?`, `q` or `Enter` closes it) |
-| `q`, `Ctrl-C` | Quit. Asks first (default No) while a scenario is running, a connector has an active transaction, or the fleet has more than one station; a second `Ctrl-C` while the question is open quits at once |
+| `q`, `Ctrl-C` | Quit. Asks first (default No) while a scenario is running, a connector has an active transaction, or the fleet has more than one station; a second `Ctrl-C` while the question is open quits at once. In a form, the data browser or another view, `Ctrl-C` asks the same way and a "no" brings the view back; during another confirmation it quits at once |
 
-Confirmations (quit, clear log, clear list, ...) accept only `y`/`Y`; any other key cancels.
+Confirmations (quit, clear log, clear list, ...) accept only `y`/`Y`; any other key cancels. The quit question also accepts `q`.
 
-The footer always ends with the `? help` and `: palette` hints, even in a narrow terminal; other hints are dropped first. While a command that waits for the CSMS is in flight (from a key, the palette or a form), the footer shows `waiting... <action>` until the result arrives.
+The footer always ends with the `? help` and `: palette` hints, even in a narrow terminal; other hints are dropped first. While a command that waits for the CSMS is in flight (from a key, the palette or a form), the footer shows `waiting... <action>` until the result arrives; a notice takes that line while it is shown, and the marker is dropped when the connection goes down.
 
 First steps: the station starts offline. On the Station tab press `c` to connect, then `:` and type an action name (BootNotification, Heartbeat, StartTransaction) to run it, or open the Scenarios tab (`7`). Every frame lands in the log. The help popup (`?`) opens with the same hints.
 
@@ -111,7 +111,7 @@ Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints 
 - With `--json` each line is one JSON object with a `type` of `frame` (carries a `payload` field next to the raw `frame`), `log` or `state_changed`. If the stdout reader is too slow, events are dropped and a `note` line says how many.
 - Text that comes from the CSMS is sanitized (control characters replaced or escaped) before it is printed.
 
-If the station gives up reconnecting (`--no-reconnect`, or `--reconnect-max-attempts` used up), the headless process no longer idles: it closes cleanly, prints `error: reconnect stopped (REASON); last error: ...` to stderr and exits 1. A fleet exits 1 when every station has given up. The terminal UI keeps running (it shows the state itself).
+If the station gives up reconnecting (`--no-reconnect`, or `--reconnect-max-attempts` used up), the headless process no longer idles: it closes cleanly, prints `error: reconnect stopped (REASON); last error: ...` to stderr and exits 1. After a lost event stream the process waits 2 s for the link to come back before it counts as given up. A fleet exits 1 when every station has given up. The terminal UI keeps running (it shows the state itself).
 
 `kirby-ocpp run --scenario NAME_OR_FILE` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`). Frame and log lines are not printed unless you pass `-v` (see [Output levels and color](#output-levels-and-color)). A `run` does not read or write a state file, so it is repeatable; `--persist` keeps state like a plain station. A connection that cannot be established (or is lost for good) ends the run at once with exit 1 and the same message as in headless mode; with reconnect enabled the run waits until `--timeout` and the timeout message names the last connection error. The run options (`--report`, `--junit`, `--timeout`, `--id-tag`), the report shapes and CI use are in [scenarios.md](scenarios.md#running-scenarios).
 
@@ -131,7 +131,10 @@ A failed connection prints the error plus one line of advice for its class:
 | connection refused | check the host and port and that the CSMS is running |
 | TLS handshake EOF or garbage against a `wss://` URL | the server may speak plain ws:// |
 | unknown certificate authority | use `--tls-ca` or `--tls-skip-verify` |
-| HTTP 400, 401, 403 or 404 on the upgrade, or no subprotocol agreed | the status and the offered subprotocol (from `--ws-subprotocol`) are repeated with: check the URL path and `--ws-subprotocol` |
+| HTTP 401 or 403 on the upgrade | check the credentials (`AuthorizationKey`, URL `user:password`) and the security profile |
+| HTTP 400 or 404 on the upgrade, or no subprotocol agreed | the status and the offered subprotocol (from `--ws-subprotocol`) are repeated with: check the URL path and `--ws-subprotocol` |
+| TLS alert `CertificateRequired` or `BadCertificate` | the server wants a client certificate: check `--tls-cert` and `--tls-key` |
+| certificate `NotValidForName` | the certificate does not match the host name: use `--tls-server-name` |
 
 The text is `error. Hint: ...` on one line, in the stderr message, the `suite` row and the timeout message of `run`. The log events keep the plain error text.
 
@@ -144,7 +147,7 @@ Human output (not `--json`, not the terminal UI) colors PASS green, FAIL red and
 ## Version, completions and validation
 
 * `kirby-ocpp --version` prints one line. `kirby-ocpp version` prints the version, git commit, build date, target triple and supported protocols (`OCPP 1.6J`); `kirby-ocpp version --json` prints them as one JSON object.
-* `kirby-ocpp scenarios validate FILE|DIR|NAME...` parses scenarios without connecting and without `--url`: `ok PATH (N steps)` per valid scenario, the load error with the path otherwise, exit 0 or 2. A directory is scanned like `suite` does.
+* `kirby-ocpp scenarios validate FILE|DIR|NAME...` parses scenarios without connecting and without `--url`: `ok PATH (N steps)` per valid scenario, the load error with the path otherwise, exit 0 or 2. A directory is scanned like `suite` does. A file named twice is checked once, a scenario name used by two files gives a `warning:` line (exit stays 0), and `*.toml` entries that are not regular files (dangling symlinks) are skipped with a `note:` line.
 
 ### Shell completions
 
@@ -178,7 +181,7 @@ SKIP last-one
 suite: 1/3 scenarios passed, FAILED: my-auth, SKIPPED: last-one
 ```
 
-`--fail-fast` skips the rest after the first failure. `--count` above 1 is a usage error (exit 2). Options, JSON and JUnit shapes and exit codes: [scenarios.md](scenarios.md#suite-runs).
+`--fail-fast` skips the rest after the first failure. `--count` above 1 is a usage error (exit 2). Options, JSON and JUnit shapes: [scenarios.md](scenarios.md#suite-runs); exit codes: [configuration.md](configuration.md#kirby-ocpp-suite).
 
 ## Fleet mode
 
@@ -205,7 +208,7 @@ The UI shows a selector row on top (`1 CP-001+* 2 CP-002- ...`: index, id, conne
 
 Selector keys work in normal mode only (inside a dialog they are plain input). `Alt` combinations need "Option as Meta" in macOS Terminal.
 
-Exit codes in fleet mode: for `run`, 0 only if every station passes, 1 if any fails or times out, 2 usage error, 130 SIGINT. For the plain fleet, 0 after a signal or UI quit.
+Exit codes in fleet mode are the same as for a single station: see [configuration.md](configuration.md#exit-codes).
 
 ## Response rules
 
