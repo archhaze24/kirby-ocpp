@@ -6,6 +6,7 @@ mod cli;
 mod commands;
 mod headless;
 mod script;
+mod settings;
 mod stdin_cmd;
 
 use std::fmt::Write as _;
@@ -14,7 +15,6 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use clap::Parser;
 use kirby_csms_core::{
     CsmsConfig, CsmsEvent, CsmsHandle, CsmsServer, server_config_from_pem,
     server_config_with_client_ca,
@@ -22,7 +22,7 @@ use kirby_csms_core::{
 use kirby_ocpp_core::scenario::{JunitSuite, ScenarioReport, StepStatus, junit_xml};
 use tokio::sync::broadcast;
 
-use crate::cli::Cli;
+use crate::cli::{Cli, PrintFormat};
 use crate::headless::{Output, Sink, sanitize};
 use crate::script::Script;
 
@@ -39,27 +39,26 @@ const EXIT_INTERRUPTED: u8 = 130;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    let mut cli = Cli::parse();
+    let mut cli = Cli::parse_args();
     if cli.licenses {
         print!("{LICENSES}");
         return ExitCode::SUCCESS;
     }
+    if cli.print_config.is_some() {
+        return print_config(&mut cli);
+    }
     // Everything that can be wrong with the input is found before the server binds.
-    let mut script = match cli.script.as_deref().map(Script::load).transpose() {
+    let script = match load_script(&cli) {
         Ok(script) => script,
         Err(error) => return usage_error(&error),
     };
-    if let Some(script) = &mut script {
-        for (name, value) in &cli.vars {
-            if let Err(error) = script.set_var(name, value.clone()) {
-                return usage_error(&format!("--var {name}: {error}"));
-            }
-        }
-    }
     let config = match build_config(&mut cli) {
         Ok(config) => config,
         Err(error) => return usage_error(&error),
     };
+    if cli.check_config {
+        return check_config(&cli);
+    }
     let api_plan = match prepare_api(&cli).await {
         Ok(plan) => plan,
         Err(code) => return code,
@@ -73,6 +72,10 @@ async fn main() -> ExitCode {
         Ok(handle) => handle,
         Err(code) => return code,
     };
+    if let Err(error) = apply_rules(&handle, &cli.blocks.rules) {
+        handle.shutdown().await;
+        return usage_error(&error);
+    }
     // The terminal UI is for interactive runs only. The `listening` line goes to stderr before
     // the alternate screen opens, so it is still in the scrollback after the UI ends.
     let session = if cli.wants_tui(
@@ -152,11 +155,108 @@ async fn main() -> ExitCode {
     code
 }
 
+/// Loads the `--script` file and applies the `--var` values.
+fn load_script(cli: &Cli) -> Result<Option<Script>, String> {
+    let mut script = cli.script.as_deref().map(Script::load).transpose()?;
+    if let Some(script) = &mut script {
+        for (name, value) in &cli.vars {
+            script
+                .set_var(name, value.clone())
+                .map_err(|error| format!("--var {name}: {error}"))?;
+        }
+    }
+    Ok(script)
+}
+
+/// `--print-config`: the effective settings, without reading any file the settings point to.
+fn print_config(cli: &mut Cli) -> ExitCode {
+    use std::io::Write as _;
+    let checked = cli
+        .apply_env_auth_keys(std::env::var("KIRBY_CSMS_AUTH_KEY").ok().as_deref())
+        .and_then(|()| cli.validate_security());
+    if let Err(error) = checked {
+        return usage_error(&error);
+    }
+    let text = match cli.print_config {
+        Some(PrintFormat::Toml) => cli.config_toml(),
+        _ => match serde_json::to_string_pretty(&cli.config_json()) {
+            Ok(json) => format!("{json}\n"),
+            Err(error) => {
+                eprintln!("error: {error}");
+                return ExitCode::FAILURE;
+            }
+        },
+    };
+    let _ = std::io::stdout().write_all(text.as_bytes());
+    ExitCode::SUCCESS
+}
+
+/// `--check-config`: everything that is checked before the server binds has passed.
+fn check_config(cli: &Cli) -> ExitCode {
+    if let Err(error) = cli.api_token() {
+        return usage_error(&error);
+    }
+    let source = match (&cli.config, &cli.profile) {
+        (Some(path), Some(profile)) => {
+            format!("{} (profile {profile})", settings::absolute_text(path))
+        }
+        (Some(path), None) => settings::absolute_text(path),
+        _ => "no configuration file".to_owned(),
+    };
+    println!("OK: {source}: configuration is valid");
+    ExitCode::SUCCESS
+}
+
+/// Installs the `[[rule]]` blocks of the configuration file: response rules and faults for
+/// all stations.
+fn apply_rules(handle: &CsmsHandle, rules: &[settings::RuleBlock]) -> Result<(), String> {
+    use kirby_csms_core::Reply;
+    for rule in rules {
+        match rule.behavior {
+            settings::RuleBehavior::Respond => {
+                let payload = rule.payload.clone().unwrap_or_default();
+                handle.respond(&rule.action, move |_| Reply::Result(payload.clone()));
+            }
+            settings::RuleBehavior::Fault(kind) => {
+                let fault =
+                    commands::build_fault(&rule.action, kind, rule.payload.clone(), rule.times);
+                handle
+                    .try_inject(fault)
+                    .map_err(|error| format!("rule for {}: {error}", sanitize(&rule.action)))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Adds the keys of the `[[station]]` blocks; entries given on the command line win.
+fn merge_station_keys(
+    config: &mut CsmsConfig,
+    stations: &[settings::StationBlock],
+) -> Result<(), String> {
+    for station in stations {
+        if let Some(path) = &station.auth_key_file {
+            let key = cli::read_key_file(
+                path,
+                &format!("station `{}` auth_key_file", sanitize(&station.id)),
+            )?;
+            config
+                .security
+                .keys
+                .entry(station.id.clone())
+                .or_insert(key);
+        }
+    }
+    Ok(())
+}
+
 /// Applies the security flags and builds the engine configuration.
 fn build_config(cli: &mut Cli) -> Result<CsmsConfig, String> {
     cli.apply_env_auth_keys(std::env::var("KIRBY_CSMS_AUTH_KEY").ok().as_deref())?;
     cli.validate_security()?;
+    cli.load_default_key_file()?;
     let mut config = cli.csms_config();
+    merge_station_keys(&mut config, &cli.blocks.stations)?;
     if let Some(path) = &cli.auth_keys_file {
         merge_auth_keys_file(&mut config, path)?;
     }

@@ -14,7 +14,8 @@ use kirby_csms_core::{CsmsConfig, SecurityProfile, SubprotocolPolicy, Transactio
 /// Accepts any number of charge points on `ws(s)://HOST:PORT/<any prefix>/<station id>`, prints
 /// what happens and takes commands as JSON lines on stdin. With --script it runs a TOML script
 /// against the stations that connect and exits with its verdict.
-/// Precedence: command-line flag, then environment variable, then default.
+/// Precedence: command-line flag, then environment variable, then the configuration file
+/// (--config), then default.
 #[derive(Debug, Parser)]
 #[command(
     name = "kirby-csms",
@@ -104,9 +105,15 @@ pub struct Cli {
     /// Basic Auth key for stations without an ID=KEY entry
     #[arg(
         long, env = "KIRBY_CSMS_DEFAULT_AUTH_KEY", value_name = "KEY",
-        hide_env_values = true, value_parser = non_empty_secret
+        hide_env_values = true, value_parser = non_empty_secret,
+        conflicts_with = "default_auth_key_file"
     )]
     pub default_auth_key: Option<String>,
+
+    /// File holding the default Basic Auth key (read once; a trailing newline is dropped). Keep
+    /// it private: a warning is printed when it is readable by group or others (Unix)
+    #[arg(long, env = "KIRBY_CSMS_DEFAULT_AUTH_KEY_FILE", value_name = "FILE", value_parser = non_empty_path)]
+    pub default_auth_key_file: Option<PathBuf>,
 
     /// WebSocket subprotocol policy: require:NAME (refuse clients that do not offer it), select:NAME
     /// (always select it), omit (select nothing), reject (refuse every upgrade)
@@ -240,6 +247,164 @@ pub struct Cli {
     /// Print the third-party license notices and exit
     #[arg(long)]
     pub licenses: bool,
+
+    /// Read settings from this TOML configuration file; flags and environment variables win
+    #[arg(
+        long, env = "KIRBY_CSMS_CONFIG", value_name = "FILE", value_parser = non_empty_path
+    )]
+    pub config: Option<PathBuf>,
+
+    /// Use the `[profile.NAME]` tables of the configuration file on top of its other values
+    #[arg(long, env = "KIRBY_CSMS_PROFILE", value_name = "NAME", value_parser = non_empty_text)]
+    pub profile: Option<String>,
+
+    /// Print the effective configuration and exit: JSON, or with `=toml` a configuration file for --config
+    #[arg(
+        long, value_name = "FORMAT", value_enum, num_args = 0..=1, require_equals = true,
+        default_missing_value = "json", conflicts_with = "check_config"
+    )]
+    pub print_config: Option<PrintFormat>,
+
+    /// Validate the configuration file, the profile and every flag, print the verdict and exit
+    /// (0 valid, 2 invalid); never binds a port
+    #[arg(long)]
+    pub check_config: bool,
+
+    /// Station and rule blocks of the configuration file (not a flag).
+    #[arg(skip)]
+    pub blocks: crate::settings::Blocks,
+}
+
+/// `--print-config` formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum PrintFormat {
+    /// The effective settings as JSON.
+    Json,
+    /// A configuration file that `--config` accepts.
+    Toml,
+}
+
+/// The command with the `--help` headings that name the tables of the configuration file.
+pub fn command() -> clap::Command {
+    use clap::CommandFactory;
+    let mut command = Cli::command();
+    for (heading, ids) in HEADINGS {
+        for id in *ids {
+            command = command.mut_arg(*id, |arg| arg.help_heading(*heading));
+        }
+    }
+    command
+}
+
+/// `--help` headings: the heading of a group of flags and the ids of its arguments.
+const HEADINGS: &[(&str, &[&str])] = &[
+    ("Listener", &["listen", "subprotocol"]),
+    ("API", &["api_listen", "api_token", "api_token_file"]),
+    ("TLS", &["tls_cert", "tls_key", "tls_client_ca"]),
+    (
+        "Security",
+        &[
+            "security_profile",
+            "auth_key_raw",
+            "auth_keys_file",
+            "default_auth_key",
+            "default_auth_key_file",
+            "show_secrets",
+        ],
+    ),
+    (
+        "Behavior",
+        &[
+            "transaction_ids",
+            "heartbeat_interval",
+            "validate_inbound",
+            "ping_interval",
+            "pong_timeout",
+            "call_timeout",
+            "history_cap",
+            "transaction_history_cap",
+        ],
+    ),
+    (
+        "Output",
+        &["json", "log_file", "stdin", "no_tui", "licenses"],
+    ),
+    ("Script", &["script", "report", "junit", "vars", "timeout"]),
+    (
+        "Configuration",
+        &["config", "profile", "print_config", "check_config"],
+    ),
+];
+
+impl Cli {
+    /// Parses the process arguments, with the configuration file applied when `--config` is
+    /// given; exits on `--help`, `--version` and usage errors.
+    pub fn parse_args() -> Self {
+        use clap::FromArgMatches;
+        let (mut matches, blocks) = crate::settings::parse_matches(std::env::args_os().collect());
+        let mut cli = Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|e| e.exit());
+        cli.blocks = blocks;
+        cli
+    }
+
+    /// Whether any source names an authorization key: the flags, the keys file, the default
+    /// key (or its file) or a `[[station]]` block of the configuration file.
+    fn has_auth_key_source(&self) -> bool {
+        !self.auth_keys.is_empty()
+            || !self.auth_key_raw.is_empty()
+            || self.auth_keys_file.is_some()
+            || self.default_auth_key.is_some()
+            || self.default_auth_key_file.is_some()
+            || self
+                .blocks
+                .stations
+                .iter()
+                .any(|station| station.auth_key_file.is_some())
+    }
+
+    /// Replaces `--default-auth-key-file` by the key it holds. The error names the file,
+    /// never the key.
+    pub fn load_default_key_file(&mut self) -> Result<(), String> {
+        if let Some(path) = &self.default_auth_key_file {
+            let key = read_key_file(path, "--default-auth-key-file")?;
+            self.default_auth_key = Some(key);
+        }
+        Ok(())
+    }
+}
+
+/// Reads a file that holds one key: a trailing line end is dropped, an empty key is an error.
+pub fn read_key_file(path: &std::path::Path, what: &str) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(KEY_FILE_MAX + 1).read_to_end(&mut bytes))
+        .map_err(|error| format!("{what}: cannot read {}: {error}", path.display()))?;
+    if bytes.len() as u64 > KEY_FILE_MAX {
+        return Err(format!(
+            "{what}: {} is larger than {KEY_FILE_MAX} bytes",
+            path.display()
+        ));
+    }
+    let text = String::from_utf8(bytes)
+        .map_err(|_| format!("{what}: {} is not valid UTF-8", path.display()))?;
+    let key = text.trim_end_matches(['\n', '\r']);
+    if key.is_empty() {
+        return Err(format!("{what}: {} is empty", path.display()));
+    }
+    warn_if_shared(path);
+    Ok(key.to_owned())
+}
+
+/// Largest key file that is read, in bytes.
+const KEY_FILE_MAX: u64 = 64 * 1024;
+
+fn non_empty_text(value: &str) -> Result<String, String> {
+    if value.is_empty() {
+        Err("must not be empty".to_owned())
+    } else {
+        Ok(value.to_owned())
+    }
 }
 
 /// Prints a warning when the token file can be read by the group or by others.
@@ -389,13 +554,11 @@ impl Cli {
         if profile != 3 && self.tls_client_ca.is_some() {
             return Err("--tls-client-ca is only used with --security-profile 3".to_owned());
         }
-        let has_keys = !self.auth_keys.is_empty()
-            || !self.auth_key_raw.is_empty()
-            || self.auth_keys_file.is_some()
-            || self.default_auth_key.is_some();
+        let has_keys = self.has_auth_key_source();
         if matches!(profile, 1 | 2) && !has_keys {
             return Err(format!(
-                "--security-profile {profile} needs --auth-key, --auth-keys-file or --default-auth-key"
+                "--security-profile {profile} needs --auth-key, --auth-keys-file, \
+                 --default-auth-key, --default-auth-key-file or a [[station]] block with auth_key_file"
             ));
         }
         if !matches!(profile, 1 | 2) && has_keys {

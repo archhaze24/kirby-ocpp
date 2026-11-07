@@ -14,7 +14,7 @@ kirby-csms --script suite.toml --junit junit.xml --timeout 120
 echo '{"station":"CP-1","action":"Reset","payload":{"type":"Soft"}}' | kirby-csms
 ```
 
-Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhost:9000/ocpp --id CP-1`. Every flag and its `KIRBY_CSMS_*` variable is in [configuration.md](configuration.md); precedence is command line, then environment, then default.
+Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhost:9000/ocpp --id CP-1`. Every flag and its `KIRBY_CSMS_*` variable is in [configuration.md](configuration.md); precedence is command line, then environment, then default. A TOML file keeps a whole setup (flags, `[[station]]` keys and `[[rule]]` response rules and faults) in one place: `--config FILE`, `--profile NAME`, `--print-config`, `--check-config`, see [kirby-csms configuration file](configuration.md#kirby-csms-configuration-file).
 
 ## Connecting stations
 
@@ -170,6 +170,8 @@ Both apply to all stations, not to the selected one, and to CALLs sent by statio
 | `invalid_payload` | CALLRESULT with the payload you give, as is (for example schema-invalid) |
 
 Scripts and the HTTP API check faults the same way: the action name is 1 to 128 bytes without control characters, `times` is 1 to 1 000 000, and at most 1000 faults (8 MiB of text) are stored at once.
+
+Rules and faults can also be installed at start from `[[rule]]` blocks of a [configuration file](configuration.md#blocks) (`behavior = "respond"` or a fault kind). They apply to all stations and are in place before the first station connects.
 
 In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` steps, see [scenarios.md](scenarios.md). The emulator has the mirror feature for CSMS commands ([emulator.md](emulator.md)).
 
