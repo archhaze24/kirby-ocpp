@@ -44,8 +44,8 @@ use std::time::{Duration, Instant};
 use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Frame, Reply};
 use kirby_ocpp_core::scenario::vars::{self, Vars};
 use kirby_ocpp_core::scenario::{
-    ScenarioReport, StepReport, StepStatus, check_contract_keys, line_col, now_rfc3339,
-    redact_params, with_suggestion,
+    ScenarioReport, StepReport, StepStatus, check_contract_keys, check_reserved_keys, line_col,
+    now_rfc3339, precheck_contract, read_scenario_file, redact_params, redacted, with_suggestion,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -225,6 +225,7 @@ impl Script {
     }
 
     fn parse(text: &str) -> Result<Self, Located> {
+        precheck_contract(text).map_err(Located::plain)?;
         let raw: RawScript = toml::from_str(text).map_err(|e| Located {
             message: with_suggestion(e.message().to_owned()),
             offset: e.span().map(|span| span.start),
@@ -278,7 +279,7 @@ impl Script {
     /// # Errors
     /// The file cannot be read, or see [`Script::from_toml`].
     pub fn load(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
+        let text = read_scenario_file(path)
             .map_err(|e| format!("cannot read script file {}: {e}", path.display()))?;
         match Self::parse(&text) {
             Ok(mut script) => {
@@ -301,6 +302,7 @@ impl Script {
 }
 
 fn parse_step(mut table: toml::Table) -> Result<Step, String> {
+    check_reserved_keys(&table)?;
     let name = match table.remove("name") {
         None => None,
         Some(toml::Value::String(s)) => Some(s),
@@ -721,7 +723,9 @@ pub async fn run(
         let mut report = StepReport::new(index, name, status, millis(began.elapsed()));
         step.action_name().clone_into(&mut report.detail.action);
         if step_failed {
-            let mut params = step.params.clone();
+            // The resolved values; the raw ones when a variable cannot be resolved.
+            let mut params = vars::substitute(&step.params, &runner.vars)
+                .unwrap_or_else(|_| step.params.clone());
             redact_params(&mut params);
             report.detail.params = Some(params);
             report.detail.expected = runner.evidence.expected.take();
@@ -843,12 +847,13 @@ impl Runner<'_> {
                 if let Some(expected) = &expect_payload
                     && !json_subset(expected, &answer)
                 {
+                    let (expected, answer) = (redacted(expected), redacted(&answer));
                     self.evidence.expected = Some(expected.clone());
                     self.evidence.actual = Some(vars::clip_json(&answer));
                     return Err(format!(
                         "{call}: payload {} does not contain {}",
                         vars::clip_json(&answer),
-                        vars::clip_json(expected)
+                        vars::clip_json(&expected)
                     ));
                 }
                 self.capture(capture, &answer)
@@ -1352,6 +1357,45 @@ call = "Heartbeat"
         assert!(e.contains("unknown field `timeout`"), "{e}");
         let e = err(&format!("name = \"t\"\nstpes = []\n{step}"));
         assert!(e.contains("did you mean `steps`"), "{e}");
+    }
+
+    #[test]
+    fn version_keys_win_and_reserved_keys_are_named() {
+        let step = "[[steps]]\naction = \"sleep\"\nms = 1\n";
+        let e = err(&format!("name = \"t\"\nschema = 2\nfuture = 1\n{step}"));
+        assert!(e.contains("unsupported schema 2"), "{e}");
+        let e = err(&format!(
+            "name = \"t\"\nocpp_version = \"2.0.1\"\nfuture = 1\n{step}"
+        ));
+        assert!(e.contains("OCPP 1.6 only"), "{e}");
+        let e = err(&format!("name = \"t\"\nschema = \"1\"\n{step}"));
+        assert!(e.contains("`schema` must be an integer"), "{e}");
+        let e = err("name = \"t\"\n[[steps]]\naction = \"sleep\"\nms = 1\nevse = 1\n");
+        assert!(e.contains("`evse` is reserved for OCPP 2.x steps"), "{e}");
+    }
+
+    #[test]
+    fn load_refuses_a_non_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let e = Script::load(dir.path()).unwrap_err();
+        assert!(e.contains("cannot read script file"), "{e}");
+    }
+
+    #[test]
+    fn evidence_secrets_are_redacted_and_params_are_resolved() {
+        let key = serde_json::json!({"key": "AuthorizationKey", "value": "0123456789abcdef"});
+        let redacted_copy = kirby_ocpp_core::scenario::redacted(&key);
+        assert_eq!(redacted_copy["value"], "***");
+        assert_eq!(key["value"], "0123456789abcdef");
+        let script = Script::from_toml(
+            "name = \"t\"\n[vars]\nms = 7\n[[steps]]\naction = \"call\"\nstation = \"CP-1\"\ncall = \"ChangeConfiguration\"\npayload = { key = \"AuthorizationKey\", value = \"s3cretvalue\" }\nexpect_payload = { key = \"AuthorizationKey\", value = \"s3cretvalue\" }\ntimeout_ms = 50\n",
+        )
+        .unwrap();
+        let step = &script.steps[0];
+        let mut params = vars::substitute(&step.params, &script.vars).unwrap();
+        redact_params(&mut params);
+        let text = params.to_string();
+        assert!(!text.contains("s3cretvalue"), "{text}");
     }
 
     #[test]

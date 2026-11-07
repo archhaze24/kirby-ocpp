@@ -387,7 +387,9 @@ impl Api {
 }
 
 fn router(state: ApiState) -> Router {
-    Router::new()
+    // `finish_response` wraps the whole router: layers added with `Router::layer` sit inside
+    // each route's method router, which sets its own `Allow` after them.
+    let routes = Router::new()
         .route("/v1", get(index))
         .route("/v1/health", get(health))
         .route("/v1/stations", get(list_stations))
@@ -413,8 +415,10 @@ fn router(state: ApiState) -> Router {
         })
         .layer(middleware::from_fn(options))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
-        .layer(middleware::from_fn(close_connection))
-        .with_state(state)
+        .with_state(state);
+    Router::new()
+        .fallback_service(routes)
+        .layer(middleware::from_fn(finish_response))
 }
 
 /// A JSON response; text from stations gets the same extra escaping as the `--json` lines.
@@ -474,22 +478,25 @@ fn route_methods(path: &str) -> Option<&'static [&'static str]> {
     })
 }
 
-/// `OPTIONS` on a known path: `204` with `Allow`, and no CORS headers (browsers are refused by
-/// design, see docs/api.md). It runs inside [`auth`], so the token and `Host` rules apply.
+/// The `Allow` value of a known path: its methods plus `HEAD` (for a `GET` route) and
+/// `OPTIONS`, sorted, joined by a comma and a space.
+fn allow_value(path: &str) -> Option<HeaderValue> {
+    let methods = route_methods(path)?;
+    let mut allow: Vec<&str> = methods.to_vec();
+    if methods.contains(&"GET") {
+        allow.push("HEAD");
+    }
+    allow.push("OPTIONS");
+    allow.sort_unstable();
+    HeaderValue::from_str(&allow.join(", ")).ok()
+}
+
+/// `OPTIONS` on a known path: `204` (the `Allow` header is set by [`finish_response`]) and no
+/// CORS headers (browsers are refused by design, see docs/api.md). It runs inside [`auth`], so
+/// the token and `Host` rules apply.
 async fn options(request: Request, next: Next) -> Response {
-    if request.method() == Method::OPTIONS
-        && let Some(methods) = route_methods(request.uri().path())
-    {
-        let mut allow: Vec<&str> = methods.to_vec();
-        if methods.contains(&"GET") {
-            allow.push("HEAD");
-        }
-        allow.push("OPTIONS");
-        let mut response = StatusCode::NO_CONTENT.into_response();
-        if let Ok(value) = HeaderValue::from_str(&allow.join(", ")) {
-            response.headers_mut().insert(header::ALLOW, value);
-        }
-        return response;
+    if request.method() == Method::OPTIONS && route_methods(request.uri().path()).is_some() {
+        return StatusCode::NO_CONTENT.into_response();
     }
     next.run(request).await
 }
@@ -529,12 +536,22 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Every response of a route closes its connection, so one connection serves one request.
-async fn close_connection(request: Request, next: Next) -> Response {
+/// The one place that shapes headers common to every response: `Connection: close` (so one
+/// connection serves one request) and `Allow`. Any `Allow` the router set is dropped; it is
+/// written back only on a `405` and on the `204` answer to `OPTIONS`, derived from [`ROUTES`].
+async fn finish_response(request: Request, next: Next) -> Response {
+    let options = request.method() == Method::OPTIONS;
+    let allow = allow_value(request.uri().path());
     let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    let headers = response.headers_mut();
+    headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
+    headers.remove(header::ALLOW);
+    let status = response.status();
+    if (status == StatusCode::METHOD_NOT_ALLOWED || (options && status == StatusCode::NO_CONTENT))
+        && let Some(allow) = allow
+    {
+        response.headers_mut().insert(header::ALLOW, allow);
+    }
     response
 }
 
@@ -709,10 +726,12 @@ async fn get_station(
     };
     let station_state = state.handle.state(&id);
     let mut value = station_summary(&info, station_state.as_ref());
-    if let (Some(object), Some(station_state)) = (value.as_object_mut(), &station_state) {
+    if let Some(object) = value.as_object_mut() {
         object.insert(
             "state".to_owned(),
-            serde_json::to_value(station_state).unwrap_or(Value::Null),
+            station_state.as_ref().map_or(Value::Null, |station_state| {
+                serde_json::to_value(station_state).unwrap_or(Value::Null)
+            }),
         );
     }
     stringify_transaction_ids(&mut value);
@@ -956,7 +975,7 @@ fn event_station(event: &CsmsEvent) -> Option<&str> {
 }
 
 /// The value of the query parameter `name`, percent-decoded (`%XX` only; `+` stays a plus).
-/// Any other parameter is an error.
+/// Any other parameter, and a repeated one, is an error.
 fn query_param(uri: &Uri, name: &str) -> Result<Option<String>, String> {
     let Some(query) = uri.query() else {
         return Ok(None);
@@ -964,6 +983,9 @@ fn query_param(uri: &Uri, name: &str) -> Result<Option<String>, String> {
     let mut found = None;
     for pair in query.split('&').filter(|pair| !pair.is_empty()) {
         match pair.split_once('=') {
+            Some((key, _)) if key == name && found.is_some() => {
+                return Err(format!("repeated query parameter `{name}`"));
+            }
             Some((key, value)) if key == name => found = Some(percent_decode(value)),
             _ => return Err(format!("unknown query parameter; supported: {name}")),
         }
@@ -1266,6 +1288,27 @@ mod tests {
 
     use super::*;
 
+    /// The paths of `router()` are exactly the paths of `ROUTES`: the index lists every route
+    /// and no phantom one.
+    #[test]
+    fn routes_table_matches_the_router_definition() {
+        let source = include_str!("api.rs");
+        let start = source.find("fn router(").unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let mut paths: Vec<&str> = Vec::new();
+        let mut rest = &source[start..end];
+        while let Some(at) = rest.find("\"/v1") {
+            let tail = &rest[at + 1..];
+            let close = tail.find('"').unwrap();
+            paths.push(&tail[..close]);
+            rest = &tail[close..];
+        }
+        let mut table: Vec<&str> = ROUTES.iter().map(|(path, _)| *path).collect();
+        paths.sort_unstable();
+        table.sort_unstable();
+        assert_eq!(paths, table);
+    }
+
     /// No limit gets in the way.
     const LONG: Limits = Limits {
         write_stall: Duration::from_secs(600),
@@ -1421,7 +1464,10 @@ mod tests {
                 break;
             }
             assert!(answer.contains(" 200 "), "{answer}");
-            assert!(started.elapsed() < Duration::from_secs(20), "never saw 429");
+            assert!(started.elapsed() < Duration::from_secs(30), "never saw 429");
+            // Without a pause the next probe grabs the share the last one gave back before a
+            // held call (retrying every 20 ms) can: the loop would then take many seconds.
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
         for task in waiting {
             task.abort();

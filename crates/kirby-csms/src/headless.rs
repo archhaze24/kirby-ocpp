@@ -131,32 +131,23 @@ pub fn announce_api(out: &Output, addr: std::net::SocketAddr) {
 }
 
 /// A compact JSON view of one station: connection, boot info, connector statuses, transactions.
+/// Every field is always present: `remote_addr`, `vendor` and `model` are `null` while unknown,
+/// `connectors` and `active_transactions` are empty and `security_events` is `0` before the
+/// engine has state for the station.
 pub fn station_summary(info: &StationInfo, state: Option<&StationState>) -> Value {
-    let mut value = json!({
+    let boot = state.and_then(|state| state.boot.as_ref());
+    json!({
         "id": info.id,
         "connected": info.connected,
         "protocol": info.subprotocol,
         "received_calls": info.received_calls,
-    });
-    let Some(object) = value.as_object_mut() else {
-        return value;
-    };
-    if let Some(addr) = info.remote_addr {
-        object.insert("remote_addr".to_owned(), addr.to_string().into());
-    }
-    if let Some(state) = state {
-        if let Some(boot) = &state.boot {
-            object.insert("vendor".to_owned(), boot.vendor.clone().into());
-            object.insert("model".to_owned(), boot.model.clone().into());
-        }
-        object.insert("connectors".to_owned(), connector_statuses(state));
-        object.insert("active_transactions".to_owned(), active_transactions(state));
-        object.insert(
-            "security_events".to_owned(),
-            state.security_events_total.into(),
-        );
-    }
-    value
+        "remote_addr": info.remote_addr.map(|addr| addr.to_string()),
+        "vendor": boot.map(|boot| boot.vendor.clone()),
+        "model": boot.map(|boot| boot.model.clone()),
+        "connectors": state.map_or_else(|| json!({}), connector_statuses),
+        "active_transactions": state.map_or_else(|| json!([]), active_transactions),
+        "security_events": state.map_or(0, |state| state.security_events_total),
+    })
 }
 
 fn connector_statuses(state: &StationState) -> Value {
