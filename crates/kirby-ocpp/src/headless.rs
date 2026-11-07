@@ -161,8 +161,29 @@ fn hint_with(error: &str, context: &ConnectContext) -> Option<String> {
     if text.contains("cannot reach the central system") && text.contains("refused") {
         return Some("check the host and port and that the CSMS is running".to_owned());
     }
+    if text.contains("certificate required")
+        || text.contains("certificaterequired")
+        || text.contains("bad certificate")
+        || text.contains("badcertificate")
+    {
+        return Some(
+            "the server wants a client certificate: check --tls-cert and --tls-key".to_owned(),
+        );
+    }
+    if text.contains("notvalidforname") || text.contains("not valid for name") {
+        return Some(
+            "the certificate does not match the host name: use --tls-server-name".to_owned(),
+        );
+    }
     if let Some(status) = http_status(&text)
-        && matches!(status, 400 | 401 | 403 | 404)
+        && matches!(status, 401 | 403)
+    {
+        return Some(format!(
+            "HTTP status {status}: check the credentials (AuthorizationKey, URL user:password) and the security profile"
+        ));
+    }
+    if let Some(status) = http_status(&text)
+        && matches!(status, 400 | 404)
     {
         return Some(format!(
             "HTTP status {status}, offered subprotocol `{offered}`: check the URL path and --ws-subprotocol"
@@ -190,6 +211,9 @@ pub fn with_hint(error: &str) -> String {
         None => error.to_owned(),
     }
 }
+
+/// How long a link must stay down after lost events before it counts as given up.
+const LAG_GRACE: Duration = Duration::from_secs(2);
 
 /// Watches a station's log for the end of the reconnect loop, so a headless run can fail
 /// instead of idling forever, and remembers the last connection error for messages.
@@ -231,9 +255,19 @@ impl LinkWatch {
                 }
                 Ok(_) => {}
                 Err(broadcast::error::RecvError::Lagged(_)) => {
-                    // Events were lost: the state still tells whether the station gave up.
+                    // Events were lost, so "reconnect stopped" may be gone. The state tells
+                    // only that the link is down; a deliberate disconnect looks the same for a
+                    // moment. A link that stays down for the grace period has given up.
                     if self.handle.snapshot().connection == ConnectionState::Disconnected {
-                        return self.describe("the connection is down");
+                        let mut state = self.handle.watch_snapshot();
+                        let moved = tokio::time::timeout(
+                            LAG_GRACE,
+                            state.wait_for(|s| s.connection != ConnectionState::Disconnected),
+                        )
+                        .await;
+                        if moved.is_err() {
+                            return self.describe("the connection is down");
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
@@ -613,6 +647,31 @@ mod tests {
             )
             .unwrap()
             .contains("--ws-subprotocol")
+        );
+        let denied = hint(
+            "WebSocket handshake failed: the central system answered `HTTP/1.1 401 Unauthorized` instead of 101",
+            &plain,
+        )
+        .unwrap();
+        assert!(
+            denied.contains("credentials") && !denied.contains("subprotocol"),
+            "{denied}"
+        );
+        assert!(
+            hint(
+                "TLS handshake failed: received fatal alert: CertificateRequired",
+                &secure
+            )
+            .unwrap()
+            .contains("--tls-cert")
+        );
+        assert!(
+            hint(
+                "TLS handshake failed: invalid peer certificate: NotValidForName",
+                &secure
+            )
+            .unwrap()
+            .contains("--tls-server-name")
         );
         // Other statuses and unknown errors get no hint.
         assert_eq!(

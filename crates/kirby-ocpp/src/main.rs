@@ -76,6 +76,7 @@ async fn real_main() -> ExitCode {
     let spec = cli.fleet_spec();
     let templated = cli.id_template.is_some();
     let log_file = cli.log_file.clone();
+    let state_dir_given = cli.state_dir.is_some();
     let connector = ConnectorId::new(cli.connector);
     let mut config = match cli.into_config() {
         Ok(config) => config,
@@ -94,6 +95,9 @@ async fn real_main() -> ExitCode {
     if let Some(Cmd::Run(args)) = &command
         && !args.persist
     {
+        if state_dir_given && config.persist {
+            eprintln!("note: --state-dir is ignored by `run` unless --persist is given");
+        }
         config.persist = false;
     }
     config.normalize();
@@ -192,14 +196,26 @@ fn validate_scenarios(paths: &[String]) -> ExitCode {
         eprintln!("error: {}", kirby_ocpp_tui::text::sanitize(message));
         failed = true;
     };
+    // Sources already validated (canonical path, or the name of a built-in) and the file that
+    // first defined each scenario name.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for spec in paths {
         let mut sources = Vec::new();
         if names_a_path(spec) && Path::new(spec).is_dir() {
-            match suite::toml_files(Path::new(spec)) {
-                Ok(files) if files.is_empty() => {
-                    fail(&format!("no `*.toml` scenario files in `{spec}`"));
+            match suite::toml_files_noting(Path::new(spec)) {
+                Ok((files, skipped)) => {
+                    for path in skipped {
+                        eprintln!(
+                            "note: skipped `{}`: not a regular file",
+                            kirby_ocpp_tui::text::sanitize(&path.display().to_string())
+                        );
+                    }
+                    if files.is_empty() {
+                        fail(&format!("no `*.toml` scenario files in `{spec}`"));
+                    }
+                    sources.extend(files.iter().map(|file| file.display().to_string()));
                 }
-                Ok(files) => sources.extend(files.iter().map(|file| file.display().to_string())),
                 Err(error) => fail(&error),
             }
         } else if !names_a_path(spec) && builtin::get(spec).is_none() {
@@ -208,6 +224,11 @@ fn validate_scenarios(paths: &[String]) -> ExitCode {
             sources.push(spec.clone());
         }
         for source in sources {
+            let key = std::fs::canonicalize(&source)
+                .map_or_else(|_| source.clone(), |path| path.display().to_string());
+            if !seen.insert(key) {
+                continue;
+            }
             let args = SuiteArgs::for_sources(vec![source.clone()]);
             match suite::load_entries(&args, ConnectorId::new(1)) {
                 Ok(entries) => {
@@ -220,6 +241,16 @@ fn validate_scenarios(paths: &[String]) -> ExitCode {
                             ),
                             false,
                         );
+                        if let Some(first) =
+                            names.insert(entry.scenario.name.clone(), entry.source.clone())
+                        {
+                            eprintln!(
+                                "warning: scenario name `{}` is used by `{}` and `{}`",
+                                kirby_ocpp_tui::text::sanitize(&entry.scenario.name),
+                                kirby_ocpp_tui::text::sanitize(&first),
+                                kirby_ocpp_tui::text::sanitize(&entry.source)
+                            );
+                        }
                     }
                 }
                 Err(error) if error.contains(&source) => fail(&error),
@@ -355,12 +386,6 @@ fn load_scenario(
     Ok(scenario)
 }
 
-/// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C). Builds its streams per call,
-/// so use [`Shutdown`] where a signal must not be lost between two waits.
-pub(crate) async fn shutdown_signal() -> bool {
-    Shutdown::new().recv().await
-}
-
 /// SIGINT/SIGTERM streams created once: a signal that arrives while nobody awaits is kept
 /// and delivered by the next [`Shutdown::recv`].
 pub(crate) struct Shutdown {
@@ -446,6 +471,9 @@ async fn interactive(
     log_file: Option<&Path>,
 ) -> ExitCode {
     let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
+    // Subscribed before anything connects (also before the terminal UI does), so a give-up that
+    // happens early is not missed when the run falls back to headless.
+    let mut link = LinkWatch::new(&handle);
     // Under the terminal UI the screen is the UI's: `--log-file` still gets the events, stdout
     // does not.
     let mut sink = None;
@@ -461,7 +489,10 @@ async fn interactive(
         }
         // Like the TS CLI: connect at startup (the station does not do it by itself).
         if let Err(error) = handle.connect().await {
-            eprintln!("error: {error}");
+            eprintln!(
+                "error: {}",
+                kirby_ocpp_tui::text::sanitize(&error.to_string())
+            );
         }
         match kirby_ocpp_tui::run(handle.clone(), TuiOptions::default()).await {
             Ok(()) => {
@@ -498,13 +529,17 @@ async fn interactive(
             }
         },
     };
-    let mut link = LinkWatch::new(&handle);
+    // Signal streams exist before the connection starts, so an early signal is not lost.
+    let mut shutdown = Shutdown::new();
     if !tui && let Err(error) = handle.connect().await {
-        eprintln!("error: {error}");
+        eprintln!(
+            "error: {}",
+            kirby_ocpp_tui::text::sanitize(&error.to_string())
+        );
     }
     // A station that gave up reconnecting ends the process.
     let dead = tokio::select! {
-        _ = shutdown_signal() => None,
+        _ = shutdown.recv() => None,
         dead = link.dead() => Some(dead),
     };
     stop_station(&handle, join).await;
@@ -553,9 +588,10 @@ async fn run(
 
     let overrides = override_vars(&args.vars);
     let mut interrupted = false;
+    let mut shutdown = Shutdown::new();
     let outcome = tokio::select! {
         outcome = connect_and_run(&handle, &scenario, &cancel, &overrides, 1) => outcome,
-        sigint = shutdown_signal() => {
+        sigint = shutdown.recv() => {
             interrupted = sigint;
             cancel.cancel();
             Err("interrupted".to_owned())
@@ -635,7 +671,13 @@ pub(crate) async fn connect_and_run(
             return Err(message);
         }
     }
-    Ok(run_scenario_with_vars(handle, scenario, cancel, None, overrides, index).await)
+    // The link can also go away while the scenario runs: end the run with that reason.
+    tokio::select! {
+        report = run_scenario_with_vars(handle, scenario, cancel, None, overrides, index) => {
+            Ok(report)
+        }
+        dead = link.dead() => Err(format!("connection lost: {dead}")),
+    }
 }
 
 /// The `--var` overrides of a `run` or `suite` command.

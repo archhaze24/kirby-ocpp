@@ -53,6 +53,8 @@ struct Row {
     /// File path or `builtin:NAME` of the scenario.
     source: Option<String>,
     outcome: Outcome,
+    /// RFC 3339 UTC start time; `None` for a scenario that never started.
+    started_at: Option<String>,
     duration_ms: u64,
 }
 
@@ -141,9 +143,16 @@ pub(crate) fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<V
 
 /// The `*.toml` files directly inside `dir`, sorted by file name.
 pub(crate) fn toml_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    toml_files_noting(dir).map(|(files, _)| files)
+}
+
+/// The `*.toml` files of a directory, plus the `*.toml` entries that are not regular files
+/// (dangling symlinks, directories) and were skipped.
+pub(crate) fn toml_files_noting(dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), String> {
     let read =
         std::fs::read_dir(dir).map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?;
     let mut files = Vec::new();
+    let mut skipped = Vec::new();
     for item in read {
         let path = item
             .map_err(|e| format!("cannot read `{}`: {e}", dir.display()))?
@@ -153,10 +162,13 @@ pub(crate) fn toml_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
             .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"));
         if is_toml && path.is_file() {
             files.push(path);
+        } else if is_toml {
+            skipped.push(path);
         }
     }
     files.sort();
-    Ok(files)
+    skipped.sort();
+    Ok((files, skipped))
 }
 
 /// Row names: the scenario name, with the source appended when two scenarios share a name.
@@ -304,11 +316,13 @@ pub async fn run(
                 name: name.clone(),
                 source: entry.scenario.source.clone(),
                 outcome: Outcome::Skipped,
+                started_at: None,
                 duration_ms: 0,
             });
             continue;
         }
         let begun = Instant::now();
+        let row_started_at = now_rfc3339();
         let (outcome, signal) = run_one(
             &mut shutdown,
             &config,
@@ -336,6 +350,7 @@ pub async fn run(
             name: name.clone(),
             source: entry.scenario.source.clone(),
             outcome,
+            started_at: Some(row_started_at),
             duration_ms,
         });
     }
@@ -450,16 +465,30 @@ fn summary_line(rows: &[Row]) -> String {
 fn summary_json(rows: &[Row], duration_ms: u64, started_at: &str) -> Value {
     let passed_count = rows.iter().filter(|r| r.status() == "passed").count();
     let failed = names_with(rows, Row::failed);
+    let failed_names = names_with(rows, |r| r.status() == "failed");
+    let error_names = names_with(rows, |r| r.status() == "error");
     let skipped = names_with(rows, |r| matches!(r.outcome, Outcome::Skipped));
     let scenarios: Vec<Value> = rows
         .iter()
         .map(|row| {
+            let ocpp_version = match &row.outcome {
+                Outcome::Done(report) => report.ocpp_version.as_str(),
+                _ => OCPP_VERSION,
+            };
             let mut value = json!({
                 "name": row.name,
+                "scenario": row.name,
                 "status": row.status(),
-                "ocpp_version": OCPP_VERSION,
+                "ocpp_version": ocpp_version,
                 "duration_ms": row.duration_ms,
             });
+            let started_at = match &row.outcome {
+                Outcome::Done(report) => Some(&report.started_at),
+                _ => row.started_at.as_ref(),
+            };
+            if let Some(started_at) = started_at {
+                value["started_at"] = json!(started_at);
+            }
             if let Some(source) = &row.source {
                 value["source"] = json!(source);
             }
@@ -486,6 +515,7 @@ fn summary_json(rows: &[Row], duration_ms: u64, started_at: &str) -> Value {
     json!({
         "type": "suite_report",
         "schema": SCHEMA_VERSION,
+        "ocpp_version": OCPP_VERSION,
         "tool_version": TOOL_VERSION,
         "started_at": started_at,
         "status": status,
@@ -499,8 +529,66 @@ fn summary_json(rows: &[Row], duration_ms: u64, started_at: &str) -> Value {
         "total": rows.len(),
         "passed_count": passed_count,
         "failed": failed,
+        "failed_names": failed_names,
+        "error_names": error_names,
         "skipped": skipped,
         "scenarios": scenarios,
         "duration_ms": duration_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(name: &str, outcome: Outcome) -> Row {
+        let started_at = (!matches!(outcome, Outcome::Skipped)).then(now_rfc3339);
+        Row {
+            name: name.to_owned(),
+            source: None,
+            outcome,
+            started_at,
+            duration_ms: 1,
+        }
+    }
+
+    #[test]
+    fn summary_arrays_agree_with_the_counts() {
+        let passed = ScenarioReport::new("p".to_owned(), true, false, Vec::new(), 1);
+        let failed = ScenarioReport::new("f".to_owned(), false, false, Vec::new(), 1);
+        let rows = vec![
+            row("p", Outcome::Done(passed)),
+            row("f", Outcome::Done(failed)),
+            row("e", Outcome::Error("no boot".to_owned())),
+            row("s", Outcome::Skipped),
+        ];
+        let summary = summary_json(&rows, 5, "2026-01-01T00:00:00Z");
+        let names = |key: &str| -> Vec<String> {
+            summary[key]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(names("failed"), ["f", "e"]);
+        assert_eq!(names("failed_names"), ["f"]);
+        assert_eq!(names("error_names"), ["e"]);
+        assert_eq!(names("skipped"), ["s"]);
+        let counts = &summary["counts"];
+        assert_eq!(counts["failed"], 1);
+        assert_eq!(counts["error"], 1);
+        assert_eq!(counts["skipped"], 1);
+        assert_eq!(
+            summary["failed"].as_array().unwrap().len() as u64,
+            counts["failed"].as_u64().unwrap() + counts["error"].as_u64().unwrap()
+        );
+        for entry in summary["scenarios"].as_array().unwrap() {
+            assert_eq!(entry["scenario"], entry["name"]);
+            assert_eq!(
+                entry["started_at"].is_string(),
+                entry["status"] != "skipped"
+            );
+        }
+    }
 }
