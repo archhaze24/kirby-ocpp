@@ -66,6 +66,7 @@ Environment variables cannot be set inside a test (edition 2024 makes `std::env:
 * `cargo nextest run` runs every test of every binary in parallel across processes: about 15 s against about 60 s for `cargo test` on a warm target directory. It does not run doctests, so add `cargo test --workspace --doc`.
 * CI runs nextest everywhere and plain `cargo test --workspace --tests` once on Linux; the final gate before a push uses plain `cargo test --workspace`. A test that only passes under nextest (process per test) but fails under `cargo test` (shared process) breaks the "no globals" rule; fix the test.
 * Use a separate `CARGO_TARGET_DIR` per parallel checkout and set `CARGO_INCREMENTAL=0` to keep build directories small.
+* macOS limits a shell to 256 open files by default. The `kirby-csms` API tests (`too_many_commands_in_flight_get_429`, `rules_round_trip`, `station_calls_history_and_forget`) open more connections than that, and plain `cargo test` shares one process per test binary, so run `ulimit -n 4096` first. CI runners have higher limits.
 
 ## Windows trap and emulation
 
