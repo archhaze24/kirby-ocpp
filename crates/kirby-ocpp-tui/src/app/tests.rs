@@ -889,3 +889,52 @@ fn pending_commands_are_tracked_until_done() {
     assert!(fx.is_empty());
     assert!(a.pending.is_empty());
 }
+
+#[test]
+fn ctrl_c_in_a_form_asks_and_declining_brings_the_form_back() {
+    let mut a = app();
+    a.in_fleet = true;
+    a.mode = Mode::Form(Form::authorize());
+    ctrl_c(&mut a);
+    assert!(!a.quit);
+    assert!(confirm_text(&a).contains("stations"));
+    press(&mut a, "n");
+    assert!(matches!(a.mode, Mode::Form(_)), "the form is back");
+    assert!(a.quit_prev.is_none());
+    ctrl_c(&mut a);
+    ctrl_c(&mut a);
+    assert!(a.quit);
+}
+
+#[test]
+fn ctrl_c_does_not_replace_another_question() {
+    let mut a = app();
+    a.in_fleet = true;
+    a.mode = Mode::Confirm(Confirm {
+        message: "Clear?".to_owned(),
+        action: ConfirmAction::ClearLog,
+    });
+    ctrl_c(&mut a);
+    assert!(a.quit, "plain Ctrl-C meaning, no second dialog");
+}
+
+#[test]
+fn q_confirms_the_quit_question() {
+    let mut a = app();
+    a.scenario.running = true;
+    press(&mut a, "q");
+    assert!(!a.quit);
+    press(&mut a, "q");
+    assert!(a.quit);
+}
+
+#[test]
+fn losing_the_connection_clears_the_waiting_marker() {
+    let mut a = app();
+    connected(&mut a);
+    a.pending.push("heartbeat".to_owned());
+    let mut s = a.snapshot.clone();
+    s.connection = ConnectionState::Disconnected;
+    update(&mut a, Msg::Snapshot(Box::new(s)));
+    assert!(a.pending.is_empty());
+}

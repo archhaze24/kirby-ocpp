@@ -516,6 +516,21 @@ fn station_url_example_keeps_specific_hosts() {
 }
 
 #[test]
+fn station_url_example_handles_missing_ports_and_ipv6() {
+    for (listen, expected) in [
+        ("ws://example.org", "ws://example.org/<station id>"),
+        ("ws://[::1]:9000", "ws://[::1]:9000/<station id>"),
+        ("ws://[::1]", "ws://[::1]/<station id>"),
+        ("ws://::1", "ws://[::1]/<station id>"),
+        ("ws://[::]", "ws://<this-host>/<station id>"),
+        ("ws://0.0.0.0:9000", "ws://<this-host>:9000/<station id>"),
+        ("ws://host:9000/", "ws://host:9000/<station id>"),
+    ] {
+        assert_eq!(station_url_example(listen, false), expected, "{listen}");
+    }
+}
+
+#[test]
 fn footer_keeps_help_and_palette_hints_in_narrow_terminals() {
     let (app, _) = app_with(&["CP-1"]);
     for w in [40_u16, 30, 24] {

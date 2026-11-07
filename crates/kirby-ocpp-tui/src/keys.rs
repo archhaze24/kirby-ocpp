@@ -19,18 +19,19 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
     }
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     if ctrl && key.code == KeyCode::Char('c') {
-        // A second Ctrl-C while the quit question is open means yes.
-        let asked = matches!(
-            &app.mode,
-            Mode::Confirm(Confirm {
-                action: ConfirmAction::Quit,
-                ..
-            })
-        );
-        if asked {
-            app.quit = true;
-        } else {
-            app.request_quit();
+        match &app.mode {
+            // A second Ctrl-C while the quit question is open means yes; during another
+            // question Ctrl-C keeps its plain meaning and quits.
+            Mode::Confirm(_) => app.quit = true,
+            Mode::Normal => app.request_quit(),
+            // A form, the browser or another view may hold work: ask, and bring the view
+            // back if the answer is no.
+            _ if app.quit_reason().is_some() => {
+                let previous = std::mem::replace(&mut app.mode, Mode::Normal);
+                app.request_quit();
+                app.quit_prev = Some(previous);
+            }
+            _ => app.quit = true,
         }
         return;
     }
@@ -50,7 +51,13 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         Mode::Detail(d) => detail(app, d, key, fx),
         Mode::Confirm(c) => match key.code {
             KeyCode::Char('y' | 'Y') => confirmed(app, c.action, fx),
-            _ => app.notify(NoticeLevel::Info, "cancelled"),
+            KeyCode::Char('q' | 'Q') if c.action == ConfirmAction::Quit => app.quit = true,
+            _ => {
+                if let Some(previous) = app.quit_prev.take() {
+                    app.mode = previous;
+                }
+                app.notify(NoticeLevel::Info, "cancelled");
+            }
         },
         Mode::Browser(b) => browser(app, b, key, fx),
     }

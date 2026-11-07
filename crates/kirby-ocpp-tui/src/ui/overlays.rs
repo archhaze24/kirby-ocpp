@@ -5,7 +5,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
 use super::dim;
-use crate::app::{App, Confirm, Detail, Mode};
+use crate::app::{App, Confirm, ConfirmAction, Detail, Mode};
 use crate::forms::{Choice, Field, FieldKind, Form};
 use crate::palette::Palette;
 use crate::text::{sanitize, truncate, width};
@@ -264,10 +264,15 @@ fn detail(f: &mut Frame<'_>, d: &Detail, area: Rect) {
 }
 
 fn confirm(f: &mut Frame<'_>, c: &Confirm, area: Rect) {
-    let w = u16::try_from(width(&c.message) + 12)
+    let w = u16::try_from(width(&c.message) + 28)
         .unwrap_or(u16::MAX)
         .max(24);
     let rect = centered(area, w, 3);
     let inner = popup(f, rect, "Confirm");
-    f.render_widget(Paragraph::new(format!("{}  [y/N]", c.message)), inner);
+    let keys = if c.action == ConfirmAction::Quit {
+        "[y/q quit, n/Esc stay]"
+    } else {
+        "[y/N]"
+    };
+    f.render_widget(Paragraph::new(format!("{}  {keys}", c.message)), inner);
 }

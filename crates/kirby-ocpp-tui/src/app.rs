@@ -9,6 +9,7 @@ use kirby_ocpp_core::scenario::{
     Scenario, ScenarioProgress, ScenarioReport, StepReport, StepStatus, builtin,
 };
 use kirby_ocpp_core::station::{Command, Event, Outcome, Snapshot};
+use kirby_ocpp_core::ws::ConnectionState;
 
 use crate::actions::{self, ActionDef, ActionId, Context, Tab};
 use crate::browser::{Browser, Page};
@@ -179,6 +180,9 @@ pub struct App {
     pub scenario: ScenarioView,
     pub dirty: bool,
     pub quit: bool,
+    /// The mode that was on screen when Ctrl-C opened the quit question; it comes back when
+    /// the question is declined.
+    pub quit_prev: Option<Mode>,
     /// One of several stations (the help mentions the station selector keys).
     pub in_fleet: bool,
     /// Labels of commands sent to the station that have not completed yet, oldest first.
@@ -210,6 +214,7 @@ impl App {
             scenario: ScenarioView::default(),
             dirty: true,
             quit: false,
+            quit_prev: None,
             in_fleet: false,
             pending: Vec::new(),
         }
@@ -713,6 +718,12 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             }
         }
         Msg::Snapshot(s) => {
+            // Replies cannot arrive over a connection that is gone: drop the "waiting" marker.
+            if app.snapshot.connection == ConnectionState::Connected
+                && s.connection != ConnectionState::Connected
+            {
+                app.pending.clear();
+            }
             app.snapshot = *s;
             if app
                 .snapshot

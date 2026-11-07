@@ -74,10 +74,10 @@ fn draw_body(f: &mut Frame<'_>, app: &App, area: Rect) {
 pub fn station_url_example(listen_url: &str, prefix: bool) -> String {
     let (scheme, rest) = listen_url.split_once("://").unwrap_or(("ws", listen_url));
     let rest = rest.trim_end_matches('/');
-    let (host, port) = rest.rsplit_once(':').unwrap_or((rest, ""));
-    let host = match host {
-        "0.0.0.0" | "[::]" | "::" | "" => "<this-host>",
-        h => h,
+    let (host, port) = split_host_port(rest);
+    let host = match host.as_str() {
+        "0.0.0.0" | "[::]" | "" => "<this-host>".to_owned(),
+        _ => host,
     };
     let port = if port.is_empty() {
         String::new()
@@ -86,6 +86,31 @@ pub fn station_url_example(listen_url: &str, prefix: bool) -> String {
     };
     let prefix = if prefix { "/<prefix>" } else { "" };
     format!("{scheme}://{host}{port}{prefix}/<station id>")
+}
+
+/// Host (IPv6 in brackets) and port of `host:port`; the port is empty when there is none.
+fn split_host_port(rest: &str) -> (String, String) {
+    if let Ok(addr) = rest.parse::<std::net::SocketAddr>() {
+        let host = match addr.ip() {
+            std::net::IpAddr::V4(ip) => ip.to_string(),
+            std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        };
+        return (host, addr.port().to_string());
+    }
+    if let Some(inner) = rest.strip_prefix('[')
+        && let Some((address, after)) = inner.split_once(']')
+    {
+        let port = after.strip_prefix(':').unwrap_or_default();
+        return (format!("[{address}]"), port.to_owned());
+    }
+    // A bare IPv6 address (several colons) has no port.
+    if rest.matches(':').count() > 1 {
+        return (format!("[{rest}]"), String::new());
+    }
+    match rest.rsplit_once(':') {
+        Some((host, port)) => (host.to_owned(), port.to_owned()),
+        None => (rest.to_owned(), String::new()),
+    }
 }
 
 fn chip(text: &str, color: Color) -> Span<'static> {

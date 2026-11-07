@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 
 use crate::actions::Tab;
-use crate::app::{App, Mode, NoticeLevel};
+use crate::app::{App, ConfirmAction, Mode, NoticeLevel};
 use crate::fleet::{FleetApp, station_marks, visible_range};
 use crate::text::{sanitize, truncate, width};
 
@@ -228,7 +228,14 @@ fn tab_line(app: &App, w: usize) -> Line<'static> {
 
 fn draw_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
     let w = usize::from(area.width);
-    let first = if let Some(label) = app.pending.first() {
+    let first = if let Some(n) = &app.notice {
+        let color = match n.level {
+            NoticeLevel::Info => Color::Cyan,
+            NoticeLevel::Success => Color::Green,
+            NoticeLevel::Error => Color::Red,
+        };
+        Line::styled(truncate(&format!(" {}", n.text), w), Style::new().fg(color))
+    } else if let Some(label) = app.pending.first() {
         let more = match app.pending.len() {
             0 | 1 => String::new(),
             n => format!(" (+{})", n - 1),
@@ -237,13 +244,6 @@ fn draw_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
             truncate(&format!(" waiting... {}{more}", sanitize(label)), w),
             Style::new().fg(Color::Yellow),
         )
-    } else if let Some(n) = &app.notice {
-        let color = match n.level {
-            NoticeLevel::Info => Color::Cyan,
-            NoticeLevel::Success => Color::Green,
-            NoticeLevel::Error => Color::Red,
-        };
-        Line::styled(truncate(&format!(" {}", n.text), w), Style::new().fg(color))
     } else if let (Mode::Normal, Some(a)) = (&app.mode, app.selected_action()) {
         match app.reason_for(a.id) {
             Some(why) => Line::styled(
@@ -302,6 +302,9 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         Mode::Choice(_) => vec![("Enter", "select"), ("Esc", "cancel"), ("↑↓", "move")],
         Mode::Help => vec![("Esc", "close")],
         Mode::Detail(_) => vec![("Esc", "close"), ("↑↓", "scroll"), ("c", "copy")],
+        Mode::Confirm(c) if c.action == ConfirmAction::Quit => {
+            vec![("y/q", "quit"), ("n/Esc", "stay")]
+        }
         Mode::Confirm(_) => vec![("y", "yes"), ("n", "no")],
         Mode::Browser(b) if b.filtering => {
             vec![("Enter", "keep"), ("Esc", "clear"), ("↑↓", "move")]
