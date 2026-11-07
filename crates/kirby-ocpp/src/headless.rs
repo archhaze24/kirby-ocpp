@@ -157,6 +157,9 @@ fn hint_with(error: &str, context: &ConnectContext) -> Option<String> {
     {
         return Some("the server may speak plain ws://".to_owned());
     }
+    if !context.secure && text.contains("closed before the upgrade response") {
+        return Some("the server may require TLS: try a wss:// URL".to_owned());
+    }
     if text.contains("cannot reach the central system") && text.contains("refused") {
         return Some("check the host and port and that the CSMS is running".to_owned());
     }
@@ -263,6 +266,7 @@ impl LinkWatch {
         let mut events_open = true;
         loop {
             let step = tokio::select! {
+                biased;
                 state = self.state.wait_for(|s| s.reconnect_stopped.is_some()) => {
                     Step::Stopped(state.ok().and_then(|s| s.reconnect_stopped.clone()))
                 }
@@ -272,8 +276,17 @@ impl LinkWatch {
                 Step::Stopped(None) => return "the station stopped".to_owned(),
                 Step::Stopped(Some(reason)) => {
                     // The failure log precedes the snapshot change: pick up what is queued.
-                    while let Ok(event) = self.rx.try_recv() {
-                        self.note(&event);
+                    // A lagged receiver reports the loss once and then yields the newest
+                    // events: keep reading until the queue is empty or closed.
+                    loop {
+                        match self.rx.try_recv() {
+                            Ok(event) => self.note(&event),
+                            Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                            Err(
+                                broadcast::error::TryRecvError::Empty
+                                | broadcast::error::TryRecvError::Closed,
+                            ) => break,
+                        }
                     }
                     return self.describe(&reason);
                 }
@@ -308,6 +321,16 @@ pub fn stdout_line(line: &str, json: bool) {
         sanitize(line)
     };
     STDOUT.get_or_init(|| StdoutPump::new(json)).send(&line);
+}
+
+/// Writes one line to stderr with a single `write` call (see the `eprintln!` macro of
+/// `main.rs`), ignoring errors such as a closed stderr.
+pub fn stderr_line(line: &str) {
+    use std::io::Write as _;
+    let mut text = String::with_capacity(line.len() + 1);
+    text.push_str(line);
+    text.push('\n');
+    let _ = io::stderr().lock().write_all(text.as_bytes());
 }
 
 /// Writes out the queued stdout lines (bounded wait); call before the process exits.
@@ -626,6 +649,11 @@ mod tests {
                 .unwrap()
                 .contains("plain ws://")
         );
+        // A plain ws:// URL whose peer closes before answering the upgrade: try wss://.
+        let closed =
+            "WebSocket handshake failed: the connection closed before the upgrade response";
+        assert!(hint(closed, &plain).unwrap().contains("wss://"));
+        assert_eq!(hint(closed, &secure), None);
         // Not a TLS URL: no plain-ws advice.
         assert_eq!(hint("TLS handshake failed: unexpected eof", &plain), None);
         assert_eq!(
@@ -724,6 +752,25 @@ mod tests {
             text.contains("reconnect stopped (after 2 failed attempt(s))"),
             "{text}"
         );
+        assert!(text.contains("last error: refused"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn link_watch_keeps_the_last_error_when_the_drain_lags() {
+        let config = kirby_ocpp_core::config::StationConfig::new("ws://h/p");
+        let (state_tx, state_rx) = watch::channel(Snapshot::initial(&config));
+        let (event_tx, event_rx) = broadcast::channel(1);
+        // The receiver is already behind when the flag is set: the drain meets `Lagged`
+        // first and must still reach the newest event.
+        for _ in 0..3 {
+            event_tx.send(log_event("noise")).unwrap();
+        }
+        event_tx
+            .send(log_event("connection failed: refused"))
+            .unwrap();
+        state_tx.send_modify(|s| s.reconnect_stopped = Some("after 1 failed attempt(s)".into()));
+        let mut watch = LinkWatch::from_parts(event_rx, state_rx);
+        let text = tokio::time::timeout(WAIT, watch.dead()).await.unwrap();
         assert!(text.contains("last error: refused"), "{text}");
     }
 

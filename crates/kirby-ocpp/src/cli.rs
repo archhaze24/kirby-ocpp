@@ -334,7 +334,7 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
     )]
     pub color: ColorChoice,
 
-    /// Print the third-party licence notices and exit
+    /// Print the third-party license notices and exit
     #[arg(help_heading = "Output", long)]
     pub licenses: bool,
 
@@ -536,6 +536,15 @@ pub fn command() -> clap::Command {
             .cloned()
             .collect();
         command = command.mut_subcommand(*name, |sub| hide_global_args(sub, &hidden));
+    }
+    // `version` keeps `--json` with a help text of its own (the global one talks about
+    // events and reports).
+    if let Some(json) = globals.iter().find(|arg| arg.get_id() == "json") {
+        let json = json
+            .clone()
+            .help("Print the version details as one JSON object")
+            .long_help("Print the version details as one JSON object");
+        command = command.mut_subcommand("version", |sub| sub.arg(json));
     }
     command
 }

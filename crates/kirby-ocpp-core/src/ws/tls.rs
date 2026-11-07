@@ -140,7 +140,7 @@ async fn client_identity(
             Ok(Some((chain, key)))
         }
         _ => Err(ConnectError::Tls(
-            "tls cert_file and key_file must be given together".to_owned(),
+            "--tls-cert and --tls-key must be given together".to_owned(),
         )),
     }
 }

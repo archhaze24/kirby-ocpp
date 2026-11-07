@@ -16,6 +16,14 @@ use url::Url;
 use crate::ids::ConnectorId;
 use crate::station::response_rules::{ResponseRule, canonical_action};
 
+/// Longest `chargePointVendor` and `chargePointModel` of `BootNotification` (OCPP 1.6 schema).
+const BOOT_VENDOR_MAX: usize = 20;
+const BOOT_MODEL_MAX: usize = 20;
+/// Longest `chargePointSerialNumber` of `BootNotification`.
+const BOOT_SERIAL_MAX: usize = 25;
+/// Longest `firmwareVersion` of `BootNotification`.
+const BOOT_FIRMWARE_MAX: usize = 50;
+
 /// Upper bound of `call_timeout_ms`: 24 hours.
 pub const MAX_CALL_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -224,8 +232,18 @@ pub enum ConfigError {
     NotPositive { field: &'static str },
     #[error("{field} must be at most {max}")]
     TooLarge { field: &'static str, max: u64 },
-    #[error("tls.cert_file and tls.key_file must be given together")]
+    #[error("--tls-cert and --tls-key must be given together")]
     TlsCertKeyMismatch,
+    #[error("{flag} must be at most {max} characters")]
+    TooLong { flag: &'static str, max: usize },
+    #[error("--id `{0}` contains control or invisible characters")]
+    UnsafeChargePointId(String),
+    #[error("{flag} {}: {reason}", path.display())]
+    TlsFile {
+        flag: &'static str,
+        path: PathBuf,
+        reason: String,
+    },
     #[error(
         "reconnect: a zero initial or maximum delay with unlimited attempts would retry in a \
          busy loop; use a delay of at least 1 ms, limit the attempts or disable reconnect"
@@ -334,6 +352,29 @@ impl StationConfig {
                 self.charge_point_id.clone(),
             ));
         }
+        if self
+            .charge_point_id
+            .chars()
+            .any(crate::text::is_unsafe_char)
+        {
+            return Err(ConfigError::UnsafeChargePointId(
+                crate::text::escape_unsafe(&self.charge_point_id),
+            ));
+        }
+        for (flag, value, max) in [
+            ("--vendor", Some(&self.vendor), BOOT_VENDOR_MAX),
+            ("--model", Some(&self.model), BOOT_MODEL_MAX),
+            ("--serial", self.serial_number.as_ref(), BOOT_SERIAL_MAX),
+            (
+                "--firmware-version",
+                self.firmware_version.as_ref(),
+                BOOT_FIRMWARE_MAX,
+            ),
+        ] {
+            if value.is_some_and(|text| text.chars().count() > max) {
+                return Err(ConfigError::TooLong { flag, max });
+            }
+        }
         if !is_http_token(&self.ws_subprotocol) {
             return Err(ConfigError::InvalidSubprotocol(self.ws_subprotocol.clone()));
         }
@@ -376,6 +417,37 @@ impl StationConfig {
                 || rule.remaining == Some(0)
             {
                 return Err(ConfigError::InvalidResponseRule(rule.to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks that the configured TLS files (`--tls-ca`, `--tls-cert`, `--tls-key`) can be
+    /// opened, so a wrong path fails at startup instead of on every reconnect attempt.
+    /// Separate from [`StationConfig::validate`], which does no I/O.
+    ///
+    /// # Errors
+    /// [`ConfigError::TlsFile`] naming the flag, the path and the I/O error.
+    pub fn check_tls_files(&self) -> Result<(), ConfigError> {
+        for (flag, path) in [
+            ("--tls-ca", &self.tls.ca_file),
+            ("--tls-cert", &self.tls.cert_file),
+            ("--tls-key", &self.tls.key_file),
+        ] {
+            let Some(path) = path else { continue };
+            let opened = std::fs::File::open(path).and_then(|file| {
+                if file.metadata()?.is_dir() {
+                    Err(std::io::Error::other("is a directory"))
+                } else {
+                    Ok(())
+                }
+            });
+            if let Err(error) = opened {
+                return Err(ConfigError::TlsFile {
+                    flag,
+                    path: path.clone(),
+                    reason: error.to_string(),
+                });
             }
         }
         Ok(())
@@ -637,6 +709,56 @@ mod tests {
             valid().with_tls(tls).validate(),
             Err(ConfigError::TlsCertKeyMismatch)
         );
+    }
+
+    #[test]
+    fn boot_notification_strings_respect_the_schema_limits() {
+        let limit = |flag, max| Err(ConfigError::TooLong { flag, max });
+        let mut c = valid();
+        c.serial_number = Some("s".repeat(26));
+        assert_eq!(c.validate(), limit("--serial", 25));
+        c.serial_number = Some("s".repeat(25));
+        assert_eq!(c.validate(), Ok(()));
+        c.firmware_version = Some("f".repeat(51));
+        assert_eq!(c.validate(), limit("--firmware-version", 50));
+        c.firmware_version = None;
+        c.vendor = "v".repeat(21);
+        assert_eq!(c.validate(), limit("--vendor", 20));
+        c.vendor = "v".to_owned();
+        c.model = "m".repeat(21);
+        assert_eq!(c.validate(), limit("--model", 20));
+    }
+
+    #[test]
+    fn unsafe_charge_point_ids_are_refused() {
+        for id in ["CP\n1", "CP\u{1b}[2J", "CP\u{200b}1"] {
+            assert!(
+                matches!(
+                    valid().with_charge_point_id(id).validate(),
+                    Err(ConfigError::UnsafeChargePointId(_))
+                ),
+                "{id:?}"
+            );
+        }
+        assert_eq!(valid().with_charge_point_id("CP-ä 1").validate(), Ok(()));
+    }
+
+    #[test]
+    fn unreadable_tls_files_name_their_flag() {
+        let dir = std::env::temp_dir();
+        let mut c = valid();
+        c.tls.ca_file = Some(dir.join("kirby-ocpp-no-such-ca.pem"));
+        assert!(matches!(
+            c.check_tls_files(),
+            Err(ConfigError::TlsFile {
+                flag: "--tls-ca",
+                ..
+            })
+        ));
+        c.tls.ca_file = Some(dir);
+        assert!(c.check_tls_files().is_err(), "a directory is not a file");
+        c.tls.ca_file = None;
+        assert_eq!(c.check_tls_files(), Ok(()));
     }
 
     #[test]

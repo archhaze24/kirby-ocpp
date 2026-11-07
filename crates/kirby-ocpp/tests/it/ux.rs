@@ -152,7 +152,149 @@ async fn unknown_ca_hints_at_tls_ca() {
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let err = stderr(&output);
     assert!(err.contains("use --tls-ca or --tls-skip-verify"), "{err}");
+    assert!(!err.contains("configuration error"), "{err}");
     csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn plain_ws_against_a_tls_server_hints_at_wss() {
+    let csms = MockCsms::start(CsmsOptions {
+        tls: Some(TlsOpts::default()),
+        ..CsmsOptions::default()
+    })
+    .await
+    .unwrap();
+    let url = csms.url().replacen("wss://", "ws://", 1);
+    let output = run(args(&url, &["--no-reconnect"])).await;
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let err = stderr(&output);
+    assert!(err.contains("try a wss:// URL"), "{err}");
+    csms.shutdown().await;
+}
+
+/// Runs `args` (a `run`, `suite` or plain invocation) and returns the exit code and stderr.
+fn startup_failure(args: &[&str]) -> (Option<i32>, String) {
+    let output = crate::support::output(command(args));
+    (output.status.code(), stderr(&output))
+}
+
+#[test]
+fn missing_tls_files_fail_at_startup_naming_the_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("absent.pem");
+    let missing = missing.to_str().unwrap();
+    let present = write(&dir, "present.pem", "not a certificate");
+    let present = present.as_str();
+    for flag in ["--tls-ca", "--tls-cert", "--tls-key"] {
+        let mut base = vec!["--url", "wss://127.0.0.1:1/ocpp", "--no-tui", flag, missing];
+        // The other half of the pair exists, so only `flag` is at fault.
+        if flag == "--tls-cert" {
+            base.extend(["--tls-key", present]);
+        } else if flag == "--tls-key" {
+            base.extend(["--tls-cert", present]);
+        }
+        let mut run_args = base.clone();
+        run_args.extend(["run", "--scenario", "charge-session"]);
+        let mut suite_args = base.clone();
+        suite_args.extend(["suite", "charge-session"]);
+        for args in [base, run_args, suite_args] {
+            let (code, err) = startup_failure(&args);
+            assert_eq!(code, Some(2), "{args:?}: {err}");
+            assert!(err.contains(flag) && err.contains("absent.pem"), "{err}");
+            assert_eq!(err.trim().lines().count(), 1, "{err}");
+        }
+    }
+}
+
+#[test]
+fn over_long_boot_fields_fail_at_startup() {
+    let url = ["--url", "ws://127.0.0.1:1/ocpp", "--no-tui"];
+    for (flag, ok, bad, limit) in [
+        ("--serial", 25, 26, "25"),
+        ("--firmware-version", 50, 51, "50"),
+        ("--vendor", 20, 21, "20"),
+        ("--model", 20, 21, "20"),
+    ] {
+        let value = "x".repeat(bad);
+        let (code, err) = startup_failure(&[url[0], url[1], url[2], flag, &value]);
+        assert_eq!(code, Some(2), "{flag}: {err}");
+        assert!(err.contains(flag) && err.contains(limit), "{err}");
+        assert_eq!(err.trim().lines().count(), 1, "{err}");
+        // The limit itself is accepted (printing the configuration does not connect).
+        let value = "x".repeat(ok);
+        let (code, err) =
+            startup_failure(&[url[0], url[1], url[2], flag, &value, "--print-config"]);
+        assert_eq!(code, Some(0), "{flag}: {err}");
+    }
+}
+
+#[test]
+fn unsafe_ids_fail_at_startup() {
+    for id in ["CP\u{7}1", "CP\u{200b}1", "CP\n1", "CP\u{202e}1"] {
+        let (code, err) = startup_failure(&["--url", "ws://127.0.0.1:1/ocpp", "--id", id]);
+        assert_eq!(code, Some(2), "{id:?}: {err}");
+        assert!(err.contains("--id"), "{err}");
+        assert_eq!(err.trim().lines().count(), 1, "{err}");
+    }
+}
+
+#[test]
+fn one_sided_client_tls_names_both_flags() {
+    for flag in ["--tls-cert", "--tls-key"] {
+        let (code, err) = startup_failure(&["--url", "wss://127.0.0.1:1/ocpp", flag, "x.pem"]);
+        assert_eq!(code, Some(2), "{err}");
+        assert!(
+            err.contains("--tls-cert") && err.contains("--tls-key"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn version_help_has_its_own_json_text() {
+    let text = stdout(&command(&["version", "--help"]).output().unwrap());
+    assert!(text.contains("one JSON object"), "{text}");
+    assert!(!text.contains("never opens the terminal UI"), "{text}");
+    let top = stdout(&command(&["--help"]).output().unwrap());
+    assert!(top.contains("never opens the terminal UI"), "{top}");
+}
+
+#[test]
+fn help_and_output_use_us_spelling() {
+    let text = stdout(&command(&["--help"]).output().unwrap());
+    assert!(!text.contains("licence"), "{text}");
+    assert!(text.contains("license notices"), "{text}");
+}
+
+#[cfg(unix)]
+#[test]
+fn merged_stdout_and_stderr_keep_whole_lines() {
+    // `2>&1` makes both streams one pipe, as in a CI log. A station that gives up prints
+    // event lines on stdout and the final error on stderr: no line may contain another.
+    for _ in 0..10 {
+        let mut shell = Command::new("sh");
+        shell
+            .arg("-c")
+            .arg(
+                "exec \"$0\" --url \"$1\" --id CP-MERGE --no-persist --no-tui \
+                 --reconnect-max-attempts 3 --reconnect-initial-ms 1 --reconnect-max-ms 1 2>&1",
+            )
+            .arg(env!("CARGO_BIN_EXE_kirby-ocpp"))
+            .arg(dead_url())
+            .stdin(Stdio::null());
+        let output = crate::support::output(shell);
+        assert_eq!(output.status.code(), Some(1));
+        let text = stdout(&output);
+        assert!(text.contains("reconnect stopped"), "{text}");
+        for line in text.lines() {
+            let is_error = line.starts_with("error: ");
+            assert!(
+                line.matches("error: reconnect").count() <= usize::from(is_error)
+                    && (is_error || line.starts_with(|c: char| c.is_ascii_digit())),
+                "torn line {line:?} in {text}"
+            );
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -219,6 +361,25 @@ fn unknown_scenario_names_the_closest_built_in() {
         "{}",
         stderr(&output)
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn boot_accepted_is_logged_once() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let output = run(args(
+        csms.url(),
+        &["-v", "run", "--scenario", "heartbeat-and-status"],
+    ))
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let boots = text
+        .lines()
+        .filter(|line| line.contains("BootNotification accepted"))
+        .collect::<Vec<_>>();
+    assert_eq!(boots.len(), 1, "{text}");
+    assert!(boots[0].contains("heartbeat every"), "{text}");
+    csms.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

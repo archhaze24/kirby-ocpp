@@ -242,21 +242,29 @@ fn reconnect_flag_beats_env_that_disables_it() {
 
 #[test]
 fn tls_flags_and_no_persist_flag() {
+    // The files must be readable: a wrong path is a startup error.
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, "pem").unwrap();
+        path.to_str().unwrap().to_owned()
+    };
+    let (ca, cert, key) = (file("ca.pem"), file("c.pem"), file("k.pem"));
     let c = config(
         &with_url(&[
             "--tls-skip-verify",
             "--tls-ca",
-            "ca.pem",
+            &ca,
             "--tls-cert",
-            "c.pem",
+            &cert,
             "--tls-key",
-            "k.pem",
+            &key,
             "--no-persist",
         ]),
         &[],
     );
     assert_eq!(c["tls"]["skip_verify"], true);
-    assert_eq!(c["tls"]["ca_file"], "ca.pem");
+    assert_eq!(c["tls"]["ca_file"], ca.as_str());
     assert_eq!(c["persist"], false);
 }
 
@@ -304,7 +312,7 @@ fn tls_cert_without_key_fails_validation() {
     let output = run(&with_url(&["--tls-cert", "c.pem"]), &[]);
     assert_eq!(output.status.code(), Some(2));
     assert!(
-        stderr(&output).contains("tls.cert_file"),
+        stderr(&output).contains("--tls-cert and --tls-key must be given together"),
         "{}",
         stderr(&output)
     );
@@ -344,7 +352,7 @@ fn licenses_prints_notices_without_a_url() {
     let output = run(&["--licenses"], &[]);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("MIT licence"), "{text}");
+    assert!(text.contains("MIT license"), "{text}");
     assert!(text.contains("Open Charge Alliance"), "{text}");
     assert!(text.contains("Rust dependencies"), "{text}");
 }

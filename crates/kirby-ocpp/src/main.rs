@@ -1,5 +1,14 @@
 //! `kirby-ocpp`: terminal OCPP 1.6J charge point emulator.
 
+/// Stderr lines are written whole and in one piece. The std macro issues several small
+/// writes per line, which interleave with the stdout lines when both streams share a pipe
+/// (`2>&1`) and tear one into the other. Declared before the modules so they all use it.
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        $crate::headless::stderr_line(&format!($($arg)*))
+    };
+}
+
 mod cli;
 mod fleet;
 mod headless;
@@ -27,9 +36,9 @@ use tokio::task::JoinHandle;
 use crate::cli::{Cli, Cmd, RunArgs, ScenariosCmd, SuiteArgs};
 use crate::headless::{Level, LinkWatch, Sink};
 
-/// Project licence line and third-party notices (`--licenses`).
+/// Project license line and third-party notices (`--licenses`).
 const LICENSES: &str = concat!(
-    "kirby-ocpp is distributed under the MIT licence (see LICENSE in the source repository).\n\n",
+    "kirby-ocpp is distributed under the MIT license (see LICENSE in the source repository).\n\n",
     include_str!("../THIRD_PARTY_NOTICES.md")
 );
 
@@ -101,7 +110,7 @@ async fn real_main() -> ExitCode {
         config.persist = false;
     }
     config.normalize();
-    if let Err(error) = config.validate() {
+    if let Err(error) = config.validate().and_then(|()| config.check_tls_files()) {
         return usage_error(&error.to_string());
     }
     headless::init_connect_context(&config.url, &config.ws_subprotocol);

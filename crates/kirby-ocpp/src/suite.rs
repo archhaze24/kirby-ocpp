@@ -408,7 +408,11 @@ pub async fn run(
     }
 }
 
+/// A duration for the PASS line: milliseconds below one second, else seconds with one decimal.
 fn seconds(ms: u64) -> String {
+    if ms < 1000 {
+        return format!("{ms} ms");
+    }
     #[allow(clippy::cast_precision_loss, reason = "a display value")]
     let secs = ms as f64 / 1000.0;
     format!("{secs:.1} s")
@@ -540,6 +544,15 @@ fn summary_json(rows: &[Row], duration_ms: u64, started_at: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durations_show_milliseconds_below_one_second() {
+        assert_eq!(seconds(0), "0 ms");
+        assert_eq!(seconds(34), "34 ms");
+        assert_eq!(seconds(999), "999 ms");
+        assert_eq!(seconds(1000), "1.0 s");
+        assert_eq!(seconds(1234), "1.2 s");
+    }
 
     fn row(name: &str, outcome: Outcome) -> Row {
         let started_at = (!matches!(outcome, Outcome::Skipped)).then(now_rfc3339);

@@ -165,8 +165,9 @@ pub struct IncomingCall {
 pub enum ConnectError {
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
-    /// A TLS setting is inconsistent or the TLS handshake failed.
-    #[error("TLS configuration error: {0}")]
+    /// A TLS setting is inconsistent or the TLS handshake failed (for example the server
+    /// certificate is not trusted).
+    #[error("TLS error: {0}")]
     Tls(String),
     /// A TLS file (CA certificate, client certificate or key) could not be read or parsed.
     #[error("cannot use TLS file {}: {reason}", path.display())]

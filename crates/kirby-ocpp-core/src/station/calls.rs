@@ -334,6 +334,10 @@ impl StationActor {
             return;
         };
         match &result {
+            // The BootNotification handler logs the outcome itself (accepted with the heartbeat
+            // and clock details, or pending/rejected): a generic line would repeat it, and
+            // would read "accepted" for a rejected boot.
+            Ok(_) if call.action == "BootNotification" => {}
             Ok(_) => self.log(LogLevel::Success, format!("{} accepted", call.action)),
             Err(error) => self.log(LogLevel::Error, error.to_string()),
         }

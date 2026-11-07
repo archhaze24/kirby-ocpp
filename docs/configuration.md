@@ -13,18 +13,18 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 
 ## kirby-ocpp
 
-`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help` and `suite --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), and `version --help` shows only `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Output and Scenarios; the tables below follow the same grouping.
+`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help` and `suite --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), and `version --help` shows only `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Output and Scenarios; the tables below use a similar grouping (the headings differ in places).
 
 ### Station and connection
 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `-u, --url <URL>` | `OCPP_URL` | none (required) | Central System WebSocket URL, `ws://` or `wss://`, e.g. `ws://localhost:9000/ocpp` |
-| `-i, --id <ID>` | `OCPP_CHARGE_POINT_ID` | `CP-001` | Charge point id (non-empty, not `.` or `..`); with `--count` above 1 it is the id template unless `--id-template` is given |
-| `--vendor <VENDOR>` | `OCPP_VENDOR` | `archhaze24` | BootNotification vendor (non-empty) |
-| `--model <MODEL>` | `OCPP_MODEL` | `KIRBY` | BootNotification model (non-empty) |
-| `--serial <SERIAL>` | `OCPP_SERIAL` | none | Serial number in BootNotification, BootNotification schema limit: 25 characters |
-| `--firmware-version <VERSION>` | `OCPP_FIRMWARE_VERSION` | none | Firmware version in BootNotification, BootNotification schema limit: 50 characters |
+| `-i, --id <ID>` | `OCPP_CHARGE_POINT_ID` | `CP-001` | Charge point id (non-empty, not `.` or `..`, no control or invisible characters such as newlines, zero-width spaces or bidirectional marks; otherwise exit 2); with `--count` above 1 it is the id template unless `--id-template` is given |
+| `--vendor <VENDOR>` | `OCPP_VENDOR` | `archhaze24` | BootNotification vendor (non-empty, at most 20 characters; longer exits 2) |
+| `--model <MODEL>` | `OCPP_MODEL` | `KIRBY` | BootNotification model (non-empty, at most 20 characters; longer exits 2) |
+| `--serial <SERIAL>` | `OCPP_SERIAL` | none | Serial number in BootNotification, BootNotification schema limit: 25 characters (longer exits 2) |
+| `--firmware-version <VERSION>` | `OCPP_FIRMWARE_VERSION` | none | Firmware version in BootNotification, BootNotification schema limit: 50 characters (longer exits 2) |
 | `-c, --connector <ID>` | | `1` | Initial connector id (at least 1) |
 | `--connectors <COUNT>` | | `1` | Number of connectors (at least 1; raised to `--connector` if smaller) |
 | `--heartbeat <SECONDS>` | | `30` | Fallback heartbeat interval (at least 1); the CSMS value from BootNotification wins |
@@ -49,13 +49,13 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
-| `--tls-ca <PATH>` | `OCPP_TLS_CA_FILE` | system roots | CA bundle (PEM) for `wss://` |
-| `--tls-cert <PATH>` | `OCPP_TLS_CERT_FILE` | none | Client certificate for mutual TLS; needs `--tls-key` |
-| `--tls-key <PATH>` | `OCPP_TLS_KEY_FILE` | none | Client private key for mutual TLS; needs `--tls-cert` |
+| `--tls-ca <PATH>` | `OCPP_TLS_CA_FILE` | system roots | CA bundle (PEM) for `wss://`; a file that cannot be read exits 2 at startup |
+| `--tls-cert <PATH>` | `OCPP_TLS_CERT_FILE` | none | Client certificate for mutual TLS; needs `--tls-key` (one without the other, or a file that cannot be read, exits 2) |
+| `--tls-key <PATH>` | `OCPP_TLS_KEY_FILE` | none | Client private key for mutual TLS; needs `--tls-cert` (one without the other, or a file that cannot be read, exits 2) |
 | `--tls-server-name <NAME>` | `OCPP_TLS_SERVER_NAME` | URL host | SNI and verification name override |
 | `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Disable certificate verification (local or self-signed testing only) |
 | `--show-secrets` | `OCPP_SHOW_SECRETS` | off | Show `AuthorizationKey` values in frame logs; by default they are replaced by `***` |
-| `--security-profile-fallback <BOOL>` | `OCPP_SECURITY_PROFILE_FALLBACK` | `true` | Go back to the previous `SecurityProfile` after 3 profile-attributable connection failures (HTTP 401/403, TLS errors) with a newly set one, before it ever connected (`A05.FR.08`); see [Security](security.md#emulator-side) |
+| `--security-profile-fallback <BOOL>` | `OCPP_SECURITY_PROFILE_FALLBACK` | `true` | Go back to the previous `SecurityProfile` after 3 profile-attributable connection failures (HTTP 401/403, or a TLS alert rejecting the client certificate) with a newly set one, before it ever connected (`A05.FR.08`); see [Security](security.md#emulator-side) |
 | `--additional-root-certificate-check` | `OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK` | off | Value of the read-only `AdditionalRootCertificateCheck` key: a new Central System root must be signed by the installed one |
 
 Profiles and certificates are explained in [Security](security.md).
@@ -88,7 +88,7 @@ Profiles and certificates are explained in [Security](security.md).
 | `-q, --quiet` | | off | `run` and `suite` print only errors and the final verdict line (see [Output levels](#output-levels)) |
 | `--color <WHEN>` | | `auto` | Colorize PASS (green), FAIL (red), SKIP and warnings (yellow) in human output: `auto` (only when stdout is a terminal and `NO_COLOR` is unset or empty), `always`, `never`. Explicit `always` or `never` wins over `NO_COLOR`; the terminal UI is unchanged |
 | `--log-file <PATH>` | | none | Also append the event log to this file, with the UI too. A new file is created `0600` on unix (frames hold idTags); an existing file keeps its mode. A helper thread writes it; lines that cannot be written in time are dropped and a `note` line reports the count |
-| `--licenses` | | | Print third-party licence notices and exit |
+| `--licenses` | | | Print third-party license notices and exit |
 | `-V, --version`, `-h, --help` | | | `--version` prints one line; `kirby-ocpp version` prints the build details |
 
 ### Output levels
@@ -228,7 +228,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--junit <PATH>` | | none | Script report as JUnit XML; needs `--script` |
 | `--var <NAME=VALUE>` | | none | Set a script variable (repeatable): `${NAME}` in the script becomes VALUE. Overrides `[vars]`; `true`/`false`/numbers keep their type; needs `--script` |
 | `--timeout <SECONDS>` | | `60` | Fail the script after this long, 1 to 86400; needs `--script` |
-| `--licenses` | | | Print third-party licence notices and exit |
+| `--licenses` | | | Print third-party license notices and exit |
 | `-V, --version`, `-h, --help` | | | |
 
 CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md). The HTTP API: [api.md](api.md).

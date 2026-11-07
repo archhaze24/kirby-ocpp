@@ -48,6 +48,6 @@ Pre-1.0: the API may change between minor versions.
 - [Emulator guide](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/emulator.md), [scenarios](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/scenarios.md), [conformance notes](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_1.6J_CONFORMANCE.md)
 - API reference: <https://docs.rs/kirby-ocpp-core>
 
-## Licence
+## License
 
 MIT. The bundled OCPP JSON schemas belong to the Open Charge Alliance and are used under CC BY-ND 4.0, see `schemas/README.md`.
