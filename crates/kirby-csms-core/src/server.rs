@@ -153,6 +153,8 @@ impl CsmsServer {
                 responders: std::collections::HashMap::new(),
                 tx_ids: config.transaction_ids.allocator(),
                 next_session: 0,
+                frame_seq: unix_micros(),
+                history_dropped: 0,
             }),
             config,
             events,
@@ -214,6 +216,17 @@ impl CsmsHandle {
             .collect()
     }
 
+    /// How many stations the registry holds and how many of them are connected.
+    pub fn station_counts(&self) -> (usize, usize) {
+        let state = self.inner.lock();
+        let connected = state
+            .stations
+            .values()
+            .filter(|rec| rec.info.connected)
+            .count();
+        (state.stations.len(), connected)
+    }
+
     /// One station of the registry.
     pub fn station(&self, id: &str) -> Option<StationInfo> {
         self.inner
@@ -255,6 +268,69 @@ impl CsmsHandle {
                 .map(|item| item.entry.clone())
                 .collect()
         })
+    }
+
+    /// The frames of a station that are newer than the sequence `after` (all of them for
+    /// `None`), oldest first, each with its sequence number. Sequence numbers increase over
+    /// every station and never repeat during one run. See [`HistoryPage`].
+    pub fn history_since(&self, id: &str, after: Option<u64>) -> Option<HistoryPage> {
+        let state = self.inner.lock();
+        let newest = state.frame_seq;
+        state.stations.get(id).map(|rec| {
+            let after = after.unwrap_or(0);
+            let start = rec.history.partition_point(|item| item.seq <= after);
+            HistoryPage {
+                frames: rec
+                    .history
+                    .iter()
+                    .skip(start)
+                    .map(|item| (item.seq, item.entry.clone()))
+                    .collect(),
+                dropped_through: rec.dropped_seq,
+                newest,
+            }
+        })
+    }
+
+    /// How many frames left a station history for good so far (evicted by a cap, or too big
+    /// to be kept), over every station of this run.
+    pub fn history_dropped(&self) -> u64 {
+        self.inner.lock().history_dropped
+    }
+
+    /// Up to `limit` transactions of the registry, ordered by station id and then as the
+    /// station state holds them, with the station id. `active` keeps only the running
+    /// (`Some(true)`) or only the stopped ones, `since` those that started (by the station's
+    /// clock) at or after it. The flag is `true` when more matched than `limit`.
+    pub fn transactions(
+        &self,
+        station: Option<&str>,
+        active: Option<bool>,
+        since: Option<chrono::DateTime<Utc>>,
+        limit: usize,
+    ) -> (Vec<(String, crate::state::TransactionRecord)>, bool) {
+        let state = self.inner.lock();
+        let mut found = Vec::new();
+        let mut more = false;
+        for (id, rec) in &state.stations {
+            if station.is_some_and(|wanted| wanted != id) {
+                continue;
+            }
+            for tx in &rec.state.transactions {
+                let running = tx.status == crate::state::TransactionStatus::Active;
+                if active.is_some_and(|wanted| wanted != running)
+                    || since.is_some_and(|since| tx.started_at < since)
+                {
+                    continue;
+                }
+                if found.len() >= limit {
+                    more = true;
+                    return (found, more);
+                }
+                found.push((id.clone(), tx.clone()));
+            }
+        }
+        (found, more)
     }
 
     /// Removes a station from the registry, closing its connection if it has one.
@@ -537,11 +613,36 @@ struct State {
     responders: std::collections::HashMap<String, Responder>,
     tx_ids: TransactionIdAllocator,
     next_session: u64,
+    /// Sequence of the last frame recorded in any station history. It starts at the start time
+    /// in microseconds, so a sequence from an earlier run is smaller than every one of this run.
+    frame_seq: u64,
+    /// Frames that left a history for good: evicted by a cap, or too big to be kept.
+    history_dropped: u64,
+}
+
+/// Microseconds since the Unix epoch (0 before it).
+fn unix_micros() -> u64 {
+    u64::try_from(Utc::now().timestamp_micros()).unwrap_or(0)
+}
+
+/// A page of a station's frame history, see [`CsmsHandle::history_since`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoryPage {
+    /// Every frame still held that is newer than `after`, oldest first, with its sequence
+    /// number.
+    pub frames: Vec<(u64, FrameEntry)>,
+    /// The largest sequence of a frame of this station that left the history without being
+    /// kept (0 when none did): a cursor older than this has lost frames.
+    pub dropped_through: u64,
+    /// The sequence of the newest frame recorded in any history so far.
+    pub newest: u64,
 }
 
 struct StationRec {
     info: StationInfo,
     history: VecDeque<HistoryItem>,
+    /// Sequence of the newest frame of this station that was evicted or not kept.
+    dropped_seq: u64,
     /// Sum of `HistoryItem::bytes`.
     history_bytes: usize,
     state: StationState,
@@ -549,6 +650,8 @@ struct StationRec {
 }
 
 struct HistoryItem {
+    /// Position in the sequence of [`State::frame_seq`].
+    seq: u64,
     entry: FrameEntry,
     /// Size of the frame as JSON text.
     bytes: usize,
@@ -676,6 +779,7 @@ impl Inner {
                     received_by_action: BTreeMap::new(),
                 },
                 history: VecDeque::new(),
+                dropped_seq: 0,
                 history_bytes: 0,
                 state: StationState::default(),
                 session: None,
@@ -725,13 +829,16 @@ impl Inner {
     }
 
     fn record_frame(&self, station: &str, session_id: u64, direction: Direction, frame: &Frame) {
-        let mut state = self.lock();
+        let mut guard = self.lock();
+        let state = &mut *guard;
         let Some(rec) = state.stations.get_mut(station) else {
             return;
         };
         if rec.session.as_ref().map(|s| s.id) != Some(session_id) {
             return; // A session that was replaced or forgotten must not write into the record.
         }
+        state.frame_seq += 1;
+        let seq = state.frame_seq;
         if let (Direction::In, Frame::Call { action, .. }) = (direction, frame) {
             rec.info.received_calls += 1;
             let by_action = &mut rec.info.received_by_action;
@@ -766,11 +873,14 @@ impl Inner {
             {
                 if let Some(old) = rec.history.pop_front() {
                     rec.history_bytes = rec.history_bytes.saturating_sub(old.bytes);
+                    rec.dropped_seq = rec.dropped_seq.max(old.seq);
+                    state.history_dropped += 1;
                 }
             }
             if rec.history_bytes.saturating_add(bytes) <= bytes_cap {
                 rec.history_bytes += bytes;
                 rec.history.push_back(HistoryItem {
+                    seq,
                     entry: FrameEntry {
                         ts: Utc::now(),
                         direction,
@@ -778,6 +888,9 @@ impl Inner {
                     },
                     bytes,
                 });
+            } else {
+                rec.dropped_seq = rec.dropped_seq.max(seq);
+                state.history_dropped += 1;
             }
         }
         if self.events.receiver_count() > 0 {

@@ -63,7 +63,9 @@ pub use rules::{
     FaultInfo, MAX_FAULT_BYTES, MAX_FAULTS, MAX_FAULTS_PER_STATION, MAX_RULE_BYTES,
     MAX_RULES_PER_STATION, MAX_SCOPED_RULES, RuleInfo, Scope, reply_kind,
 };
-pub use server::{CsmsHandle, CsmsServer, MAX_STATION_ID_LEN, event_frame, station_id_from_path};
+pub use server::{
+    CsmsHandle, CsmsServer, HistoryPage, MAX_STATION_ID_LEN, event_frame, station_id_from_path,
+};
 pub use state::{
     BootInfo, CertificateRequest, ConnectorState, InstalledCertificates, LogReport,
     MAX_ACTIVE_TRANSACTIONS, MAX_CONNECTORS, MAX_INSTALLED_CERTIFICATES, MAX_SECURITY_EVENTS,

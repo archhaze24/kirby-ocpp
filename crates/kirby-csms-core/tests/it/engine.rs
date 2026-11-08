@@ -1648,6 +1648,52 @@ async fn fault_counters_saturate_and_storage_is_bounded() {
 }
 
 #[tokio::test]
+async fn history_sequences_pages_drops_and_counts() {
+    let csms = start(|config| config.history_cap = 3).await;
+    assert_eq!(csms.station_counts(), (0, 0));
+    assert!(csms.history_since("ghost", None).is_none());
+    let mut events = csms.subscribe();
+    let cp = Cp::connect(&csms, "/ocpp", "CP-SEQ").await;
+    cp.wait_accepted().await;
+    assert_eq!(csms.station_counts(), (1, 1));
+    // Wait until the startup traffic overflowed the history cap of three frames.
+    wait_event(&mut events, "a dropped frame", |_| {
+        csms.history_dropped() > 0
+    })
+    .await;
+
+    // The boot traffic is more than the cap: the oldest frames were dropped and counted.
+    let page = csms.history_since("CP-SEQ", None).unwrap();
+    assert_eq!(page.frames.len(), 3);
+    let sequences: Vec<u64> = page.frames.iter().map(|(sequence, _)| *sequence).collect();
+    assert!(
+        sequences.windows(2).all(|pair| pair[0] < pair[1]),
+        "{sequences:?}"
+    );
+    assert!(page.dropped_through > 0 && page.dropped_through < sequences[0]);
+    assert!(page.newest >= sequences[2]);
+    assert!(csms.history_dropped() > 0);
+
+    // `after` keeps only the frames that are newer; a sequence from the far past keeps all.
+    let after = csms.history_since("CP-SEQ", Some(sequences[0])).unwrap();
+    assert_eq!(after.frames.len(), 2);
+    assert_eq!(after.frames[0].0, sequences[1]);
+    let all = csms.history_since("CP-SEQ", Some(1)).unwrap();
+    assert_eq!(all.frames.len(), 3);
+    let none = csms.history_since("CP-SEQ", Some(page.newest)).unwrap();
+    assert_eq!(none.frames.len(), 0);
+
+    // Sequences start at the start time in microseconds, so ones from an earlier run are
+    // smaller than every sequence of this run.
+    let now = u64::try_from(chrono::Utc::now().timestamp_micros()).unwrap();
+    assert!(sequences[0] > now - 60_000_000, "{sequences:?} {now}");
+
+    // The transaction list: filters and the limit flag.
+    assert_eq!(csms.transactions(None, None, None, 10), (Vec::new(), false));
+    cp.stop().await;
+}
+
+#[tokio::test]
 async fn forget_if_disconnected_is_atomic_and_history_tail_is_bounded() {
     let csms = start(|_| {}).await;
     let mut events = csms.subscribe();
