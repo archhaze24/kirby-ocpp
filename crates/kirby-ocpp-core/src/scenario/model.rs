@@ -46,6 +46,39 @@ fn default_true() -> bool {
     true
 }
 
+fn default_times() -> u32 {
+    1
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde `skip_serializing_if`"
+)]
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// The CALLERROR a `reply` step sends.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplyError {
+    /// One of the OCPP CALLERROR codes (case-insensitive), e.g. `NotSupported`.
+    pub code: String,
+    #[serde(default)]
+    pub description: String,
+    /// The `errorDetails` object (default `{}`).
+    #[serde(default = "default_payload")]
+    pub details: Value,
+}
+
+/// The CALLERROR code spelled `text` (case-insensitive), if it is one of the standard ones.
+pub(super) fn standard_error_code(text: &str) -> Option<crate::ocpp::frame::ErrorCode> {
+    crate::ocpp::frame::ErrorCode::STANDARD
+        .iter()
+        .find(|code| code.as_str().eq_ignore_ascii_case(text.trim()))
+        .cloned()
+}
+
 fn default_payload() -> Value {
     Value::Object(serde_json::Map::new())
 }
@@ -206,6 +239,25 @@ pub enum Action {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         call: Option<String>,
     },
+    /// Arm an answer for the next CALL(s) of the command `call` from the CSMS: exactly one of
+    /// `result` (the CALLRESULT payload) and `error` (a CALLERROR). The station's own handler
+    /// does not run for a CALL answered this way.
+    Reply {
+        call: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<ReplyError>,
+        /// How many CALLs the reply answers (default 1).
+        #[serde(default = "default_times")]
+        times: u32,
+        /// Hold the answer back this many milliseconds (default 0).
+        #[serde(default, skip_serializing_if = "is_zero")]
+        delay_ms: u64,
+        /// The scenario fails when the reply was not used up by the end (default `false`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        must_fire: bool,
+    },
     /// Run the nested `steps` `count` times. Inside, `${i}` (1-based) and `${i0}` (0-based)
     /// hold the iteration, or `${<var>}` / `${<var>0}` when `var` names the counter.
     /// Built by the TOML parser only (never deserialised through serde).
@@ -303,6 +355,7 @@ impl Action {
             Self::DataTransfer { .. } => "data_transfer",
             Self::SetRule { .. } => "set_rule",
             Self::ClearRules { .. } => "clear_rules",
+            Self::Reply { .. } => "reply",
             Self::RequestCertificate {} => "request_certificate",
             Self::SecurityEvent { .. } => "security_event",
             Self::Repeat { .. } => "repeat",
@@ -683,11 +736,92 @@ fn validate_steps(
                     return bad(&error.to_string());
                 }
             }
+            Action::Reply {
+                call,
+                result,
+                error,
+                times,
+                delay_ms,
+                ..
+            } => {
+                if let Err(message) = validate_reply(call, result.as_ref(), error.as_ref()) {
+                    return bad(&format!("action `reply`: {message}"));
+                }
+                if *times == 0 || *times > crate::station::scripted_reply::MAX_TIMES {
+                    return bad(&format!(
+                        "action `reply`: `times` must be between 1 and {}",
+                        crate::station::scripted_reply::MAX_TIMES
+                    ));
+                }
+                if *delay_ms > crate::station::response_rules::MAX_DELAY_MS {
+                    return bad(&format!(
+                        "action `reply`: `delay_ms` must be at most {}",
+                        crate::station::response_rules::MAX_DELAY_MS
+                    ));
+                }
+            }
             _ => {}
         }
         path.pop();
     }
     Ok(())
+}
+
+/// Checks the shape of a `reply` step (what can be known before the step runs).
+fn validate_reply(
+    call: &str,
+    result: Option<&Value>,
+    error: Option<&ReplyError>,
+) -> Result<(), String> {
+    let action = match static_text(call) {
+        Some(text) => Some(
+            canonical_action(&text)
+                .map_err(|e| e.to_string())?
+                .to_owned(),
+        ),
+        None => None,
+    };
+    match (result, error) {
+        (Some(_), Some(_)) => return Err("`result` and `error` exclude each other".to_owned()),
+        (None, None) => return Err("needs `result` or `error`".to_owned()),
+        (Some(result), None) => {
+            if !result.is_object() {
+                return Err("`result` must be a table (the CALLRESULT payload)".to_owned());
+            }
+            // A payload without placeholders can be checked against the response schema now.
+            if let Some(action) = &action
+                && !result.to_string().contains('$')
+                && let Some(registry) = schema_registry()
+                && let Err(violation) = registry.validate_response(action, result)
+            {
+                return Err(format!(
+                    "`result` is not a valid {action} response: {violation}"
+                ));
+            }
+        }
+        (None, Some(error)) => {
+            if let Some(text) = static_text(&error.code)
+                && standard_error_code(&text).is_none()
+            {
+                return Err(format!(
+                    "unknown error code `{text}` (expected one of the ten OCPP 1.6 CALLERROR codes)"
+                ));
+            }
+            if !error.details.is_object() {
+                return Err("`error.details` must be a table".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The bundled schemas, compiled once on first use (`None` if they cannot be compiled).
+pub(super) fn schema_registry() -> Option<&'static crate::ocpp::schema::SchemaRegistry> {
+    static REGISTRY: std::sync::OnceLock<Option<crate::ocpp::schema::SchemaRegistry>> =
+        std::sync::OnceLock::new();
+    REGISTRY
+        .get_or_init(|| crate::ocpp::schema::SchemaRegistry::new().ok())
+        .as_ref()
 }
 
 /// Counter names (`i`, `i0`, or `<var>`, `<var>0`) of every loop below `steps`.
@@ -1565,5 +1699,121 @@ ms = 5
                 "sleep 5ms"
             ]
         );
+    }
+
+    fn reply_step(fields: &str) -> String {
+        format!("name = \"t\"\n[[steps]]\naction = \"reply\"\n{fields}")
+    }
+
+    #[test]
+    fn reply_step_loads_with_defaults_and_a_stable_label() {
+        let s = Scenario::from_toml(&reply_step(
+            "call = \"reset\"\nresult = { status = \"Rejected\" }\n",
+        ))
+        .unwrap();
+        let Action::Reply {
+            call,
+            result,
+            error,
+            times,
+            delay_ms,
+            must_fire,
+        } = &s.steps[0].action
+        else {
+            panic!("{:?}", s.steps[0].action);
+        };
+        assert_eq!(call, "reset");
+        assert_eq!(result.as_ref().unwrap()["status"], "Rejected");
+        assert!(error.is_none());
+        assert_eq!((*times, *delay_ms, *must_fire), (1, 0, false));
+        assert_eq!(s.steps[0].stable_label(), "reply reset");
+        let e = Scenario::from_toml(&reply_step(
+            "call = \"Reset\"\nerror = { code = \"GenericError\" }\ntimes = 3\ndelay_ms = 10\nmust_fire = true\n",
+        ))
+        .unwrap();
+        let Action::Reply { error, times, .. } = &e.steps[0].action else {
+            panic!();
+        };
+        assert_eq!(error.as_ref().unwrap().code, "GenericError");
+        assert_eq!(*times, 3);
+    }
+
+    #[test]
+    fn reply_step_bad_shapes_are_load_errors() {
+        for (fields, needle) in [
+            ("call = \"Reset\"\n", "needs `result` or `error`"),
+            (
+                "call = \"Reset\"\nresult = { status = \"Accepted\" }\nerror = { code = \"GenericError\" }\n",
+                "exclude each other",
+            ),
+            ("call = \"Nonsense\"\nresult = {}\n", "unknown action"),
+            (
+                "result = { status = \"Accepted\" }\n",
+                "missing field `call`",
+            ),
+            (
+                "call = \"Reset\"\nresult = { status = \"Accepted\" }\nbogus = 1\n",
+                "unknown field `bogus`",
+            ),
+            (
+                "call = \"Reset\"\nresult = { status = \"Accepted\" }\ntimes = 0\n",
+                "`times` must be between 1 and 1000",
+            ),
+            (
+                "call = \"Reset\"\nresult = { status = \"Accepted\" }\ntimes = 1001\n",
+                "`times` must be between 1 and 1000",
+            ),
+            (
+                "call = \"Reset\"\nresult = { status = \"Accepted\" }\ndelay_ms = 3600001\n",
+                "`delay_ms` must be at most 3600000",
+            ),
+            (
+                "call = \"Reset\"\nresult = \"Accepted\"\n",
+                "`result` must be a table",
+            ),
+            (
+                "call = \"Reset\"\nresult = { status = \"Maybe\" }\n",
+                "not a valid Reset response",
+            ),
+            (
+                "call = \"Reset\"\nerror = { code = \"Nope\" }\n",
+                "unknown error code `Nope`",
+            ),
+            (
+                "call = \"Reset\"\nerror = { code = \"GenericError\", extra = 1 }\n",
+                "unknown field `extra`",
+            ),
+            (
+                "call = \"Reset\"\nerror = { code = \"GenericError\", details = 1 }\n",
+                "`error.details` must be a table",
+            ),
+            (
+                "call = \"Reset\"\nresult = { status = \"Accepted\" }\ncapture = { a = \"/x\" }\n",
+                "`capture` is only valid on",
+            ),
+            (
+                "call = \"Reset\"\nresult = { status = \"Accepted\" }\nevse = 1\n",
+                "`evse` is reserved for OCPP 2.x steps",
+            ),
+        ] {
+            let e = err(&reply_step(fields));
+            assert!(e.contains(needle), "{fields}: {e}");
+        }
+    }
+
+    #[test]
+    fn reply_step_checks_what_it_can_when_it_has_placeholders() {
+        // A placeholder defers the schema check and the action check to run time.
+        Scenario::from_toml(&format!(
+            "name = \"t\"\n[vars]\nr = \"Rejected\"\n{}",
+            "[[steps]]\naction = \"reply\"\ncall = \"Reset\"\nresult = { status = \"${r}\" }\n"
+        ))
+        .unwrap();
+        // The action name may be a placeholder too.
+        Scenario::from_toml(&format!(
+            "name = \"t\"\n[vars]\na = \"Reset\"\n{}",
+            "[[steps]]\naction = \"reply\"\ncall = \"${a}\"\nresult = { status = \"Rejected\" }\n"
+        ))
+        .unwrap();
     }
 }

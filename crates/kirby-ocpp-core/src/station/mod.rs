@@ -60,6 +60,7 @@ pub mod metering;
 pub mod offline;
 pub mod reservation;
 pub mod response_rules;
+pub mod scripted_reply;
 pub mod security;
 pub mod smart_charging;
 pub mod transaction;

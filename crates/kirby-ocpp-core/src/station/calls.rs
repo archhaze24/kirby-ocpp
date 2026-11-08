@@ -347,6 +347,43 @@ impl StationActor {
         (call.continuation)(self, result);
     }
 
+    /// Stops waiting for the oldest unanswered CALL of `action` (`CancelCall`). The call is
+    /// forgotten: its continuation runs once with [`CallError::Cancelled`], and the answer, if
+    /// one still arrives, is logged as a frame and dropped (`on_call_done` ignores unknown
+    /// tokens). The CALL itself cannot be recalled from the wire.
+    ///
+    /// Transaction messages are refused: the CSMS may already have acted on them, and the
+    /// station state has to follow its answer or the retry logic.
+    pub(super) fn cancel_call(&mut self, action: &str) -> Result<(), StationError> {
+        if is_transaction_message(action) {
+            return Err(StationError::InvalidState {
+                connector: None,
+                reason: format!("{action} cannot be cancelled: the transaction follows its answer"),
+            });
+        }
+        let token = self
+            .calls
+            .iter()
+            .filter(|(_, call)| call.action == action)
+            .map(|(token, _)| *token)
+            .min()
+            .ok_or_else(|| StationError::InvalidState {
+                connector: None,
+                reason: format!("no unanswered {action} call to cancel"),
+            })?;
+        if let Some(call) = self.calls.remove(&token) {
+            call.task.abort();
+            self.log(LogLevel::Warn, format!("{action} cancelled"));
+            (call.continuation)(
+                self,
+                Err(CallError::Cancelled {
+                    action: action.to_owned(),
+                }),
+            );
+        }
+        Ok(())
+    }
+
     /// Fails every call in flight (connection lost, disconnect, shutdown): the tasks (and
     /// their retry sleeps) are aborted and each continuation runs once with `error()`.
     pub(super) fn fail_pending_calls(&mut self, error: impl Fn() -> CallError) {

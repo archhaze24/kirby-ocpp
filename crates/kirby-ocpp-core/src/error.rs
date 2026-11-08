@@ -32,6 +32,9 @@ pub enum CallError {
     /// No CALLRESULT/CALLERROR within the call timeout.
     #[error("{action} timed out after {after:?}")]
     Timeout { action: String, after: Duration },
+    /// The caller stopped waiting (`CancelCall`); the CALL may still be answered later.
+    #[error("{action} cancelled")]
+    Cancelled { action: String },
     /// The central system answered with a CALLERROR.
     #[error("{action} failed: {code} {description}")]
     Rpc {

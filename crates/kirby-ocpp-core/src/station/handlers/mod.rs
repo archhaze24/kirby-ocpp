@@ -69,6 +69,10 @@ impl StationActor {
         } = call;
         self.log(LogLevel::Info, format!("CSMS requests {action}"));
         let reply = if INBOUND_ACTIONS.contains(&action.as_str()) {
+            // A scripted reply answers the CALL itself; a response rule only shapes the handler.
+            let Some(reply) = self.apply_scripted_reply(&action, reply) else {
+                return;
+            };
             match self.apply_response_rule(&action, reply) {
                 Some(reply) => reply,
                 None => return,

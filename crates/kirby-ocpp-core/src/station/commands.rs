@@ -141,6 +141,7 @@ impl StationActor {
                 Ok(Outcome::Done)
             }
             Command::AddConnector => Ok(self.add_connector()),
+            Command::CancelCall { action } => self.cancel_call(&action).map(|()| Outcome::Done),
             Command::PlugIn { connector } => self.plug_in(connector),
             Command::SetConnectorStatus { connector, status } => self.set_status(connector, status),
             Command::CycleConnectorStatus { connector } => {
@@ -193,6 +194,8 @@ impl StationActor {
                 );
                 Ok(Outcome::Done)
             }
+            Command::ArmScriptedReply { reply } => self.arm_scripted_reply(reply),
+            Command::ClearScriptedReplies => Ok(self.clear_scripted_replies()),
             Command::SetConfiguration { key, value } => self.set_configuration(&key, &value),
             Command::SetLocalListEntry { id_tag, info } => self.set_local_list_entry(id_tag, info),
             Command::RemoveLocalListEntry { id_tag } => self.remove_local_list_entry(id_tag),

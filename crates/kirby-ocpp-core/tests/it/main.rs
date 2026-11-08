@@ -2,7 +2,9 @@
 //! Add a test file as `tests/it/<name>.rs` and declare it here.
 
 mod fleet;
+mod scenario_reply;
 mod scenario_runner;
+mod station_cancel_call;
 mod station_csms_calls;
 mod station_features;
 mod station_lifecycle;

@@ -6,6 +6,7 @@ use serde_json::Value;
 use super::authorization::AuthorizationDecision;
 use super::maintenance::{DiagnosticsOutcome, FirmwareOutcome};
 use super::response_rules::ResponseRule;
+use super::scripted_reply::ScriptedReply;
 use crate::ids::{ConnectorId, IdTag, TxId};
 use crate::ocpp::messages::{ChargingProfile, IdTagInfo};
 use crate::ocpp::types::{
@@ -113,11 +114,22 @@ pub enum Command {
         payload: Value,
         validate: bool,
     },
+    /// Stop waiting for the oldest unanswered CALL of one action: the command that sent it
+    /// completes with a `cancelled` error, and a late answer is logged but ignored. Refused for
+    /// `StartTransaction`, `StopTransaction` and `MeterValues`: the CSMS may already have acted
+    /// on them, and the station state must follow its answer.
+    CancelCall { action: String },
     /// Make the station misbehave on purpose: add (or replace, per action) a response rule for an
     /// inbound CSMS command. See [`super::response_rules`].
     SetResponseRule { rule: ResponseRule },
     /// Remove the response rules of one action, or all of them for `None`.
     ClearResponseRules { action: Option<String> },
+    /// Arm an answer for the next inbound CALLs of one action (a scenario `reply` step). See
+    /// [`super::scripted_reply`]. The action name is checked like a response rule's.
+    ArmScriptedReply { reply: ScriptedReply },
+    /// Remove every armed scripted reply. The outcome is a `Response` whose payload lists the
+    /// ones that were not fully used: `{"unused":[{"tag":..,"action":..,"remaining":..}]}`.
+    ClearScriptedReplies,
     /// Change a writable configuration key as `ChangeConfiguration` would (same validation,
     /// persistence and side effects), without a CSMS round trip. Unknown, read-only or invalid
     /// values are `StationError::InvalidArgument`.
@@ -177,8 +189,11 @@ impl Command {
             Self::SetDiagnosticsOutcome { .. } => "set_diagnostics_outcome",
             Self::SetFirmwareOutcome { .. } => "set_firmware_outcome",
             Self::SendRaw { .. } => "send_raw",
+            Self::CancelCall { .. } => "cancel_call",
             Self::SetResponseRule { .. } => "set_response_rule",
             Self::ClearResponseRules { .. } => "clear_response_rules",
+            Self::ArmScriptedReply { .. } => "arm_scripted_reply",
+            Self::ClearScriptedReplies => "clear_scripted_replies",
             Self::SetConfiguration { .. } => "set_configuration",
             Self::SetLocalListEntry { .. } => "set_local_list_entry",
             Self::RemoveLocalListEntry { .. } => "remove_local_list_entry",

@@ -154,6 +154,8 @@ pub(crate) struct StationActor {
     events: broadcast::Sender<Event>,
     /// The live model; published as the snapshot.
     pub(super) state: Snapshot,
+    /// Answers armed by scenario `reply` steps (runtime only, see `scripted_reply`).
+    pub(super) scripted_replies: super::scripted_reply::ReplyList,
     pub(super) registry: ConfigRegistry,
     pub(super) local_list: LocalAuthList,
     pub(super) auth_cache: AuthorizationCache,
@@ -305,6 +307,7 @@ impl StationActor {
             snapshot_tx,
             events,
             state,
+            scripted_replies: super::scripted_reply::ReplyList::default(),
             registry: parts.registry,
             local_list: parts.local_list,
             auth_cache: parts.auth_cache,

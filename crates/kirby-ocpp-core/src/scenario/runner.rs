@@ -10,11 +10,13 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc};
 use tokio::time::{sleep, sleep_until, timeout};
 
-use super::model::{Action, Expect, Step};
+use super::model::{Action, Expect, ReplyError, Step};
 use super::vars::{self, Vars};
 use super::{CancelToken, Scenario, ScenarioError};
 use crate::error::StationError;
 use crate::station::ResponseRule;
+use crate::station::response_rules::canonical_action;
+use crate::station::scripted_reply::{ScriptedAnswer, ScriptedReply};
 use crate::station::{Command, Event, FrameRecord, Outcome, StationHandle};
 
 /// How one step ended.
@@ -321,6 +323,7 @@ async fn run_inner(
         frame_bytes: 0,
         cancel,
         vars,
+        index: 0,
     };
     let flat = scenario.expanded_steps();
     let mut steps = Vec::with_capacity(flat.len());
@@ -356,6 +359,7 @@ async fn run_inner(
         }
         let step_started = Instant::now();
         ctx.evidence = Evidence::default();
+        ctx.index = index as u64;
         for (counter, iteration) in &flat_step.counters {
             // Counter names are valid and never built-ins (checked when the scenario loads).
             let _ = ctx.vars.insert(counter, (iteration + 1).into());
@@ -387,6 +391,12 @@ async fn run_inner(
         }
         steps.push(report);
     }
+    if flat
+        .iter()
+        .any(|f| matches!(f.step.action, Action::Reply { .. }))
+    {
+        finish_replies(handle, &flat, &mut steps, failed).await;
+    }
     let mut report = ScenarioReport::new(
         scenario.name.clone(),
         steps.iter().all(|s| s.status == StepStatus::Passed),
@@ -398,6 +408,58 @@ async fn run_inner(
     report.station = Some(handle.snapshot().charge_point_id.clone());
     report.source.clone_from(&scenario.source);
     report
+}
+
+/// Disarms the scripted replies the scenario left behind. Unless the scenario failed already
+/// (then an unused reply is a consequence, not a cause), a `reply` step with `must_fire = true`
+/// whose reply was not used up fails in the final report.
+async fn finish_replies(
+    handle: &StationHandle,
+    flat: &[super::model::FlatStep<'_>],
+    steps: &mut [StepReport],
+    failed: bool,
+) {
+    let cleared = timeout(
+        Duration::from_secs(2),
+        handle.send(Command::ClearScriptedReplies),
+    )
+    .await;
+    let Ok(Ok(Outcome::Response { payload })) = cleared else {
+        return;
+    };
+    if failed {
+        return;
+    }
+    let Some(unused) = payload.get("unused").and_then(Value::as_array) else {
+        return;
+    };
+    for entry in unused {
+        let Some(tag) = entry.get("tag").and_then(Value::as_u64) else {
+            continue;
+        };
+        let Ok(index) = usize::try_from(tag) else {
+            continue;
+        };
+        let (Some(flat_step), Some(report)) = (flat.get(index), steps.get_mut(index)) else {
+            continue;
+        };
+        let Action::Reply {
+            call,
+            times,
+            must_fire: true,
+            ..
+        } = &flat_step.step.action
+        else {
+            continue;
+        };
+        let left = entry.get("remaining").and_then(Value::as_u64).unwrap_or(0);
+        let used = u64::from(*times).saturating_sub(left);
+        report.status = StepStatus::Failed(format!(
+            "reply: the scripted {} reply was used {used} of {times} time(s) before the scenario ended",
+            vars::clip_text(call)
+        ));
+        report.detail.params = step_params(flat_step.step);
+    }
 }
 
 /// What a failed step can tell about itself beyond the reason text.
@@ -469,6 +531,8 @@ struct Ctx<'a> {
     frame_bytes: usize,
     cancel: &'a CancelToken,
     vars: Vars,
+    /// Index of the running step in the expanded scenario (tags scripted replies).
+    index: u64,
 }
 
 impl Ctx<'_> {
@@ -573,6 +637,28 @@ impl Ctx<'_> {
                 self.expect_call(call, *direction, matches.as_ref(), *timeout_ms)
                     .await?,
             ),
+            Action::Reply {
+                call,
+                result,
+                error,
+                times,
+                delay_ms,
+                ..
+            } => {
+                let command = reply_command(
+                    self.index,
+                    call,
+                    result.as_ref(),
+                    error.as_ref(),
+                    *times,
+                    *delay_ms,
+                )?;
+                self.handle
+                    .send(command)
+                    .await
+                    .map_err(|error| format!("reply: {error}"))?;
+                None
+            }
             action => {
                 let command = to_command(action)?;
                 let result = self.handle.send(command).await;
@@ -666,6 +752,56 @@ impl Ctx<'_> {
     }
 }
 
+/// The command that arms a `reply` step (variables already substituted); `tag` is the step's
+/// index in the expanded scenario.
+fn reply_command(
+    tag: u64,
+    call: &str,
+    result: Option<&Value>,
+    error: Option<&ReplyError>,
+    times: u32,
+    delay_ms: u64,
+) -> Result<Command, String> {
+    let action = canonical_action(call).map_err(|e| format!("reply: {e}"))?;
+    let answer = match (result, error) {
+        (Some(payload), None) => {
+            if !payload.is_object() {
+                return Err("reply: `result` must be a table".to_owned());
+            }
+            if let Some(registry) = super::model::schema_registry()
+                && let Err(violation) = registry.validate_response(action, payload)
+            {
+                return Err(format!(
+                    "reply: `result` is not a valid {action} response: {violation}"
+                ));
+            }
+            ScriptedAnswer::Result {
+                payload: payload.clone(),
+            }
+        }
+        (None, Some(error)) => ScriptedAnswer::Error {
+            code: super::model::standard_error_code(&error.code).ok_or_else(|| {
+                format!(
+                    "reply: unknown error code `{}`",
+                    vars::clip_text(&error.code)
+                )
+            })?,
+            description: error.description.clone(),
+            details: error.details.clone(),
+        },
+        _ => return Err("reply: needs exactly one of `result` and `error`".to_owned()),
+    };
+    Ok(Command::ArmScriptedReply {
+        reply: ScriptedReply {
+            tag,
+            action: action.to_owned(),
+            answer,
+            remaining: times,
+            delay_ms,
+        },
+    })
+}
+
 fn to_command(action: &Action) -> Result<Command, String> {
     Ok(match action.clone() {
         Action::Connect {} => Command::Connect,
@@ -743,6 +879,7 @@ fn to_command(action: &Action) -> Result<Command, String> {
         Action::Sleep { .. }
         | Action::WaitFor { .. }
         | Action::ExpectCall { .. }
+        | Action::Reply { .. }
         | Action::Repeat { .. } => {
             return Err("not a command".to_owned());
         }
@@ -850,7 +987,7 @@ fn substitute_step(step: &Step, vars: &Vars) -> Result<Step, String> {
         && let Value::Object(fields) = &mut action
     {
         for (key, value) in fields.iter_mut() {
-            if key == "payload" || key == "match" {
+            if matches!(key.as_str(), "payload" | "match" | "result" | "error") {
                 *value = vars::substitute(value, vars).map_err(|e| format!("{key}: {e}"))?;
             } else if let Value::String(text) = value {
                 *text = vars::substitute_str(text, vars).map_err(|e| format!("{key}: {e}"))?;
@@ -941,6 +1078,7 @@ mod tests {
                 frame_bytes: 0,
                 cancel: &cancel,
                 vars: Vars::new(),
+                index: 0,
             };
             let out = f(&mut ctx).await;
             drop(ctx);

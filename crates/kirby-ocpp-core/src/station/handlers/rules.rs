@@ -7,8 +7,42 @@ use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::responder::ReplyHandle;
 use crate::station::event::LogLevel;
 use crate::station::response_rules::{Behavior, ResponseRule, RuleList, reject_payload};
+use crate::station::scripted_reply::ScriptedAnswer;
 
 impl StationActor {
+    /// Answers the CALL with an armed scripted reply (see `station::scripted_reply`).
+    ///
+    /// Returns the handle back when no reply is armed for `action`; `None` when the CALL was
+    /// answered here (exactly once, possibly after the reply's delay).
+    pub(super) fn apply_scripted_reply(
+        &mut self,
+        action: &str,
+        reply: ReplyHandle,
+    ) -> Option<ReplyHandle> {
+        let Some((answer, delay_ms, left)) = self.scripted_replies.take(action) else {
+            return Some(reply);
+        };
+        self.log(
+            LogLevel::Warn,
+            format!("scripted reply: {action} answered ({left} more)"),
+        );
+        let reply = if delay_ms > 0 {
+            reply.delayed(Duration::from_millis(delay_ms))
+        } else {
+            reply
+        };
+        let result = match answer {
+            ScriptedAnswer::Result { payload } => reply.accept_value(payload),
+            ScriptedAnswer::Error {
+                code,
+                description,
+                details,
+            } => reply.reject_with_details(code, description, details),
+        };
+        self.log_rule_reply_error(action, result);
+        None
+    }
+
     /// Looks up a rule for `action` and applies it.
     ///
     /// Returns the handle for the normal handler, or `None` when the rule dealt with the CALL
