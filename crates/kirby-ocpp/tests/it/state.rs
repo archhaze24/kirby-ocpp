@@ -303,6 +303,24 @@ fn a_newer_state_file_is_refused_and_left_untouched() {
 }
 
 #[test]
+fn reset_refuses_a_backup_of_a_newer_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let id = "CP-BAK";
+    let file = file_of(dir.path(), id);
+    std::fs::write(&file, br#"{"version": 1}"#).unwrap();
+    let backup = dir.path().join(format!("{id}.station.json.bak"));
+    let body = br#"{"version": 99, "future": true}"#;
+    std::fs::write(&backup, body).unwrap();
+    let state = dir.path().to_str().unwrap();
+
+    let output = run(&["state", "reset", "--id", id, "--state-dir", state, "--yes"]);
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    assert!(text(&output.stderr).contains("nothing was deleted"));
+    assert_eq!(std::fs::read(&backup).unwrap(), body);
+    assert!(file.exists());
+}
+
+#[test]
 fn an_unusable_state_file_is_reported_but_not_moved() {
     let dir = tempfile::tempdir().unwrap();
     let id = "CP-BAD";

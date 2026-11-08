@@ -329,10 +329,11 @@ impl StationStore {
 
     /// Deletes the persisted state of this charge point (see [`StationStore::owned_files`])
     /// and returns the files that existed. Nothing is deleted when the state file or the
-    /// secrets file was written by a newer version ([`StoreError::UnsupportedVersion`]).
+    /// secrets file, or a `.bak` copy of either, was written by a newer version
+    /// ([`StoreError::UnsupportedVersion`]).
     pub fn remove(&self) -> Result<Vec<PathBuf>, StoreError> {
         let files = self.owned_files();
-        for path in [&files[0], &files[2]] {
+        for path in &files {
             let Ok(bytes) = fs::read(path) else { continue };
             let found = serde_json::from_slice::<Value>(&bytes)
                 .ok()
@@ -875,6 +876,25 @@ mod tests {
         ));
         assert!(store.path().exists(), "the state file stays");
         assert_eq!(fs::read_to_string(store.secrets_path()).unwrap(), text);
+    }
+
+    #[test]
+    fn remove_refuses_a_backup_of_a_newer_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        store.save(&sample()).unwrap();
+        let files = store.owned_files();
+        for index in [1, 3] {
+            let text = format!(r#"{{"version": {}}}"#, u64::from(STORE_VERSION) + 1);
+            fs::write(&files[index], &text).unwrap();
+            assert!(matches!(
+                store.remove(),
+                Err(StoreError::UnsupportedVersion { .. })
+            ));
+            assert!(store.path().exists(), "the state file stays");
+            assert_eq!(fs::read_to_string(&files[index]).unwrap(), text);
+            fs::remove_file(&files[index]).unwrap();
+        }
     }
 
     #[test]

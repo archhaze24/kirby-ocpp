@@ -313,6 +313,7 @@ fn print_version(json: bool) -> ExitCode {
     let date = env!("KIRBY_OCPP_BUILD_DATE");
     let target = env!("KIRBY_OCPP_TARGET");
     let protocols = ["OCPP 1.6J"];
+    let protocol_tokens = ["ocpp1.6"];
     if json {
         let value = serde_json::json!({
             "name": "kirby-ocpp",
@@ -321,6 +322,7 @@ fn print_version(json: bool) -> ExitCode {
             "build_date": date,
             "target": target,
             "protocols": protocols,
+            "protocol_tokens": protocol_tokens,
         });
         headless::stdout_line(&value.to_string(), true);
     } else {

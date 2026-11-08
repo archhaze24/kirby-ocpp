@@ -877,6 +877,26 @@ fn version_command_and_flag() {
     assert!(value["commit"].is_string() && value["target"].is_string());
     assert!(value["build_date"].as_str().is_some_and(|d| d.len() == 10));
     assert_eq!(value["protocols"][0], "OCPP 1.6J");
+    assert_eq!(value["protocol_tokens"][0], "ocpp1.6");
+    let mut keys: Vec<&str> = value
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "build_date",
+            "commit",
+            "name",
+            "protocol_tokens",
+            "protocols",
+            "target",
+            "version"
+        ]
+    );
 }
 
 #[test]
