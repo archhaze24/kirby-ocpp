@@ -171,9 +171,9 @@ Rules:
 
 ## HTTP API
 
-`--api-listen 127.0.0.1:9100` starts a local JSON HTTP API next to the server (off by default; works with the TUI, headless and `--script`): list stations, read state and frame history, send CALLs, forget stations, stream events (SSE) and manage response rules and faults.
-- Calls share the 256-command limit with stdin. The answer is the stdin result object without `type`, `station` and `action`, plus an `outcome` field; stdin answers are unchanged. After the `listening` line the server prints `api listening on http://ADDR` (`{"type":"api_listening","addr":..,"url":..}` with `--json`).
-- A non-loopback address needs `--api-token` / `--api-token-file`; without a token browser-like requests (`Origin`, cross-site, non-loopback `Host`) are refused. Plain HTTP only. The shapes are a versioned contract (`/v1`, `api_version` 1; a release that serves OCPP 2.0.1 or 2.1 on the same listener keeps them). Endpoints, error codes, auth model and examples: [api.md](api.md).
+`--api-listen 127.0.0.1:9100` starts a local JSON HTTP API next to the server (off by default; works with the TUI, headless and `--script`): list stations, read state and frame history (with cursors, filters and CSV or NDJSON export), list transactions, send CALLs, forget stations, stream events (SSE, resumable with `Last-Event-ID`), scrape Prometheus metrics and manage response rules and faults. See [History, export and metrics](api.md#history-export-and-metrics).
+- Calls share the 256-command limit with stdin. The answer is the stdin result object without `type`, `station` and `action`, plus an `outcome` field; stdin answers are unchanged. After the `listening` line the server prints `api listening on http://ADDR` (`https://` with TLS) (`{"type":"api_listening","addr":..,"url":..}` with `--json`).
+- A non-loopback address needs `--api-token` / `--api-token-file` and `--api-tls-cert` / `--api-tls-key` (HTTPS, optional client certificates with `--api-tls-client-ca`); without a token browser-like requests (`Origin`, cross-site, non-loopback `Host`) are refused. Plain HTTP is for loopback. The shapes are a versioned contract (`/v1`, `api_version` 1; a release that serves OCPP 2.0.1 or 2.1 on the same listener keeps them). Endpoints, error codes, auth model and examples: [api.md](api.md).
 
 ## Response rules and fault injection
 
@@ -199,7 +199,7 @@ A rule or fault with a `protocol` applies only to stations that negotiated it; a
 | `close` | close the WebSocket with code 1011 without replying |
 | `invalid_payload` | CALLRESULT with the payload you give, as is (for example schema-invalid) |
 
-Scripts, stdin and the HTTP API check faults the same way: the action name is 1 to 128 bytes without control characters, `times` is 1 to 1 000 000, a station id is 1 to 128 bytes, and at most 1000 faults (100 for one station, 8 MiB of text in all) and 1000 rules of stations (64 for one station, 8 MiB of text in all) are stored at once.
+Scripts, stdin and the HTTP API check faults the same way: the action name is 1 to 128 bytes without control characters, `times` is 1 to 1 000 000, a station id is 1 to 128 bytes, and at most 1000 faults (100 for one station, 8 MiB of text in all) and 1000 scoped rules (rules of stations and global rules that carry a protocol; 64 for one station, 8 MiB of text in all) are stored at once.
 
 Rules and faults can also be installed at start from `[[rule]]` blocks of a [configuration file](configuration.md#blocks) (`behavior = "respond"` or a fault kind). Without `station` they apply to all stations; all are in place before the first station connects.
 

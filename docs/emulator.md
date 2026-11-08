@@ -193,7 +193,7 @@ Human output (not `--json`, not the terminal UI) colors PASS green, FAIL red and
 
 ## Version, completions and validation
 
-* `kirby-ocpp --version` prints one line. `kirby-ocpp version` prints the version, git commit, build date, target triple and supported protocols (`OCPP 1.6J`); `kirby-ocpp version --json` prints them as one JSON object.
+* `kirby-ocpp --version` prints one line. `kirby-ocpp version` prints the version, git commit, build date, target triple and supported protocols (`OCPP 1.6J`); `kirby-ocpp version --json` prints them as one JSON object (`protocols` holds display names, `protocol_tokens` the subprotocol tokens such as `ocpp1.6`).
 * `kirby-ocpp scenarios validate FILE|DIR|NAME...` parses scenarios without connecting and without `--url`: `ok PATH (N steps)` per valid scenario, the load error with the path otherwise, exit 0 or 2. A directory is scanned like `suite` does. A file named twice is checked once, a scenario name used by two files gives a `warning:` line (exit stays 0), and `*.toml` entries that are not regular files (dangling symlinks) are skipped with a `note:` line.
 
 ### Shell completions

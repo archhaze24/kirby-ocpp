@@ -175,16 +175,16 @@ New keys may be added to these objects; none is renamed or removed. None of the 
 | Command | Meaning |
 | --- | --- |
 | `state path [--id ID]` | Print the state directory; with `--id` the state file of that station. Nothing is created or read. `--json`: `{"schema": 1, "dir", "station", "file", "secrets_file"}` (`station`, `file` and `secrets_file` are `null` without `--id`) |
-| `state show --id ID` | Print what the state file holds: store version, availability, connectors with their transaction, local list, authorization cache, charging profiles, offline queue, certificates, queued security events and the configuration keys. The secrets file is never read: only its presence is reported, and configuration values whose key name contains `AuthorizationKey`, `password`, `secret` or `privateKey` print as `***`. A file that cannot be used (corrupt, or of another station) is reported and left where it is. `--json`: `{"schema": 1, "station", "file", "status", "store_version", "supported_store_version", "secrets_file" (boolean), "state"}` with `status` `found`, `missing` or `unusable` (`unusable` adds `reason`; `state` is `null` unless found) |
+| `state show --id ID` | Print what the state file holds: store version, availability, connectors with their transaction, local list, authorization cache, charging profiles, offline queue, certificates, queued security events and the configuration keys. The secrets file is never read: only its presence is reported, and configuration values whose key name contains `AuthorizationKey`, `password`, `secret` or `privateKey` print as `***`. A file that cannot be used (corrupt, or of another station) is reported and left where it is. `--json`: `{"schema": 1, "station", "file", "status", "store_version", "supported_store_version", "secrets_file" (boolean), "state"}` with `status` `found`, `missing` or `unusable` (`unusable` adds `reason`; `state` is `null` unless found). The content of `state` is specific to the protocol of the station (OCPP 1.6 today): do not rely on its keys across protocols |
 | `state reset --id ID [--yes]` | Delete the state file, the secrets file and their `.bak` copies of that station, nothing else and nothing outside the state directory. Asks `Delete? [y/N]` on a terminal; without a terminal it needs `-y, --yes` (exit 2 without it). Nothing to delete is not an error. `--json`: `{"schema": 1, "station", "deleted": [paths]}` |
 
-`state show` and `state reset` need the id to be given (`--id`, `OCPP_CHARGE_POINT_ID` or the `id` key of the configuration file); the default id `CP-001` is not assumed. A state or secrets file written by a newer version is refused by `show` and `reset` and stays untouched. None of the `state` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-state).
+`state show` and `state reset` need the id to be given (`--id`, `OCPP_CHARGE_POINT_ID` or the `id` key of the configuration file); the default id `CP-001` is not assumed. A state or secrets file, or a `.bak` copy of either, written by a newer version is refused by `show` and `reset` and stays untouched (`reset` deletes nothing then). None of the `state` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-state).
 
 `kirby-ocpp scenarios list` lists the built-in scenarios; `kirby-ocpp scenarios show <NAME>` prints one as TOML. Scenario format: [Scenarios](scenarios.md).
 
 `kirby-ocpp scenarios validate <FILE|DIR|NAME>...` parses scenarios without connecting (no `--url` needed). It prints `ok PATH (N steps)` per scenario (built-ins as `ok built-in NAME (N steps)`) and `error: PATH: reason` per failure, scanning directories like `suite` does (every `*.toml` directly inside, sorted). Exit 0 when all are valid, 2 when any is not.
 
-`kirby-ocpp version` prints the tool version, the git commit, the build date, the target triple and the supported protocols (`OCPP 1.6J`); with `--json` one JSON object with the keys `name`, `version`, `commit`, `build_date`, `target` and `protocols`. The commit is `unknown` in a build without git. `kirby-ocpp --version` stays a single line.
+`kirby-ocpp version` prints the tool version, the git commit, the build date, the target triple and the supported protocols (`OCPP 1.6J`); with `--json` one JSON object with the keys `name`, `version`, `commit`, `build_date`, `target`, `protocols` (display names such as `OCPP 1.6J`) and `protocol_tokens` (the WebSocket subprotocol tokens such as `ocpp1.6`, in the same order). The commit is `unknown` in a build without git. `kirby-ocpp --version` stays a single line.
 
 `kirby-ocpp completions <bash|zsh|fish|powershell|elvish>` prints a shell completion script to stdout; installation hints are in [emulator.md](emulator.md#shell-completions).
 
@@ -342,9 +342,12 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `--listen <ADDR>` | `KIRBY_CSMS_LISTEN` | `0.0.0.0:9000` | Address to listen on; port `0` picks a free port (the real address is printed first) |
-| `--api-listen <ADDR>` | `KIRBY_CSMS_API_LISTEN` | off | Address of the local HTTP control API; port `0` picks a free port. A non-loopback address needs a token (exit 2 otherwise). See [api.md](api.md) |
+| `--api-listen <ADDR>` | `KIRBY_CSMS_API_LISTEN` | off | Address of the local HTTP control API; port `0` picks a free port. A non-loopback address needs a token and `--api-tls-cert` (exit 2 otherwise). See [api.md](api.md#tls) |
 | `--api-token <TOKEN>` | `KIRBY_CSMS_API_TOKEN` | none | Bearer token the API requires (visible in `ps`: prefer the environment variable or `--api-token-file`); needs `--api-listen`, excludes `--api-token-file` |
 | `--api-token-file <FILE>` | `KIRBY_CSMS_API_TOKEN_FILE` | none | File holding the API bearer token (read once, trailing newline dropped, must not be empty; a warning on unix when group/world readable); needs `--api-listen`, excludes `KIRBY_CSMS_API_TOKEN`; a token is visible ASCII without spaces |
+| `--api-tls-cert <FILE>` | `KIRBY_CSMS_API_TLS_CERT` | none | Server certificate chain (PEM) that makes the API serve HTTPS; needs `--api-tls-key` and `--api-listen`. See [api.md](api.md#tls) |
+| `--api-tls-key <FILE>` | `KIRBY_CSMS_API_TLS_KEY` | none | Server private key (PEM) of the API certificate; needs `--api-tls-cert` |
+| `--api-tls-client-ca <FILE>` | `KIRBY_CSMS_API_TLS_CLIENT_CA` | none | Trusted CA(s) for API client certificates; every client must present one (mutual TLS); needs `--api-tls-cert` |
 | `--tls-cert <FILE>` | `KIRBY_CSMS_TLS_CERT` | none | Server certificate chain (PEM) for `wss://`; needs `--tls-key` |
 | `--tls-key <FILE>` | `KIRBY_CSMS_TLS_KEY` | none | Server private key (PEM); needs `--tls-cert` |
 | `--tls-client-ca <FILE>` | `KIRBY_CSMS_TLS_CLIENT_CA` | none | Trusted CA(s) for client certificates; with `--tls-cert` every client must present one (mutual TLS); needs `--tls-cert` |
@@ -404,10 +407,12 @@ CSMS usage and the script format: [CSMS](csms.md), [Scenarios](scenarios.md). Th
 
 ### Precedence and format
 
-For every setting: command-line flag, then environment variable, then the selected profile, then the top level of the file, then the built-in default. A flag or variable that is set always wins. `api_token_file` and `default_auth_key_file` of the file are dropped when `--api-token` / `KIRBY_CSMS_API_TOKEN` or `--default-auth-key` / `KIRBY_CSMS_DEFAULT_AUTH_KEY` is set, so the file never turns a set value into a conflict. A flag may be satisfied by the file: `--api-token-file` with `api_listen` in the file, or `--tls-cert` with `tls_key` in the file, is valid.
+For every setting: command-line flag, then environment variable, then the selected profile, then the top level of the file, then the built-in default. A flag or variable that is set always wins. `api_token_file` and `default_auth_key_file` of the file are dropped when `--api-token` / `KIRBY_CSMS_API_TOKEN` or `--default-auth-key` / `KIRBY_CSMS_DEFAULT_AUTH_KEY` is set, so the file never turns a set value into a conflict. A flag may be satisfied by the file: `--api-token-file` with `api_listen` in the file, or `--tls-cert` with `tls_key` in the file (likewise `--api-tls-cert` with `api_tls_key`), is valid.
 
 * TOML, at most 1 MiB; a problem exits 2 with a message that names the file and the key path (`behavior.history_cap`, `profile.lab.rule[1].behavior`, `station[0].id`).
 * Top-level `schema = 1` and `protocol = "ocpp1.6"` are optional; no other value is accepted. Both are valid only at the top level.
+* The top-level `protocol` states which protocol the file is written for. It is an assertion and the default for the blocks without their own `protocol`; it does not restrict the listener. A listener can serve several protocols (see `subprotocol`): stations that negotiate another protocol are unaffected by the key and only meet the blocks scoped to their own protocol. A `protocol` on a `[[station]]` or `[[rule]]` block scopes that block to stations of that protocol.
+* `transaction_ids` (`[behavior]`, `--transaction-ids`) applies to OCPP 1.6 stations only: it sets the integer ids of `StartTransaction`. Other protocols assign transaction ids in their own way.
 * Settings sit in tables named after the groups of `kirby-csms --help`, in lower case. The key of a setting is the long flag name with `-` replaced by `_`. Values have the type of the flag (text, integer, boolean); a value the flag would refuse is refused with the same message, and the message points at the key.
 * Unknown tables and keys are errors. A key in the wrong table is an unknown key.
 * Relative paths in the file resolve against the directory of the file; paths given by flag or variable resolve against the working directory.
@@ -417,7 +422,7 @@ For every setting: command-line flag, then environment variable, then the select
 | Table | Keys |
 | --- | --- |
 | `[listener]` | `listen`, `subprotocol` |
-| `[api]` | `api_listen`, `api_token_file` |
+| `[api]` | `api_listen`, `api_token_file`, `api_tls_cert`, `api_tls_key`, `api_tls_client_ca` |
 | `[tls]` | `tls_cert`, `tls_key`, `tls_client_ca` |
 | `[security]` | `security_profile`, `auth_keys_file`, `default_auth_key_file`, `show_secrets` |
 | `[behavior]` | `transaction_ids`, `heartbeat_interval`, `validate_inbound`, `ping_interval`, `pong_timeout`, `call_timeout`, `history_cap`, `transaction_history_cap` |

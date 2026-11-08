@@ -305,9 +305,45 @@ curl -s -X POST 127.0.0.1:9100/v1/stations/CP-1/calls \
 curl -sN '127.0.0.1:9100/v1/events?station=CP-1'
 ```
 
-The first call lists the stations (`id`, `connected`, `connectors`, ...). The second answers `{"ok":true,"outcome":"result","result":{"status":"Accepted"}}`. The last one streams server-sent events (`connected`, `frame`, `state`, ...) until you stop it. A non-loopback `--api-listen` address needs a token.
+The first call lists the stations (`id`, `connected`, `connectors`, ...). The second answers `{"ok":true,"outcome":"result","result":{"status":"Accepted"}}`. The last one streams server-sent events (`connected`, `frame`, `state`, ...) until you stop it. A non-loopback `--api-listen` address needs a token and TLS (see [TLS](api.md#tls)).
 
 Reference: [CSMS scripts](scenarios.md#csms-scripts), [HTTP API](api.md).
+
+## Export traffic and scrape metrics
+
+Goal: keep a CSV of what a station did, pick up where a reader stopped, and watch a running `kirby-csms` from Prometheus.
+
+```sh
+kirby-csms --listen 127.0.0.1:9000 --api-listen 127.0.0.1:9100 --no-tui &
+
+# Everything the server holds for CP-1 as a spreadsheet, or only the BootNotification exchange.
+curl -s '127.0.0.1:9100/v1/stations/CP-1/history?format=csv' > cp-1.csv
+curl -s '127.0.0.1:9100/v1/stations/CP-1/history?format=ndjson&action=BootNotification'
+
+# Transactions of all stations.
+curl -s '127.0.0.1:9100/v1/transactions?state=stopped&format=csv' > transactions.csv
+
+# Read new frames only: keep the cursor of the last row between runs.
+cursor=$(curl -s '127.0.0.1:9100/v1/stations/CP-1/history?limit=0' | jq -r .next_cursor)
+curl -s "127.0.0.1:9100/v1/stations/CP-1/history?since=$cursor"
+```
+
+`next_cursor` is the position to continue from; a poll that finds nothing returns the same cursor. When `gap` is `true` the server dropped frames after the cursor. A client that follows `/v1/events` keeps the `id:` of the last event and reconnects with `Last-Event-ID` (a browser-style `EventSource` does that by itself); on `event: resync` it reads the state again.
+
+Scrape the metrics with this job in `prometheus.yml` (drop `authorization` when no token is set):
+
+```yaml
+scrape_configs:
+  - job_name: kirby-csms
+    metrics_path: /v1/metrics
+    scrape_interval: 15s
+    authorization:
+      credentials_file: /etc/prometheus/kirby-csms.token
+    static_configs:
+      - targets: ["127.0.0.1:9100"]
+```
+
+`kirby_csms_stations_connected`, `rate(kirby_csms_calls_received_total[5m])` by `action` and `kirby_csms_history_frames_dropped_total` are the usual first panels. Reference: [History, export and metrics](api.md#history-export-and-metrics).
 
 ## TLS and mutual TLS
 

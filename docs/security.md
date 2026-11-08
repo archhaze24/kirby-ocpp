@@ -39,6 +39,10 @@ What the CSMS does for the whitepaper messages:
 - Has typed commands (TUI keys in [csms.md](csms.md#terminal-ui)) for `CertificateSigned` (`X`), `InstallCertificate` (`I`), `DeleteCertificate` (`d`), `GetInstalledCertificateIds` (`L`), `ExtendedTriggerMessage` (`E`), `GetLog` (`l`) and `SignedUpdateFirmware` (`S`). Over stdin, send them as raw `action` / `payload` commands.
 - Does not sign CSRs, does not validate firmware signatures and does not enforce certificate checks beyond what rustls / webpki verify. To answer a CSR, sign it yourself (see [Station certificate flow](#station-certificate-flow)) and send `CertificateSigned`.
 
+### Control API transport
+
+The HTTP control API has its own listener and its own certificate, separate from the station listener and from the security profiles above. `--api-tls-cert` and `--api-tls-key` serve it over HTTPS (TLS 1.2 and 1.3); `--api-tls-client-ca` also requires a client certificate from every API client. A bearer token over plain HTTP is accepted only on a loopback address: a non-loopback `--api-listen` needs a token and TLS, and the process exits with code 2 before binding otherwise. Failed or silent TLS handshakes are dropped without a log line, limited to 5 s each and 64 at a time. The key file permissions are not checked; keep it `0600`. The full matrix and examples: [api.md](api.md#tls).
+
 ## Emulator side
 
 `kirby-ocpp check` tests a connection with the TLS flags and the URL credentials only (certificate verification, `--tls-ca`, `--tls-cert`/`--tls-key`, `--tls-skip-verify`, a wildcard certificate is refused as above). It prints the subject, issuer and expiry of the server certificate and never the password of the URL; see [Connection check](emulator.md#connection-check).
