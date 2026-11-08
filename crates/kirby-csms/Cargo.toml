@@ -33,6 +33,7 @@ toml.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "signal", "net"] }
 
 [dev-dependencies]
+clap_mangen.workspace = true
 kirby-ocpp-core.workspace = true
 rcgen.workspace = true
 serde_json.workspace = true

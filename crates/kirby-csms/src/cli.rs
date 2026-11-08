@@ -847,4 +847,27 @@ mod tests {
         assert!(parse_transaction_ids("fixed").is_err());
         assert!(parse_transaction_ids("fixed:x").is_err());
     }
+
+    /// Writes the man page to `$KIRBY_CSMS_MAN_DIR` when it is set (the release workflow does
+    /// this) and checks that every visible flag appears in it.
+    #[test]
+    fn man_page_lists_every_flag() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let dir = std::env::var_os("KIRBY_CSMS_MAN_DIR")
+            .map_or_else(|| temp.path().to_path_buf(), PathBuf::from);
+        std::fs::create_dir_all(&dir).expect("man dir");
+        clap_mangen::generate_to(command(), &dir).expect("generate man page");
+        let text = std::fs::read_to_string(dir.join("kirby-csms.1")).expect("page exists");
+        let mut built = command();
+        built.build();
+        let mut flags = 0;
+        for arg in built.get_arguments().filter(|arg| !arg.is_hide_set()) {
+            if let Some(long) = arg.get_long() {
+                let flag = format!("\\-\\-{}", long.replace('-', "\\-"));
+                assert!(text.contains(&flag), "kirby-csms.1 misses --{long}");
+                flags += 1;
+            }
+        }
+        assert!(flags > 10, "flags expected");
+    }
 }

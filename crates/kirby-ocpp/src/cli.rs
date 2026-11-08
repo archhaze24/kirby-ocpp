@@ -962,3 +962,51 @@ fn non_empty(value: &str) -> Result<String, String> {
 fn non_empty_path(value: &str) -> Result<PathBuf, String> {
     non_empty(value).map(PathBuf::from)
 }
+
+#[cfg(test)]
+mod man_tests {
+    use super::command;
+
+    /// Every non-hidden command with its man page file name, flags and subcommands included.
+    fn pages(command: &clap::Command, out: &mut Vec<(String, clap::Command)>) {
+        out.push((
+            clap_mangen::Man::new(command.clone()).get_filename(),
+            command.clone(),
+        ));
+        for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+            pages(sub, out);
+        }
+    }
+
+    /// Writes the man pages to `$KIRBY_OCPP_MAN_DIR` when it is set (the release workflow does
+    /// this) and checks that every visible flag and subcommand appears in its page.
+    #[test]
+    fn man_pages_list_every_flag() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let dir = std::env::var_os("KIRBY_OCPP_MAN_DIR")
+            .map_or_else(|| temp.path().to_path_buf(), std::path::PathBuf::from);
+        std::fs::create_dir_all(&dir).expect("man dir");
+        clap_mangen::generate_to(command(), &dir).expect("generate man pages");
+        let mut root = command().disable_help_subcommand(true);
+        root.build();
+        let mut all = Vec::new();
+        pages(&root, &mut all);
+        assert!(all.len() > 5, "subcommand pages expected");
+        for (file, cmd) in all {
+            let text = std::fs::read_to_string(dir.join(&file)).expect("page exists");
+            for arg in cmd.get_arguments().filter(|arg| !arg.is_hide_set()) {
+                if let Some(long) = arg.get_long() {
+                    let flag = format!("\\-\\-{}", long.replace('-', "\\-"));
+                    assert!(text.contains(&flag), "{file} misses --{long}");
+                }
+            }
+            for sub in cmd.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+                assert!(
+                    text.contains(sub.get_name()),
+                    "{file} misses {}",
+                    sub.get_name()
+                );
+            }
+        }
+    }
+}
