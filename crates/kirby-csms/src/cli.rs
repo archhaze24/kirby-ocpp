@@ -220,6 +220,26 @@ pub struct Cli {
     )]
     pub no_tui: bool,
 
+    /// Color of the terminal UI: auto (color unless NO_COLOR is set), always or never; the UI then marks states with text instead
+    #[arg(
+        long,
+        env = "KIRBY_CSMS_COLOR",
+        value_name = "WHEN",
+        value_enum,
+        default_value = "auto"
+    )]
+    pub color: ColorChoice,
+
+    /// Clock in front of event lines of the terminal UI and of human output: utc, local (this machine's time zone) or none; --json keeps its own timestamps
+    #[arg(
+        long,
+        env = "KIRBY_CSMS_TIME",
+        value_name = "ZONE",
+        value_enum,
+        default_value = "utc"
+    )]
+    pub time: TimeChoice,
+
     /// Run this TOML script against the connecting stations, print the report and exit
     #[arg(long, env = "KIRBY_CSMS_SCRIPT", value_name = "FILE", value_parser = non_empty_path)]
     pub script: Option<PathBuf>,
@@ -284,6 +304,63 @@ pub enum PrintFormat {
     Toml,
 }
 
+/// `--color` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ColorChoice {
+    /// Color unless `NO_COLOR` is set and non-empty.
+    Auto,
+    /// Always.
+    Always,
+    /// Never.
+    Never,
+}
+
+impl ColorChoice {
+    /// Whether the terminal UI draws without color.
+    #[must_use]
+    pub fn monochrome(self, no_color: bool) -> bool {
+        match self {
+            Self::Always => false,
+            Self::Never => true,
+            Self::Auto => no_color,
+        }
+    }
+
+    /// The name used on the command line and in the configuration file.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+}
+
+/// `--time` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum TimeChoice {
+    /// UTC (the default).
+    Utc,
+    /// The time zone of this machine.
+    Local,
+    /// No timestamp.
+    None,
+}
+
+impl TimeChoice {
+    /// The mode the output layers use.
+    #[must_use]
+    pub fn mode(self) -> kirby_ocpp_core::timefmt::TimeMode {
+        use kirby_ocpp_core::timefmt::TimeMode;
+        match self {
+            Self::Utc => TimeMode::Utc,
+            Self::Local => TimeMode::Local,
+            Self::None => TimeMode::None,
+        }
+    }
+}
+
 /// The command with the `--help` headings that name the tables of the configuration file.
 pub fn command() -> clap::Command {
     use clap::CommandFactory;
@@ -327,7 +404,9 @@ const HEADINGS: &[(&str, &[&str])] = &[
     ),
     (
         "Output",
-        &["json", "log_file", "stdin", "no_tui", "licenses"],
+        &[
+            "json", "log_file", "stdin", "no_tui", "color", "time", "licenses",
+        ],
     ),
     ("Script", &["script", "report", "junit", "vars", "timeout"]),
     (

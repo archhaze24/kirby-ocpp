@@ -105,6 +105,7 @@ pub const SCHEMA: Schema = Schema {
                 KeySpec::new("verbose", Kind::Switch),
                 KeySpec::new("quiet", Kind::Switch),
                 KeySpec::new("color", Kind::Text),
+                KeySpec::new("time", Kind::Text),
             ],
         },
     ],

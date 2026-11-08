@@ -16,8 +16,8 @@ use kirby_ocpp_core::scenario::{
     now_rfc3339,
 };
 use kirby_ocpp_core::{Clock, StationConfig, SystemClock};
+use kirby_ocpp_tui::TuiError;
 use kirby_ocpp_tui::text::sanitize;
-use kirby_ocpp_tui::{TuiError, TuiOptions};
 use serde_json::{Value, json};
 
 use crate::cli::RunArgs;
@@ -66,7 +66,7 @@ pub async fn interactive(
             }
         }
         let handles: Vec<_> = fleet.stations().iter().map(|(_, h)| h.clone()).collect();
-        let mut ui = std::pin::pin!(kirby_ocpp_tui::run_fleet(&handles, TuiOptions::default()));
+        let mut ui = std::pin::pin!(kirby_ocpp_tui::run_fleet(&handles, headless::tui_options()));
         // Like the single station: connect at startup (staggered), while the UI is up.
         // Connect failures are printed after the UI ends (stderr would garble the screen).
         let mut connect_failures = Vec::new();

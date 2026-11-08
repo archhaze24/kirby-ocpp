@@ -102,6 +102,8 @@ pub const SCHEMA: Schema = Schema {
                 KeySpec::new("log_file", Kind::Path),
                 KeySpec::new("stdin", Kind::Switch),
                 KeySpec::new("no_tui", Kind::Switch),
+                KeySpec::new("color", Kind::Text),
+                KeySpec::new("time", Kind::Text),
             ],
         },
     ],
@@ -604,6 +606,8 @@ impl Cli {
         }
         values.push(("stdin", Value::Bool(self.stdin)));
         values.push(("no_tui", Value::Bool(self.no_tui)));
+        values.push(("color", text(self.color.name())));
+        values.push(("time", text(self.time.mode().name())));
         values
     }
 

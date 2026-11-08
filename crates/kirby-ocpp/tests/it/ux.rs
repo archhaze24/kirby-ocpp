@@ -775,6 +775,83 @@ async fn colour_follows_the_flag() {
     csms.shutdown().await;
 }
 
+/// `HH:MM:SS.mmm ` at the start of a line.
+fn starts_with_clock(line: &str) -> bool {
+    let b = line.as_bytes();
+    b.len() > 13
+        && b[..13].iter().enumerate().all(|(i, c)| match i {
+            2 | 5 => *c == b':',
+            8 => *c == b'.',
+            12 => *c == b' ',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn time_flag_sets_the_clock_of_event_lines() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let scenario = ["run", "--scenario", "heartbeat-and-status", "--verbose"];
+    let event_lines = |output: &Output| -> Vec<String> {
+        stdout(output)
+            .lines()
+            .filter(|l| l.contains("->") || l.contains("<-"))
+            .map(str::to_owned)
+            .collect()
+    };
+    for (extra, clock) in [
+        (&[][..], true),
+        (&["--time", "utc"][..], true),
+        (&["--time", "local"][..], true),
+        (&["--time", "none"][..], false),
+    ] {
+        let output = run(args(csms.url(), &[extra, &scenario[..]].concat())).await;
+        let lines = event_lines(&output);
+        assert!(!lines.is_empty(), "{}", stdout(&output));
+        for line in &lines {
+            assert_eq!(starts_with_clock(line), clock, "{extra:?}: {line}");
+        }
+        if !clock {
+            assert!(
+                lines
+                    .iter()
+                    .all(|l| l.starts_with("->") || l.starts_with("<-"))
+            );
+        }
+    }
+    // --json keeps its timestamp fields whatever --time says.
+    let json = run(args(
+        csms.url(),
+        &[&["--time", "none", "--json"], &scenario[..]].concat(),
+    ))
+    .await;
+    assert!(stdout(&json).contains("\"ts\""), "{}", stdout(&json));
+    csms.shutdown().await;
+}
+
+#[test]
+fn time_flag_rejects_unknown_zones_and_is_in_print_config() {
+    let bad = command(&[
+        "--url",
+        "ws://127.0.0.1:1/ocpp",
+        "--time",
+        "mars",
+        "--print-config",
+    ])
+    .output()
+    .unwrap();
+    assert_eq!(bad.status.code(), Some(2), "{}", stderr(&bad));
+    let ok = command(&[
+        "--url",
+        "ws://127.0.0.1:1/ocpp",
+        "--time",
+        "local",
+        "--print-config=toml",
+    ])
+    .output()
+    .unwrap();
+    assert!(stdout(&ok).contains("time = \"local\""), "{}", stdout(&ok));
+}
+
 #[test]
 fn version_command_and_flag() {
     let flag = command(&["--version"]).output().unwrap();

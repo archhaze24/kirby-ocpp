@@ -365,6 +365,18 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
     )]
     pub color: ColorChoice,
 
+    /// Clock in front of event and frame lines of the terminal UI and of human output: utc, local (this machine's time zone) or none; --json keeps its own timestamps
+    #[arg(
+        help_heading = "Output",
+        global = true,
+        long,
+        env = "KIRBY_OCPP_TIME",
+        value_name = "ZONE",
+        value_enum,
+        default_value = "utc"
+    )]
+    pub time: TimeChoice,
+
     /// Print the third-party license notices and exit
     #[arg(help_heading = "Output", long)]
     pub licenses: bool,
@@ -385,6 +397,30 @@ pub enum PrintFormat {
     Json,
     /// A configuration file that `--config` accepts.
     Toml,
+}
+
+/// `--time` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum TimeChoice {
+    /// UTC (the default).
+    Utc,
+    /// The time zone of this machine.
+    Local,
+    /// No timestamp.
+    None,
+}
+
+impl TimeChoice {
+    /// The mode the output layers use.
+    #[must_use]
+    pub fn mode(self) -> kirby_ocpp_core::timefmt::TimeMode {
+        use kirby_ocpp_core::timefmt::TimeMode;
+        match self {
+            Self::Utc => TimeMode::Utc,
+            Self::Local => TimeMode::Local,
+            Self::None => TimeMode::None,
+        }
+    }
 }
 
 /// `--color` values.
@@ -879,6 +915,7 @@ impl Cli {
             .to_possible_value()
             .map_or_else(|| "auto".to_owned(), |value| value.get_name().to_owned());
         values.push(("color", text(&color)));
+        values.push(("time", text(self.time.mode().name())));
         render(&SCHEMA, &values, &comments)
     }
 

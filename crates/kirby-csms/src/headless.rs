@@ -13,11 +13,24 @@ use kirby_csms_core::{
     CsmsEvent, CsmsHandle, Direction, DisconnectReason, Frame, StationInfo, StationState,
     TransactionStatus,
 };
+use kirby_ocpp_core::timefmt::TimeMode;
 use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file};
 use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
+
+static TIME: std::sync::OnceLock<TimeMode> = std::sync::OnceLock::new();
+
+/// Fixes the clock of the human event lines (call once, before any output).
+pub fn init_time(mode: TimeMode) {
+    let _ = TIME.set(mode);
+}
+
+/// The clock of the human event lines (UTC before [`init_time`]).
+pub fn time_mode() -> TimeMode {
+    TIME.get().copied().unwrap_or_default()
+}
 
 /// Where lines go: stdout (human text, or JSON with `--json`) and, always as JSON, the log file.
 /// Shared between the event sink, the stdin commands and the script report.
@@ -256,7 +269,8 @@ impl Renderer {
 
     fn print(&mut self, event: &CsmsEvent) {
         let ts = Utc::now();
-        let clock = ts.format("%H:%M:%S%.3f");
+        // The clock with its trailing space (empty with `--time none`).
+        let clock = time_mode().prefix(ts);
         let stamp = ts.to_rfc3339_opts(SecondsFormat::Millis, true);
         match event {
             CsmsEvent::Connected { station } => {
@@ -273,7 +287,7 @@ impl Renderer {
                         "protocol": protocol,
                     }),
                     &format!(
-                        "{clock} {} connected from {} ({}, profile {profile})",
+                        "{clock}{} connected from {} ({}, profile {profile})",
                         sanitize(station),
                         remote
                             .map_or_else(|| "unknown address".to_owned(), |addr| addr.to_string()),
@@ -287,7 +301,7 @@ impl Renderer {
                 let reason = reason_name(*reason);
                 self.push(
                     &json!({"type": "disconnected", "ts": stamp, "station": station, "reason": reason}),
-                    &format!("{clock} {} disconnected ({reason})", sanitize(station)),
+                    &format!("{clock}{} disconnected ({reason})", sanitize(station)),
                 );
             }
             CsmsEvent::Frame {
@@ -309,7 +323,7 @@ impl Renderer {
                 self.push(
                     &value,
                     &format!(
-                        "{clock} {} {arrow} {}",
+                        "{clock}{} {arrow} {}",
                         sanitize(station),
                         sanitize(&frame.to_json_string())
                     ),
@@ -319,7 +333,7 @@ impl Renderer {
                 self.push(
                     &json!({"type": "malformed", "ts": stamp, "station": station, "text": text}),
                     &format!(
-                        "{clock} {} sent malformed text: {}",
+                        "{clock}{} sent malformed text: {}",
                         sanitize(station),
                         sanitize(text)
                     ),
@@ -329,11 +343,11 @@ impl Renderer {
                 self.last_state.remove(station);
                 self.push(
                     &json!({"type": "forgotten", "ts": stamp, "station": station}),
-                    &format!("{clock} {} forgotten", sanitize(station)),
+                    &format!("{clock}{} forgotten", sanitize(station)),
                 );
             }
             CsmsEvent::StateChanged { station } => {
-                self.print_state(station, &stamp, &clock.to_string());
+                self.print_state(station, &stamp, &clock);
             }
             CsmsEvent::AuthFailed {
                 station,
@@ -349,7 +363,7 @@ impl Renderer {
                         "remote_addr": remote_addr.to_string(), "reason": reason
                     }),
                     &format!(
-                        "{clock} {who} refused ({}) from {remote_addr}",
+                        "{clock}{who} refused ({}) from {remote_addr}",
                         sanitize(reason)
                     ),
                 );
@@ -386,7 +400,7 @@ impl Renderer {
             .collect::<Vec<_>>()
             .join(" ");
         let human = format!(
-            "{clock} {} state: connectors [{connectors}] active transactions [{active}]",
+            "{clock}{} state: connectors [{connectors}] active transactions [{active}]",
             sanitize(station)
         );
         let mut value = view.clone();

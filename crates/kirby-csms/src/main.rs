@@ -63,6 +63,7 @@ async fn main() -> ExitCode {
         Ok(plan) => plan,
         Err(code) => return code,
     };
+    headless::init_time(cli.time.mode());
     let out = match Output::open(cli.json, cli.log_file.as_deref()) {
         Ok(out) => out,
         Err(error) => return usage_error(&format!("cannot open the log file: {error}")),
@@ -127,10 +128,7 @@ async fn main() -> ExitCode {
     }
 
     let code = if let Some(session) = session {
-        match session
-            .run(handle.clone(), kirby_csms_tui::TuiOptions::default())
-            .await
-        {
+        match session.run(handle.clone(), tui_options(&cli)).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 eprintln!("error: {error}");
@@ -317,6 +315,17 @@ fn merge_auth_keys_file(config: &mut CsmsConfig, path: &Path) -> Result<(), Stri
         config.security.keys.entry(id).or_insert(key);
     }
     Ok(())
+}
+
+/// The terminal UI settings that come from the output flags: color (`--color`, `NO_COLOR`) and
+/// the clock of the log rows (`--time`).
+fn tui_options(cli: &cli::Cli) -> kirby_csms_tui::TuiOptions {
+    let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
+    kirby_csms_tui::TuiOptions {
+        monochrome: cli.color.monochrome(no_color),
+        time: cli.time.mode(),
+        ..kirby_csms_tui::TuiOptions::default()
+    }
 }
 
 /// Extra startup lines on stderr, after the `listening` line: a warning for an open profile 0

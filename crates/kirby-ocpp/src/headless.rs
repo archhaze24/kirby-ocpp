@@ -9,6 +9,7 @@ use std::time::Duration;
 use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::fleet::{FleetEvents, FleetItem};
 use kirby_ocpp_core::station::{Direction, Event, Snapshot};
+use kirby_ocpp_core::timefmt::TimeMode;
 use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file, print_lossy};
 use kirby_ocpp_tui::text::{escape_json_unsafe, sanitize};
 use serde_json::{Value, json};
@@ -100,6 +101,30 @@ static STYLE: OnceLock<Style> = OnceLock::new();
 /// Fixes the verbosity and the colour switch (call once, before any output).
 pub fn init_style(level: Level, color: bool) {
     let _ = STYLE.set(Style { level, color });
+}
+
+static TIME: OnceLock<TimeMode> = OnceLock::new();
+static MONOCHROME: OnceLock<bool> = OnceLock::new();
+
+/// Fixes the clock of event lines and whether the terminal UI draws without color (call
+/// once, before any output).
+pub fn init_display(time: TimeMode, monochrome: bool) {
+    let _ = TIME.set(time);
+    let _ = MONOCHROME.set(monochrome);
+}
+
+/// The clock of event lines (UTC before [`init_display`]).
+pub fn time_mode() -> TimeMode {
+    TIME.get().copied().unwrap_or_default()
+}
+
+/// Options of the terminal UI that come from the output flags.
+pub fn tui_options() -> kirby_ocpp_tui::TuiOptions {
+    kirby_ocpp_tui::TuiOptions {
+        monochrome: MONOCHROME.get().copied().unwrap_or(false),
+        time: time_mode(),
+        ..kirby_ocpp_tui::TuiOptions::default()
+    }
 }
 
 /// The verbosity of this process (`Normal` before [`init_style`]).
@@ -423,14 +448,14 @@ pub fn event_human(event: &Event) -> Option<String> {
                 Direction::Out => "->",
             };
             Some(format!(
-                "{} {arrow} {}",
-                record.ts.format("%H:%M:%S%.3f"),
+                "{}{arrow} {}",
+                time_mode().prefix(record.ts),
                 record.frame
             ))
         }
         Event::Log(record) => Some(format!(
-            "{} [{:?}] {}",
-            record.ts.format("%H:%M:%S%.3f"),
+            "{}[{:?}] {}",
+            time_mode().prefix(record.ts),
             record.level,
             record.text
         )),

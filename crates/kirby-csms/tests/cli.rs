@@ -34,6 +34,8 @@ const ENV_VARS: &[&str] = &[
     "KIRBY_CSMS_STDIN",
     "KIRBY_CSMS_SCRIPT",
     "KIRBY_CSMS_NO_TUI",
+    "KIRBY_CSMS_COLOR",
+    "KIRBY_CSMS_TIME",
     "KIRBY_CSMS_SECURITY_PROFILE",
     "KIRBY_CSMS_AUTH_KEY",
     "KIRBY_CSMS_AUTH_KEYS_FILE",
@@ -1023,6 +1025,113 @@ async fn human_output_neutralises_hostile_station_ids() {
         assert!(!line.chars().any(char::is_control), "{line:?}");
         assert!(!line.starts_with("fake"), "{line:?}");
     }
+}
+
+/// `HH:MM:SS.mmm ` at the start of a line.
+fn starts_with_clock(line: &str) -> bool {
+    let b = line.as_bytes();
+    b.len() > 13
+        && b[..13].iter().enumerate().all(|(i, c)| match i {
+            2 | 5 => *c == b':',
+            8 => *c == b'.',
+            12 => *c == b' ',
+            _ => c.is_ascii_digit(),
+        })
+}
+
+/// The human lines `kirby-csms` prints up to the first BootNotification frame of a station.
+async fn human_lines(extra: &[&str]) -> Vec<String> {
+    let mut args = vec!["--listen", "127.0.0.1:0", "--no-tui"];
+    args.extend_from_slice(extra);
+    let mut child = command(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, lines) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    let first = lines.recv_timeout(WAIT).expect("listening line");
+    let addr = first
+        .strip_prefix("listening on ws://")
+        .unwrap_or_else(|| panic!("unexpected first line {first:?}"))
+        .to_owned();
+    let _station = station(&addr, "CP-T", false).await;
+    let mut seen = Vec::new();
+    loop {
+        let line = lines.recv_timeout(WAIT).expect("station lines");
+        seen.push(line.clone());
+        if line.contains("BootNotification") {
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    seen
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn time_flag_sets_the_clock_of_event_lines() {
+    for (extra, clock) in [
+        (&[][..], true),
+        (&["--time", "utc"][..], true),
+        (&["--time", "local"][..], true),
+        (&["--time", "none"][..], false),
+    ] {
+        let seen = human_lines(extra).await;
+        let events: Vec<&String> = seen.iter().filter(|l| l.contains("CP-T")).collect();
+        assert!(!events.is_empty(), "{extra:?}: {seen:#?}");
+        for line in events {
+            assert_eq!(starts_with_clock(line), clock, "{extra:?}: {line}");
+        }
+    }
+}
+
+#[test]
+fn time_and_color_flags_validate_and_print_in_the_config() {
+    let bad = command(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--time",
+        "mars",
+        "--print-config",
+    ])
+    .output()
+    .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    let bad = command(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--color",
+        "pink",
+        "--print-config",
+    ])
+    .output()
+    .unwrap();
+    assert_eq!(bad.status.code(), Some(2));
+    let ok = command(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--time",
+        "none",
+        "--color",
+        "never",
+        "--print-config=toml",
+    ])
+    .output()
+    .unwrap();
+    let text = String::from_utf8_lossy(&ok.stdout);
+    assert!(
+        text.contains("time = \"none\"") && text.contains("color = \"never\""),
+        "{text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

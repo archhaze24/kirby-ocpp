@@ -32,8 +32,8 @@ use kirby_ocpp_core::scenario::{
     junit_xml_runs, run_scenario_subscribed,
 };
 use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
+use kirby_ocpp_tui::TuiError;
 use kirby_ocpp_tui::stdout_pump::print_lossy;
-use kirby_ocpp_tui::{TuiError, TuiOptions};
 use tokio::task::JoinHandle;
 
 use crate::cli::{Cli, Cmd, PrintFormat, RunArgs, ScenarioVar, ScenariosCmd, SuiteArgs};
@@ -77,6 +77,11 @@ async fn real_main() -> ExitCode {
     let color =
         !cli.json && headless::resolve_color(cli.color, std::io::stdout().is_terminal(), no_color);
     headless::init_style(level, color);
+    // The terminal UI is a terminal by definition: only the choice and `NO_COLOR` decide.
+    headless::init_display(
+        cli.time.mode(),
+        !headless::resolve_color(cli.color, true, no_color),
+    );
     let command = cli.command.take();
     match &command {
         Some(Cmd::Scenarios { action }) => return scenarios(action),
@@ -538,7 +543,7 @@ async fn interactive(
                 kirby_ocpp_tui::text::sanitize(&error.to_string())
             );
         }
-        match kirby_ocpp_tui::run(handle.clone(), TuiOptions::default()).await {
+        match kirby_ocpp_tui::run(handle.clone(), headless::tui_options()).await {
             Ok(()) => {
                 stop_station(&handle, join).await;
                 if let Some(sink) = sink {
