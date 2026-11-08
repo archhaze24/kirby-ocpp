@@ -25,7 +25,7 @@ Needs Rust 1.88 or newer.
 
 ## Release archives
 
-[GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases) carry one archive per target, `kirby-ocpp-<tag>-<target>.tar.gz` (`.zip` on Windows) plus a `.sha256` file each. Targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. The musl builds are fully static (Alpine, minimal containers). Each archive holds both binaries, the license, the third-party notices and the README.
+[GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases) carry one archive per target, `kirby-ocpp-<tag>-<target>.tar.gz` (`.zip` on Windows) plus a `.sha256` file each. Targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. The musl builds are fully static (Alpine, minimal containers). Each archive holds both binaries, the license, the third-party notices, the README and the manual pages in `man/man1/` (`kirby-ocpp.1`, `kirby-csms.1` and one page per `kirby-ocpp` subcommand, such as `kirby-ocpp-run.1`; the Windows zip carries them too). The pages are generated from the same definitions as `--help`. Read one in place with `man -l man/man1/kirby-ocpp.1`, or install them with `cp man/man1/*.1 /usr/local/share/man/man1/`.
 
 ## Docker
 
@@ -67,7 +67,7 @@ Notes:
 brew install archhaze24/tap/kirby-ocpp
 ```
 
-Installs both binaries (macOS arm64/x64, Linux arm64/x64 from the static musl archives). The formula is published with each final release to the tap repo `archhaze24/homebrew-tap` as `Formula/kirby-ocpp.rb`. The template is `packaging/homebrew/kirby-ocpp.rb.in`.
+Installs both binaries and the manual pages (`man kirby-ocpp`, `man kirby-csms`) on macOS arm64/x64 and Linux arm64/x64 (from the static musl archives). The formula is published with each final release to the tap repo `archhaze24/homebrew-tap` as `Formula/kirby-ocpp.rb`. The template is `packaging/homebrew/kirby-ocpp.rb.in`.
 
 ## Scoop
 

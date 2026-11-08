@@ -23,6 +23,7 @@ cargo test --workspace                                          # what CI runs
 * The dev profile uses `debug = "line-tables-only"`; test binaries are linked once per crate, which keeps builds quick.
 * Set `CARGO_TARGET_DIR` to a directory outside the source tree if you build several checkouts, and `CARGO_INCREMENTAL=0` to save disk.
 * Details of test layout and rules: [Testing](testing.md).
+* Manual pages come from the clap commands (`clap_mangen`). Regenerate them with `KIRBY_OCPP_MAN_DIR=man/man1 KIRBY_CSMS_MAN_DIR=man/man1 cargo test -p kirby-ocpp -p kirby-csms --bin kirby-ocpp --bin kirby-csms man_page`, then `man -l man/man1/kirby-ocpp.1`. The same tests fail when a visible flag or subcommand is missing from a page; the release workflow uses them to build the pages that go into the archives.
 
 ## Definition of done
 
