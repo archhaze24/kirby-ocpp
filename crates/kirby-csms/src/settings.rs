@@ -23,7 +23,7 @@ use serde_json::Value as Json;
 
 use crate::EXIT_USAGE;
 use crate::cli::{self, Cli};
-use crate::commands::{FaultKind, MAX_FAULT_ACTION_LEN, MAX_FAULT_TIMES};
+use crate::commands::{self, FaultKind, MAX_FAULT_ACTION_LEN, MAX_FAULT_TIMES};
 
 /// Settings of the configuration file of `kirby-csms`: one table per `--help` heading, plus
 /// the `[[station]]` and `[[rule]]` blocks.
@@ -122,16 +122,14 @@ pub const SCHEMA: Schema = Schema {
             name: "rule",
             keys: &[
                 KeySpec::new("action", Kind::Text),
+                KeySpec::new("station", Kind::Text),
                 KeySpec::checked("protocol", check_protocol),
                 KeySpec::new("behavior", Kind::Text),
                 KeySpec::new("payload", Kind::Text),
                 KeySpec::new("times", Kind::Integer),
             ],
             required: &["action", "behavior"],
-            reserved: &[(
-                "station",
-                "per-station rules are not supported yet: every rule answers all stations",
-            )],
+            reserved: &[],
             unique: None,
             check: Some(check_rule),
         },
@@ -210,6 +208,13 @@ fn check_rule(block: &Block) -> Result<(), String> {
     if action.chars().any(is_unsafe_char) {
         return Err("`action` must not contain control characters".to_owned());
     }
+    if let Some(station) = block.text("station") {
+        commands::check_station_id(station)
+            .map_err(|message| message.replace("the station id", "`station`"))?;
+        if station.contains(['*', '?']) {
+            return Err("`station` is one station id; patterns are not supported yet".to_owned());
+        }
+    }
     let name = block.text("behavior").unwrap_or_default();
     let Some(behavior) = RuleBehavior::parse(name) else {
         return Err(format!(
@@ -234,6 +239,15 @@ fn check_rule(block: &Block) -> Result<(), String> {
                 return Err(format!("behavior `{name}` takes no `payload`"));
             }
         }
+    }
+    if behavior == RuleBehavior::Respond
+        && (block.text("station").is_some() || block.text("protocol").is_some())
+        && !commands::is_rule_action(action, block.text("protocol"))
+    {
+        return Err(format!(
+            "`action` {action} is not a charge-point action for this protocol, so a scoped \
+             `respond` rule would never apply"
+        ));
     }
     if let Some(times) = block.integer("times") {
         if behavior == RuleBehavior::Respond {
@@ -261,6 +275,10 @@ pub struct StationBlock {
 pub struct RuleBlock {
     /// The action the rule applies to.
     pub action: String,
+    /// The one station the rule applies to; `None` applies to every station.
+    pub station: Option<String>,
+    /// The negotiated subprotocol the rule is limited to; `None` applies to every protocol.
+    pub protocol: Option<String>,
     /// What the rule does.
     pub behavior: RuleBehavior,
     /// CALLRESULT payload (`respond`, `invalid_payload`).
@@ -295,6 +313,8 @@ impl Blocks {
                 let behavior = RuleBehavior::parse(block.text("behavior")?)?;
                 Some(RuleBlock {
                     action: block.text("action")?.to_owned(),
+                    station: block.text("station").map(str::to_owned),
+                    protocol: block.text("protocol").map(str::to_owned),
                     behavior,
                     payload: block
                         .text("payload")
@@ -330,6 +350,12 @@ impl Blocks {
                     ("action", Value::Text(rule.action.clone())),
                     ("behavior", Value::Text(rule.behavior.name().to_owned())),
                 ];
+                if let Some(station) = &rule.station {
+                    values.push(("station", Value::Text(station.clone())));
+                }
+                if let Some(protocol) = &rule.protocol {
+                    values.push(("protocol", Value::Text(protocol.clone())));
+                }
                 if let Some(payload) = &rule.payload {
                     values.push(("payload", Value::Text(payload.to_string())));
                 }

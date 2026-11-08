@@ -17,15 +17,12 @@ use axum::http::{HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
-use chrono::SecondsFormat;
+use axum::routing::{delete, get, post, put};
 use futures_util::{StreamExt, stream};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
-use kirby_csms_core::{
-    ACTIONS_PROTOCOL, CsmsError, CsmsEvent, CsmsHandle, Direction, Reply, is_charge_point_action,
-};
+use kirby_csms_core::{CsmsError, CsmsEvent, CsmsHandle, Scope};
 use kirby_ocpp_core::text::is_unsafe_char;
 use kirby_ocpp_tui::text::escape_json_unsafe;
 use serde::Deserialize;
@@ -38,7 +35,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Instant, Sleep};
 
 use crate::commands::{self, Outcome};
-use crate::headless::{Renderer, frame_json, station_summary};
+use crate::headless::{Renderer, station_summary};
 
 /// Largest request body accepted, bytes.
 const MAX_BODY_BYTES: usize = 1024 * 1024;
@@ -397,6 +394,13 @@ fn router(state: ApiState) -> Router {
         .route("/v1/stations/{id}/history", get(history))
         .route("/v1/stations/{id}/calls", post(call))
         .route("/v1/events", get(events))
+        .route("/v1/stations/{id}/rules", get(list_station_rules))
+        .route(
+            "/v1/stations/{id}/rules/{action}",
+            get(get_station_rule)
+                .put(put_station_rule)
+                .delete(delete_station_rule),
+        )
         .route("/v1/rules", get(list_rules))
         .route("/v1/rules/{action}", put(put_rule).delete(delete_rule))
         .route(
@@ -405,6 +409,7 @@ fn router(state: ApiState) -> Router {
                 .post(inject_fault)
                 .delete(clear_faults),
         )
+        .route("/v1/faults/{id}", delete(remove_fault))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "not found") })
         .method_not_allowed_fallback(|| async {
             error(
@@ -456,10 +461,16 @@ const ROUTES: &[(&str, &[&str])] = &[
     ("/v1/stations/{id}", &["GET", "DELETE"]),
     ("/v1/stations/{id}/history", &["GET"]),
     ("/v1/stations/{id}/calls", &["POST"]),
+    ("/v1/stations/{id}/rules", &["GET"]),
+    (
+        "/v1/stations/{id}/rules/{action}",
+        &["GET", "PUT", "DELETE"],
+    ),
     ("/v1/events", &["GET"]),
     ("/v1/rules", &["GET"]),
     ("/v1/rules/{action}", &["PUT", "DELETE"]),
     ("/v1/faults", &["GET", "POST", "DELETE"]),
+    ("/v1/faults/{id}", &["DELETE"]),
 ];
 
 /// The methods of the route that `path` matches (`{name}` matches one non-empty segment).
@@ -772,29 +783,7 @@ async fn history(
     let Some(entries) = state.handle.history_tail(&id, limit.unwrap_or(usize::MAX)) else {
         return unknown_station();
     };
-    let frames: Vec<Value> = entries
-        .iter()
-        .map(|entry| {
-            let mut value = frame_json(&entry.frame);
-            if let Some(object) = value.as_object_mut() {
-                object.insert("type".to_owned(), "frame".into());
-                object.insert(
-                    "ts".to_owned(),
-                    entry.ts.to_rfc3339_opts(SecondsFormat::Millis, true).into(),
-                );
-                object.insert("station".to_owned(), id.clone().into());
-                object.insert(
-                    "direction".to_owned(),
-                    match entry.direction {
-                        Direction::In => "in",
-                        Direction::Out => "out",
-                    }
-                    .into(),
-                );
-            }
-            value
-        })
-        .collect();
+    let frames = commands::history_frames(&id, &entries);
     reply(StatusCode::OK, &json!({"station": id, "frames": frames}))
 }
 
@@ -1154,15 +1143,19 @@ async fn list_rules(State(state): State<ApiState>) -> Response {
 }
 
 /// The path action of a rule, which must be an action a charge point can send.
-fn rule_action(action: Result<Path<String>, PathRejection>) -> Result<String, Box<Response>> {
+fn rule_action(
+    action: Result<Path<String>, PathRejection>,
+    protocol: Option<&str>,
+) -> Result<String, Box<Response>> {
     match action {
-        Ok(Path(action)) if is_charge_point_action(&action) => Ok(action),
+        Ok(Path(action)) if commands::is_rule_action(&action, protocol) => Ok(action),
         Ok(Path(action)) => Err(Box::new(error(
             StatusCode::BAD_REQUEST,
             "unsupported_action",
             &format!(
-                "{} is not a known charge-point action for protocol {ACTIONS_PROTOCOL}",
-                kirby_ocpp_tui::text::sanitize(&action)
+                "{} is not a known charge-point action for protocol {}",
+                kirby_ocpp_tui::text::sanitize(&action),
+                protocol.unwrap_or(kirby_csms_core::ACTIONS_PROTOCOL)
             ),
         ))),
         Err(_) => Err(Box::new(error(
@@ -1178,32 +1171,174 @@ async fn put_rule(
     action: Result<Path<String>, PathRejection>,
     request: Request<Body>,
 ) -> Response {
-    let action = match rule_action(action) {
+    let action = match rule_action(action, None) {
         Ok(action) => action,
         Err(response) => return *response,
     };
-    let payload = match read_json(request).await {
-        Ok((payload, _)) if payload.is_object() => payload,
-        Ok(_) => {
-            return error(
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-                "the body must be a JSON object",
-            );
-        }
+    let payload = match read_rule_payload(request).await {
+        Ok(payload) => payload,
         Err(response) => return *response,
     };
-    state
-        .handle
-        .respond(&action, move |_| Reply::Result(payload.clone()));
+    let _ = commands::set_rule(&state.handle, &Scope::global(), &action, payload);
     reply(StatusCode::OK, &json!({"action": action, "set": true}))
+}
+
+/// The body of a rule request: a JSON object, the whole CALLRESULT payload.
+async fn read_rule_payload(request: Request<Body>) -> Result<Value, Box<Response>> {
+    match read_json(request).await {
+        Ok((payload, _)) if payload.is_object() => Ok(payload),
+        Ok(_) => Err(Box::new(error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "the body must be a JSON object",
+        ))),
+        Err(response) => Err(response),
+    }
+}
+
+/// The optional `?protocol=` of a per-station rule request, checked against the registry.
+fn protocol_param(uri: &Uri) -> Result<Option<String>, Box<Response>> {
+    let bad = |message: &str| Box::new(error(StatusCode::BAD_REQUEST, "bad_request", message));
+    let protocol = query_param(uri, "protocol").map_err(|message| bad(&message))?;
+    if let Some(protocol) = &protocol {
+        commands::check_protocol(protocol)
+            .map_err(|message| bad(&kirby_ocpp_tui::text::sanitize(&message)))?;
+    }
+    Ok(protocol)
+}
+
+/// The checked station id of a per-station rule path (the station need not be known).
+fn rule_station(id: Result<Path<String>, PathRejection>) -> Result<String, Box<Response>> {
+    let id = station_id(id)?;
+    commands::check_station_id(&id)
+        .map_err(|message| Box::new(error(StatusCode::BAD_REQUEST, "bad_request", &message)))?;
+    Ok(id)
+}
+
+/// A `Path` of two parameters, `{id}` and `{action}`.
+type StationAction = Result<Path<(String, String)>, PathRejection>;
+
+/// The checked station id and rule action of a per-station rule path.
+fn station_and_action(
+    path: StationAction,
+    protocol: Option<&str>,
+) -> Result<(String, String), Box<Response>> {
+    let Ok(Path((id, action))) = path else {
+        return Err(Box::new(error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "invalid station id or action in the path",
+        )));
+    };
+    let id = rule_station(Ok(Path(id)))?;
+    let action = rule_action(Ok(Path(action)), protocol)?;
+    Ok((id, action))
+}
+
+async fn list_station_rules(
+    State(state): State<ApiState>,
+    id: Result<Path<String>, PathRejection>,
+) -> Response {
+    let id = match rule_station(id) {
+        Ok(id) => id,
+        Err(response) => return *response,
+    };
+    let rules: Vec<Value> = state
+        .handle
+        .scoped_rules(Some(&id))
+        .iter()
+        .map(|rule| {
+            json!({
+                "action": rule.action,
+                "protocol": rule.scope.protocol,
+                "payload": rule.payload,
+            })
+        })
+        .collect();
+    reply(StatusCode::OK, &json!({"station": id, "rules": rules}))
+}
+
+async fn get_station_rule(State(state): State<ApiState>, path: StationAction) -> Response {
+    let (id, action) = match station_and_action(path, None) {
+        Ok(pair) => pair,
+        Err(response) => return *response,
+    };
+    match state.handle.scoped_rule(&id, &action) {
+        Some(rule) => reply(
+            StatusCode::OK,
+            &json!({
+                "station": id,
+                "action": rule.action,
+                "protocol": rule.scope.protocol,
+                "payload": rule.payload,
+            }),
+        ),
+        None => error(
+            StatusCode::NOT_FOUND,
+            "unknown_rule",
+            "the station has no rule for this action",
+        ),
+    }
+}
+
+async fn put_station_rule(
+    State(state): State<ApiState>,
+    path: StationAction,
+    request: Request<Body>,
+) -> Response {
+    let protocol = match protocol_param(request.uri()) {
+        Ok(protocol) => protocol,
+        Err(response) => return *response,
+    };
+    let (id, action) = match station_and_action(path, protocol.as_deref()) {
+        Ok(pair) => pair,
+        Err(response) => return *response,
+    };
+    let payload = match read_rule_payload(request).await {
+        Ok(payload) => payload,
+        Err(response) => return *response,
+    };
+    let scope = Scope {
+        station: Some(id.clone()),
+        protocol: protocol.clone(),
+    };
+    if let Err(message) = commands::set_rule(&state.handle, &scope, &action, payload) {
+        return error(StatusCode::CONFLICT, "conflict", &message);
+    }
+    reply(
+        StatusCode::OK,
+        &json!({"station": id, "action": action, "protocol": protocol, "set": true}),
+    )
+}
+
+async fn delete_station_rule(
+    State(state): State<ApiState>,
+    path: StationAction,
+    uri: Uri,
+) -> Response {
+    let (id, action) = match station_and_action(path, None) {
+        Ok(pair) => pair,
+        Err(response) => return *response,
+    };
+    if uri.query().is_some() {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "this request takes no query parameters",
+        );
+    }
+    let cleared = state.handle.clear_scoped_rule(Some(&id), &action);
+    reply(
+        StatusCode::OK,
+        &json!({"station": id, "action": action, "cleared": cleared}),
+    )
 }
 
 async fn delete_rule(
     State(state): State<ApiState>,
     action: Result<Path<String>, PathRejection>,
 ) -> Response {
-    let action = match rule_action(action) {
+    let action = match rule_action(action, None) {
         Ok(action) => action,
         Err(response) => return *response,
     };
@@ -1223,6 +1358,10 @@ struct FaultRequest {
     payload: Option<Value>,
     #[serde(default = "one")]
     times: usize,
+    #[serde(default)]
+    station: Option<String>,
+    #[serde(default)]
+    protocol: Option<String>,
 }
 
 fn one() -> usize {
@@ -1252,25 +1391,52 @@ async fn inject_fault(State(state): State<ApiState>, request: Request<Body>) -> 
     ) {
         return error(StatusCode::BAD_REQUEST, "bad_request", &message);
     }
-    if let Err(message) = state.handle.try_inject(commands::build_fault(
-        &fault.action,
-        fault.kind,
-        fault.payload,
-        fault.times,
-    )) {
-        return error(StatusCode::CONFLICT, "conflict", &message);
-    }
+    let scope = match commands::scope_of(fault.station.as_deref(), fault.protocol.as_deref()) {
+        Ok(scope) => scope,
+        Err(message) => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                &kirby_ocpp_tui::text::sanitize(&message),
+            );
+        }
+    };
+    let id = match state.handle.try_inject_scoped(
+        commands::build_fault(&fault.action, fault.kind, fault.payload, fault.times),
+        scope,
+    ) {
+        Ok(id) => id,
+        Err(message) => return error(StatusCode::CONFLICT, "conflict", &message),
+    };
     reply(
         StatusCode::OK,
-        &json!({"injected": true, "remaining": state.handle.faults_remaining()}),
+        &json!({"injected": true, "id": id, "remaining": state.handle.faults_remaining()}),
     )
 }
 
 async fn faults_remaining(State(state): State<ApiState>) -> Response {
     reply(
         StatusCode::OK,
-        &json!({"remaining": state.handle.faults_remaining()}),
+        &json!({
+            "remaining": state.handle.faults_remaining(),
+            "faults": commands::faults_list(&state.handle, None),
+        }),
     )
+}
+
+async fn remove_fault(
+    State(state): State<ApiState>,
+    id: Result<Path<String>, PathRejection>,
+) -> Response {
+    let Ok(Path(id)) = id else {
+        return error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "invalid fault id in the path",
+        );
+    };
+    let removed = state.handle.remove_fault(&id);
+    reply(StatusCode::OK, &json!({"id": id, "removed": removed}))
 }
 
 async fn clear_faults(State(state): State<ApiState>) -> Response {

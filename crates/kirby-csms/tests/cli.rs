@@ -295,6 +295,145 @@ async fn stdin_commands_round_trip() {
     let _ = station.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one session through every new command"
+)]
+async fn stdin_history_rules_faults_and_forget() {
+    let mut csms = Csms::start(&[]);
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    csms.wait(|v| v["type"] == "connected");
+
+    // history: the newest frames, secrets redacted like the log lines.
+    csms.send(
+        &json!({"station": "CP-1", "action": "ChangeConfiguration", "id": "k",
+            "payload": {"key": "AuthorizationKey", "value": "0123456789abcdef0123"}})
+        .to_string(),
+    );
+    csms.wait(|v| v["type"] == "result" && v["id"] == "k");
+    csms.send(r#"{"cmd":"history","station":"CP-1","id":"h"}"#);
+    let history = csms.wait(|v| v["type"] == "history");
+    assert_eq!(
+        (&history["station"], &history["id"]),
+        (&json!("CP-1"), &json!("h"))
+    );
+    let frames = history["frames"].as_array().unwrap();
+    assert!(frames.len() >= 3, "{history}");
+    assert!(
+        frames
+            .iter()
+            .all(|f| f["type"] == "frame" && f["station"] == "CP-1")
+    );
+    assert!(
+        !history.to_string().contains("0123456789abcdef0123"),
+        "{history}"
+    );
+    csms.send(r#"{"cmd":"history","station":"CP-1","limit":1}"#);
+    let history = csms.wait(|v| v["type"] == "history");
+    assert_eq!(history["frames"].as_array().unwrap().len(), 1);
+    for line in [
+        r#"{"cmd":"history","station":"NOPE"}"#,
+        r#"{"cmd":"history"}"#,
+        r#"{"cmd":"history","station":"CP-1","limit":-1}"#,
+    ] {
+        csms.send(line);
+        let reply = csms.wait(|v| v["type"] == "result" && v["ok"] == false);
+        assert!(reply["error"].is_string(), "{line}: {reply}");
+    }
+
+    // rules: global, per station, list, clear.
+    csms.send(r#"{"cmd":"rules","op":"set","station":"CP-1","action":"Heartbeat","payload":{"currentTime":"2031-01-01T00:00:00Z"},"id":"r1"}"#);
+    let set = csms.wait(|v| v["type"] == "rule" && v["id"] == "r1");
+    assert_eq!(
+        (&set["station"], &set["action"], &set["set"]),
+        (&json!("CP-1"), &json!("Heartbeat"), &json!(true))
+    );
+    csms.send(r#"{"cmd":"rules","op":"set","action":"Authorize","payload":{"idTagInfo":{"status":"Blocked"}},"id":"r2"}"#);
+    csms.wait(|v| v["type"] == "rule" && v["id"] == "r2");
+    csms.send(r#"{"cmd":"rules"}"#);
+    let list = csms.wait(|v| v["type"] == "rules");
+    assert_eq!(list["global"], json!(["Authorize"]));
+    assert_eq!(list["scoped"].as_array().unwrap().len(), 1);
+    assert_eq!(list["scoped"][0]["station"], "CP-1");
+    assert_eq!(
+        list["scoped"][0]["payload"]["currentTime"],
+        "2031-01-01T00:00:00Z"
+    );
+    csms.send(r#"{"cmd":"rules","op":"clear","station":"CP-1","action":"Heartbeat"}"#);
+    let cleared = csms.wait(|v| v["type"] == "rule");
+    assert_eq!(cleared["cleared"], true);
+    csms.send(r#"{"cmd":"rules","op":"clear","action":"Authorize"}"#);
+    assert_eq!(csms.wait(|v| v["type"] == "rule")["cleared"], true);
+    for line in [
+        r#"{"cmd":"rules","op":"set","action":"Reset","payload":{}}"#,
+        r#"{"cmd":"rules","op":"set","action":"Heartbeat","payload":[]}"#,
+        r#"{"cmd":"rules","op":"set","action":"Heartbeat","payload":{},"protocol":"ocpp2.0.1"}"#,
+        r#"{"cmd":"rules","op":"dance"}"#,
+        r#"{"cmd":"rules","station":5}"#,
+    ] {
+        csms.send(line);
+        let reply = csms.wait(|v| v["type"] == "result" && v["ok"] == false);
+        assert!(reply["error"].is_string(), "{line}: {reply}");
+    }
+
+    // faults: inject (scoped), list, remove by id.
+    csms.send(r#"{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"silence","times":2,"station":"CP-1"}"#);
+    let injected = csms.wait(|v| v["type"] == "fault");
+    assert_eq!(
+        (&injected["injected"], &injected["remaining"]),
+        (&json!(true), &json!(2))
+    );
+    let id = injected["id"].as_str().unwrap().to_owned();
+    csms.send(r#"{"cmd":"faults"}"#);
+    let list = csms.wait(|v| v["type"] == "faults");
+    assert_eq!(list["remaining"], 2);
+    assert_eq!(list["faults"][0]["id"], id.as_str());
+    assert_eq!(list["faults"][0]["scope"], "station");
+    csms.send(&json!({"cmd": "faults", "op": "remove", "id": id}).to_string());
+    assert_eq!(csms.wait(|v| v["type"] == "fault")["removed"], true);
+    csms.send(&json!({"cmd": "faults", "op": "remove", "id": id}).to_string());
+    assert_eq!(csms.wait(|v| v["type"] == "fault")["removed"], false);
+    for line in [
+        r#"{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"nope"}"#,
+        r#"{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"invalid_payload"}"#,
+        r#"{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"silence","times":0}"#,
+        r#"{"cmd":"faults","op":"remove"}"#,
+    ] {
+        csms.send(line);
+        let reply = csms.wait(|v| v["type"] == "result" && v["ok"] == false);
+        assert!(reply["error"].is_string(), "{line}: {reply}");
+    }
+    csms.send(r#"{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"close"}"#);
+    csms.wait(|v| v["type"] == "fault");
+    csms.send(r#"{"cmd":"faults","op":"clear"}"#);
+    assert_eq!(csms.wait(|v| v["type"] == "faults")["remaining"], 0);
+
+    // forget: refused while connected, works once disconnected.
+    csms.send(r#"{"cmd":"forget","station":"CP-1"}"#);
+    let reply = csms.wait(|v| v["type"] == "result" && v["ok"] == false);
+    assert!(
+        reply["error"].as_str().unwrap().contains("connected"),
+        "{reply}"
+    );
+    csms.send(r#"{"cmd":"forget","station":"NOPE"}"#);
+    let reply = csms.wait(|v| v["type"] == "result" && v["ok"] == false);
+    assert!(reply["error"].as_str().unwrap().contains("unknown station"));
+    let _ = station.shutdown().await;
+    csms.wait(|v| v["type"] == "disconnected");
+    csms.send(r#"{"cmd":"forget","station":"CP-1","id":"f"}"#);
+    let forgotten = csms.wait(|v| v["type"] == "forgotten");
+    assert_eq!(
+        (&forgotten["forgotten"], &forgotten["id"]),
+        (&json!(true), &json!("f"))
+    );
+    csms.send(r#"{"cmd":"stations"}"#);
+    assert_eq!(
+        csms.wait(|v| v["type"] == "stations")["stations"],
+        json!([])
+    );
+}
+
 fn script_run(dir: &Path, script: &str, extra: &[&str]) -> Csms {
     let path = write(dir, "script.toml", script);
     let mut args = vec!["--script", path.as_str()];
@@ -406,6 +545,94 @@ timeout_ms = 20000
         .unwrap();
     let printed = csms.wait(|v| v["type"] == "report");
     assert_eq!(printed["passed"], true, "{printed}");
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn script_steps_for_scoped_rules_faults_history_and_forget() {
+    let dir = tempfile::tempdir().unwrap();
+    let report = dir.path().join("report.json");
+    let mut csms = script_run(
+        dir.path(),
+        r#"
+name = "scoped"
+[[steps]]
+action = "wait_station"
+station = "CP-1"
+booted = true
+[[steps]]
+action = "respond"
+call = "Heartbeat"
+station = "CP-1"
+protocol = "ocpp1.6"
+payload = { currentTime = "2031-01-01T00:00:00Z" }
+[[steps]]
+action = "rules"
+station = "CP-1"
+expect_actions = ["Heartbeat"]
+[[steps]]
+action = "inject_fault"
+call = "Heartbeat"
+kind = "silence"
+times = 2
+station = "CP-1"
+capture_id = "fid"
+[[steps]]
+action = "faults"
+station = "CP-1"
+expect_count = 1
+[[steps]]
+action = "remove_fault"
+id = "${fid}"
+[[steps]]
+action = "faults"
+expect_count = 0
+[[steps]]
+action = "history"
+station = "CP-1"
+limit = 50
+expect_action = "BootNotification"
+[[steps]]
+action = "clear_respond"
+call = "Heartbeat"
+station = "CP-1"
+[[steps]]
+action = "rules"
+expect_actions = []
+[[steps]]
+action = "forget"
+station = "CP-1"
+"#,
+        &["--report", report.to_str().unwrap()],
+    );
+    // Do not wait for the station's own boot: the script ends within milliseconds of it and
+    // the server stops, so the station may never see the boot reply.
+    let mut config =
+        StationConfig::new(format!("ws://{}/ocpp", csms.addr)).with_charge_point_id("CP-1");
+    config.persist = false;
+    let (station, _join) = Station::spawn(config, Arc::new(SystemClock));
+    station.connect().await.unwrap();
+    // The last step forgets a connected station, so the script fails there and only there.
+    let printed = csms.wait(|v| v["type"] == "report");
+    assert_eq!(printed["passed"], false, "{printed}");
+    let (code, _, stderr) = csms.finish();
+    assert_eq!(code, 1, "{stderr}");
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(&report).unwrap()).unwrap();
+    let statuses: Vec<&str> = saved["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["status"].as_str().unwrap())
+        .collect();
+    let mut expected = vec!["passed"; 10];
+    expected.push("failed");
+    assert_eq!(statuses, expected, "{saved}");
+    assert!(
+        saved["steps"][10]["reason"]
+            .as_str()
+            .is_some_and(|m| m.contains("connected")),
+        "{saved}"
+    );
     let _ = station.shutdown().await;
 }
 

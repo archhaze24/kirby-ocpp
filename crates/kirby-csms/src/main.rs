@@ -207,21 +207,23 @@ fn check_config(cli: &Cli) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Installs the `[[rule]]` blocks of the configuration file: response rules and faults for
-/// all stations.
+/// Installs the `[[rule]]` blocks of the configuration file: response rules and faults, for
+/// all stations or, with `station` and `protocol`, for one station and protocol.
 fn apply_rules(handle: &CsmsHandle, rules: &[settings::RuleBlock]) -> Result<(), String> {
-    use kirby_csms_core::Reply;
     for rule in rules {
+        let scope = commands::scope_of(rule.station.as_deref(), rule.protocol.as_deref())
+            .map_err(|error| format!("rule for {}: {error}", sanitize(&rule.action)))?;
         match rule.behavior {
             settings::RuleBehavior::Respond => {
                 let payload = rule.payload.clone().unwrap_or_default();
-                handle.respond(&rule.action, move |_| Reply::Result(payload.clone()));
+                commands::set_rule(handle, &scope, &rule.action, payload)
+                    .map_err(|error| format!("rule for {}: {error}", sanitize(&rule.action)))?;
             }
             settings::RuleBehavior::Fault(kind) => {
                 let fault =
                     commands::build_fault(&rule.action, kind, rule.payload.clone(), rule.times);
                 handle
-                    .try_inject(fault)
+                    .try_inject_scoped(fault, scope)
                     .map_err(|error| format!("rule for {}: {error}", sanitize(&rule.action)))?;
             }
         }

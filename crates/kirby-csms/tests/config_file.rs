@@ -199,6 +199,19 @@ payload = '{"idTagInfo":{"status":"Blocked"}}'
 action = "Heartbeat"
 behavior = "call_error"
 times = 3
+
+[[rule]]
+action = "Authorize"
+station = "CP-A"
+protocol = "ocpp1.6"
+behavior = "respond"
+payload = '{"idTagInfo":{"status":"Expired"}}'
+
+[[rule]]
+action = "StartTransaction"
+station = "CP-A"
+behavior = "silence"
+times = 2
 "#,
     );
     // Neither the keys file nor the key files exist (`default.key`, `a.key`) or matter:
@@ -224,6 +237,10 @@ times = 3
     assert!(first.contains("[[station]]"), "{first}");
     assert!(first.contains("[[rule]]"), "{first}");
     assert!(first.contains("times = 3"), "{first}");
+    assert!(
+        first.contains("station = \"CP-A\"\nprotocol = \"ocpp1.6\""),
+        "{first}"
+    );
     assert!(
         first.contains("transaction_ids = \"incrementing:7\""),
         "{first}"
@@ -490,11 +507,20 @@ fn block_errors_name_the_element() {
             &["`action` must not be empty"],
         ),
         (
-            "[[rule]]\naction = \"A\"\nbehavior = \"close\"\nstation = \"CP-1\"\n",
-            &[
-                "key `rule[0].station`",
-                "per-station rules are not supported yet",
-            ],
+            "[[rule]]\naction = \"A\"\nbehavior = \"close\"\nstation = \"CP-*\"\n",
+            &["`rule[0]`", "patterns are not supported yet"],
+        ),
+        (
+            "[[rule]]\naction = \"A\"\nbehavior = \"close\"\nstation = \"\"\n",
+            &["`rule[0]`", "`station` must not be empty"],
+        ),
+        (
+            "[[rule]]\naction = \"Heartbeat\"\nbehavior = \"respond\"\npayload = \"{}\"\nstation = \"CP-1\"\nprotocol = \"ocpp2.0.1\"\n",
+            &["key `rule[0].protocol`"],
+        ),
+        (
+            "[[rule]]\naction = \"Reset\"\nbehavior = \"respond\"\npayload = \"{}\"\nstation = \"CP-1\"\n",
+            &["`rule[0]`", "would never apply"],
         ),
         ("rule = 3\n", &["key `rule`: expected an array of tables"]),
     ];
@@ -709,6 +735,49 @@ payload = '{"idTagInfo":{"status":"Blocked"}}'
     let _ = station.authorize(tag).await;
     server.wait(|v| v["type"] == "frame" && v.to_string().contains("Blocked"));
     let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rule_blocks_with_a_station_answer_only_that_station() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        dir.path(),
+        "csms.toml",
+        r#"
+[listener]
+listen = "127.0.0.1:0"
+
+[[rule]]
+action = "Authorize"
+behavior = "respond"
+payload = '{"idTagInfo":{"status":"Blocked"}}'
+station = "CP-1"
+protocol = "ocpp1.6"
+"#,
+    );
+    let mut server = Server::start(&file, &[]);
+    let addr = server.addr.clone();
+    let tag = IdTag::new("TAG1").unwrap();
+    let other = station(&addr, "CP-2", None).await;
+    booted(&other).await;
+    let _ = other.authorize(tag.clone()).await;
+    server.wait(|v| {
+        v["type"] == "frame"
+            && v["station"] == "CP-2"
+            && v["direction"] == "out"
+            && v.to_string().contains("Accepted")
+    });
+    let ruled = station(&addr, "CP-1", None).await;
+    booted(&ruled).await;
+    let _ = ruled.authorize(tag).await;
+    server.wait(|v| {
+        v["type"] == "frame"
+            && v["station"] == "CP-1"
+            && v["direction"] == "out"
+            && v.to_string().contains("Blocked")
+    });
+    let _ = other.shutdown().await;
+    let _ = ruled.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

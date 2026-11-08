@@ -19,9 +19,11 @@
 //! ```
 //!
 //! Other steps: `wait_call {station?, call, payload_contains?, timeout_ms}`, `sleep {ms}`,
-//! `respond {call, payload}`, `clear_respond {call}`,
-//! `inject_fault {call, kind = "call_error"|"silence"|"close"|"invalid_payload", payload?, times}`.
-//! Every step takes an optional `name`.
+//! `respond {call, payload, station?, protocol?}`, `clear_respond {call, station?, protocol?}`,
+//! `inject_fault {call, kind = "call_error"|"silence"|"close"|"invalid_payload", payload?, times,
+//! station?, protocol?, capture_id?}`, `remove_fault {id}`, `forget {station}`,
+//! `history {station, limit?, expect_action?}`, `rules {station?, expect_actions?}`,
+//! `faults {station?, expect_count?}`. Every step takes an optional `name`.
 //!
 //! Variables: an optional top-level `[vars]` table (strings, numbers, booleans; `--var`
 //! overrides it) and `capture = { name = "/json/pointer" }` on `call` (from the CALLRESULT
@@ -41,7 +43,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Frame, Reply};
+use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Frame};
 use kirby_ocpp_core::scenario::vars::{self, Vars};
 use kirby_ocpp_core::scenario::{
     ScenarioReport, StepReport, StepStatus, check_contract_keys, check_reserved_keys, line_col,
@@ -156,9 +158,19 @@ pub enum Action {
     Respond {
         call: String,
         payload: Value,
+        /// Limits the rule to one station.
+        #[serde(default)]
+        station: Option<String>,
+        /// Limits the rule to stations that negotiated this protocol.
+        #[serde(default)]
+        protocol: Option<String>,
     },
     ClearRespond {
         call: String,
+        #[serde(default)]
+        station: Option<String>,
+        #[serde(default)]
+        protocol: Option<String>,
     },
     InjectFault {
         call: String,
@@ -167,6 +179,44 @@ pub enum Action {
         payload: Option<Value>,
         #[serde(default = "default_times")]
         times: usize,
+        #[serde(default)]
+        station: Option<String>,
+        #[serde(default)]
+        protocol: Option<String>,
+        /// Variable that receives the id of the injected fault (for `remove_fault`).
+        #[serde(default)]
+        capture_id: Option<String>,
+    },
+    /// Remove one stored fault by id.
+    RemoveFault {
+        id: String,
+    },
+    /// Forget a disconnected station.
+    Forget {
+        station: String,
+    },
+    /// Read the frame history of a station; optionally require a frame of one action.
+    History {
+        station: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        expect_action: Option<String>,
+    },
+    /// List the per-station rules (`station`) or all scoped rules; optionally require the
+    /// exact set of actions.
+    Rules {
+        #[serde(default)]
+        station: Option<String>,
+        #[serde(default)]
+        expect_actions: Option<Vec<String>>,
+    },
+    /// List the stored faults (of `station`, or of every scope); optionally require their count.
+    Faults {
+        #[serde(default)]
+        station: Option<String>,
+        #[serde(default)]
+        expect_count: Option<usize>,
     },
 }
 
@@ -332,6 +382,7 @@ fn parse_step(mut table: toml::Table) -> Result<Step, String> {
     })
 }
 
+#[allow(clippy::too_many_lines, reason = "one arm per script action")]
 fn validate(action: &Action) -> Result<(), String> {
     let bad = |msg: &str| Err(msg.to_owned());
     let check_wait = |ms: u64| match ms {
@@ -391,23 +442,71 @@ fn validate(action: &Action) -> Result<(), String> {
         Action::Sleep { ms } if *ms > MAX_WAIT_MS => {
             return bad("`ms` must be at most 86400000 (one day)");
         }
-        Action::Respond { call, .. } | Action::ClearRespond { call } if call.is_empty() => {
+        Action::Respond { call, .. } | Action::ClearRespond { call, .. } if call.is_empty() => {
             return bad("`call` must not be empty");
         }
         Action::Respond { payload, .. } if !payload.is_object() => {
             return bad("`payload` of `respond` must be a table (the CALLRESULT payload object)");
         }
-        Action::Sleep { .. } | Action::Respond { .. } | Action::ClearRespond { .. } => {}
+        Action::Respond {
+            call,
+            station,
+            protocol,
+            ..
+        }
+        | Action::ClearRespond {
+            call,
+            station,
+            protocol,
+        } => {
+            check_script_scope(station.as_deref(), protocol.as_deref())?;
+            if (station.is_some() || protocol.is_some())
+                && !commands::is_rule_action(call, protocol.as_deref())
+            {
+                return bad("`call` is not a known charge-point action for this protocol");
+            }
+        }
         Action::InjectFault {
             call,
             kind,
             payload,
             times,
+            station,
+            protocol,
+            capture_id,
         } => {
             if let Err(message) = commands::check_fault(call, *kind, payload.as_ref(), *times) {
                 return bad(&message);
             }
+            check_script_scope(station.as_deref(), protocol.as_deref())?;
+            if let Some(name) = capture_id
+                && !vars::is_valid_name(name)
+            {
+                return Err(format!("capture_id: `{name}` is not a valid variable name"));
+            }
         }
+        Action::RemoveFault { id } if id.is_empty() => return bad("`id` must not be empty"),
+        Action::Forget { station } | Action::History { station, .. } if station.is_empty() => {
+            return bad("`station` must not be empty");
+        }
+        Action::Sleep { .. }
+        | Action::RemoveFault { .. }
+        | Action::Forget { .. }
+        | Action::History { .. }
+        | Action::Rules { .. }
+        | Action::Faults { .. } => {}
+    }
+    Ok(())
+}
+
+/// Checks the `station` and `protocol` of a rule or fault step; a `${var}` in `station` is
+/// resolved at run time.
+fn check_script_scope(station: Option<&str>, protocol: Option<&str>) -> Result<(), String> {
+    if station.is_some_and(str::is_empty) {
+        return Err("`station` must not be empty".to_owned());
+    }
+    if let Some(protocol) = protocol {
+        commands::check_protocol(protocol)?;
     }
     Ok(())
 }
@@ -433,6 +532,11 @@ impl Step {
             Action::Respond { .. } => "respond",
             Action::ClearRespond { .. } => "clear_respond",
             Action::InjectFault { .. } => "inject_fault",
+            Action::RemoveFault { .. } => "remove_fault",
+            Action::Forget { .. } => "forget",
+            Action::History { .. } => "history",
+            Action::Rules { .. } => "rules",
+            Action::Faults { .. } => "faults",
         }
     }
 
@@ -454,10 +558,21 @@ impl Step {
             Action::Call { station, call, .. } => format!("call {station} {call}"),
             Action::Sleep { ms } => format!("sleep {ms} ms"),
             Action::Respond { call, .. } => format!("respond {call}"),
-            Action::ClearRespond { call } => format!("clear_respond {call}"),
+            Action::ClearRespond { call, .. } => format!("clear_respond {call}"),
             Action::InjectFault { call, kind, .. } => {
                 format!("inject_fault {call} {kind:?}")
             }
+            Action::RemoveFault { id } => format!("remove_fault {id}"),
+            Action::Forget { station } => format!("forget {station}"),
+            Action::History { station, .. } => format!("history {station}"),
+            Action::Rules { station, .. } => match station {
+                Some(station) => format!("rules {station}"),
+                None => "rules".to_owned(),
+            },
+            Action::Faults { station, .. } => match station {
+                Some(station) => format!("faults {station}"),
+                None => "faults".to_owned(),
+            },
         }
     }
 }
@@ -937,14 +1052,23 @@ impl Runner<'_> {
                 tokio::time::sleep(Duration::from_millis(*ms)).await;
                 Ok(())
             }
-            Action::Respond { call, payload } => {
+            Action::Respond {
+                call,
+                payload,
+                station,
+                protocol,
+            } => {
                 let payload = self.sub("payload", payload)?;
-                self.handle
-                    .respond(call, move |_| Reply::Result(payload.clone()));
-                Ok(())
+                let scope = self.scope(station.as_deref(), protocol.as_deref())?;
+                commands::set_rule(self.handle, &scope, call, payload)
             }
-            Action::ClearRespond { call } => {
-                self.handle.clear_responder(call);
+            Action::ClearRespond {
+                call,
+                station,
+                protocol,
+            } => {
+                let scope = self.scope(station.as_deref(), protocol.as_deref())?;
+                commands::clear_rule(self.handle, &scope, call);
                 Ok(())
             }
             Action::InjectFault {
@@ -952,15 +1076,113 @@ impl Runner<'_> {
                 kind,
                 payload,
                 times,
+                station,
+                protocol,
+                capture_id,
             } => {
                 let payload = payload
                     .as_ref()
                     .map(|v| self.sub("payload", v))
                     .transpose()?;
-                self.handle
-                    .try_inject(commands::build_fault(call, *kind, payload, *times))
+                let scope = self.scope(station.as_deref(), protocol.as_deref())?;
+                let id = self.handle.try_inject_scoped(
+                    commands::build_fault(call, *kind, payload, *times),
+                    scope,
+                )?;
+                if let Some(name) = capture_id {
+                    self.vars.insert(name, Value::String(id))?;
+                }
+                Ok(())
+            }
+            Action::RemoveFault { id } => {
+                let id = self.sub_str("id", id)?;
+                if self.handle.remove_fault(&id) {
+                    Ok(())
+                } else {
+                    Err(format!("no stored fault has the id {id}"))
+                }
+            }
+            Action::Forget { station } => {
+                let station = self.sub_str("station", station)?;
+                match self.handle.forget_if_disconnected(&station) {
+                    Some(true) => Ok(()),
+                    Some(false) => Err(format!("{station} is connected and cannot be forgotten")),
+                    None => Err(format!("{station} is unknown")),
+                }
+            }
+            Action::History {
+                station,
+                limit,
+                expect_action,
+            } => {
+                let station = self.sub_str("station", station)?;
+                let entries = self
+                    .handle
+                    .history_tail(&station, limit.unwrap_or(usize::MAX))
+                    .ok_or_else(|| format!("{station} is unknown"))?;
+                if let Some(wanted) = expect_action {
+                    let wanted = self.sub_str("expect_action", wanted)?;
+                    let seen = entries.iter().any(|entry| {
+                        matches!(&entry.frame, Frame::Call { action, .. } if *action == wanted)
+                    });
+                    if !seen {
+                        self.evidence.expected = Some(Value::String(wanted.clone()));
+                        self.evidence.actual =
+                            Some(format!("{} frames, none of {wanted}", entries.len()));
+                        return Err(format!("the history of {station} has no {wanted} CALL"));
+                    }
+                }
+                Ok(())
+            }
+            Action::Rules {
+                station,
+                expect_actions,
+            } => {
+                let station = self.sub_opt(station.as_deref())?;
+                let mut actions: Vec<String> = self
+                    .handle
+                    .scoped_rules(station.as_deref())
+                    .into_iter()
+                    .map(|rule| rule.action)
+                    .collect();
+                actions.sort();
+                if let Some(expected) = expect_actions {
+                    let mut expected = expected.clone();
+                    expected.sort();
+                    if actions != expected {
+                        self.evidence.expected = Some(serde_json::json!(expected));
+                        self.evidence.actual = Some(serde_json::json!(actions).to_string());
+                        return Err("the rules do not match `expect_actions`".to_owned());
+                    }
+                }
+                Ok(())
+            }
+            Action::Faults {
+                station,
+                expect_count,
+            } => {
+                let station = self.sub_opt(station.as_deref())?;
+                let count = commands::faults_list(self.handle, station.as_deref()).len();
+                if let Some(expected) = expect_count
+                    && count != *expected
+                {
+                    self.evidence.expected = Some(serde_json::json!(expected));
+                    self.evidence.actual = Some(count.to_string());
+                    return Err(format!("{count} faults are stored, expected {expected}"));
+                }
+                Ok(())
             }
         }
+    }
+
+    /// The scope of a rule or fault step, with `${var}` resolved in the station.
+    fn scope(
+        &self,
+        station: Option<&str>,
+        protocol: Option<&str>,
+    ) -> Result<kirby_csms_core::Scope, String> {
+        let station = self.sub_opt(station)?;
+        commands::scope_of(station.as_deref(), protocol)
     }
 
     fn sub(&self, field: &str, value: &Value) -> Result<Value, String> {

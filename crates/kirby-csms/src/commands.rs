@@ -4,13 +4,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use kirby_csms_core::{CsmsError, CsmsHandle, Fault, Frame};
+use chrono::SecondsFormat;
+use kirby_csms_core::registry;
+use kirby_csms_core::{
+    CsmsError, CsmsHandle, Direction, Fault, FaultInfo, Frame, FrameEntry, Reply, RuleInfo, Scope,
+};
 use kirby_ocpp_core::text::is_unsafe_char;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::Semaphore;
 
-use crate::headless::station_summary;
+use crate::headless::{frame_json, station_summary};
 
 /// Longest `timeout_ms` accepted: one day.
 pub const MAX_TIMEOUT_MS: u64 = 86_400_000;
@@ -205,6 +209,150 @@ pub fn build_fault(action: &str, kind: FaultKind, payload: Option<Value>, times:
         FaultKind::InvalidPayload => Fault::invalid_payload(action, payload.unwrap_or_default()),
     };
     fault.times(times)
+}
+
+use kirby_csms_core::MAX_STATION_ID_LEN;
+
+/// Checks a station id used in a scope or a command: 1 to 128 bytes, no control or bidi
+/// characters.
+pub fn check_station_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("the station id must not be empty".to_owned());
+    }
+    if id.len() > MAX_STATION_ID_LEN {
+        return Err(format!(
+            "the station id must be at most {MAX_STATION_ID_LEN} bytes"
+        ));
+    }
+    if id.chars().any(is_unsafe_char) {
+        return Err(
+            "the station id must not contain control or bidirectional characters".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Checks that `protocol` has an action table in the registry.
+pub fn check_protocol(protocol: &str) -> Result<(), String> {
+    if registry::protocol_actions(protocol).is_some() {
+        return Ok(());
+    }
+    let known: Vec<&str> = registry::protocols().collect();
+    Err(format!(
+        "unsupported protocol; supported: {}",
+        known.join(", ")
+    ))
+}
+
+/// Builds and checks the [`Scope`] of a rule or fault from an optional station id and an
+/// optional protocol.
+pub fn scope_of(station: Option<&str>, protocol: Option<&str>) -> Result<Scope, String> {
+    if let Some(station) = station {
+        check_station_id(station)?;
+    }
+    if let Some(protocol) = protocol {
+        check_protocol(protocol)?;
+    }
+    Ok(Scope {
+        station: station.map(str::to_owned),
+        protocol: protocol.map(str::to_owned),
+    })
+}
+
+/// Whether `action` is one a station sends: in `protocol` when given, else in any protocol
+/// with an action table.
+pub fn is_rule_action(action: &str, protocol: Option<&str>) -> bool {
+    match protocol {
+        Some(protocol) => registry::is_station_action(protocol, action),
+        None => registry::protocols().any(|protocol| registry::is_station_action(protocol, action)),
+    }
+}
+
+/// Sets the fixed CALLRESULT payload of `action` in `scope`. The global scope (no station,
+/// no protocol) is the engine-wide responder; any other scope is a capped scoped rule.
+pub fn set_rule(
+    handle: &CsmsHandle,
+    scope: &Scope,
+    action: &str,
+    payload: Value,
+) -> Result<(), String> {
+    if *scope == Scope::global() {
+        handle.respond(action, move |_| Reply::Result(payload.clone()));
+        Ok(())
+    } else {
+        handle.respond_scoped(scope, action, payload)
+    }
+}
+
+/// Removes the rule of `action` in `scope`; returns whether there was one.
+pub fn clear_rule(handle: &CsmsHandle, scope: &Scope, action: &str) -> bool {
+    if *scope == Scope::global() {
+        handle.clear_responder(action)
+    } else {
+        handle.clear_scoped_rule(scope.station.as_deref(), action)
+    }
+}
+
+/// A scoped rule as JSON: `station` (null for a global rule with a protocol), `action`,
+/// `protocol` (null when not limited), `payload`.
+pub fn rule_json(rule: &RuleInfo) -> Value {
+    json!({
+        "station": rule.scope.station,
+        "action": rule.action,
+        "protocol": rule.scope.protocol,
+        "payload": rule.payload,
+    })
+}
+
+/// A stored fault as JSON: `id`, `scope` (`global` or `station`), `station`, `protocol`,
+/// `action`, `kind`, `remaining`.
+pub fn fault_json(fault: &FaultInfo) -> Value {
+    json!({
+        "id": fault.id,
+        "scope": if fault.scope.station.is_some() { "station" } else { "global" },
+        "station": fault.scope.station,
+        "protocol": fault.scope.protocol,
+        "action": fault.action,
+        "kind": fault.kind,
+        "remaining": fault.remaining,
+    })
+}
+
+/// The stored faults as JSON objects, of one station (`Some`) or of every scope (`None`).
+pub fn faults_list(handle: &CsmsHandle, station: Option<&str>) -> Vec<Value> {
+    handle
+        .faults()
+        .iter()
+        .filter(|fault| station.is_none_or(|id| fault.scope.station.as_deref() == Some(id)))
+        .map(fault_json)
+        .collect()
+}
+
+/// The frames of a station history as JSON objects shaped like the `--json` frame lines.
+pub fn history_frames(station: &str, entries: &[FrameEntry]) -> Vec<Value> {
+    entries
+        .iter()
+        .map(|entry| {
+            let mut value = frame_json(&entry.frame);
+            if let Some(object) = value.as_object_mut() {
+                object.insert("type".to_owned(), "frame".into());
+                object.insert(
+                    "ts".to_owned(),
+                    entry.ts.to_rfc3339_opts(SecondsFormat::Millis, true).into(),
+                );
+                object.insert("station".to_owned(), station.into());
+                object.insert(
+                    "direction".to_owned(),
+                    match entry.direction {
+                        Direction::In => "in",
+                        Direction::Out => "out",
+                    }
+                    .into(),
+                );
+            }
+            value
+        })
+        .collect()
 }
 
 #[cfg(test)]

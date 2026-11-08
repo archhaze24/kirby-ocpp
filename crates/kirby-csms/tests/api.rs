@@ -99,6 +99,13 @@ impl Csms {
         http(&self.api_addr, "GET", path, &[], None).await
     }
 
+    /// The `remaining` of `GET /v1/faults`.
+    async fn remaining(&self) -> u64 {
+        self.get("/v1/faults").await.1["remaining"]
+            .as_u64()
+            .unwrap()
+    }
+
     async fn post_call(&self, id: &str, body: &Value) -> (u16, Value) {
         http(
             &self.api_addr,
@@ -774,16 +781,16 @@ async fn faults_round_trip() {
         (200, Some(1)),
         "{body}"
     );
-    assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 1}));
+    assert_eq!(csms.remaining().await, 1);
     assert!(station.send(Command::Heartbeat).await.is_err());
-    assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 0}));
+    assert_eq!(csms.remaining().await, 0);
     assert!(station.send(Command::Heartbeat).await.is_ok());
 
     let (_, body) = post(r#"{"action":"Heartbeat","kind":"silence","times":3}"#).await;
     assert_eq!(body["remaining"], 3);
     let (status, body) = http(addr, "DELETE", "/v1/faults", &[], None).await;
     assert_eq!((status, body), (200, json!({"remaining": 0})));
-    assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 0}));
+    assert_eq!(csms.remaining().await, 0);
     assert!(station.send(Command::Heartbeat).await.is_ok());
 
     for body in [
@@ -799,7 +806,7 @@ async fn faults_round_trip() {
         assert_eq!(status, 400, "{body}: {reply}");
         assert!(reply["error"]["code"].is_string());
     }
-    assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 0}));
+    assert_eq!(csms.remaining().await, 0);
 }
 
 /// A client that completes the WebSocket handshake and then never answers anything.
@@ -1087,7 +1094,7 @@ async fn fault_action_names_are_checked() {
     )
     .await;
     assert_eq!(status, 200, "{reply}");
-    assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 1}));
+    assert_eq!(csms.remaining().await, 1);
 }
 
 #[tokio::test]
@@ -1128,7 +1135,7 @@ async fn fault_sizes_and_counts_are_bounded() {
             .unwrap()
             .contains("too many faults")
     );
-    assert_eq!(csms.get("/v1/faults").await.1, json!({"remaining": 1000}));
+    assert_eq!(csms.remaining().await, 1000);
     http(addr, "DELETE", "/v1/faults", &[], None).await;
 
     // Byte budget: 8 payloads of ~900 KiB do not all fit in 8 MiB.
@@ -1764,4 +1771,415 @@ async fn hyper_answers_before_the_router_have_an_empty_body() {
         assert!(body.is_empty(), "{answer:.200}");
         assert!(!head.to_lowercase().contains("application/json"), "{head}");
     }
+}
+
+const TIME_GLOBAL: &str = "2030-01-01T00:00:00Z";
+const TIME_STATION: &str = "2031-01-01T00:00:00Z";
+const TIME_FAULT: &str = "2032-01-01T00:00:00Z";
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn station_rules_beat_global_rules_and_round_trip() {
+    use kirby_ocpp_core::station::Command;
+    let csms = Csms::start(&[]);
+    let one = station(&csms.station_addr, "CP-1").await;
+    let two = station(&csms.station_addr, "CP-2").await;
+    let addr = &csms.api_addr;
+    let rule = |station: &str, action: &str| format!("/v1/stations/{station}/rules/{action}");
+
+    let (status, body) = csms.get("/v1/stations/CP-1/rules").await;
+    assert_eq!(
+        (status, body),
+        (200, json!({"station": "CP-1", "rules": []}))
+    );
+    let (status, body) = csms.get(&rule("CP-1", "Heartbeat")).await;
+    assert_eq!(status, 404, "{body}");
+    assert_eq!(body["error"]["code"], "unknown_rule");
+
+    let global = format!(r#"{{"currentTime":"{TIME_GLOBAL}"}}"#);
+    let own = format!(r#"{{"currentTime":"{TIME_STATION}"}}"#);
+    assert_eq!(
+        http(addr, "PUT", "/v1/rules/Heartbeat", &[], Some(&global))
+            .await
+            .0,
+        200
+    );
+    let (status, body) = http(addr, "PUT", &rule("CP-1", "Heartbeat"), &[], Some(&own)).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body,
+        json!({"station": "CP-1", "action": "Heartbeat", "protocol": null, "set": true})
+    );
+    // The station's rule wins for CP-1, the global one still answers CP-2.
+    assert_eq!(
+        heartbeat_time(one.send(Command::Heartbeat).await),
+        TIME_STATION
+    );
+    assert_eq!(
+        heartbeat_time(two.send(Command::Heartbeat).await),
+        TIME_GLOBAL
+    );
+
+    let (_, body) = csms.get(&rule("CP-1", "Heartbeat")).await;
+    assert_eq!(
+        body,
+        json!({
+            "station": "CP-1", "action": "Heartbeat", "protocol": null,
+            "payload": {"currentTime": TIME_STATION}
+        })
+    );
+    let (_, body) = csms.get("/v1/stations/CP-1/rules").await;
+    assert_eq!(
+        body["rules"],
+        json!([{"action": "Heartbeat", "protocol": null, "payload": {"currentTime": TIME_STATION}}])
+    );
+    // The global list is unchanged by station rules.
+    assert_eq!(
+        csms.get("/v1/rules").await.1,
+        json!({"rules": ["Heartbeat"]})
+    );
+    assert_eq!(
+        csms.get("/v1/stations/CP-2/rules").await.1["rules"],
+        json!([])
+    );
+
+    // Setting it again with a protocol replaces it; it still applies to an ocpp1.6 station.
+    let path = format!("{}?protocol=ocpp1.6", rule("CP-1", "Heartbeat"));
+    let (status, body) = http(addr, "PUT", &path, &[], Some(&own)).await;
+    assert_eq!(
+        (status, &body["protocol"]),
+        (200, &json!("ocpp1.6")),
+        "{body}"
+    );
+    assert_eq!(
+        heartbeat_time(one.send(Command::Heartbeat).await),
+        TIME_STATION
+    );
+    assert_eq!(
+        csms.get(&rule("CP-1", "Heartbeat")).await.1["protocol"],
+        "ocpp1.6"
+    );
+
+    let (status, body) = http(addr, "DELETE", &rule("CP-1", "Heartbeat"), &[], None).await;
+    assert_eq!(
+        (status, body),
+        (
+            200,
+            json!({"station": "CP-1", "action": "Heartbeat", "cleared": true})
+        )
+    );
+    assert_eq!(
+        heartbeat_time(one.send(Command::Heartbeat).await),
+        TIME_GLOBAL
+    );
+    let (_, body) = http(addr, "DELETE", &rule("CP-1", "Heartbeat"), &[], None).await;
+    assert_eq!(body["cleared"], false);
+
+    // A rule may be set before the station is known.
+    let (status, _) = http(addr, "PUT", &rule("CP-LATER", "Heartbeat"), &[], Some(&own)).await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn station_rule_requests_are_validated() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let long = "S".repeat(129);
+    let long_path = format!("/v1/stations/{long}/rules/Heartbeat");
+    for (method, path, body, code) in [
+        (
+            "PUT",
+            "/v1/stations/CP-1/rules/Reset",
+            "{}",
+            "unsupported_action",
+        ),
+        (
+            "PUT",
+            "/v1/stations/CP-1/rules/Nope",
+            "{}",
+            "unsupported_action",
+        ),
+        (
+            "GET",
+            "/v1/stations/CP-1/rules/Reset",
+            "",
+            "unsupported_action",
+        ),
+        (
+            "DELETE",
+            "/v1/stations/CP-1/rules/Reset",
+            "",
+            "unsupported_action",
+        ),
+        (
+            "PUT",
+            "/v1/stations/CP-1/rules/Heartbeat",
+            "[]",
+            "bad_request",
+        ),
+        (
+            "PUT",
+            "/v1/stations/CP-1/rules/Heartbeat",
+            "nope",
+            "bad_request",
+        ),
+        (
+            "PUT",
+            "/v1/stations/CP-1/rules/Heartbeat?protocol=ocpp2.0.1",
+            "{}",
+            "bad_request",
+        ),
+        (
+            "PUT",
+            "/v1/stations/CP-1/rules/Heartbeat?protocol=ocpp1.6&protocol=ocpp1.6",
+            "{}",
+            "bad_request",
+        ),
+        (
+            "PUT",
+            "/v1/stations/CP-1/rules/Heartbeat?x=1",
+            "{}",
+            "bad_request",
+        ),
+        (
+            "DELETE",
+            "/v1/stations/CP-1/rules/Heartbeat?x=1",
+            "",
+            "bad_request",
+        ),
+        ("PUT", &long_path, "{}", "bad_request"),
+        ("GET", &long_path, "", "bad_request"),
+        ("GET", "/v1/stations/%07/rules", "", "bad_request"),
+    ] {
+        let body = (!body.is_empty()).then_some(body);
+        let (status, reply) = http(addr, method, path, &[], body).await;
+        assert_eq!(status, 400, "{method} {path}: {reply}");
+        assert_eq!(reply["error"]["code"], code, "{method} {path}: {reply}");
+    }
+    assert_eq!(
+        http(addr, "POST", "/v1/stations/CP-1/rules", &[], Some("{}"))
+            .await
+            .0,
+        405
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn station_rules_are_bounded() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let actions = kirby_csms_core::CHARGE_POINT_ACTIONS;
+    let mut stored = 0;
+    'fill: for index in 0.. {
+        for action in actions {
+            let path = format!("/v1/stations/S{index}/rules/{action}");
+            let (status, body) = http(addr, "PUT", &path, &[], Some("{}")).await;
+            if status == 409 {
+                assert_eq!(body["error"]["code"], "conflict", "{body}");
+                assert!(
+                    body["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("too many"),
+                    "{body}"
+                );
+                break 'fill;
+            }
+            assert_eq!(status, 200, "{body}");
+            stored += 1;
+        }
+    }
+    assert_eq!(stored, kirby_csms_core::MAX_SCOPED_RULES);
+    // Replacing a stored rule still works at the cap; a new one does not.
+    let (status, _) = http(
+        addr,
+        "PUT",
+        "/v1/stations/S0/rules/Heartbeat",
+        &[],
+        Some(r#"{"a":1}"#),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _) = http(
+        addr,
+        "PUT",
+        "/v1/stations/NEW/rules/Heartbeat",
+        &[],
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(status, 409);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn faults_have_ids_scopes_and_can_be_removed() {
+    use kirby_ocpp_core::station::Command;
+    let csms = Csms::start(&[]);
+    let one = station(&csms.station_addr, "CP-1").await;
+    let two = station(&csms.station_addr, "CP-2").await;
+    let addr = &csms.api_addr;
+
+    let (_, body) = csms.get("/v1/faults").await;
+    assert_eq!(body, json!({"remaining": 0, "faults": []}));
+
+    let (status, global) = http(
+        addr,
+        "POST",
+        "/v1/faults",
+        &[],
+        Some(r#"{"action":"Heartbeat","kind":"call_error"}"#),
+    )
+    .await;
+    assert_eq!(status, 200, "{global}");
+    let station_body = json!({
+        "action": "Heartbeat", "kind": "invalid_payload", "station": "CP-1",
+        "protocol": "ocpp1.6", "times": 2, "payload": {"currentTime": TIME_FAULT}
+    })
+    .to_string();
+    let (status, scoped) = http(addr, "POST", "/v1/faults", &[], Some(&station_body)).await;
+    assert_eq!(status, 200, "{scoped}");
+    let (global_id, scoped_id) = (
+        global["id"].as_str().unwrap().to_owned(),
+        scoped["id"].as_str().unwrap().to_owned(),
+    );
+    assert_ne!(global_id, scoped_id);
+    assert_eq!(scoped["remaining"], 3);
+
+    let (_, body) = csms.get("/v1/faults").await;
+    assert_eq!(body["remaining"], 3);
+    assert_eq!(
+        body["faults"],
+        json!([
+            {"id": global_id, "scope": "global", "station": null, "protocol": null,
+             "action": "Heartbeat", "kind": "call_error", "remaining": 1},
+            {"id": scoped_id, "scope": "station", "station": "CP-1", "protocol": "ocpp1.6",
+             "action": "Heartbeat", "kind": "invalid_payload", "remaining": 2},
+        ])
+    );
+
+    // CP-1 uses its own fault first although the global one was injected earlier.
+    assert_eq!(
+        heartbeat_time(one.send(Command::Heartbeat).await),
+        TIME_FAULT
+    );
+    assert_eq!(csms.get("/v1/faults").await.1["faults"][1]["remaining"], 1);
+    // CP-2 only matches the global fault.
+    assert!(two.send(Command::Heartbeat).await.is_err());
+    let (_, body) = csms.get("/v1/faults").await;
+    assert_eq!(body["faults"].as_array().unwrap().len(), 1, "{body}");
+    assert_eq!(body["faults"][0]["id"], scoped_id);
+
+    let (status, body) = http(
+        addr,
+        "DELETE",
+        &format!("/v1/faults/{scoped_id}"),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(
+        (status, body),
+        (200, json!({"id": scoped_id, "removed": true}))
+    );
+    assert_eq!(
+        csms.get("/v1/faults").await.1,
+        json!({"remaining": 0, "faults": []})
+    );
+    let (status, body) = http(
+        addr,
+        "DELETE",
+        &format!("/v1/faults/{scoped_id}"),
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!((status, body["removed"].as_bool()), (200, Some(false)));
+    assert_eq!(
+        http(addr, "DELETE", "/v1/faults/f999999", &[], None)
+            .await
+            .1["removed"],
+        false
+    );
+    assert!(one.send(Command::Heartbeat).await.is_ok());
+
+    // DELETE /v1/faults clears every scope.
+    for body in [
+        r#"{"action":"Heartbeat","kind":"silence","times":5}"#,
+        r#"{"action":"Heartbeat","kind":"silence","station":"CP-9"}"#,
+    ] {
+        assert_eq!(
+            http(addr, "POST", "/v1/faults", &[], Some(body)).await.0,
+            200
+        );
+    }
+    assert_eq!(csms.remaining().await, 6);
+    http(addr, "DELETE", "/v1/faults", &[], None).await;
+    assert_eq!(
+        csms.get("/v1/faults").await.1,
+        json!({"remaining": 0, "faults": []})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn scoped_fault_requests_are_validated_and_bounded() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let long = "S".repeat(129);
+    for body in [
+        r#"{"action":"Heartbeat","kind":"silence","protocol":"ocpp2.0.1"}"#.to_owned(),
+        r#"{"action":"Heartbeat","kind":"silence","station":""}"#.to_owned(),
+        r#"{"action":"Heartbeat","kind":"silence","station":"CP\u001b"}"#.to_owned(),
+        format!(r#"{{"action":"Heartbeat","kind":"silence","station":"{long}"}}"#),
+        r#"{"action":"Heartbeat","kind":"silence","station":5}"#.to_owned(),
+    ] {
+        let (status, reply) = http(addr, "POST", "/v1/faults", &[], Some(&body)).await;
+        assert_eq!(status, 400, "{body}: {reply}");
+        assert_eq!(reply["error"]["code"], "bad_request", "{reply}");
+    }
+    let post = |station: &'static str| async move {
+        let body = format!(r#"{{"action":"Heartbeat","kind":"silence","station":"{station}"}}"#);
+        http(addr, "POST", "/v1/faults", &[], Some(&body)).await
+    };
+    for _ in 0..kirby_csms_core::MAX_FAULTS_PER_STATION {
+        assert_eq!(post("CP-1").await.0, 200);
+    }
+    let (status, body) = post("CP-1").await;
+    assert_eq!(status, 409, "{body}");
+    assert_eq!(body["error"]["code"], "conflict");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("one station"),
+        "{body}"
+    );
+    // Another station is unaffected.
+    assert_eq!(post("CP-2").await.0, 200);
+    assert_eq!(csms.remaining().await, 101);
+    let (_, body) = csms.get("/v1/faults").await;
+    let keys: std::collections::BTreeSet<&str> = body["faults"][0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys.into_iter().collect::<Vec<_>>(),
+        [
+            "action",
+            "id",
+            "kind",
+            "protocol",
+            "remaining",
+            "scope",
+            "station"
+        ]
+    );
+    let mut top: Vec<&str> = body
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    top.sort_unstable();
+    assert_eq!(top, ["faults", "remaining"]);
 }

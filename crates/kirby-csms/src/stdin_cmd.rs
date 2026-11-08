@@ -137,15 +137,24 @@ pub async fn handle_line(handle: &CsmsHandle, line: &str) -> Value {
     };
     let tag = object.get("id").cloned();
     if let Some(cmd) = object.get("cmd") {
-        return match cmd.as_str() {
-            Some("stations") => stations(handle, tag),
+        let mut answer = match cmd.as_str() {
+            Some("stations") => json!({"type": "stations", "stations": commands::stations(handle)}),
+            Some("history") => history(handle, object),
+            Some("forget") => forget(handle, object),
+            Some("rules") => rules(handle, object),
+            Some("faults") => faults(handle, object),
             _ => failure(
-                tag,
                 None,
                 None,
-                &format!("unknown cmd {cmd}; supported: \"stations\""),
+                None,
+                &format!(
+                    "unknown cmd {cmd}; supported: \"stations\", \"history\", \"forget\", \
+                     \"rules\", \"faults\""
+                ),
             ),
         };
+        add_tag(&mut answer, tag);
+        return answer;
     }
     let text = |key: &str| {
         object
@@ -173,10 +182,160 @@ pub async fn handle_line(handle: &CsmsHandle, line: &str) -> Value {
     answer
 }
 
-fn stations(handle: &CsmsHandle, tag: Option<Value>) -> Value {
-    let mut answer = json!({"type": "stations", "stations": commands::stations(handle)});
-    add_tag(&mut answer, tag);
-    answer
+type Object = serde_json::Map<String, Value>;
+
+/// An optional text field; a field of another type or an empty text is an error.
+fn opt_text<'a>(object: &'a Object, key: &str) -> Result<Option<&'a str>, String> {
+    match object.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() => Ok(Some(text)),
+        Some(_) => Err(format!("`{key}` must be a non-empty string")),
+    }
+}
+
+fn req_text<'a>(object: &'a Object, key: &str) -> Result<&'a str, String> {
+    opt_text(object, key)?.ok_or_else(|| format!("needs a string field `{key}`"))
+}
+
+/// The `result`-shaped failure answer of a `cmd` that went wrong.
+fn cmd_failure(object: &Object, error: &str) -> Value {
+    let station = object.get("station").and_then(Value::as_str);
+    failure(None, station, None, &kirby_ocpp_tui::text::sanitize(error))
+}
+
+fn history(handle: &CsmsHandle, object: &Object) -> Value {
+    let run = || -> Result<Value, String> {
+        let station = req_text(object, "station")?;
+        let limit = match object.get("limit") {
+            None | Some(Value::Null) => usize::MAX,
+            Some(value) => value
+                .as_u64()
+                .and_then(|limit| usize::try_from(limit).ok())
+                .ok_or("`limit` must be a non-negative integer")?,
+        };
+        let entries = handle
+            .history_tail(station, limit)
+            .ok_or("unknown station")?;
+        Ok(json!({
+            "type": "history", "station": station,
+            "frames": commands::history_frames(station, &entries),
+        }))
+    };
+    run().unwrap_or_else(|error| cmd_failure(object, &error))
+}
+
+fn forget(handle: &CsmsHandle, object: &Object) -> Value {
+    let run = || -> Result<Value, String> {
+        let station = req_text(object, "station")?;
+        match handle.forget_if_disconnected(station) {
+            None => Err("unknown station".to_owned()),
+            Some(false) => {
+                Err("station is connected; only a disconnected station can be forgotten".to_owned())
+            }
+            Some(true) => Ok(json!({"type": "forgotten", "station": station, "forgotten": true})),
+        }
+    };
+    run().unwrap_or_else(|error| cmd_failure(object, &error))
+}
+
+/// `{"cmd":"rules","op":"list"|"set"|"clear", ...}`; `op` defaults to `list`.
+fn rules(handle: &CsmsHandle, object: &Object) -> Value {
+    let run = || -> Result<Value, String> {
+        let station = opt_text(object, "station")?;
+        let protocol = opt_text(object, "protocol")?;
+        let scope = commands::scope_of(station, protocol)?;
+        match opt_text(object, "op")?.unwrap_or("list") {
+            "list" => {
+                let scoped: Vec<Value> = handle
+                    .scoped_rules(station)
+                    .iter()
+                    .map(commands::rule_json)
+                    .collect();
+                Ok(json!({
+                    "type": "rules", "global": handle.responder_actions(), "scoped": scoped,
+                }))
+            }
+            op @ ("set" | "clear") => {
+                let action = req_text(object, "action")?;
+                if !commands::is_rule_action(action, protocol) {
+                    return Err(format!(
+                        "{action} is not a known charge-point action for protocol {}",
+                        protocol.unwrap_or(kirby_csms_core::ACTIONS_PROTOCOL)
+                    ));
+                }
+                if op == "set" {
+                    let payload = object
+                        .get("payload")
+                        .filter(|payload| payload.is_object())
+                        .ok_or("`payload` must be a JSON object (the CALLRESULT payload)")?;
+                    commands::set_rule(handle, &scope, action, payload.clone())?;
+                    Ok(json!({
+                        "type": "rule", "station": station, "protocol": protocol,
+                        "action": action, "set": true,
+                    }))
+                } else {
+                    let cleared = commands::clear_rule(handle, &scope, action);
+                    Ok(json!({
+                        "type": "rule", "station": station, "protocol": protocol,
+                        "action": action, "cleared": cleared,
+                    }))
+                }
+            }
+            _ => Err("`op` must be one of: list, set, clear".to_owned()),
+        }
+    };
+    run().unwrap_or_else(|error| cmd_failure(object, &error))
+}
+
+/// `{"cmd":"faults","op":"list"|"inject"|"remove"|"clear", ...}`; `op` defaults to `list`.
+fn faults(handle: &CsmsHandle, object: &Object) -> Value {
+    let run = || -> Result<Value, String> {
+        let station = opt_text(object, "station")?;
+        match opt_text(object, "op")?.unwrap_or("list") {
+            "list" => Ok(json!({
+                "type": "faults",
+                "remaining": handle.faults_remaining(),
+                "faults": commands::faults_list(handle, station),
+            })),
+            "inject" => {
+                let scope = commands::scope_of(station, opt_text(object, "protocol")?)?;
+                let action = req_text(object, "action")?;
+                let kind: commands::FaultKind =
+                    serde_json::from_value(object.get("kind").cloned().unwrap_or(Value::Null))
+                        .map_err(|_| {
+                            "`kind` must be one of: call_error, silence, close, invalid_payload"
+                                .to_owned()
+                        })?;
+                let times = match object.get("times") {
+                    None | Some(Value::Null) => 1,
+                    Some(value) => value
+                        .as_u64()
+                        .and_then(|times| usize::try_from(times).ok())
+                        .ok_or("`times` must be a positive integer")?,
+                };
+                let payload = object.get("payload").cloned();
+                commands::check_fault(action, kind, payload.as_ref(), times)?;
+                let id = handle.try_inject_scoped(
+                    commands::build_fault(action, kind, payload, times),
+                    scope,
+                )?;
+                Ok(json!({
+                    "type": "fault", "injected": true, "id": id,
+                    "remaining": handle.faults_remaining(),
+                }))
+            }
+            "remove" => {
+                let id = req_text(object, "id")?;
+                Ok(json!({"type": "fault", "id": id, "removed": handle.remove_fault(id)}))
+            }
+            "clear" => {
+                handle.clear_faults();
+                Ok(json!({"type": "faults", "remaining": 0, "faults": []}))
+            }
+            _ => Err("`op` must be one of: list, inject, remove, clear".to_owned()),
+        }
+    };
+    run().unwrap_or_else(|error| cmd_failure(object, &error))
 }
 
 fn failure(tag: Option<Value>, station: Option<&str>, action: Option<&str>, error: &str) -> Value {
