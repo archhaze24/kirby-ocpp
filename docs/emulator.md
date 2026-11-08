@@ -140,6 +140,39 @@ A failed connection prints the error plus one line of advice for its class:
 
 The text is `error. Hint: ...` on one line, in the stderr message, the `suite` row and the timeout message of `run`. The log events keep the plain error text.
 
+## Connection check
+
+`kirby-ocpp check --url URL` answers "why does my station not connect" without starting a station. It walks the way to the Central System one step at a time (`url`, `dns`, `tcp`, `tls`, `websocket`, `boot`, `close`), prints a line per step and exits 1 when a step fails. The connection flags are the ones of the station; the step list, the judgments and the `--json` shape are in the [configuration reference](configuration.md#kirby-ocpp-subcommands).
+
+```console
+$ kirby-ocpp check --url ws://127.0.0.1:9311/ocpp --id CP-001
+PASS  url       ws://127.0.0.1:9311/ocpp/CP-001 (scheme ws, port 9311)
+PASS  dns       127.0.0.1 is an IP address, no lookup needed
+PASS  tcp       connected to 127.0.0.1:9311 in 0 ms
+SKIP  tls       not applicable: the URL scheme is ws
+PASS  websocket 101 Switching Protocols, subprotocol `ocpp1.6`
+PASS  boot      Accepted, heartbeat interval 300 s, server time +0 s from this machine
+PASS  close     closed by the station; the server ended the connection without a close reply
+PASSED  6 passed, 1 skipped
+```
+
+A failed step stops the steps that depend on it and adds a hint:
+
+```console
+$ kirby-ocpp check --url wss://localhost:9312/ocpp --id CP-001
+PASS  url       wss://localhost:9312/ocpp/CP-001 (scheme wss, port 9312)
+PASS  dns       localhost -> 127.0.0.1
+PASS  tcp       connected to 127.0.0.1:9312 in 0 ms
+FAIL  tls       TLS handshake failed: invalid peer certificate: UnknownIssuer; the server presents subject CN=localhost, issuer CN=Test CA, valid until 2026-12-07 (29 days left)
+      hint: the certificate is not signed by a trusted CA: pass the CA with --tls-ca <FILE>, or use --tls-skip-verify for local testing
+SKIP  websocket skipped: the `tls` step failed
+SKIP  boot      skipped: the `tls` step failed
+SKIP  close     skipped: the `tls` step failed
+FAILED  3 passed, 1 failed, 3 skipped
+```
+
+The check sends one BootNotification, so a Central System that registers or counts boots sees one. It does not read or write the station state, and the password of a `user:password@` URL is printed as `***`. It uses the TLS flags only: installed Central System roots and the station certificate kept in the state of a real station are not used. Recipe: [Debug a connection](cookbook.md#debug-a-connection).
+
 ## Output levels and color
 
 `run` and `suite` print the report only. `-v, --verbose` adds the frame and log lines as they happen (what plain headless mode always prints); `-q, --quiet` leaves only errors (stderr) and the final verdict line. `--json` keeps printing events as before. The exact output of each level is in the [configuration reference](configuration.md#output-levels). `--log-file` always gets the full event log.
@@ -278,6 +311,8 @@ Secrets (such as private keys) live in a separate `<id>.station.secrets.json`.
 The state directory is `--state-dir` (`KIRBY_OCPP_STATE_DIR`), else `~/.kirby-ocpp/stations` (`%USERPROFILE%` on Windows). Special characters in the id are percent-escaped in the file name; an id whose escaped name would exceed 100 bytes is shortened and gets a hash suffix (`...~<16 hex>.station.json`) so the name always fits the filesystem limit.
 
 Files are `0600` on Unix, versioned, and written atomically (temp file plus rename, then the directory is fsynced). A file with a newer version than the binary supports is an error and is left alone. A corrupt file, or one that belongs to another charge point, is moved to `<file>.bak` and the station starts clean. `--no-persist` disables both loading and saving. Response rules are never saved.
+
+`kirby-ocpp state path --id ID` prints the file of a station, `state show --id ID` summarizes what it holds (the secrets file is not read; its presence is reported) and `state reset --id ID` deletes the state of that station, after a confirmation on a terminal or with `--yes`. Details and exit codes: [configuration reference](configuration.md#kirby-ocpp-subcommands).
 
 ## TLS
 

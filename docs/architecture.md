@@ -30,11 +30,11 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 | Module | Content |
 | --- | --- |
 | `ocpp/` | `Frame` (CALL / CALLRESULT / CALLERROR), the `Action` trait, 39 typed messages in `messages/` (OCPP 1.6 plus the Security Whitepaper set), the embedded JSON-schema registry (`schema.rs`; schema files in `crates/kirby-ocpp-core/schemas/`), `Responder`, shared types (`types.rs`), `redact_secrets` |
-| `ws/` | One connection task per link: handshake (`handshake.rs`, subprotocol, Basic Auth), rustls TLS incl. mTLS (`tls.rs`), serialized CALL queue, ping watchdog (`task.rs`) |
+| `ws/` | One connection task per link: handshake (`handshake.rs`, subprotocol, Basic Auth), rustls TLS incl. mTLS (`tls.rs`), serialized CALL queue, ping watchdog (`task.rs`); the connection doctor behind `kirby-ocpp check` (`probe.rs`: the same TLS and upgrade code, step by step, one BootNotification) |
 | `station/` | The single `StationActor` plus `handle.rs` (public handle), `command.rs`, `snapshot.rs`, `event.rs`; `handlers/` has one file per group of CSMS-originated CALLs; pure logic modules: `smart_charging.rs`, `charging_profiles.rs`, `power.rs`, `sampling.rs`, `config_registry.rs`, `local_auth_list.rs`, `reservation.rs`, `authorization.rs`, `certificates.rs`, `security.rs`, `secure.rs`, `maintenance.rs`, `response_rules.rs`, `status.rs` |
 | `scenario/` | TOML scenario model (`model.rs`), runner (`runner.rs`), variables and capture (`vars.rs`, shared with the `kirby-csms` scripts), JUnit renderer (`junit.rs`), nine built-ins (`builtin.rs`, TOML in `crates/kirby-ocpp-core/scenarios/`) |
 | `fleet.rs` | `Fleet`: N independent stations, id templates, merged event stream |
-| `store.rs` | `StationStore`: atomic versioned JSON state |
+| `store.rs` | `StationStore`: atomic versioned JSON state; `inspect` (read-only load) and `remove` back `kirby-ocpp state show` and `state reset` |
 | `config_file.rs` | Generic TOML configuration file loader: schema of tables and keys, unknown-key rejection, profiles, relative path resolution, secret-key refusal, rendering (no clap; the binaries supply their schema) |
 | `config.rs`, `ids.rs`, `clock.rs`, `error.rs` | `StationConfig` + validation, id newtypes, `Clock` (`SystemClock`, `ManualClock`), error types |
 
@@ -66,7 +66,8 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 | `state(id)` | `StationState`: per-station protocol read model (boot info, connectors, transactions with meter readings, security events, log/firmware status, last CSR). Pull model plus `CsmsEvent::StateChanged{station}`. |
 | `stations()`, `station(id)`, `history(id)` | Registry and bounded frame history (`FrameEntry`). |
 | `subscribe()` | `CsmsEvent` stream: `Connected`, `Disconnected` (with `DisconnectReason`), `Frame`, `StateChanged`, `AuthFailed`, `Malformed`, `Forgotten`. |
-| `respond(action, f)`, `clear_responder`, `inject(Fault)`, `clear_faults`, `faults_remaining`, `responder_actions` | Response rules and fault injection (global across stations). |
+| `respond(action, f)`, `clear_responder`, `inject(Fault)`, `clear_faults`, `faults_remaining`, `responder_actions` | Response rules and fault injection across all stations. |
+| `respond_scoped(&Scope, action, payload)`, `clear_scoped_rule`, `scoped_rule(s)`, `inject_scoped`, `try_inject_scoped`, `faults()`, `remove_fault(id)` | The same for one station and/or protocol (`Scope`), stored as data so they can be listed; faults get ids. The `try_` methods and `respond_scoped` enforce the caps, `inject` and `inject_scoped` do not. |
 | `forget(id)`, `security_profile()`, `local_addr()`, `url()`, `shutdown()` | Housekeeping. |
 
 ## Emulator internals
@@ -103,7 +104,8 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 
 * `CsmsServer` accepts any number of stations on `ws(s)://host:port/<any prefix>/<station id>`; the id is the last non-empty percent-decoded path segment. Ids with control, line-separator or bidi characters (`kirby_ocpp_core::text::is_unsafe_char`) or over 128 bytes are refused with HTTP 400. A second connection with the same id replaces the first (`Disconnected{Replaced}`).
 * Outbound CALLs are serialized per station (one outstanding); at most 1024 more wait behind it, further `call()`s fail with `CsmsError::QueueFull` at once (a slot is reserved when `call()` is made and freed when the call leaves the queue; callers that gave up are pruned); the timeout counts from the `call()`, queue time included; when a caller drops its call after the write, the session waits at most the default call timeout more for the station before the next CALL is written; a late reply after a timeout is recorded but ignored.
-* Inbound CALLs: schema-validated if `validate_inbound`; then a `Fault` (global, counted), a responder, or the canned `default_reply`; known non-CP actions get `NotSupported`, unknown `NotImplemented`; malformed frames with a readable id get `FormationViolation`.
+* Inbound CALLs, in this order: a `Fault` (the station's own first, then global ones; each in injection order, counted, optionally limited to a protocol); schema validation if `validate_inbound` (a fault still wins); the station's rule, a global rule with a protocol, the global responder; the canned `default_reply`. Known non-CP actions get `NotSupported`, unknown `NotImplemented`; malformed frames with a readable id get `FormationViolation`. Scoped faults and rules, their ids and caps live in `rules.rs` (`Scope`, `FaultInfo`, `RuleInfo`); `Fault` itself stays scope-free so the test mock shares it.
+* **Action registry** (`kirby-csms-core/src/registry/`): per protocol (found by subprotocol name, `registry::protocol_actions("ocpp1.6")`) the actions a CSMS sends (`ActionSpec`: name, group, palette title and summary, `FieldSpec`s with JSON key, form label, type, choices, default, required, hint) and the actions a station sends (what rules and faults can target). Only `ocpp1.6` has a table (`registry/ocpp16.rs`, next to the typed messages). The CSMS terminal UI takes palette titles and descriptions, the rule/fault/raw-call action lists from it; the HTTP API, stdin commands and scripts check rule actions with it (`commands::is_rule_action`). `defaults::CHARGE_POINT_ACTIONS` and `is_charge_point_action` delegate to it. Tests tie the table to the typed layer (every CSMS-sendable action of `kirby-ocpp-core` is registered), to the enums behind the choices, and to the forms (`kirby-csms-tui/src/registry_tests.rs`).
 * State tracking (`state.rs`) is built from the actual reply payload of CALLs answered with `Reply::Result`. Stopped transactions are capped (`transaction_history_cap`), active ones at 256. Free text from stations (boot fields, connector `info`/vendor codes, security events) is cut to the schema maximum (255 characters at most).
 * Security profiles 0-3 (`auth.rs`, `tls.rs`): Basic Auth checked in the handshake callback (constant-time, user must equal the URL id), TLS, mTLS with client CN equal to the station id; refusals emit `CsmsEvent::AuthFailed`.
 * One global `std::sync::Mutex` guards engine state; events are emitted under the lock to keep ordering.
@@ -147,7 +149,8 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 | Suite runs (several scenarios, summary, JUnit) | `kirby-ocpp/src/suite.rs` |
 | Fleet mode | `kirby-ocpp-core/src/fleet.rs`, `kirby-ocpp-tui/src/fleet.rs`, `kirby-ocpp/src/fleet.rs` |
 | Persistence | `kirby-ocpp-core/src/store.rs`, `station/persistence.rs` |
-| CSMS engine, typed commands, faults, auth | `kirby-csms-core/src/` (`server.rs`, `typed.rs`, `fault.rs`, `auth.rs`, `tls.rs`, `state.rs`) |
+| CSMS engine, typed commands, faults, scoped rules, auth | `kirby-csms-core/src/` (`server.rs`, `typed.rs`, `fault.rs`, `rules.rs`, `auth.rs`, `tls.rs`, `state.rs`) |
+| Per-protocol action registry (names, forms, palette texts, rule targets) | `kirby-csms-core/src/registry/` (`mod.rs` types and lookups, `ocpp16.rs` table) |
 | CSMS script and stdin commands | `kirby-csms/src/script.rs`, `stdin_cmd.rs`, shared `commands.rs` |
 | CSMS HTTP control API (routes, auth, limits) | `kirby-csms/src/api.rs`, [api.md](api.md) |
 | TUI forms, keys, palette | `kirby-ocpp-tui/src/{forms,keys,palette}.rs`, `kirby-csms-tui/src/{form,keys,actions}.rs` |

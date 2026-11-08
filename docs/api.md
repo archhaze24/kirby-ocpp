@@ -14,7 +14,7 @@ The shapes in this page are a public contract, versioned by the path prefix and 
 - Browsers are refused by design: there are no CORS headers, and a request with an `Origin` header is refused without a token. `OPTIONS` answers `204` with an `Allow` header for every known path (behind the same token and `Host` checks) and is meant for tools, not for browser preflights.
 - `Allow` is derived from the route table that `GET /v1` lists and appears only on a `405` and on the `204` answer to `OPTIONS`, in one format: the route's methods plus `HEAD` (for a `GET` route) and `OPTIONS`, sorted, joined by a comma and a space (`GET, HEAD, OPTIONS`). No other status (`200`, `401`, `403`, `404`, ...) carries it.
 - Absent and `null`: a field that exists in a shape is always present. A value that is not known yet is an explicit `null` (a station that never booted has `"vendor":null`), a collection that is empty is `[]` or `{}`, a counter is `0`. A key that is missing means the field does not exist in this version of the API: clients must tolerate keys they do not know and must not rely on a key being absent. Optional extension fields that are not defined yet are simply not sent.
-- Golden shapes (top-level keys, checked by the test suite): health `ok`, `api_version`, `version`, `stations`; index `api_version`, `version`, `resources` (each `path`, `methods`); station object (in the list and in `GET /v1/stations/{id}`) `id`, `connected`, `protocol`, `received_calls`, `remote_addr`, `vendor`, `model`, `connectors`, `active_transactions`, `security_events`, and `state` in `GET /v1/stations/{id}` only; history `station`, `frames`; frames and events as in [Event stream](#event-stream).
+- Golden shapes (top-level keys, checked by the test suite): health `ok`, `api_version`, `version`, `stations`; index `api_version`, `version`, `resources` (each `path`, `methods`); station object (in the list and in `GET /v1/stations/{id}`) `id`, `connected`, `protocol`, `received_calls`, `remote_addr`, `vendor`, `model`, `connectors`, `active_transactions`, `security_events`, and `state` in `GET /v1/stations/{id}` only; history `station`, `frames`; frames and events as in [Event stream](#event-stream); faults list `remaining`, `faults`, each fault `id`, `scope`, `station`, `protocol`, `action`, `kind`, `remaining`; station rules list `station`, `rules` (each `action`, `protocol`, `payload`); one station rule `station`, `action`, `protocol`, `payload`.
 
 ## Start
 
@@ -53,9 +53,14 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `GET /v1/rules` | `{"rules":["Heartbeat",...]}`: actions that have a fixed reply, sorted |
 | `PUT /v1/rules/{action}` | Sets the fixed CALLRESULT payload (body: a JSON object) for a charge-point action |
 | `DELETE /v1/rules/{action}` | Removes the rule (`{"action":..,"cleared":true\|false}`); restores the default answer |
+| `GET /v1/stations/{id}/rules` | `{"station":..,"rules":[{"action","protocol","payload"}]}`: the rules of one station, sorted by action |
+| `GET /v1/stations/{id}/rules/{action}` | `{"station","action","protocol","payload"}`; `404` `unknown_rule` when the station has no rule for the action |
+| `PUT /v1/stations/{id}/rules/{action}` | Sets the fixed CALLRESULT payload (body: a JSON object) for one station; optional `?protocol=ocpp1.6` |
+| `DELETE /v1/stations/{id}/rules/{action}` | Removes the station's rule (`{"station","action","cleared":true\|false}`); the global rule or the default answer applies again |
 | `POST /v1/faults` | Injects a fault, see [Rules and faults](#rules-and-faults) |
-| `GET /v1/faults` | `{"remaining":N}`: fault occurrences not triggered yet |
-| `DELETE /v1/faults` | Clears all faults (`{"remaining":0}`) |
+| `GET /v1/faults` | `{"remaining":N,"faults":[...]}`: fault occurrences not triggered yet, and the stored faults with their ids |
+| `DELETE /v1/faults` | Clears all faults of every scope (`{"remaining":0}`) |
+| `DELETE /v1/faults/{id}` | Removes one fault (`{"id":..,"removed":true\|false}`) |
 
 Status of a call: `200` also when the station answered with a CALLERROR or the call timed out (`"ok":false` and `outcome` `call_error` or `timeout` in the body); `404` `unknown_station` when the id was never seen; `409` `station_not_connected` when the station is known but has no open connection (or the connection closed before the answer); `400` for a bad body; `413` above 1 MiB; `429` `too_many_requests` when 256 commands (stdin and API together) are already in flight, or when the request bodies of the calls in flight already hold 32 MiB (a body counts while its call runs; only the payload is kept in memory, the rest of the body is dropped before the call starts).
 - The 256 slots are shared with the stdin handler: when they are full the API answers `429` at once, while a stdin line waits for a free slot.
@@ -124,7 +129,17 @@ data: {"action":"Heartbeat","direction":"in","id":"...","kind":"call","payload":
 
 ## Rules and faults
 
-Same engine features as the script steps `respond` and `inject_fault` ([csms.md](csms.md#response-rules-and-fault-injection)); they apply to every station.
+Same engine features as the script steps `respond` and `inject_fault` ([csms.md](csms.md#response-rules-and-fault-injection)). The endpoints under `/v1/rules` and `POST /v1/faults` without `station` apply to every station; the per-station endpoints and the optional `station` and `protocol` fields scope a rule or fault to one station, one protocol or both.
+
+**Resolution order** for one CALL from a station, first match wins:
+1. a fault of that station (injection order), then a global fault (injection order); a fault with a `protocol` applies only to stations that negotiated it; one CALL uses up one occurrence of one fault;
+2. schema validation, when enabled;
+3. the rule of that station for the action (a `protocol` on the rule must match the station's protocol);
+4. a global rule that names a protocol (set from a `[[rule]]` block of the configuration file), when the protocol matches;
+5. the global rule of `/v1/rules` (one per action; setting it again replaces it);
+6. the default answer.
+
+Faults beat rules at every scope. `times` counts per fault: two faults for the same action and scope are used one after the other. A station that negotiated no subprotocol (`"protocol":null`) matches only scopes without a `protocol`. Rules and faults of a station stay when the station is forgotten and apply when it connects again; the station id does not have to be known yet.
 
 ```text
 $ curl -s -X PUT http://127.0.0.1:9100/v1/rules/Heartbeat -d '{"currentTime":"2030-01-01T00:00:00Z"}'
@@ -135,14 +150,37 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/rules/Heartbeat
 {"action":"Heartbeat","cleared":true}
 
 $ curl -s -X POST http://127.0.0.1:9100/v1/faults -d '{"action":"Heartbeat","kind":"call_error","times":2}'
-{"injected":true,"remaining":2}
+{"id":"f1","injected":true,"remaining":2}
 $ curl -s http://127.0.0.1:9100/v1/faults
-{"remaining":2}
+{"faults":[{"action":"Heartbeat","id":"f1","kind":"call_error","protocol":null,"remaining":2,"scope":"global","station":null}],"remaining":2}
 $ curl -s -X DELETE http://127.0.0.1:9100/v1/faults
 ```
 
+Per station:
+
+```text
+$ curl -s -X PUT http://127.0.0.1:9100/v1/stations/CP-1/rules/Authorize -d '{"idTagInfo":{"status":"Blocked"}}'
+{"action":"Authorize","protocol":null,"set":true,"station":"CP-1"}
+$ curl -s http://127.0.0.1:9100/v1/stations/CP-1/rules
+{"rules":[{"action":"Authorize","payload":{"idTagInfo":{"status":"Blocked"}},"protocol":null}],"station":"CP-1"}
+$ curl -s -X DELETE http://127.0.0.1:9100/v1/stations/CP-1/rules/Authorize
+{"action":"Authorize","cleared":true,"station":"CP-1"}
+
+$ curl -s -X POST http://127.0.0.1:9100/v1/faults -d '{"action":"StartTransaction","kind":"silence","station":"CP-1","protocol":"ocpp1.6","times":3}'
+{"id":"f2","injected":true,"remaining":3}
+$ curl -s -X DELETE http://127.0.0.1:9100/v1/faults/f2
+{"id":"f2","removed":true}
+```
+
+- `PUT /v1/stations/{id}/rules/{action}`: the same checks as the global endpoint on `{action}` and the body. The optional query parameter `protocol` (at most once, no other parameter) limits the rule to stations that negotiated that subprotocol; it must be a protocol the server has an action table for (`ocpp1.6` today, `400` `bad_request` otherwise) and `{action}` must be an action a station of that protocol sends. Without it the rule applies whatever the protocol, and `{action}` must be an action of any known protocol. The answer repeats `station`, `action` and `protocol` (`null` when not given). Setting the rule again replaces it, with the new `protocol`. `{id}` is at most 128 bytes without control characters (`400` otherwise).
+- `GET`, `DELETE` of one rule use the same `{id}` and `{action}` checks. A `GET` of a station or action without a rule is `404` `unknown_rule`; `DELETE` is idempotent (`cleared` tells whether a rule was removed) and takes no query parameter (`400`). `GET /v1/stations/{id}/rules` is `200` with `"rules":[]` for a station that has none or that was never seen.
+- `GET /v1/faults`: `remaining` is the sum of the occurrences left in every scope (as before). `faults` lists the stored faults in injection order, each with `id`, `scope` (`"global"` or `"station"`), `station` (the id, `null` for a global fault), `protocol` (`null` when not limited), `action`, `kind` and `remaining` (occurrences left, 1 or more). A fault disappears from the list when its last occurrence is used.
+- Fault ids are opaque strings (`f1`, `f2`, ...). An id stays valid until the fault is used up or removed, is never reused during one run and carries no meaning clients may rely on beyond equality. `DELETE /v1/faults/{id}` with an id that is not stored answers `200` with `"removed":false` (a fault can be used up between the list and the delete); it removes the fault with its remaining occurrences.
+- `POST /v1/faults` accepts two more optional fields, `station` (exact station id, 1 to 128 bytes without control characters) and `protocol` (a protocol with an action table). The answer carries the new `id` besides `injected` and `remaining`.
+- Caps (a request beyond them is `409` `conflict` with a JSON error and changes nothing): 1000 faults in all, 100 faults for one station, 8 MiB of action and payload text over all faults; 1000 per-station rules in all, 64 rules for one station, 8 MiB of payload text over all per-station rules. A rule that replaces an existing one does not count as new. Global rules (`/v1/rules`) are one per action and have no cap.
+
 - `PUT /v1/rules/{action}`: `{action}` must be an action a charge point can send in the protocol of the engine's action table, today `ocpp1.6` (otherwise `400` `unsupported_action`); the body must be a JSON object (the whole CALLRESULT payload, not checked against the schema).
-- `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `action` is 1 to 128 bytes without control characters (any other name is accepted, so faults can target actions the server does not know; `400` otherwise); `times` defaults to 1 and must be 1 to 1000000 (`400` otherwise); at most 1000 faults and 8 MiB of action and payload text are stored at once (`409` with a JSON error beyond that; `DELETE /v1/faults` frees them). Scripts apply the same checks and caps (an `inject_fault` step fails the script when the store is full); the terminal UI form is bounded by the same `times` limit. Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
+- `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `action` is 1 to 128 bytes without control characters (any other name is accepted, so faults can target actions the server does not know; `400` otherwise); `times` defaults to 1 and must be 1 to 1000000 (`400` otherwise); the caps listed above apply (`409` with a JSON error beyond that; `DELETE /v1/faults` frees them). Scripts apply the same checks and caps (an `inject_fault` step fails the script when the store is full); the terminal UI form is bounded by the same `times` limit. Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
 
 ## Errors and limits
 
@@ -150,16 +188,17 @@ Every error the API produces has the body `{"error":{"code":"<code>","message":"
 
 | Status | `code` | When |
 | --- | --- | --- |
-| 400 | `bad_request` | Invalid JSON or fields, bad `timeout_ms`, bad `limit`, unknown or repeated query parameter, unsafe station id, more than one `Host` header, bad fault, a rule body that is not an object |
-| 400 | `unsupported_action` | `PUT`/`DELETE /v1/rules/{action}` with an action that is not a known charge-point action for the protocol (`ocpp1.6` today) |
+| 400 | `bad_request` | Invalid JSON or fields, bad `timeout_ms`, bad `limit`, unknown or repeated query parameter, unsafe or over-long station id, more than one `Host` header, bad fault, an unknown `protocol`, a rule body that is not an object |
+| 400 | `unsupported_action` | `PUT`/`DELETE` of `/v1/rules/{action}` or `/v1/stations/{id}/rules/{action}`, and `GET` of the latter, with an action that is not a known charge-point action for the protocol (`ocpp1.6` today) |
 | 401 | `unauthorized` | Token configured and missing or wrong |
 | 403 | `forbidden` | No token configured and the request has an `Origin` header, `Sec-Fetch-Site: cross-site` or a non-loopback `Host` |
 | 404 | `not_found` | Unknown route |
+| 404 | `unknown_rule` | `GET /v1/stations/{id}/rules/{action}` for a station that has no rule for the action |
 | 404 | `unknown_station` | The station id was never seen (or was forgotten) |
 | 405 | `method_not_allowed` | Wrong method for the path |
 | 408 | `request_timeout` | Request body not complete 10 s after the head |
 | 409 | `station_not_connected` | A call to a station that is known but not connected |
-| 409 | `conflict` | Forgetting a connected station; fault store full |
+| 409 | `conflict` | Forgetting a connected station; fault store or per-station rule store full |
 | 413 | `payload_too_large` | Request body over 1 MiB (also when chunked) |
 | 429 | `too_many_requests` | Too many commands in flight, too much request data held by calls in flight, or 1024 calls already waiting for the station |
 | 500 | `internal` | A call failed in a way that is neither a protocol outcome nor a request problem (for example an unexpected frame as the answer) |

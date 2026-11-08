@@ -13,7 +13,7 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 
 ## kirby-ocpp
 
-`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help` and `suite --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), and `version --help` shows only `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Configuration, Output and Scenarios; the tables below use a similar grouping (the headings differ in places).
+`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help`, `suite --help` and `check --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), `version --help` shows only `--json`, and `state --help` shows only `--id`, `--state-dir` and `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Configuration, Output and Scenarios; the tables below use a similar grouping (the headings differ in places).
 
 ### Station and connection
 
@@ -148,6 +148,37 @@ Plain headless mode (no subcommand) prints every event at any level. `--log-file
 
 None of the `suite` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-suite). Details: [Scenarios](scenarios.md#suite-runs).
 
+`kirby-ocpp check` tests the way to the Central System one step at a time and prints a checklist. It reads the same connection options as a station: `--url` (required), `--id`, `--ws-subprotocol`, `--call-timeout-ms`, the TLS flags (`--tls-ca`, `--tls-cert`, `--tls-key`, `--tls-server-name`, `--tls-skip-verify`), the identity flags that go into the BootNotification (`--vendor`, `--model`, `--serial`, `--firmware-version`), `--json` and `--color`; Basic Auth is taken from `user:password@` in the URL. It opens one connection, sends exactly one BootNotification and closes; it never reads or writes the station state. A fleet (`--count` above 1) exits 2. Plus:
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `--timeout <SECONDS>` | | `30` | Give up after this long in total; 1 to 3600. One connection step (DNS, TCP, TLS, upgrade) is also limited to 10 seconds, and the BootNotification answer to `--call-timeout-ms`, always within what is left of the total |
+
+The steps, in order: `url` (the WebSocket URL with the id appended; scheme `ws` or `wss`), `dns` (the addresses of the host), `tcp` (connect to the first reachable address), `tls` (`wss` only: version, certificate subject and issuer, expiry, how the certificate was verified), `websocket` (the upgrade with the subprotocol: status, the subprotocol the server selected), `boot` (the BootNotification: status, interval, clock difference) and `close` (the close handshake). A failed step skips the steps that depend on it. Each line starts with one of `PASS`, `WARN`, `FAIL` or `SKIP`; a failed step may be followed by a `hint:` line. The last line is `PASSED` or `FAILED` with the counts. Judgments: a server certificate that expires in under 14 days is a warning; an expired one fails the step (with `--tls-skip-verify` it is a warning, since the connection works); a `Pending` boot is a warning and a `Rejected` boot fails; a server clock that differs from this machine by more than 60 seconds is a warning. A `wss` handshake that fails certificate verification also prints the subject and issuer the server presented. The password of the URL never appears in the output (`***`), and text that comes from the server is stripped of control characters.
+
+`check --json` prints one JSON object instead of the lines:
+
+| Key | Value |
+| --- | --- |
+| `schema` | `1` |
+| `ocpp_version` | `"1.6"` |
+| `tool_version` | Version of the tool |
+| `url` | The URL that was checked, with the id, the password replaced by `***` |
+| `status` | `"passed"` unless a step failed, then `"failed"` |
+| `steps` | An array in the order above; each step has `name` (`url`, `dns`, `tcp`, `tls`, `websocket`, `boot`, `close`), `status` (`passed`, `warning`, `failed`, `skipped`), `detail` (text), `hint` (text, or `null`) and `duration_ms` (integer) |
+
+New keys may be added to these objects; none is renamed or removed. None of the `check` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-check). Example output: [Emulator](emulator.md#connection-check).
+
+`kirby-ocpp state path|show|reset` works on the persisted state of a station (see [State directory and files](#state-directory-and-files)). It never connects and needs no `--url`. The directory is `--state-dir` (`KIRBY_OCPP_STATE_DIR`, or the `state_dir` key of the configuration file), else `~/.kirby-ocpp/stations`; the station is `--id`.
+
+| Command | Meaning |
+| --- | --- |
+| `state path [--id ID]` | Print the state directory; with `--id` the state file of that station. Nothing is created or read. `--json`: `{"schema": 1, "dir", "station", "file", "secrets_file"}` (`station`, `file` and `secrets_file` are `null` without `--id`) |
+| `state show --id ID` | Print what the state file holds: store version, availability, connectors with their transaction, local list, authorization cache, charging profiles, offline queue, certificates, queued security events and the configuration keys. The secrets file is never read: only its presence is reported, and configuration values whose key name contains `AuthorizationKey`, `password`, `secret` or `privateKey` print as `***`. A file that cannot be used (corrupt, or of another station) is reported and left where it is. `--json`: `{"schema": 1, "station", "file", "status", "store_version", "supported_store_version", "secrets_file" (boolean), "state"}` with `status` `found`, `missing` or `unusable` (`unusable` adds `reason`; `state` is `null` unless found) |
+| `state reset --id ID [--yes]` | Delete the state file, the secrets file and their `.bak` copies of that station, nothing else and nothing outside the state directory. Asks `Delete? [y/N]` on a terminal; without a terminal it needs `-y, --yes` (exit 2 without it). Nothing to delete is not an error. `--json`: `{"schema": 1, "station", "deleted": [paths]}` |
+
+`state show` and `state reset` need the id to be given (`--id`, `OCPP_CHARGE_POINT_ID` or the `id` key of the configuration file); the default id `CP-001` is not assumed. A state or secrets file written by a newer version is refused by `show` and `reset` and stays untouched. None of the `state` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-state).
+
 `kirby-ocpp scenarios list` lists the built-in scenarios; `kirby-ocpp scenarios show <NAME>` prints one as TOML. Scenario format: [Scenarios](scenarios.md).
 
 `kirby-ocpp scenarios validate <FILE|DIR|NAME>...` parses scenarios without connecting (no `--url` needed). It prints `ok PATH (N steps)` per scenario (built-ins as `ok built-in NAME (N steps)`) and `error: PATH: reason` per failure, scanning directories like `suite` does (every `*.toml` directly inside, sorted). Exit 0 when all are valid, 2 when any is not.
@@ -168,7 +199,7 @@ Each file is written to a temporary file in the same directory and renamed over 
 
 ## Configuration file
 
-`kirby-ocpp --config FILE` (or `KIRBY_OCPP_CONFIG`) reads settings from a TOML file, so a test setup lives in one versionable file instead of a long command line. `--profile NAME` (or `KIRBY_OCPP_PROFILE`) picks a named variant inside the file. Both are global flags: they work for the plain station and for `run` and `suite`. `version`, `completions` and `scenarios` never read the file.
+`kirby-ocpp --config FILE` (or `KIRBY_OCPP_CONFIG`) reads settings from a TOML file, so a test setup lives in one versionable file instead of a long command line. `--profile NAME` (or `KIRBY_OCPP_PROFILE`) picks a named variant inside the file. Both are global flags: they work for the plain station and for `run` and `suite`. `version`, `completions` and `scenarios` never read the file. `check` takes its connection settings from it; `state` takes `id` and `state_dir`.
 
 ### Precedence
 
@@ -182,7 +213,7 @@ For every setting: command-line flag, then environment variable, then the select
 * The key of a setting is the long flag name with `-` replaced by `_`: `--tls-ca` is `tls_ca`, `--reconnect-max-ms` is `reconnect_max_ms`. The key keeps its table even when the table name repeats a prefix (`[tls]` holds `tls_ca`). Values have the type of the flag: text, integer, boolean (`true` or `false`), or an array of text for `rule`. Text values are not trimmed or parsed any differently from the same flag; a value that the flag would refuse (out of range, empty, wrong form) is refused with the same message.
 * Unknown tables and unknown keys are errors, never ignored. A key in the wrong table is an unknown key.
 * Settings that exist for one OCPP version only belong to a version table below the section, such as `[station.v16]`. No setting needs one today; the table name is reserved and holds no keys yet.
-* Not file keys: `--config`, `--profile`, `--print-config`, `--licenses` and the arguments of `run`, `suite` and `scenarios` (`--scenario`, `--report`, `--junit`, `--var`, ...). They describe one invocation, not a station.
+* Not file keys: `--config`, `--profile`, `--print-config`, `--licenses` and the arguments of `run`, `suite`, `check`, `state` and `scenarios` (`--scenario`, `--report`, `--junit`, `--var`, `--yes`, ...). They describe one invocation, not a station.
 * Relative paths in the file (`tls_ca`, `tls_cert`, `tls_key`, `state_dir`, `log_file`) resolve against the directory of the configuration file, not against the working directory. Paths given by flag or variable keep resolving against the working directory.
 
 | Table | Keys |
@@ -298,6 +329,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 * Ids are escaped for the filesystem. A name that would exceed 100 bytes is shortened with a hash suffix (`...~<16 hex>.station.json`).
 * A corrupt file or a file belonging to another charge point is moved to `<file>.bak` and the station starts clean. Format changes require a `STORE_VERSION` bump (see [Development](development.md#store-version)).
 * Fleet stations never collide: the file is named after each station's id.
+* `kirby-ocpp state path`, `state show` and `state reset` print the location, summarize the content and delete the files of one station; see [kirby-ocpp subcommands](#kirby-ocpp-subcommands).
 * `kirby-csms` keeps no state on disk; its station records live in memory.
 
 ## kirby-csms
@@ -412,7 +444,7 @@ Key files are read at start (and by `--check-config`), never by `--print-config`
 | `protocol` | Optional, `"ocpp1.6"` |
 | `auth_key_file` | Optional. File holding the Basic Auth key of the station (a trailing line end is dropped). Works like `--auth-key ID=KEY`; entries given with `--auth-key` or `KIRBY_CSMS_AUTH_KEY` win over a block of the same id, and a block wins over the same id in `--auth-keys-file`. Keys need `security_profile` 1 or 2 |
 
-`[[rule]]` answers a CALL that stations send, for all stations. It mirrors the [response rules and faults](csms.md#response-rules-and-fault-injection) of the TUI, the scripts and the HTTP API and is installed before the first station connects:
+`[[rule]]` answers a CALL that stations send, for all stations or, with `station` and `protocol`, for one station and one protocol. It mirrors the [response rules and faults](csms.md#response-rules-and-fault-injection) of the TUI, the scripts and the HTTP API and is installed before the first station connects:
 
 | Key | Meaning |
 | --- | --- |
@@ -420,9 +452,10 @@ Key files are read at start (and by `--check-config`), never by `--print-config`
 | `behavior` | Required. `respond` (answer every CALL of the action with `payload`), or a fault: `call_error`, `silence`, `close`, `invalid_payload` (CALLRESULT with `payload` as given) |
 | `payload` | JSON text. Required for `respond` (a JSON object) and `invalid_payload`; refused for the other behaviors |
 | `times` | Faults only: occurrences the fault applies to, 1 to 1000000, default 1. Refused for `respond` |
-| `protocol` | Optional, `"ocpp1.6"` |
+| `station` | Optional. One station id, exactly as in the URL (1 to 128 bytes, no control characters; patterns are not supported). The rule or fault applies to that station only and wins over a rule or fault without `station`. Without it the rule applies to all stations |
+| `protocol` | Optional, `"ocpp1.6"`. The rule or fault applies only to stations that negotiated that subprotocol. With `station` and a `respond` rule, `action` must be an action a station of the protocol sends |
 
-Faults are used in the order of the file and win over responses; at most 1000 faults are stored. The key `station` of a rule is reserved for per-station rules and is refused with an error until the engine supports them; blocks that list rules and faults per station and per protocol will use these same keys.
+Faults are used in the order of the file (a station's faults before global ones) and win over responses; at most 1000 faults are stored, 100 for one station. Rules with `station` or `protocol` count against the same caps as the per-station [rules and faults of the API](api.md#rules-and-faults) (1000 rules, 64 for one station). Resolution order, counts and the effect of `protocol`: [csms.md](csms.md#response-rules-and-fault-injection). A `respond` rule without `station` and `protocol` is the global rule of its action; a later one for the same action replaces it, and a `respond` rule for the same station and action replaces the earlier one.
 
 ### `--print-config` and `--check-config`
 
@@ -512,6 +545,22 @@ No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no termi
 | 1 | Any scenario failed, timed out or could not boot (also after its retries), or a report file could not be written |
 | 2 | Usage error: no source, empty directory, invalid scenario file, `--count` above 1, a selection (`--filter`, `--skip`, `--tag`, `--skip-tag`) that leaves no scenario, `--github-annotations` with `--json`, `--summary-md` naming a scenario or report file |
 | 130 | SIGINT. The running scenario ends as an `error` row (`interrupted`), the rest are `skipped`, and `--report` and `--junit` are written for what finished. SIGTERM does the same and exits 1 |
+
+### kirby-ocpp check
+
+| Code | Meaning |
+| --- | --- |
+| 0 | No step failed (warnings are allowed) |
+| 1 | A step failed (the checklist shows which) |
+| 2 | Usage or configuration error: no `--url`, an invalid URL, a TLS file that cannot be read, `--count` above 1 |
+
+### kirby-ocpp state
+
+| Code | Meaning |
+| --- | --- |
+| 0 | `path` printed; `show` printed the state; `reset` deleted the state or found nothing to delete |
+| 1 | `show`: no state, an unusable file, or a file of a newer version; `reset`: declined at the prompt, a file of a newer version (nothing is deleted), or a file that cannot be deleted |
+| 2 | Usage error: `show` or `reset` without an id, `reset` without `--yes` when stdin is not a terminal, no state directory can be determined |
 
 ### kirby-ocpp scenarios validate
 

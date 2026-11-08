@@ -93,6 +93,16 @@ Start from the table in [Architecture](architecture.md#where-each-concern-lives)
 3. Handle the `Msg` in the pure `update` and return an `Effect` that sends the `Command`.
 4. Add `update` and `TestBackend` tests; update the keys table in [Emulator](emulator.md). For the CSMS UI the files are `kirby-csms-tui/src/{form,keys,actions}.rs` and [CSMS](csms.md).
 
+### Add a CSMS action
+
+An action the central system sends (for example another 1.6 command) touches these places; the tests below fail when one is forgotten.
+
+1. Add the typed message in `kirby-ocpp-core` (see "Add an OCPP message") and, for a typed wrapper, a method in `kirby-csms-core/src/typed.rs`.
+2. Register it: add an `action(...)` entry (name, group, title, summary, `FieldSpec`s with the JSON key, label, type, choices, default, required) to `CSMS_ACTIONS` in `kirby-csms-core/src/registry/ocpp16.rs`. The unit test `covers_every_action_the_typed_layer_knows` and the choices test point at what is missing. A new protocol gets its own `registry/<protocol>.rs` and an entry in `PROTOCOLS` in `registry/mod.rs`; lookups always take the protocol.
+3. Palette and form (optional, `Raw call` and stdin reach every action): an `ocpp(ActionId::..., "ActionName", Some('k'))` entry in `CATALOG` of `kirby-csms-tui/src/actions.rs` (the registry supplies title and description), a `Form` constructor in `form.rs` whose field labels equal the spec labels, and a branch in `run_action`. Add the action to `form_of` and `sample` in `kirby-csms-tui/src/registry_tests.rs`; without a form, list it in `NO_FORM` or `NO_PALETTE` there.
+4. Stdin lines, scripts and the HTTP API need nothing: they send any action name and the engine validates the payload against the schema. A station-sent action (for rules and faults) goes into `STATION_ACTIONS` of the table.
+5. Update [CSMS](csms.md) (keys table) and, for station-sent actions, [API](api.md).
+
 ### Add a CLI flag
 
 1. Add the field in `crates/kirby-ocpp/src/cli.rs` (or `crates/kirby-csms/src/cli.rs`) with `long`, `env = "..."`, `value_name`, a `value_parser` that enforces the range (strict `BoolishValueParser` for booleans) and a doc comment (it becomes the `--help` text).

@@ -41,6 +41,8 @@ What the CSMS does for the whitepaper messages:
 
 ## Emulator side
 
+`kirby-ocpp check` tests a connection with the TLS flags and the URL credentials only (certificate verification, `--tls-ca`, `--tls-cert`/`--tls-key`, `--tls-skip-verify`, a wildcard certificate is refused as above). It prints the subject, issuer and expiry of the server certificate and never the password of the URL; see [Connection check](emulator.md#connection-check).
+
 There is no flag that sets the security profile (`--security-profile-fallback` only controls the fallback, below). The station follows the registry keys `SecurityProfile` and `AuthorizationKey`, which a CSMS sets with `ChangeConfiguration` as the whitepaper describes.
 
 **Profile fallback (`A05.FR.08`, SHOULD).** After an accepted change of `SecurityProfile` the station remembers the profile that was in force (and the previous `AuthorizationKey` in the secrets file when the key changed in the meantime). If it then fails 3 times in a row to connect with the new profile before its first successful connection, it goes back to the previous profile (and key). It logs a warning, queues a `ReconfigurationOfSecurityParameters` security event whose `techInfo` names the fallback, and reconnects at once.

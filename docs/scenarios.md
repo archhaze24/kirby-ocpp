@@ -457,9 +457,14 @@ Every step takes an optional `name`. `timeout_ms` must be between 1 and 86400000
 | `wait_call` | `call`, optional `station`, `payload_contains`, `capture`, `timeout_ms` (default 5000) | Wait for an inbound CALL (from a given station, containing a payload subset); `capture` stores values of the matched payload |
 | `call` | `station`, `call`, `payload` (default `{}`), `expect_status`, `expect_payload`, `expect_error`, `capture`, `timeout_ms` (default 5000) | Send a CALL to a connected station and check the answer. `expect_status` checks `payload.status`; `expect_payload` checks a payload subset (see below); `expect_error = true` wants a CALLERROR. `expect_error` together with `expect_status`, `expect_payload` or `capture` is a script error. Without either, any CALLRESULT passes and a CALLERROR fails. Payloads are sent as given, not schema-checked |
 | `sleep` | `ms` | Wait (at most 86400000) |
-| `respond` | `call`, `payload` | Answer every inbound CALL of that action with this CALLRESULT payload |
-| `clear_respond` | `call` | Remove that responder |
-| `inject_fault` | `call`, `kind`, `payload`, `times` (default 1) | Make the next `times` CALLs of that action fail; see below |
+| `respond` | `call`, `payload`, optional `station`, `protocol` | Answer every inbound CALL of that action with this CALLRESULT payload; with `station` (and/or `protocol`) only that station's (that protocol's) CALLs, see [Response rules and fault injection](csms.md#response-rules-and-fault-injection) |
+| `clear_respond` | `call`, optional `station`, `protocol` | Remove that responder (the one of the same scope) |
+| `inject_fault` | `call`, `kind`, `payload`, `times` (default 1), optional `station`, `protocol`, `capture_id` | Make the next `times` CALLs of that action fail; see below. `capture_id = "name"` stores the id of the fault in the variable `name` |
+| `remove_fault` | `id` | Remove one stored fault by id (`${var}` works); the step fails when no such fault is stored |
+| `forget` | `station` | Forget a disconnected station; fails for an unknown or a connected station |
+| `history` | `station`, optional `limit`, `expect_action` | Read the station's frame history; with `expect_action` the step fails unless the newest `limit` frames hold a CALL of that action |
+| `rules` | optional `station`, `expect_actions` | Read the per-station rules (of `station`, or all); with `expect_actions` the step fails unless the sorted list of actions equals it |
+| `faults` | optional `station`, `expect_count` | Read the stored faults (of `station`, or all); with `expect_count` the step fails unless that many faults are stored |
 
 `wait_call` consumes the CALL it matches: each inbound CALL satisfies at most one `wait_call`, but waits may come in any order (a later wait can match a CALL that arrived before the previous wait's match).
 - CALLs that arrive while other steps run are kept (the last 10 000, at most about 16 MiB); only CALLs some `wait_call` of the script names are remembered, and their payload only if a `wait_call` for that action uses `payload_contains` or `capture`.

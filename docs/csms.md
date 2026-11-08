@@ -140,14 +140,29 @@ Without `--script`, when stdin is not a terminal (or with `--stdin`), each input
 | `payload` | request payload, default `{}`; sent as given, not schema-checked, so malformed requests can be tested |
 | `timeout_ms` | 1 to 86 400 000, default `--call-timeout` (30 s) |
 | `id` | optional tag echoed in the answer |
-| `cmd` | `"stations"` instead of a CALL; the only command |
+| `cmd` | A command instead of a CALL: `stations`, `history`, `forget`, `rules` or `faults`, see below |
+
+Commands (a line with `cmd` needs no `action`; `id` is echoed like for a CALL; a failure is an `"ok":false` result with the `error` text and, when the line names one, the `station`):
+
+| Line | Answer |
+| --- | --- |
+| `{"cmd":"stations"}` | `{"type":"stations","stations":[...]}` |
+| `{"cmd":"history","station":"CP-1","limit":50}` | `{"type":"history","station":"CP-1","frames":[...]}`: the newest `limit` frames (default all), oldest first, shaped like the `--json` frame lines and redacted like them (`AuthorizationKey` is `***` unless `--show-secrets`); an unknown station is an error |
+| `{"cmd":"forget","station":"CP-1"}` | `{"type":"forgotten","station":"CP-1","forgotten":true}`; an unknown or a connected station is an error |
+| `{"cmd":"rules"}` (or `"op":"list"`, optional `station`) | `{"type":"rules","global":["Heartbeat"],"scoped":[{"station","action","protocol","payload"}]}`: actions with a global rule, and the per-station rules (of `station` only, when given; `station` is `null` for a global rule limited to a protocol) |
+| `{"cmd":"rules","op":"set","action":"Authorize","payload":{...},"station":"CP-1","protocol":"ocpp1.6"}` | `{"type":"rule","action":..,"station":..,"protocol":..,"set":true}`; `station` and `protocol` are optional, `payload` must be an object, `action` must be a charge-point action of the protocol; a rule beyond the [caps](api.md#rules-and-faults) is an error |
+| `{"cmd":"rules","op":"clear","action":"Authorize","station":"CP-1"}` | `{"type":"rule",..,"cleared":true\|false}` |
+| `{"cmd":"faults"}` (or `"op":"list"`, optional `station`) | `{"type":"faults","remaining":N,"faults":[{"id","scope","station","protocol","action","kind","remaining"}]}` |
+| `{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"silence","times":2,"station":"CP-1","protocol":"ocpp1.6","payload":{...}}` | `{"type":"fault","injected":true,"id":"f1","remaining":2}`; `kind`, `times` (default 1) and `payload` follow the [fault rules](#response-rules-and-fault-injection) |
+| `{"cmd":"faults","op":"remove","id":"f1"}` | `{"type":"fault","id":"f1","removed":true\|false}` |
+| `{"cmd":"faults","op":"clear"}` | `{"type":"faults","remaining":0,"faults":[]}`: drops every fault of every scope |
 
 Rules:
 
 - Answers can arrive out of order (a slow command does not hold back later ones). Match them by `id`, not by position.
 - A CALLERROR, a timeout, an unknown station or a bad line (invalid JSON, not an object, invalid UTF-8, longer than 1 MiB) is an `"ok":false` result with an `error` text, never a crash. A CALLERROR answer also carries `code` and `details`.
 - At most 256 commands are in flight; the reader waits while all slots are busy.
-- Response rules and faults are not available over stdin; use the TUI or a [script](scenarios.md).
+- Response rules and faults are available through the `rules` and `faults` commands, the TUI, [scripts](scenarios.md#steps) and the HTTP API.
 
 ## HTTP API
 
@@ -157,10 +172,20 @@ Rules:
 
 ## Response rules and fault injection
 
-Both apply to all stations, not to the selected one, and to CALLs sent by stations (not to commands sent by the CSMS).
+Both apply to CALLs sent by stations (not to commands sent by the CSMS). By default they apply to all stations, not to the selected one; a rule or fault can be limited to one station (exact id), to one protocol (`ocpp1.6`) or to both.
 
-- Response rule (`m`): answer every CALL of one action with a fixed CALLRESULT payload, for example `{"status":"Rejected"}` for `Authorize`. The payload is not validated, so it can break the schema on purpose. Remove one rule from the palette; `M` clears all.
-- Fault (`i`): for the next N occurrences of an action (N up to 1 000 000) do something else than the normal answer. Faults win over rules and over the canned replies.
+- Response rule (`m`): answer every CALL of one action with a fixed CALLRESULT payload, for example `{"status":"Rejected"}` for `Authorize`. The payload is not validated, so it can break the schema on purpose. The form's last field limits it to one station (empty means all stations). Remove one rule from the palette (rules of a station are listed as `Action@station`); `M` clears all, rules of stations included.
+- Fault (`i`): for the next N occurrences of an action (N up to 1 000 000) do something else than the normal answer. Faults win over rules and over the canned replies. The form has the same optional station field.
+
+For one CALL the engine picks, first match wins:
+1. a fault of that station, then a global fault; each group in the order the faults were injected, and a CALL uses up one occurrence of one fault;
+2. schema validation, when `validate_inbound` is on (a fault still wins over it);
+3. the rule of that station for the action;
+4. a global rule that names a protocol (from a `[[rule]]` block with `protocol`), when the station negotiated it;
+5. the global rule (one per action; setting it again replaces it);
+6. the default answer.
+
+A rule or fault with a `protocol` applies only to stations that negotiated it; a station that negotiated no subprotocol matches only rules and faults without a `protocol`. Rules and faults of a station stay when the station is forgotten. Faults are listed with an opaque id (`f1`, ...) that stays valid until the fault is used up or removed; remove one by id over the API, stdin or a script.
 
 | Fault kind | Effect |
 | --- | --- |
@@ -169,11 +194,11 @@ Both apply to all stations, not to the selected one, and to CALLs sent by statio
 | `close` | close the WebSocket with code 1011 without replying |
 | `invalid_payload` | CALLRESULT with the payload you give, as is (for example schema-invalid) |
 
-Scripts and the HTTP API check faults the same way: the action name is 1 to 128 bytes without control characters, `times` is 1 to 1 000 000, and at most 1000 faults (8 MiB of text) are stored at once.
+Scripts, stdin and the HTTP API check faults the same way: the action name is 1 to 128 bytes without control characters, `times` is 1 to 1 000 000, a station id is 1 to 128 bytes, and at most 1000 faults (100 for one station, 8 MiB of text in all) and 1000 rules of stations (64 for one station, 8 MiB of text in all) are stored at once.
 
-Rules and faults can also be installed at start from `[[rule]]` blocks of a [configuration file](configuration.md#blocks) (`behavior = "respond"` or a fault kind). They apply to all stations and are in place before the first station connects.
+Rules and faults can also be installed at start from `[[rule]]` blocks of a [configuration file](configuration.md#blocks) (`behavior = "respond"` or a fault kind). Without `station` they apply to all stations; all are in place before the first station connects.
 
-In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` steps, see [scenarios.md](scenarios.md). The emulator has the mirror feature for CSMS commands ([emulator.md](emulator.md)).
+In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` steps (with optional `station` and `protocol`), plus `remove_fault`, `faults` and `rules`, see [scenarios.md](scenarios.md#steps). The emulator has the mirror feature for CSMS commands ([emulator.md](emulator.md)).
 
 ## Headless behavior
 

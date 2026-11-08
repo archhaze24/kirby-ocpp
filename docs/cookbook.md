@@ -350,6 +350,42 @@ kirby-ocpp --url ws://127.0.0.1:9000/ocpp run --scenario loop-and-capture.toml -
 
 Reference: [Variables](scenarios.md#variables), [Loops](scenarios.md#loops).
 
+## Debug a connection
+
+Goal: find out why a charge point does not connect to a CSMS, and which side to fix.
+
+```bash
+kirby-ocpp check --url wss://csms.example/ocpp --id CP-1
+```
+
+Read the checklist from the top; the first `FAIL` line is the problem and the `hint:` under it names the flag or the setting to change:
+
+* `dns` fails: the name does not resolve from this machine.
+* `tcp` fails: nothing listens on the port, or a firewall drops the packets (`connection refused` against `timed out`).
+* `tls` fails with `UnknownIssuer`: add the CA with `--tls-ca ca.pem`; with `NotValidForName`: set `--tls-server-name`. The line also shows the subject, the issuer and the expiry the server presented. For a self-signed test server `--tls-skip-verify` gets past the step, and the step warns when the certificate expires within 14 days.
+* `websocket` fails with 401 or 403: the credentials (`user:password@` in the URL, the `AuthorizationKey` as the password) or the registration of the id are wrong. 404: the path is wrong, since the id is appended as the last path segment. A server that selects another subprotocol is named in the line; set `--ws-subprotocol`.
+* `boot` shows `Rejected` (fails) or `Pending` (warns): the CSMS does not accept the station yet; register the id, vendor and model there.
+
+For a script, `--json` prints one object and the exit code is 0 or 1:
+
+```bash
+kirby-ocpp check --url wss://csms.example/ocpp --id CP-1 --json | jq -r '.steps[] | select(.status == "failed") | "\(.name): \(.detail)"'
+```
+
+Reference: [Connection check](emulator.md#connection-check), [Configuration](configuration.md#kirby-ocpp-subcommands), [Connection errors](emulator.md#connection-errors).
+
+## Look at or reset a station's state
+
+Goal: see what a station remembers between runs, or start it from scratch.
+
+```bash
+kirby-ocpp state path --id CP-1          # where the file is
+kirby-ocpp state show --id CP-1          # connectors, transactions, local list, configuration keys
+kirby-ocpp state reset --id CP-1 --yes   # delete the state of CP-1 only
+```
+
+The secrets file next to the state file is never read or shown; `state show` only says that it exists. Reference: [Configuration](configuration.md#kirby-ocpp-subcommands).
+
 ## Related pages
 
 [Run kirby in CI](ci.md) · [Scenarios](scenarios.md) · [Emulator](emulator.md) · [CSMS](csms.md) · [Configuration](configuration.md) · [Docs index](README.md)
