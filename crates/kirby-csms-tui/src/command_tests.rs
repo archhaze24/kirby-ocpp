@@ -282,7 +282,8 @@ fn rules_and_faults_are_set_listed_removed_and_cleared() {
         fx,
         [Effect::Respond {
             action: "Authorize".into(),
-            payload: json!({"status": "Rejected"})
+            payload: json!({"status": "Rejected"}),
+            station: None,
         }]
     );
     press(&mut app, KeyCode::Char('i'));
@@ -297,7 +298,8 @@ fn rules_and_faults_are_set_listed_removed_and_cleared() {
             action: "Authorize".into(),
             kind: FaultKind::Silence,
             times: 1,
-            payload: Value::Null
+            payload: Value::Null,
+            station: None,
         }]
     );
 
@@ -306,6 +308,7 @@ fn rules_and_faults_are_set_listed_removed_and_cleared() {
         Msg::Rules(Rules {
             actions: vec!["Authorize".into(), "Heartbeat".into()],
             faults: 2,
+            ..Rules::default()
         }),
     );
     // removing one rule from the palette
@@ -330,6 +333,7 @@ fn active_rules_are_polled_once_a_second_and_only_while_any_exist() {
     app.rules = Rules {
         actions: vec![],
         faults: 3,
+        ..Rules::default()
     };
     assert!(update(&mut app, Msg::Tick(at(1))).is_empty(), "same second");
     assert_eq!(update(&mut app, Msg::Tick(at(2))), [Effect::ReadRules]);
@@ -592,6 +596,78 @@ fn station_config(csms: &CsmsHandle, id: &str, dir: &std::path::Path) -> Station
     config
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn executor_scopes_rules_and_faults_to_one_station() {
+    let csms = start_engine().await;
+    let (mut exec, _rx) = Exec::new();
+    let rules = |msgs: Vec<Msg>| match msgs.into_iter().last() {
+        Some(Msg::Rules(rules)) => rules,
+        other => panic!("expected the rules, got {other:?}"),
+    };
+    let after = rules(
+        execute(
+            Effect::Respond {
+                action: "Heartbeat".into(),
+                payload: json!({"currentTime": "x"}),
+                station: Some("CP-1".into()),
+            },
+            &csms,
+            &mut exec,
+        )
+        .await,
+    );
+    assert_eq!(after.actions, Vec::<String>::new());
+    assert_eq!(
+        after.scoped,
+        [crate::actions::ScopedRule {
+            station: Some("CP-1".into()),
+            action: "Heartbeat".into()
+        }]
+    );
+    let after = rules(
+        execute(
+            Effect::Inject {
+                action: "Heartbeat".into(),
+                kind: FaultKind::Silence,
+                times: 2,
+                payload: Value::Null,
+                station: Some("CP-1".into()),
+            },
+            &csms,
+            &mut exec,
+        )
+        .await,
+    );
+    assert_eq!(after.faults, 2);
+    assert_eq!(csms.faults()[0].scope.station.as_deref(), Some("CP-1"));
+    let after = rules(
+        execute(
+            Effect::RemoveScopedRule {
+                station: Some("CP-1".into()),
+                action: "Heartbeat".into(),
+            },
+            &csms,
+            &mut exec,
+        )
+        .await,
+    );
+    assert!(after.scoped.is_empty());
+    execute(
+        Effect::Respond {
+            action: "Heartbeat".into(),
+            payload: json!({}),
+            station: Some("CP-2".into()),
+        },
+        &csms,
+        &mut exec,
+    )
+    .await;
+    // "Clear all" removes scoped rules and faults too.
+    let after = rules(execute(Effect::ClearRules, &csms, &mut exec).await);
+    assert!(after.is_empty());
+    csms.shutdown().await;
+}
+
 /// Waits until `check` holds for the station's state, woken by the engine's events.
 async fn wait_state(
     csms: &CsmsHandle,
@@ -756,6 +832,7 @@ async fn executor_drives_a_real_station() {
         Effect::Respond {
             action: "DataTransfer".into(),
             payload: json!({"status": "Rejected"}),
+            station: None,
         },
         &csms,
         &mut exec,
@@ -773,6 +850,7 @@ async fn executor_drives_a_real_station() {
             kind: FaultKind::Close,
             times: 4,
             payload: Value::Null,
+            station: None,
         },
         &csms,
         &mut exec,

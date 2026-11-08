@@ -12,6 +12,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
+use crate::actions::ScopedRule;
 use crate::app::{App, Focus, Mode};
 use crate::keys::HELP;
 
@@ -158,10 +159,18 @@ fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
         spans.push(chip(&format!("{} pending", app.pending), Color::Yellow));
     }
     if !app.rules.is_empty() {
-        let actions = if app.rules.actions.is_empty() {
+        // Global rules by action, a station's rules as `Action@station`.
+        let actions = if app.rules.no_rules() {
             String::new()
         } else {
-            format!(" rules: {}", app.rules.actions.join(","))
+            let names: Vec<String> = app
+                .rules
+                .actions
+                .iter()
+                .cloned()
+                .chain(app.rules.scoped.iter().map(ScopedRule::label))
+                .collect();
+            format!(" rules: {}", names.join(","))
         };
         spans.push(Span::styled(
             truncate(

@@ -30,7 +30,7 @@ use chrono::Utc;
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures_util::{Stream, StreamExt};
 use kirby_csms_core::CsmsHandle;
-use kirby_csms_core::{Fault, Reply};
+use kirby_csms_core::{Fault, Reply, Scope};
 use kirby_ocpp_tui::clipboard;
 use kirby_ocpp_tui::shutdown_signal;
 use kirby_ocpp_tui::terminal::TerminalGuard;
@@ -41,7 +41,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
-use crate::actions::Rules;
+use kirby_ocpp_tui::app::NoticeLevel;
+
+use crate::actions::{Rules, ScopedRule};
 use crate::app::{App, Effect, Msg, update};
 use crate::form::FaultKind;
 
@@ -142,6 +144,14 @@ impl Exec {
 fn rules_msg(handle: &CsmsHandle) -> Msg {
     Msg::Rules(Rules {
         actions: handle.responder_actions(),
+        scoped: handle
+            .scoped_rules(None)
+            .into_iter()
+            .map(|rule| ScopedRule {
+                station: rule.scope.station,
+                action: rule.action,
+            })
+            .collect(),
         faults: handle.faults_remaining(),
     })
 }
@@ -172,22 +182,40 @@ async fn execute(effect: Effect, handle: &CsmsHandle, exec: &mut Exec) -> Vec<Ms
             });
             vec![]
         }
-        Effect::Respond { action, payload } => {
-            let reply = Reply::Result(payload);
-            handle.respond(&action, move |_| reply.clone());
-            vec![rules_msg(handle)]
-        }
+        Effect::Respond {
+            action,
+            payload,
+            station,
+        } => match station {
+            None => {
+                let reply = Reply::Result(payload);
+                handle.respond(&action, move |_| reply.clone());
+                vec![rules_msg(handle)]
+            }
+            Some(station) => {
+                match handle.respond_scoped(&Scope::station(station), &action, payload) {
+                    Ok(()) => vec![rules_msg(handle)],
+                    Err(error) => vec![Msg::Notice(NoticeLevel::Error, error), rules_msg(handle)],
+                }
+            }
+        },
         Effect::Inject {
             action,
             kind,
             times,
             payload,
+            station,
         } => {
-            handle.inject(fault_for(&action, kind, times, payload));
+            let scope = station.map_or_else(Scope::global, Scope::station);
+            let _ = handle.inject_scoped(fault_for(&action, kind, times, payload), scope);
             vec![rules_msg(handle)]
         }
         Effect::RemoveRule(action) => {
             handle.clear_responder(&action);
+            vec![rules_msg(handle)]
+        }
+        Effect::RemoveScopedRule { station, action } => {
+            handle.clear_scoped_rule(station.as_deref(), &action);
             vec![rules_msg(handle)]
         }
         Effect::ClearRules => {
@@ -195,6 +223,7 @@ async fn execute(effect: Effect, handle: &CsmsHandle, exec: &mut Exec) -> Vec<Ms
             for action in handle.responder_actions() {
                 handle.clear_responder(&action);
             }
+            handle.clear_scoped_rules();
             vec![rules_msg(handle)]
         }
         Effect::ReadRules => vec![rules_msg(handle)],
@@ -324,6 +353,8 @@ where
 mod command_tests;
 #[cfg(test)]
 mod list_forms_tests;
+#[cfg(test)]
+mod registry_tests;
 #[cfg(test)]
 mod security_tests;
 #[cfg(test)]

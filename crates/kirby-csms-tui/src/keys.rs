@@ -298,7 +298,7 @@ pub const HELP: &[&str] = &[
     "Actions on the selected station (a form opens; Enter sends, Esc cancels, Tab next field, Left/Right or a letter picks an option); answers show up in the status line:",
     "     t remote start   x remote stop   R reset (asks)   c change config   g get config   T trigger message   u unlock   A availability   C clear cache   P charging profile   D data transfer   w raw call (any action, JSON payload)   r last results (Enter opens)   F forget a disconnected station (asks)   n copy station id",
     "Security Whitepaper (selected station): l get log   I install certificate   d delete certificate   L installed certificates   E extended trigger   S signed firmware update   X certificate signed   e security events the station reported (certificates: paste the PEM; line breaks become spaces and are rebuilt on submit)",
-    "Scripted behaviour for ALL stations: m response rule, i inject fault (call_error, silence, close, invalid_payload), M clear every rule and fault; remove one rule from the palette",
+    "Scripted behaviour (every station, or one when the station field is set): m response rule, i inject fault (call_error, silence, close, invalid_payload), M clear every rule and fault; remove one rule from the palette",
     "",
     "Log pane: Enter detail (scroll, c copies), y copy row, Y copy visible rows, f filter (all, calls, errors, from stations), s search, p pause/follow, G newest",
     "",

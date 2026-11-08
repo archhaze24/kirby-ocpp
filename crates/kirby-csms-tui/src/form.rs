@@ -6,9 +6,9 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, SecondsFormat, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use kirby_csms_core::CHARGE_POINT_ACTIONS;
+use kirby_csms_core::registry;
+use kirby_csms_core::{ACTIONS_PROTOCOL, MAX_STATION_ID_LEN};
 use kirby_ocpp_core::ids::{ConnectorId, IdTag, ReservationId};
-use kirby_ocpp_core::ocpp::messages::registry::ACTIONS;
 use kirby_ocpp_core::ocpp::messages::{
     AuthorizationData, CertificateHashData, CertificateUse, ChargingProfile,
     ClearChargingProfileRequest, ExtendedMessageTrigger, GetDiagnosticsRequest, GetLogRequest,
@@ -27,7 +27,11 @@ use kirby_ocpp_tui::forms::{
 use kirby_ocpp_tui::text::TextInput;
 use serde_json::Value;
 
+use crate::actions::ScopedRule;
 use crate::command::Command;
+
+/// The label of the optional station field of the rule and fault forms.
+const STATION_LABEL: &str = "station (optional, empty = all)";
 
 /// Longest configuration key the schema allows.
 const KEY_MAX: usize = 50;
@@ -74,6 +78,9 @@ pub enum FieldKind {
     Pem {
         max: usize,
     },
+    /// A station id (at most [`MAX_STATION_ID_LEN`] bytes, no control characters); may be
+    /// left empty (every station).
+    Station,
     /// A whole number from 0 (a request id, retries); may be left empty when `optional`.
     Count {
         optional: bool,
@@ -190,14 +197,23 @@ pub enum Submitted {
     Rule {
         action: String,
         payload: Value,
+        /// The one station it answers; `None` answers every station.
+        station: Option<String>,
     },
     Fault {
         action: String,
         kind: FaultKind,
         times: usize,
         payload: Value,
+        /// The one station it applies to; `None` applies to every station.
+        station: Option<String>,
     },
     RemoveRule(String),
+    /// Remove a rule of one station (`None`: a global rule limited to a protocol).
+    RemoveScopedRule {
+        station: Option<String>,
+        action: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -227,6 +243,9 @@ pub struct Form {
     pub error: Option<String>,
     /// Transaction ids behind the options of a `RemoteStop` form.
     tx_ids: Vec<i32>,
+    /// Behind the options of a `RemoveRule` form: whether the rule is scoped (a station or a
+    /// protocol), its station and its action.
+    targets: Vec<(bool, Option<String>, String)>,
 }
 
 fn names<I, S>(items: I) -> Vec<String>
@@ -238,13 +257,25 @@ where
 }
 
 /// The actions a central system may send (`DataTransfer` included), including the 7
-/// Security Whitepaper actions (which also have typed forms).
+/// Security Whitepaper actions (which also have typed forms), sorted by name. They come from
+/// the action registry of the protocol the palette serves.
 pub fn csms_actions() -> Vec<String> {
-    ACTIONS
-        .iter()
-        .filter(|a| a.direction.central_system_may_send())
-        .map(|a| a.name.to_owned())
-        .collect()
+    let mut names: Vec<String> = registry::protocol_actions(ACTIONS_PROTOCOL)
+        .map(|table| {
+            table
+                .csms_actions
+                .iter()
+                .map(|spec| spec.name.to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// The actions a station sends, which rules and faults can target.
+fn station_actions() -> &'static [&'static str] {
+    registry::protocol_actions(ACTIONS_PROTOCOL).map_or(&[], |table| table.station_actions)
 }
 
 impl Form {
@@ -257,6 +288,7 @@ impl Form {
             focus: 0,
             error: None,
             tx_ids: Vec::new(),
+            targets: Vec::new(),
         };
         form.validate_all();
         form.error = None;
@@ -788,15 +820,16 @@ impl Form {
     pub fn rule() -> Self {
         Self::build(
             FormKind::Rule,
-            "Response rule (answers every station)",
+            "Response rule (all stations, or one if set)",
             "",
             vec![
-                Field::select("action", names(CHARGE_POINT_ACTIONS)),
+                Field::select("action", names(station_actions())),
                 Field::new(
                     "CALLRESULT payload (JSON)",
                     FieldKind::Json,
                     r#"{"status":"Rejected"}"#,
                 ),
+                Field::new(STATION_LABEL, FieldKind::Station, ""),
             ],
         )
     }
@@ -804,25 +837,47 @@ impl Form {
     pub fn fault() -> Self {
         Self::build(
             FormKind::Fault,
-            "Inject fault (all stations)",
+            "Inject fault (all stations, or one if set)",
             "",
             vec![
-                Field::select("action", names(CHARGE_POINT_ACTIONS)),
+                Field::select("action", names(station_actions())),
                 Field::select("kind", names(FaultKind::ALL.iter().map(|k| k.name()))),
                 Field::new("times", FieldKind::Times, "1"),
                 Field::new("payload (invalid_payload only)", FieldKind::FaultJson, "{}"),
+                Field::new(STATION_LABEL, FieldKind::Station, ""),
             ],
         )
     }
 
-    /// `actions` are the ones that have a rule.
+    /// `actions` are the ones that have a global rule.
     pub fn remove_rule(actions: &[String]) -> Self {
-        Self::build(
+        Self::remove_rule_scoped(actions, &[])
+    }
+
+    /// `actions` are the ones that have a global rule, `scoped` the rules of one station (or
+    /// of one protocol); the options list the global rules first.
+    pub fn remove_rule_scoped(actions: &[String], scoped: &[ScopedRule]) -> Self {
+        let mut options = actions.to_vec();
+        options.extend(scoped.iter().map(|rule| {
+            let label = rule.label();
+            kirby_ocpp_tui::text::sanitize(&label)
+        }));
+        let mut form = Self::build(
             FormKind::RemoveRule,
             "Remove response rule",
             "",
-            vec![Field::select("action", actions.to_vec())],
-        )
+            vec![Field::select("action", options)],
+        );
+        form.targets = actions
+            .iter()
+            .map(|action| (false, None, action.clone()))
+            .chain(
+                scoped
+                    .iter()
+                    .map(|rule| (true, rule.station.clone(), rule.action.clone())),
+            )
+            .collect();
+        form
     }
 
     pub fn paste(&mut self, text: &str) {
@@ -996,6 +1051,7 @@ impl Form {
                     None
                 }
             }
+            FieldKind::Station => station_error(&text),
             FieldKind::KeyList => validate_keys(&text),
             FieldKind::Pem { max } => normalize_pem(&text, max).err(),
             FieldKind::Count { optional } => {
@@ -1219,6 +1275,7 @@ impl Form {
             FormKind::Rule => Submitted::Rule {
                 action: chosen(0)?,
                 payload: serde_json::from_str(self.fields.get(1)?.input.text()).ok()?,
+                station: Some(self.text(2)).filter(|station| !station.is_empty()),
             },
             FormKind::Fault => {
                 let kind = FaultKind::ALL
@@ -1235,9 +1292,17 @@ impl Form {
                     kind,
                     times: self.text(2).parse().ok()?,
                     payload,
+                    station: Some(self.text(4)).filter(|station| !station.is_empty()),
                 }
             }
-            FormKind::RemoveRule => Submitted::RemoveRule(chosen(0)?),
+            FormKind::RemoveRule => match self.targets.get(self.fields.first()?.option) {
+                Some((true, station, action)) => Submitted::RemoveScopedRule {
+                    station: station.clone(),
+                    action: action.clone(),
+                },
+                Some((false, _, action)) => Submitted::RemoveRule(action.clone()),
+                None => Submitted::RemoveRule(chosen(0)?),
+            },
         };
         if let Submitted::Send(command) = &submitted
             && !matches!(command, Command::Raw { .. })
@@ -1338,6 +1403,16 @@ fn parse_auth_list(text: &str) -> Result<Vec<AuthorizationData>, String> {
         });
     }
     Ok(out)
+}
+
+/// The problem with a station id typed into a form; empty is fine (every station).
+fn station_error(text: &str) -> Option<String> {
+    if text.len() > MAX_STATION_ID_LEN {
+        return Some(format!("at most {MAX_STATION_ID_LEN} bytes"));
+    }
+    text.chars()
+        .any(kirby_ocpp_core::text::is_unsafe_char)
+        .then(|| "no control characters".to_owned())
 }
 
 fn split_keys(text: &str) -> Vec<String> {

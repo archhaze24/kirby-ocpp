@@ -320,19 +320,26 @@ pub enum Effect {
         station: String,
         command: Command,
     },
-    /// Answer every `action` CALL with `payload` as a CALLRESULT.
+    /// Answer every `action` CALL (of `station` only, when set) with `payload` as a CALLRESULT.
     Respond {
         action: String,
         payload: serde_json::Value,
+        station: Option<String>,
     },
-    /// Fault the next `times` occurrences of `action`.
+    /// Fault the next `times` occurrences of `action` (of `station` only, when set).
     Inject {
         action: String,
         kind: FaultKind,
         times: usize,
         payload: serde_json::Value,
+        station: Option<String>,
     },
     RemoveRule(String),
+    /// Remove the rule of one station (`None`: a global rule that names a protocol).
+    RemoveScopedRule {
+        station: Option<String>,
+        action: String,
+    },
     /// Drop every response rule and pending fault.
     ClearRules,
     /// Read the active rules and faults.

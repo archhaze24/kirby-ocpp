@@ -469,12 +469,16 @@ mod commands {
         app.pending = 3;
         app.rules = Rules {
             actions: vec!["Authorize".into(), "Heartbeat".into()],
+            scoped: vec![crate::actions::ScopedRule {
+                station: Some("CP-1".into()),
+                action: "Reset".into(),
+            }],
             faults: 2,
         };
         let screen = render(&app, 120, 30);
         assert!(screen.contains("3 pending"), "{screen}");
         assert!(
-            screen.contains("faults 2 rules: Authorize,Heartbeat"),
+            screen.contains("faults 2 rules: Authorize,Heartbeat,Reset@CP-1"),
             "{screen}"
         );
         // many rules never overflow a narrow header
@@ -514,6 +518,7 @@ mod commands {
                 app.rules = Rules {
                     actions: vec!["Authorize".into()],
                     faults: 1,
+                    ..Rules::default()
                 };
                 update(
                     &mut app,

@@ -5,7 +5,8 @@ use std::collections::VecDeque;
 
 use chrono::{DateTime, Utc};
 use crossterm::event::KeyCode;
-use kirby_csms_core::{Frame, TransactionStatus};
+use kirby_csms_core::registry;
+use kirby_csms_core::{ACTIONS_PROTOCOL, Frame, TransactionStatus};
 use kirby_ocpp_core::ocpp::redact_secrets;
 use kirby_ocpp_tui::app::{Detail, NoticeLevel};
 use kirby_ocpp_tui::palette::rank_by;
@@ -63,12 +64,33 @@ pub enum ActionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActionDef {
     pub id: ActionId,
-    pub label: &'static str,
-    pub desc: &'static str,
+    label: &'static str,
+    desc: &'static str,
     /// The hotkey in the normal mode, if any.
     pub key: Option<char>,
+    /// The OCPP action this entry sends. Its title and description come from the action
+    /// registry of [`ACTIONS_PROTOCOL`]; `label` and `desc` are used only when it is `None`.
+    pub ocpp: Option<&'static str>,
 }
 
+impl ActionDef {
+    /// The palette title.
+    pub fn label(&self) -> &'static str {
+        self.spec().map_or(self.label, |spec| spec.title)
+    }
+
+    /// The one-line palette description.
+    pub fn desc(&self) -> &'static str {
+        self.spec().map_or(self.desc, |spec| spec.summary)
+    }
+
+    /// The registry entry of the OCPP action behind this entry.
+    pub fn spec(&self) -> Option<&'static registry::ActionSpec> {
+        registry::csms_action(ACTIONS_PROTOCOL, self.ocpp?)
+    }
+}
+
+/// An entry that is not an OCPP action (a local operation).
 const fn def(
     id: ActionId,
     label: &'static str,
@@ -80,155 +102,71 @@ const fn def(
         label,
         desc,
         key,
+        ocpp: None,
+    }
+}
+
+/// An entry that sends the OCPP action `name`; the registry supplies the texts.
+const fn ocpp(id: ActionId, name: &'static str, key: Option<char>) -> ActionDef {
+    ActionDef {
+        id,
+        label: "",
+        desc: "",
+        key,
+        ocpp: Some(name),
     }
 }
 
 /// Every action, in palette order.
 pub const CATALOG: &[ActionDef] = &[
-    def(
-        ActionId::RemoteStart,
-        "Remote start transaction",
-        "RemoteStartTransaction with an idTag, optionally on a connector",
-        Some('t'),
-    ),
-    def(
-        ActionId::RemoteStop,
-        "Remote stop transaction",
-        "RemoteStopTransaction for one of the active transactions",
-        Some('x'),
-    ),
-    def(
-        ActionId::Reset,
-        "Reset",
-        "soft or hard reset of the station (asks first)",
-        Some('R'),
-    ),
-    def(
+    ocpp(ActionId::RemoteStart, "RemoteStartTransaction", Some('t')),
+    ocpp(ActionId::RemoteStop, "RemoteStopTransaction", Some('x')),
+    ocpp(ActionId::Reset, "Reset", Some('R')),
+    ocpp(
         ActionId::ChangeConfiguration,
-        "Change configuration",
-        "ChangeConfiguration: set one key",
+        "ChangeConfiguration",
         Some('c'),
     ),
-    def(
-        ActionId::GetConfiguration,
-        "Get configuration",
-        "GetConfiguration: read keys, the answer opens in a popup",
-        Some('g'),
-    ),
-    def(
-        ActionId::Trigger,
-        "Trigger message",
-        "TriggerMessage: ask the station to send a message",
-        Some('T'),
-    ),
-    def(
-        ActionId::Unlock,
-        "Unlock connector",
-        "UnlockConnector",
-        Some('u'),
-    ),
-    def(
-        ActionId::Availability,
-        "Change availability",
-        "ChangeAvailability: operative or inoperative",
-        Some('A'),
-    ),
-    def(
-        ActionId::ClearCache,
-        "Clear cache",
-        "ClearCache: empty the authorization cache",
-        Some('C'),
-    ),
-    def(
-        ActionId::SetProfile,
-        "Set charging profile",
-        "SetChargingProfile from JSON, checked against the schema",
-        Some('P'),
-    ),
-    def(
-        ActionId::DataTransfer,
-        "Data transfer",
-        "DataTransfer to the station",
-        Some('D'),
-    ),
-    def(
-        ActionId::GetLog,
-        "Get log (security)",
-        "GetLog: ask the station to upload its diagnostics or security log",
-        Some('l'),
-    ),
-    def(
+    ocpp(ActionId::GetConfiguration, "GetConfiguration", Some('g')),
+    ocpp(ActionId::Trigger, "TriggerMessage", Some('T')),
+    ocpp(ActionId::Unlock, "UnlockConnector", Some('u')),
+    ocpp(ActionId::Availability, "ChangeAvailability", Some('A')),
+    ocpp(ActionId::ClearCache, "ClearCache", Some('C')),
+    ocpp(ActionId::SetProfile, "SetChargingProfile", Some('P')),
+    ocpp(ActionId::DataTransfer, "DataTransfer", Some('D')),
+    ocpp(ActionId::GetLog, "GetLog", Some('l')),
+    ocpp(
         ActionId::InstallCertificate,
-        "Install certificate (security)",
-        "InstallCertificate: install a root certificate from pasted PEM",
+        "InstallCertificate",
         Some('I'),
     ),
-    def(
-        ActionId::DeleteCertificate,
-        "Delete certificate (security)",
-        "DeleteCertificate by hash data",
-        Some('d'),
-    ),
-    def(
+    ocpp(ActionId::DeleteCertificate, "DeleteCertificate", Some('d')),
+    ocpp(
         ActionId::CertificateIds,
-        "Installed certificates (security)",
-        "GetInstalledCertificateIds, the answer opens in a popup",
+        "GetInstalledCertificateIds",
         Some('L'),
     ),
-    def(
+    ocpp(
         ActionId::ExtendedTrigger,
-        "Extended trigger message (security)",
-        "ExtendedTriggerMessage, e.g. SignChargePointCertificate",
+        "ExtendedTriggerMessage",
         Some('E'),
     ),
-    def(
-        ActionId::SignedFirmware,
-        "Signed update firmware (security)",
-        "SignedUpdateFirmware with signing certificate and signature",
-        Some('S'),
-    ),
-    def(
-        ActionId::CertificateSigned,
-        "Certificate signed (security)",
-        "CertificateSigned: hand the station its certificate chain (PEM)",
-        Some('X'),
-    ),
-    def(
+    ocpp(ActionId::SignedFirmware, "SignedUpdateFirmware", Some('S')),
+    ocpp(ActionId::CertificateSigned, "CertificateSigned", Some('X')),
+    ocpp(
         ActionId::ClearChargingProfile,
-        "Clear charging profile",
-        "ClearChargingProfile by id, connector, purpose or stack level",
+        "ClearChargingProfile",
         Some('K'),
     ),
-    def(
+    ocpp(
         ActionId::GetCompositeSchedule,
-        "Get composite schedule",
-        "GetCompositeSchedule: the schedule in force, the answer opens in a popup",
+        "GetCompositeSchedule",
         Some('H'),
     ),
-    def(
-        ActionId::ReserveNow,
-        "Reserve now",
-        "ReserveNow: reserve a connector for an idTag",
-        Some('V'),
-    ),
-    def(
-        ActionId::UpdateFirmware,
-        "Update firmware",
-        "UpdateFirmware: download from a URL at a given time",
-        Some('U'),
-    ),
-    def(
-        ActionId::GetDiagnostics,
-        "Get diagnostics",
-        "GetDiagnostics: ask the station to upload its diagnostics file",
-        Some('O'),
-    ),
-    def(
-        ActionId::SendLocalList,
-        "Send local list",
-        "SendLocalList: full or differential local authorization list",
-        Some('B'),
-    ),
+    ocpp(ActionId::ReserveNow, "ReserveNow", Some('V')),
+    ocpp(ActionId::UpdateFirmware, "UpdateFirmware", Some('U')),
+    ocpp(ActionId::GetDiagnostics, "GetDiagnostics", Some('O')),
+    ocpp(ActionId::SendLocalList, "SendLocalList", Some('B')),
     def(
         ActionId::SecurityEvents,
         "Security events",
@@ -296,7 +234,7 @@ pub fn def_of(id: ActionId) -> Option<&'static ActionDef> {
 
 /// Text the palette matches on.
 fn haystack(a: &ActionDef) -> String {
-    format!("{} {}", a.label, a.desc)
+    format!("{} {}", a.label(), a.desc())
 }
 
 /// Command palette: fuzzy search over [`CATALOG`].
@@ -368,15 +306,48 @@ pub struct ResultRecord {
 /// Active server-side scripting, as the engine reports it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Rules {
-    /// Actions that have a response rule, sorted.
+    /// Actions that have a global response rule, sorted.
     pub actions: Vec<String>,
-    /// Fault occurrences still waiting.
+    /// Rules of one station, or of one protocol, sorted by station then action.
+    pub scoped: Vec<ScopedRule>,
+    /// Fault occurrences still waiting, over all scopes.
     pub faults: usize,
+}
+
+/// A response rule that does not answer every station.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopedRule {
+    /// The station it answers; `None` for a global rule limited to a protocol.
+    pub station: Option<String>,
+    pub action: String,
+}
+
+impl ScopedRule {
+    /// `Action@station` (or the plain action for a protocol-limited global rule).
+    pub fn label(&self) -> String {
+        match &self.station {
+            Some(station) => format!("{}@{station}", self.action),
+            None => self.action.clone(),
+        }
+    }
 }
 
 impl Rules {
     pub fn is_empty(&self) -> bool {
-        self.actions.is_empty() && self.faults == 0
+        self.no_rules() && self.faults == 0
+    }
+
+    /// No response rule of any scope.
+    pub fn no_rules(&self) -> bool {
+        self.actions.is_empty() && self.scoped.is_empty()
+    }
+}
+
+/// `action` for a global rule or fault, `action on <station>` for a station's.
+fn scope_text(action: &str, station: Option<&str>) -> String {
+    match station {
+        Some(station) => format!("{action} on {}", sanitize(station)),
+        None => action.to_owned(),
     }
 }
 
@@ -526,8 +497,7 @@ impl App {
                 ActionId::Rule | ActionId::Fault => None,
                 ActionId::RemoveRule => self
                     .rules
-                    .actions
-                    .is_empty()
+                    .no_rules()
                     .then(|| "no response rules".to_owned()),
                 ActionId::ClearRules => self
                     .rules
@@ -579,8 +549,7 @@ impl App {
             ActionId::Rule | ActionId::Fault | ActionId::CopyId => None,
             ActionId::RemoveRule => self
                 .rules
-                .actions
-                .is_empty()
+                .no_rules()
                 .then(|| "no response rules".to_owned()),
             ActionId::ClearRules => self
                 .rules
@@ -602,7 +571,7 @@ impl App {
     /// Runs an action from a key or the palette; an unavailable one says why.
     pub fn run_action(&mut self, id: ActionId, fx: &mut Vec<Effect>) {
         if let Some(why) = self.reason_for(id) {
-            let label = def_of(id).map_or("action", |d| d.label);
+            let label = def_of(id).map_or("action", ActionDef::label);
             self.notify(NoticeLevel::Error, format!("{label}: {why}"));
             return;
         }
@@ -683,7 +652,10 @@ impl App {
             ActionId::Raw => self.mode = Mode::Form(Box::new(Form::raw(st, None))),
             ActionId::Rule => self.mode = Mode::Form(Box::new(Form::rule())),
             ActionId::RemoveRule => {
-                self.mode = Mode::Form(Box::new(Form::remove_rule(&self.rules.actions)));
+                self.mode = Mode::Form(Box::new(Form::remove_rule_scoped(
+                    &self.rules.actions,
+                    &self.rules.scoped,
+                )));
             }
             ActionId::Fault => self.mode = Mode::Form(Box::new(Form::fault())),
             ActionId::ClearRules => {
@@ -727,33 +699,47 @@ impl App {
                     self.send(form_station, command, fx);
                 }
             }
-            Submitted::Rule { action, payload } => {
+            Submitted::Rule {
+                action,
+                payload,
+                station,
+            } => {
+                let target = scope_text(&action, station.as_deref());
                 fx.push(Effect::Respond {
-                    action: action.clone(),
+                    action,
                     payload,
+                    station,
                 });
-                self.notify(NoticeLevel::Success, format!("rule set for {action}"));
+                self.notify(NoticeLevel::Success, format!("rule set for {target}"));
             }
             Submitted::Fault {
                 action,
                 kind,
                 times,
                 payload,
+                station,
             } => {
+                let target = scope_text(&action, station.as_deref());
                 fx.push(Effect::Inject {
-                    action: action.clone(),
+                    action,
                     kind,
                     times,
                     payload,
+                    station,
                 });
                 self.notify(
                     NoticeLevel::Success,
-                    format!("fault {} x{times} for {action}", kind.name()),
+                    format!("fault {} x{times} for {target}", kind.name()),
                 );
             }
             Submitted::RemoveRule(action) => {
                 fx.push(Effect::RemoveRule(action.clone()));
                 self.notify(NoticeLevel::Success, format!("rule removed for {action}"));
+            }
+            Submitted::RemoveScopedRule { station, action } => {
+                let target = scope_text(&action, station.as_deref());
+                fx.push(Effect::RemoveScopedRule { station, action });
+                self.notify(NoticeLevel::Success, format!("rule removed for {target}"));
             }
         }
     }

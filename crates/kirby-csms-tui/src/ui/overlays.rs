@@ -47,8 +47,8 @@ pub(super) fn palette(f: &mut Frame<'_>, app: &App, p: &Palette, area: Rect) {
             let why = app.reason_for(a.id);
             let key = a.key.map_or_else(|| "  ".to_owned(), |k| format!("{k} "));
             let text = match &why {
-                Some(why) => format!("{key} {} ({why})", a.label),
-                None => format!("{key} {}", a.label),
+                Some(why) => format!("{key} {} ({why})", a.label()),
+                None => format!("{key} {}", a.label()),
             };
             let style = if why.is_some() { dim() } else { Style::new() };
             ListItem::new(truncate(&text, w)).style(style)
