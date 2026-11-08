@@ -14,6 +14,8 @@ use crate::actions::Tab;
 use crate::app::{App, Focus, StepState};
 use crate::logview::{FrameKind, LogEntry};
 use crate::text::{sanitize, truncate};
+use crate::theme::{Level, level_mark};
+use kirby_ocpp_core::timefmt::TimeMode;
 
 fn block(title: String, focused: bool) -> Block<'static> {
     let style = if focused {
@@ -349,11 +351,18 @@ pub fn actions(f: &mut Frame<'_>, app: &App, area: Rect) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
-fn row_line(e: &LogEntry, inner_w: usize, selected: bool) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        format!("{} ", e.ts.format("%H:%M:%S%.3f")),
-        dim(),
-    )];
+fn row_line(
+    e: &LogEntry,
+    inner_w: usize,
+    selected: bool,
+    time: TimeMode,
+    mono: bool,
+) -> Line<'static> {
+    let mut spans = Vec::new();
+    let stamp = time.prefix(e.ts);
+    if !stamp.is_empty() {
+        spans.push(Span::styled(stamp, dim()));
+    }
     let (arrow, color, body) = match (e.frame(), e.station_line()) {
         (Some(fr), _) => {
             let tag = match e.kind {
@@ -387,7 +396,17 @@ fn row_line(e: &LogEntry, inner_w: usize, selected: bool) -> Line<'static> {
                 L::Warn => Color::Yellow,
                 L::Error => Color::Red,
             };
-            ("●", color, e.summary.clone())
+            let mark = if mono {
+                level_mark(match l.level {
+                    L::Info => Level::Info,
+                    L::Success => Level::Success,
+                    L::Warn => Level::Warn,
+                    L::Error => Level::Error,
+                })
+            } else {
+                "●"
+            };
+            (mark, color, e.summary.clone())
         }
         _ => ("?", Color::Gray, String::new()),
     };
@@ -417,7 +436,15 @@ pub fn log(f: &mut Frame<'_>, app: &App, area: Rect) {
         .enumerate()
         .skip(top)
         .take(h)
-        .map(|(i, e)| row_line(e, inner_w, Some(i) == sel && app.focus == Focus::Log))
+        .map(|(i, e)| {
+            row_line(
+                e,
+                inner_w,
+                Some(i) == sel && app.focus == Focus::Log,
+                app.time,
+                app.mono,
+            )
+        })
         .collect();
     let mut title = format!("Log [{}]", log.filter.label());
     if !log.search.is_empty() {

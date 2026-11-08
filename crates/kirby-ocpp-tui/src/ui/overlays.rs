@@ -43,7 +43,65 @@ pub fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
         Mode::Detail(d) => detail(f, d, area),
         Mode::Confirm(c) => confirm(f, c, area),
         Mode::Browser(b) => super::browser::draw(f, app, b, area),
+        Mode::Pending(sel) => {
+            let rows: Vec<PendingRow> = app
+                .pending
+                .iter()
+                .map(|p| PendingRow {
+                    elapsed: crate::app::elapsed_text(app.now.saturating_duration_since(p.since)),
+                    text: sanitize(&p.label),
+                    cancellable: p.action.is_some(),
+                })
+                .collect();
+            pending_list(f, area, &rows, *sel);
+        }
     }
+}
+
+/// One row of the pending-commands popup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingRow {
+    /// Time since the command was sent, as [`crate::app::elapsed_text`] writes it.
+    pub elapsed: String,
+    /// What the command is (already sanitized).
+    pub text: String,
+    /// `x` can cancel it.
+    pub cancellable: bool,
+}
+
+/// The line of one pending row.
+#[must_use]
+pub fn pending_line(row: &PendingRow) -> String {
+    let note = if row.cancellable { "" } else { "  (no cancel)" };
+    format!("{:>7}  {}{note}", row.elapsed, row.text)
+}
+
+/// The popup that lists commands waiting for an answer; `x` cancels the selected row.
+pub fn pending_list(f: &mut Frame<'_>, area: Rect, rows: &[PendingRow], selected: usize) {
+    let h = u16::try_from(rows.len().max(1) + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height.saturating_sub(2))
+        .max(3);
+    let rect = centered(area, 72.min(area.width.saturating_sub(2)), h);
+    let inner = popup(f, rect, &format!("Pending calls ({})", rows.len()));
+    let w = usize::from(inner.width);
+    if rows.is_empty() {
+        f.render_widget(
+            Paragraph::new(Line::styled("nothing is waiting", dim())),
+            inner,
+        );
+        return;
+    }
+    let items: Vec<ListItem<'_>> = rows
+        .iter()
+        .map(|r| ListItem::new(truncate(&pending_line(r), w)))
+        .collect();
+    let mut state = ListState::default().with_selected(Some(selected.min(rows.len() - 1)));
+    f.render_stateful_widget(
+        List::new(items).highlight_style(SELECTED),
+        inner,
+        &mut state,
+    );
 }
 
 fn palette(f: &mut Frame<'_>, app: &App, p: &Palette, area: Rect) {
@@ -238,7 +296,10 @@ const HELP: &[&str] = &[
     "[ ]                     previous / next connector",
     "Enter                   run action / open log row",
     "letters                 accelerators of the CURRENT tab only (shown in the list)",
-    "/ or :                  command palette (search log when in the log pane)",
+    ":  or Ctrl-P            command palette (every action, fuzzy search)",
+    "/                       search where there is a search (log pane of the Logs tab, data",
+    "                        browser), otherwise the command palette",
+    "W                       pending commands with their elapsed time (x cancels, Esc closes)",
     "Esc                     close dialog / clear log search",
     "?                       this help",
     "q or Ctrl-C             quit (asks while a scenario or transaction runs, or in a fleet)",
@@ -247,8 +308,12 @@ const HELP: &[&str] = &[
     "     (data browser: Tab/1-4 page, / filter, Enter edit; a add, i install, d delete,",
     "     c clear); C request certificate, S security event",
     "",
-    "Log: Enter detail, y copy row, Y copy visible, f filter, s search,",
-    "     p pause/follow, G newest, e export JSONL, c clear (asks first)",
+    "Log pane: Enter opens the detail of the selected row on every tab. On the Logs tab (6):",
+    "     y copy row, Y copy visible, f filter, s search, p pause/follow, G newest,",
+    "     e export JSONL, c clear (asks first)",
+    "",
+    "Without color (--color never or NO_COLOR): chips and selections are reverse video, errors",
+    "     bold, and log lines start with a marker: i info, + success, ! warning, x error.",
 ];
 
 const FLEET_HELP: &[&str] = &[

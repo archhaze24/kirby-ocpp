@@ -60,6 +60,7 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
             }
         },
         Mode::Browser(b) => browser(app, b, key, fx),
+        Mode::Pending(sel) => pending(app, sel, key, fx),
     }
     // A form, confirmation or detail opened from the browser gives the screen back to it.
     if matches!(app.mode, Mode::Normal)
@@ -67,6 +68,24 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
     {
         app.mode = Mode::Browser(b);
     }
+}
+
+/// Keys of the pending-commands list: move, `x` / `Delete` cancels the selected row.
+fn pending(app: &mut App, sel: usize, key: KeyEvent, fx: &mut Vec<Effect>) {
+    let last = app.pending.len().saturating_sub(1);
+    let sel = match key.code {
+        KeyCode::Esc | KeyCode::Char('q' | 'W') | KeyCode::Enter => return,
+        KeyCode::Up | KeyCode::Char('k') => sel.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => (sel + 1).min(last),
+        KeyCode::Home => 0,
+        KeyCode::End => last,
+        KeyCode::Char('x') | KeyCode::Delete => {
+            app.cancel_pending(sel, fx);
+            sel
+        }
+        _ => sel,
+    };
+    app.mode = Mode::Pending(sel.min(last));
 }
 
 fn confirmed(app: &mut App, action: ConfirmAction, fx: &mut Vec<Effect>) {
@@ -279,6 +298,7 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         _ if ctrl || alt => {}
         KeyCode::Char('q') => app.request_quit(),
         KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char('W') => app.mode = Mode::Pending(0),
         KeyCode::Char(':') => open_palette(app),
         KeyCode::Char('/') => {
             if app.tab == Tab::Logs && app.focus == Focus::Log {

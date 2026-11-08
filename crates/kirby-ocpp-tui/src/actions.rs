@@ -100,6 +100,8 @@ pub enum ActionId {
     RunScenario(usize),
     LoadScenario,
     CancelScenario,
+    /// The commands waiting for the Central System, with a way to cancel one.
+    PendingCalls,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +116,7 @@ pub struct ActionDef {
 
 /// Keys that mean the same everywhere and so can never be accelerators.
 pub const RESERVED_KEYS: &[char] = &[
-    'q', 'j', 'k', '?', '/', ':', '[', ']', '1', '2', '3', '4', '5', '6', '7',
+    'q', 'j', 'k', 'W', '?', '/', ':', '[', ']', '1', '2', '3', '4', '5', '6', '7',
 ];
 
 const SCENARIO_KEYS: [char; 4] = ['o', 'w', 's', 'i'];
@@ -175,6 +177,15 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             "Add connector",
             "Add one more connector to the station.",
         ),
+        ActionDef {
+            id: A::PendingCalls,
+            tab: T::Station,
+            // `W` works on every tab (it is in `RESERVED_KEYS`), so it is not a tab accelerator.
+            key: None,
+            label: "Pending calls...".to_owned(),
+            desc: "List the commands waiting for the Central System (key W); x cancels the selected one."
+                .to_owned(),
+        },
         def(
             A::RuleSet,
             T::Station,

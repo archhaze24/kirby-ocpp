@@ -3,12 +3,15 @@
 //! [`update`] never does I/O: it mutates the [`App`] and returns [`Effect`]s that the
 //! event loop executes (and whose results come back as [`Msg`]s).
 
+use std::time::{Duration, Instant};
+
 use crossterm::event::KeyEvent;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::scenario::{
     Scenario, ScenarioProgress, ScenarioReport, StepReport, StepStatus, builtin,
 };
 use kirby_ocpp_core::station::{Command, Event, Outcome, Snapshot};
+use kirby_ocpp_core::timefmt::TimeMode;
 use kirby_ocpp_core::ws::ConnectionState;
 
 use crate::actions::{self, ActionDef, ActionId, Context, Tab};
@@ -79,11 +82,56 @@ pub enum Mode {
     Confirm(Confirm),
     /// Configuration keys, local list and charging profiles (see [`crate::browser`]).
     Browser(Browser),
+    /// The commands still waiting for the Central System; the index is the selected row.
+    Pending(usize),
+}
+
+/// A command sent to the station that has not completed yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingCall {
+    /// What the footer and the list show.
+    pub label: String,
+    /// The OCPP action of the CALL the command waits for; `None` for a command that is not a
+    /// plain CALL (it completes locally or follows the transaction rules) and cannot be
+    /// cancelled.
+    pub action: Option<String>,
+    /// When the command was sent.
+    pub since: Instant,
+}
+
+/// The action of the CALL a command waits for, when the command is one that may be cancelled.
+/// Transaction messages are not in the list: the Central System may have acted on them.
+#[must_use]
+pub fn cancellable_action(command: &Command) -> Option<String> {
+    let name = match command {
+        Command::Boot => "BootNotification",
+        Command::Heartbeat => "Heartbeat",
+        Command::StatusNotification { .. } => "StatusNotification",
+        Command::DataTransfer { .. } => "DataTransfer",
+        Command::DiagnosticsStatusNotification { .. } => "DiagnosticsStatusNotification",
+        Command::FirmwareStatusNotification { .. } => "FirmwareStatusNotification",
+        Command::Authorize { .. } => "Authorize",
+        Command::SendRaw { action, .. } => return Some(action.clone()),
+        _ => return None,
+    };
+    Some(name.to_owned())
+}
+
+/// `7s`, `1m05s`, `2h03m`: whole seconds, so the list changes once per second.
+#[must_use]
+pub fn elapsed_text(elapsed: Duration) -> String {
+    let secs = elapsed.as_secs();
+    match secs {
+        0..=59 => format!("{secs}s"),
+        60..=3599 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
+    }
 }
 
 impl Mode {
     pub fn name(&self) -> &'static str {
         match self {
+            Self::Pending(_) => "pending",
             Self::Normal => "normal",
             Self::Palette(_) => "palette",
             Self::Form(_) => "form",
@@ -126,6 +174,10 @@ pub enum Effect {
     RunScenario(Box<Scenario>),
     RunScenarioFile(String),
     CancelScenario,
+    /// Stop waiting for the oldest unanswered CALL of `action` (`Command::CancelCall`).
+    CancelCall {
+        action: String,
+    },
     Copy {
         text: String,
         what: String,
@@ -160,6 +212,10 @@ pub enum Msg {
 }
 
 #[derive(Debug)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent view flags (dirty, quit, in_fleet, mono) of one model"
+)]
 pub struct App {
     pub size: (u16, u16),
     pub snapshot: Snapshot,
@@ -185,8 +241,14 @@ pub struct App {
     pub quit_prev: Option<Mode>,
     /// One of several stations (the help mentions the station selector keys).
     pub in_fleet: bool,
-    /// Labels of commands sent to the station that have not completed yet, oldest first.
-    pub pending: Vec<String>,
+    /// Commands sent to the station that have not completed yet, oldest first.
+    pub pending: Vec<PendingCall>,
+    /// The time of the last tick (what the elapsed times of pending commands count to).
+    pub now: Instant,
+    /// Draw without color; states then also carry text markers.
+    pub mono: bool,
+    /// Clock of the log rows.
+    pub time: TimeMode,
 }
 
 impl App {
@@ -217,6 +279,9 @@ impl App {
             quit_prev: None,
             in_fleet: false,
             pending: Vec::new(),
+            now: Instant::now(),
+            mono: false,
+            time: TimeMode::Utc,
         }
     }
 
@@ -248,6 +313,26 @@ impl App {
                 });
             }
             None => self.quit = true,
+        }
+    }
+
+    /// Cancels the pending command in row `index`: stops waiting for its CALL. A command that
+    /// is not a plain CALL (it completes locally, or it is a transaction message the Central
+    /// System may have acted on) is refused with a notice.
+    pub fn cancel_pending(&mut self, index: usize, fx: &mut Vec<Effect>) {
+        let Some(call) = self.pending.get(index) else {
+            return;
+        };
+        let label = crate::text::sanitize(&call.label);
+        match call.action.clone() {
+            Some(action) => {
+                self.notify(NoticeLevel::Info, format!("cancelling {label}..."));
+                fx.push(Effect::CancelCall { action });
+            }
+            None => self.notify(
+                NoticeLevel::Error,
+                format!("{label} cannot be cancelled (transaction messages follow the answer)"),
+            ),
         }
     }
 
@@ -437,6 +522,7 @@ impl App {
                 self.notify(NoticeLevel::Info, format!("log filter: {}", next.label()));
             }
             ActionId::LogSearch => self.mode = Mode::Form(Form::search(&self.log.search)),
+            ActionId::PendingCalls => self.mode = Mode::Pending(0),
             ActionId::LogPause => {
                 self.log.toggle_follow();
                 let state = if self.log.follow {
@@ -704,6 +790,16 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         },
         Msg::Resize(w, h) => app.size = (w, h),
         Msg::Tick => {
+            // The elapsed times show whole seconds: redraw only when one of them changed.
+            let now = Instant::now();
+            let changed = app.pending.iter().any(|p| {
+                now.saturating_duration_since(p.since).as_secs()
+                    != app.now.saturating_duration_since(p.since).as_secs()
+            });
+            app.now = now;
+            if changed {
+                app.dirty = true;
+            }
             let expired = match &mut app.notice {
                 Some(n) => {
                     n.ttl = n.ttl.saturating_sub(1);
@@ -776,8 +872,11 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             show_response,
             result,
         } => {
-            if let Some(i) = app.pending.iter().position(|l| *l == label) {
+            if let Some(i) = app.pending.iter().position(|p| p.label == label) {
                 app.pending.remove(i);
+            }
+            if let Mode::Pending(sel) = &mut app.mode {
+                *sel = (*sel).min(app.pending.len().saturating_sub(1));
             }
             command_done(app, &label, show_response, result);
         }
@@ -785,8 +884,12 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         Msg::Signal => app.quit = true,
     }
     for e in &fx {
-        if let Effect::Send { label, .. } = e {
-            app.pending.push(label.clone());
+        if let Effect::Send { label, command, .. } = e {
+            app.pending.push(PendingCall {
+                label: label.clone(),
+                action: cancellable_action(command),
+                since: Instant::now(),
+            });
         }
     }
     app.dirty = true;

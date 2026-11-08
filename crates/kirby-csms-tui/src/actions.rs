@@ -13,8 +13,8 @@ use kirby_ocpp_tui::palette::rank_by;
 use kirby_ocpp_tui::text::{TextInput, sanitize, truncate};
 use serde_json::Value;
 
-use crate::app::{App, Confirm, ConfirmAction, Effect, Mode};
-use crate::command::{CmdOutcome, Command};
+use crate::app::{App, CANCELLED_CAP, Confirm, ConfirmAction, Effect, Inflight, Mode};
+use crate::command::{CmdError, CmdOutcome, Command};
 use crate::form::{Form, StopChoice, Submitted};
 
 /// Results remembered per station.
@@ -59,6 +59,8 @@ pub enum ActionId {
     Forget,
     CopyId,
     Results,
+    /// The commands waiting for an answer, with a way to cancel one.
+    PendingCalls,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -220,6 +222,12 @@ pub const CATALOG: &[ActionDef] = &[
         "Command results",
         "the last answers from the selected station",
         Some('r'),
+    ),
+    def(
+        ActionId::PendingCalls,
+        "Pending calls",
+        "commands waiting for a station's answer; x cancels the selected one",
+        Some('W'),
     ),
 ];
 
@@ -494,7 +502,7 @@ impl App {
         let reason = |s: &str| Some(s.to_owned());
         let Some(selected) = self.selected.as_deref() else {
             return match id {
-                ActionId::Rule | ActionId::Fault => None,
+                ActionId::Rule | ActionId::Fault | ActionId::PendingCalls => None,
                 ActionId::RemoveRule => self
                     .rules
                     .no_rules()
@@ -546,7 +554,7 @@ impl App {
                 .as_ref()
                 .is_none_or(|s| s.security_events.is_empty())
                 .then(|| "no security events".to_owned()),
-            ActionId::Rule | ActionId::Fault | ActionId::CopyId => None,
+            ActionId::Rule | ActionId::Fault | ActionId::CopyId | ActionId::PendingCalls => None,
             ActionId::RemoveRule => self
                 .rules
                 .no_rules()
@@ -680,6 +688,7 @@ impl App {
                     selected: 0,
                 });
             }
+            ActionId::PendingCalls => self.mode = Mode::Pending(0),
         }
     }
 
@@ -759,6 +768,14 @@ impl App {
 
     fn send(&mut self, station: &str, command: Command, fx: &mut Vec<Effect>) {
         self.pending += 1;
+        let id = self.next_call_id;
+        self.next_call_id += 1;
+        self.inflight.push(Inflight {
+            id,
+            station: station.to_owned(),
+            command: command.clone(),
+            since: self.now,
+        });
         self.notify(
             NoticeLevel::Info,
             format!(
@@ -768,9 +785,38 @@ impl App {
             ),
         );
         fx.push(Effect::Send {
+            id,
             station: station.to_owned(),
             command,
         });
+    }
+
+    /// Keeps the selected row of the pending list inside the list.
+    pub fn clamp_pending_selection(&mut self) {
+        let last = self.inflight.len().saturating_sub(1);
+        if let Mode::Pending(sel) = &mut self.mode {
+            *sel = (*sel).min(last);
+        }
+    }
+
+    /// Stops waiting for the call in row `index` of the pending list. The call is abandoned
+    /// (the engine frees the station queue after at most the call timeout); the command is
+    /// reported as cancelled, and an answer that still arrives is ignored.
+    pub fn cancel_call(&mut self, index: usize, fx: &mut Vec<Effect>) {
+        if index >= self.inflight.len() {
+            return;
+        }
+        let call = self.inflight.remove(index);
+        if self.cancelled.len() >= CANCELLED_CAP {
+            self.cancelled.pop_front();
+        }
+        self.cancelled.push_back(call.id);
+        fx.push(Effect::CancelCall { id: call.id });
+        self.clamp_pending_selection();
+        let outcome = CmdOutcome {
+            result: Err(CmdError("cancelled".to_owned())),
+        };
+        self.command_done(&call.station, &call.command, &outcome);
     }
 
     /// A command finished: remember it, say so, and open the popup for answers with content.

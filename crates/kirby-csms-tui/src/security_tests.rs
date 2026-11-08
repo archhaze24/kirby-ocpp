@@ -472,6 +472,7 @@ async fn run(
 ) {
     app.pending = 1;
     let effect = Effect::Send {
+        id: 0,
         station: "CP-S".into(),
         command,
     };

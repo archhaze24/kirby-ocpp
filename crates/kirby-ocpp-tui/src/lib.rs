@@ -25,6 +25,7 @@ pub mod terminal;
 #[cfg(test)]
 mod tests_support;
 pub mod text;
+pub mod theme;
 pub mod ui;
 
 use std::time::Duration;
@@ -33,7 +34,9 @@ use crossterm::event::{Event as TermEvent, EventStream};
 use futures_util::StreamExt;
 use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::scenario::{CancelToken, Scenario, ScenarioRunner};
+use kirby_ocpp_core::station::Command;
 use kirby_ocpp_core::station::Snapshot;
+use kirby_ocpp_core::timefmt::TimeMode;
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 
@@ -45,12 +48,18 @@ use crate::fleet::{FleetApp, FleetEffect, FleetMsg, update_fleet};
 pub struct TuiOptions {
     /// Minimum time between redraws (drawing only happens when something changed).
     pub tick_rate: Duration,
+    /// Draw without color (see [`theme`]).
+    pub monochrome: bool,
+    /// Clock of the log rows.
+    pub time: TimeMode,
 }
 
 impl Default for TuiOptions {
     fn default() -> Self {
         Self {
             tick_rate: Duration::from_millis(33),
+            monochrome: false,
+            time: TimeMode::Utc,
         }
     }
 }
@@ -200,6 +209,10 @@ pub async fn run_fleet(stations: &[StationHandle], options: TuiOptions) -> Resul
         })
         .collect();
     let mut model = FleetApp::new(apps);
+    for app in &mut model.apps {
+        app.mono = options.monochrome;
+        app.time = options.time;
+    }
     if let Ok(size) = guard.terminal().size() {
         for app in &mut model.apps {
             app.size = (size.width, size.height);
@@ -323,6 +336,16 @@ async fn execute(effect: Effect, ctx: &mut Ctx, guard: &mut terminal::TerminalGu
                     show_response,
                     result,
                 });
+            });
+        }
+        Effect::CancelCall { action } => {
+            let (h, out) = (ctx.handle.clone(), ctx.out.clone());
+            tokio::spawn(async move {
+                // The waiting command completes with its own error; only a refusal needs a
+                // word here (nothing left to cancel, or a transaction message).
+                if let Err(e) = h.send(Command::CancelCall { action }).await {
+                    out.send(Msg::Notice(NoticeLevel::Error, e.to_string()));
+                }
             });
         }
         Effect::RunScenario(scenario) => {

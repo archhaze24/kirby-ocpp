@@ -31,6 +31,7 @@ use crossterm::event::{Event as TermEvent, EventStream};
 use futures_util::{Stream, StreamExt};
 use kirby_csms_core::CsmsHandle;
 use kirby_csms_core::{Fault, Reply, Scope};
+use kirby_ocpp_core::timefmt::TimeMode;
 use kirby_ocpp_tui::clipboard;
 use kirby_ocpp_tui::shutdown_signal;
 use kirby_ocpp_tui::terminal::TerminalGuard;
@@ -52,12 +53,18 @@ use crate::form::FaultKind;
 pub struct TuiOptions {
     /// Minimum time between redraws (drawing only happens when something changed).
     pub tick_rate: Duration,
+    /// Draw without color (see `kirby_ocpp_tui::theme`).
+    pub monochrome: bool,
+    /// Clock of the log rows.
+    pub time: TimeMode,
 }
 
 impl Default for TuiOptions {
     fn default() -> Self {
         Self {
             tick_rate: Duration::from_millis(33),
+            monochrome: false,
+            time: TimeMode::Utc,
         }
     }
 }
@@ -121,6 +128,8 @@ fn resync_msg(handle: &CsmsHandle) -> Msg {
 pub(crate) struct Exec {
     tx: mpsc::UnboundedSender<Msg>,
     tasks: JoinSet<()>,
+    /// Handles of the calls in flight, by id, so one can be cancelled.
+    calls: std::collections::HashMap<u64, tokio::task::AbortHandle>,
 }
 
 impl Exec {
@@ -130,6 +139,7 @@ impl Exec {
             Self {
                 tx,
                 tasks: JoinSet::new(),
+                calls: std::collections::HashMap::new(),
             },
             rx,
         )
@@ -170,16 +180,30 @@ fn fault_for(action: &str, kind: FaultKind, times: usize, payload: serde_json::V
 /// command is only spawned here; its answer arrives later through the [`Exec`] channel.
 async fn execute(effect: Effect, handle: &CsmsHandle, exec: &mut Exec) -> Vec<Msg> {
     match effect {
-        Effect::Send { station, command } => {
+        Effect::Send {
+            id,
+            station,
+            command,
+        } => {
             let (handle, tx) = (handle.clone(), exec.tx.clone());
-            exec.tasks.spawn(async move {
+            let abort = exec.tasks.spawn(async move {
                 let outcome = command::run(&handle, &station, &command).await;
                 let _ = tx.send(Msg::CommandDone {
+                    id,
                     station,
                     command,
                     outcome,
                 });
             });
+            exec.calls.insert(id, abort);
+            vec![]
+        }
+        Effect::CancelCall { id } => {
+            // Dropping the call's future is the engine's own "abandon": the station queue is
+            // freed once the call timeout has passed, and a late answer is logged and ignored.
+            if let Some(abort) = exec.calls.remove(&id) {
+                abort.abort();
+            }
             vec![]
         }
         Effect::Respond {
@@ -283,6 +307,8 @@ where
     let mut events_open = true;
     let mut app = App::new(handle.url(), Utc::now());
     app.security_profile = handle.security_profile().number();
+    app.mono = options.monochrome;
+    app.time = options.time;
     if let Ok(size) = terminal.size() {
         app.size = (size.width, size.height);
     }
@@ -314,7 +340,12 @@ where
                         Msg::Closed
                     }
                 },
-                Some(msg) = done.recv() => msg,
+                Some(msg) = done.recv() => {
+                    if let Msg::CommandDone { id, .. } = &msg {
+                        exec.calls.remove(id);
+                    }
+                    msg
+                }
                 _ = tick.tick() => {
                     exec.reap();
                     Msg::Tick(Utc::now())
@@ -353,6 +384,8 @@ where
 mod command_tests;
 #[cfg(test)]
 mod list_forms_tests;
+#[cfg(test)]
+mod pending_tests;
 #[cfg(test)]
 mod registry_tests;
 #[cfg(test)]

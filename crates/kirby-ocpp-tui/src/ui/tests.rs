@@ -8,7 +8,7 @@ use ratatui::backend::TestBackend;
 use serde_json::json;
 
 use super::*;
-use crate::app::{Msg, update};
+use crate::app::{Msg, PendingCall, update};
 
 fn app() -> App {
     let config = StationConfig::new("ws://csms.example/ocpp")
@@ -521,7 +521,11 @@ fn footer_keeps_help_and_palette_hints_in_narrow_terminals() {
 #[test]
 fn pending_command_shows_waiting_marker() {
     let mut a = app();
-    a.pending.push("Heartbeat".into());
+    a.pending.push(PendingCall {
+        label: "Heartbeat".into(),
+        action: Some("Heartbeat".into()),
+        since: a.now,
+    });
     let text = render(&a, 100, 30);
     assert!(text.contains("waiting... Heartbeat"), "{text}");
     a.pending.clear();
@@ -532,4 +536,206 @@ fn pending_command_shows_waiting_marker() {
 fn help_has_first_steps() {
     let lines = help_lines(false);
     assert!(lines[0].starts_with("First steps"));
+}
+
+#[test]
+fn the_pending_list_shows_elapsed_time_and_the_cancel_key() {
+    let mut a = app();
+    a.pending.push(PendingCall {
+        label: "Heartbeat".into(),
+        action: Some("Heartbeat".into()),
+        since: a
+            .now
+            .checked_sub(std::time::Duration::from_secs(7))
+            .unwrap(),
+    });
+    a.pending.push(PendingCall {
+        label: "start tx".into(),
+        action: None,
+        since: a
+            .now
+            .checked_sub(std::time::Duration::from_secs(65))
+            .unwrap(),
+    });
+    keys(&mut a, "W");
+    let text = render(&a, 100, 30);
+    assert!(text.contains("Pending calls (2)"), "{text}");
+    assert!(text.contains("7s  Heartbeat"), "{text}");
+    assert!(text.contains("1m05s  start tx  (no cancel)"), "{text}");
+    assert!(text.contains("x cancel"), "{text}");
+    // The waiting line names the oldest command with its time, and points at the list.
+    key(&mut a, KeyCode::Esc);
+    let text = render(&a, 100, 30);
+    assert!(text.contains("waiting... Heartbeat 7s (+1)"), "{text}");
+    assert!(text.contains("W pending"), "{text}");
+}
+
+fn mono_buffer(app: &App) -> ratatui::buffer::Buffer {
+    let mut term = Terminal::new(TestBackend::new(130, 30)).unwrap();
+    term.draw(|f| draw(f, app)).unwrap();
+    term.backend().buffer().clone()
+}
+
+#[test]
+fn monochrome_draws_without_color_and_marks_levels_with_text() {
+    use ratatui::style::{Color, Modifier};
+    let mut a = app();
+    a.log.push(Event::Log(LogRecord {
+        ts: Utc.timestamp_millis_opt(1_700_000_000_100).unwrap(),
+        level: LogLevel::Error,
+        text: "it broke".into(),
+    }));
+    a.log.push(Event::Log(LogRecord {
+        ts: Utc.timestamp_millis_opt(1_700_000_000_200).unwrap(),
+        level: LogLevel::Success,
+        text: "it worked".into(),
+    }));
+    a.mono = true;
+    a.notify(NoticeLevel::Error, "failed");
+    let buf = mono_buffer(&a);
+    for cell in buf.content() {
+        assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset), "{cell:?}");
+    }
+    let text = render(&a, 130, 30);
+    // Success and failure differ by a character, not only by color.
+    assert!(text.contains("x it broke"), "{text}");
+    assert!(text.contains("+ it worked"), "{text}");
+    assert!(text.contains("i connected"), "{text}");
+    assert!(text.contains(" x failed"), "{text}");
+    // Filled chips are reverse video; the header says the state in words.
+    assert!(text.contains("connected"));
+    assert!(
+        buf.content()
+            .iter()
+            .any(|c| c.symbol() == "c" && c.modifier.contains(Modifier::REVERSED)),
+        "the connection chip is reversed"
+    );
+    // Errors are bold.
+    assert!(
+        buf.content()
+            .iter()
+            .any(|c| c.symbol() == "x" && c.modifier.contains(Modifier::BOLD)),
+        "an error row is bold"
+    );
+    // Colored mode is untouched.
+    a.mono = false;
+    assert!(render(&a, 130, 30).contains("● it broke"));
+}
+
+/// The keys a footer hint stands for.
+fn hint_codes(hint: &str) -> Vec<KeyCode> {
+    match hint {
+        "Enter" => vec![KeyCode::Enter],
+        "↑↓" => vec![KeyCode::Up, KeyCode::Down],
+        "←→" => vec![KeyCode::Left, KeyCode::Right],
+        "1-7" => ('1'..='7').map(KeyCode::Char).collect(),
+        "[ ]" => vec![KeyCode::Char('['), KeyCode::Char(']')],
+        other => other.chars().map(KeyCode::Char).collect(),
+    }
+}
+
+/// What a key can change in the model, for "did the key do anything".
+fn fingerprint(a: &App) -> String {
+    format!(
+        "{:?} {:?} {:?} {} {:?} {:?} {} {:?} {} {}",
+        a.tab,
+        a.focus,
+        a.connector,
+        a.mode.name(),
+        a.action_sel,
+        a.notice.as_ref().map(|n| n.text.clone()),
+        a.log.follow,
+        a.log.selected_index(),
+        a.log.filter.label(),
+        a.quit,
+    )
+}
+
+#[test]
+fn every_footer_hint_key_does_what_its_label_says() {
+    use crate::actions::Tab;
+    use crate::app::Focus;
+    let fresh = |tab: Tab, focus: Focus| {
+        let mut a = app();
+        a.set_tab(tab);
+        a.focus = focus;
+        a.pending.push(PendingCall {
+            label: "Heartbeat".into(),
+            action: Some("Heartbeat".into()),
+            since: a.now,
+        });
+        a
+    };
+    for tab in Tab::ALL {
+        for focus in [Focus::Connectors, Focus::Actions, Focus::Log] {
+            for (k, label) in hints(&fresh(tab, focus)) {
+                let did_something = hint_codes(k).into_iter().any(|code| {
+                    let mut a = fresh(tab, focus);
+                    let before = fingerprint(&a);
+                    let fx = update(
+                        &mut a,
+                        Msg::Key(KeyEvent::new_with_kind(
+                            code,
+                            KeyModifiers::NONE,
+                            KeyEventKind::Press,
+                        )),
+                    );
+                    !fx.is_empty() || fingerprint(&a) != before
+                });
+                assert!(
+                    did_something,
+                    "{tab:?} / {focus:?}: the hint `{k} {label}` does nothing"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_log_letters_are_hinted_only_where_they_work() {
+    use crate::actions::Tab;
+    use crate::app::Focus;
+    let mut a = app();
+    a.focus = Focus::Log;
+    a.tab = Tab::Station;
+    let hint_keys = |a: &App| hints(a).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+    assert!(!hint_keys(&a).contains(&"s"), "{:?}", hint_keys(&a));
+    a.tab = Tab::Logs;
+    assert!(hint_keys(&a).contains(&"s"));
+}
+
+#[test]
+fn every_catalog_accelerator_of_the_logs_tab_is_in_the_help() {
+    let a = app();
+    let help = help_lines(false).join("\n");
+    for action in a
+        .catalog
+        .iter()
+        .filter(|x| x.tab == crate::actions::Tab::Logs)
+    {
+        let Some(key) = action.key else { continue };
+        assert!(
+            help.contains(&format!("{key} ")),
+            "the help does not mention the Logs tab key {key} ({})",
+            action.label
+        );
+    }
+    assert!(help.contains("W "), "the help lists the pending key");
+}
+
+#[test]
+fn time_none_drops_the_clock_of_log_rows() {
+    let mut a = app();
+    let row = |a: &App| {
+        render(a, 130, 30)
+            .lines()
+            .find(|l| l.contains("→ CALL Authorize"))
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
+    assert!(row(&a).contains("22:13:20.000 → CALL"), "{}", row(&a));
+    a.time = kirby_ocpp_core::timefmt::TimeMode::None;
+    let without = row(&a);
+    assert!(!without.contains("22:13"), "{without}");
+    assert!(without.contains("→ CALL Authorize idTag=ABC"), "{without}");
 }

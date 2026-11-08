@@ -5,7 +5,8 @@ mod panes;
 
 use kirby_ocpp_tui::app::NoticeLevel;
 use kirby_ocpp_tui::text::{sanitize, truncate};
-use kirby_ocpp_tui::ui::{dim, hint_line_pinned};
+use kirby_ocpp_tui::theme::{Level, level_mark};
+use kirby_ocpp_tui::ui::{PendingRow, dim, hint_line_pinned, pending_list};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -21,6 +22,13 @@ pub const WIDE: u16 = 100;
 pub const MIN_SIZE: (u16, u16) = (24, 8);
 
 pub fn draw(f: &mut Frame<'_>, app: &App) {
+    draw_colored(f, app);
+    if app.mono {
+        kirby_ocpp_tui::theme::apply_monochrome(f.buffer_mut());
+    }
+}
+
+fn draw_colored(f: &mut Frame<'_>, app: &App) {
     let area = f.area();
     if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
         kirby_ocpp_tui::ui::too_small(f, area, MIN_SIZE);
@@ -190,12 +198,20 @@ fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
 fn draw_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
     let w = usize::from(area.width);
     let first = if let Some(n) = &app.notice {
-        let color = match n.level {
-            NoticeLevel::Info => Color::Cyan,
-            NoticeLevel::Success => Color::Green,
-            NoticeLevel::Error => Color::Red,
+        let (color, level) = match n.level {
+            NoticeLevel::Info => (Color::Cyan, Level::Info),
+            NoticeLevel::Success => (Color::Green, Level::Success),
+            NoticeLevel::Error => (Color::Red, Level::Error),
         };
-        Line::styled(truncate(&format!(" {}", n.text), w), Style::new().fg(color))
+        let mark = if app.mono {
+            format!(" {}", level_mark(level))
+        } else {
+            String::new()
+        };
+        Line::styled(
+            truncate(&format!("{mark} {}", n.text), w),
+            Style::new().fg(color),
+        )
     } else {
         Line::raw("")
     };
@@ -215,6 +231,9 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     match &app.mode {
         Mode::Normal => {
             let mut v = Vec::new();
+            if !app.inflight.is_empty() {
+                v.push(("W", "pending"));
+            }
             if app.focus == Focus::Log {
                 v.extend([
                     ("Enter", "detail"),
@@ -224,13 +243,12 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                     ("p", "pause"),
                 ]);
             }
-            v.extend([
-                ("↑↓", "move"),
-                ("←→", "pane"),
-                ("/", "filter"),
-                ("a", "all stations"),
-                ("q", "quit"),
-            ]);
+            v.extend([("↑↓", "move"), ("←→", "pane")]);
+            // `/` narrows the focused pane; the log pane already lists `s` for the same thing.
+            if app.focus == Focus::Stations {
+                v.push(("/", "filter"));
+            }
+            v.extend([("a", "all stations"), ("q", "quit")]);
             v
         }
         Mode::Input(_) => vec![("Enter", "keep"), ("Esc", "clear")],
@@ -245,6 +263,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         ],
         Mode::Confirm(_) => vec![("y", "yes"), ("any other key", "cancel")],
         Mode::Results(_) => vec![("Enter", "open"), ("↑↓", "choose"), ("Esc", "close")],
+        Mode::Pending(_) => vec![("x", "cancel"), ("↑↓", "choose"), ("Esc", "close")],
     }
 }
 
@@ -321,6 +340,20 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
         Mode::Form(form) => overlays::form(f, form, area),
         Mode::Confirm(c) => overlays::confirm(f, c, area),
         Mode::Results(list) => overlays::results(f, app, list, area),
+        Mode::Pending(sel) => {
+            let rows: Vec<PendingRow> = app
+                .inflight
+                .iter()
+                .map(|c| PendingRow {
+                    elapsed: kirby_ocpp_tui::app::elapsed_text(
+                        (app.now - c.since).to_std().unwrap_or_default(),
+                    ),
+                    text: format!("{} {}", sanitize(&c.station), c.command.label()),
+                    cancellable: true,
+                })
+                .collect();
+            pending_list(f, area, &rows, *sel);
+        }
     }
 }
 

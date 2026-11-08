@@ -518,6 +518,7 @@ async fn run_loop_shows_a_connecting_station() {
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     let options = TuiOptions {
         tick_rate: Duration::from_millis(10),
+        ..TuiOptions::default()
     };
     station.connect().await.expect("connect");
     let result = tokio::time::timeout(

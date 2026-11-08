@@ -20,6 +20,17 @@ fn app() -> App {
     App::new(Snapshot::initial(&config), "ws://h/p", "Acme")
 }
 
+/// A pending command sent `secs_ago` seconds before the clock of the app.
+fn pending_call(label: &str, action: Option<&str>, secs_ago: u64) -> PendingCall {
+    PendingCall {
+        label: label.to_owned(),
+        action: action.map(str::to_owned),
+        since: Instant::now()
+            .checked_sub(Duration::from_secs(secs_ago))
+            .unwrap_or_else(Instant::now),
+    }
+}
+
 fn connected(app: &mut App) {
     let mut s = app.snapshot.clone();
     s.connection = ConnectionState::Connected;
@@ -877,7 +888,7 @@ fn pending_commands_are_tracked_until_done() {
     let fx = press(&mut a, "c");
     assert_eq!(sent(&fx), [&Command::Connect]);
     assert_eq!(a.pending.len(), 1);
-    let label = a.pending[0].clone();
+    let label = a.pending[0].label.clone();
     let fx = update(
         &mut a,
         Msg::CommandDone {
@@ -932,9 +943,114 @@ fn q_confirms_the_quit_question() {
 fn losing_the_connection_clears_the_waiting_marker() {
     let mut a = app();
     connected(&mut a);
-    a.pending.push("heartbeat".to_owned());
+    a.pending
+        .push(pending_call("heartbeat", Some("Heartbeat"), 0));
     let mut s = a.snapshot.clone();
     s.connection = ConnectionState::Disconnected;
     update(&mut a, Msg::Snapshot(Box::new(s)));
     assert!(a.pending.is_empty());
+}
+
+#[test]
+fn elapsed_time_is_written_in_whole_seconds() {
+    let secs = |s| elapsed_text(Duration::from_millis(s));
+    assert_eq!(secs(0), "0s");
+    assert_eq!(secs(999), "0s");
+    assert_eq!(secs(7_400), "7s");
+    assert_eq!(secs(59_999), "59s");
+    assert_eq!(secs(65_000), "1m05s");
+    assert_eq!(secs(3_599_000), "59m59s");
+    assert_eq!(secs(3_723_000), "1h02m");
+}
+
+#[test]
+fn only_plain_calls_can_be_cancelled() {
+    assert_eq!(
+        cancellable_action(&Command::Heartbeat).as_deref(),
+        Some("Heartbeat")
+    );
+    assert_eq!(
+        cancellable_action(&Command::Boot).as_deref(),
+        Some("BootNotification")
+    );
+    assert_eq!(cancellable_action(&Command::Connect), None);
+    assert_eq!(
+        cancellable_action(&Command::StopTransaction {
+            connector: kirby_ocpp_core::ids::ConnectorId::STATION,
+            reason: kirby_ocpp_core::ocpp::types::StopReason::Local,
+            id_tag: None,
+        }),
+        None
+    );
+}
+
+#[test]
+fn a_tick_redraws_only_when_an_elapsed_second_changes() {
+    let mut a = app();
+    a.pending
+        .push(pending_call("heartbeat", Some("Heartbeat"), 0));
+    a.now = a.pending[0].since;
+    a.dirty = false;
+    update(&mut a, Msg::Tick);
+    assert!(!a.dirty, "still inside the first second");
+    // Five seconds on: the shown value changed.
+    a.pending[0].since = a.now.checked_sub(Duration::from_secs(5)).unwrap();
+    a.now = a.pending[0].since;
+    update(&mut a, Msg::Tick);
+    assert!(a.dirty, "the elapsed second changed");
+}
+
+#[test]
+fn w_lists_pending_commands_and_x_cancels_the_selected_one() {
+    let mut a = app();
+    connected(&mut a);
+    let fx = press(&mut a, "b");
+    assert_eq!(sent(&fx), [&Command::Boot]);
+    press(&mut a, "W");
+    assert!(matches!(a.mode, Mode::Pending(0)));
+    let fx = press(&mut a, "x");
+    assert_eq!(
+        fx,
+        [Effect::CancelCall {
+            action: "BootNotification".to_owned()
+        }]
+    );
+    assert!(matches!(a.mode, Mode::Pending(0)), "the list stays open");
+    // The waiting command completes with the cancelled error and leaves the list.
+    let label = a.pending[0].label.clone();
+    update(
+        &mut a,
+        Msg::CommandDone {
+            label,
+            show_response: false,
+            result: Err("BootNotification cancelled".to_owned()),
+        },
+    );
+    assert!(a.pending.is_empty());
+    assert!(
+        a.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("cancelled")),
+        "{:?}",
+        a.notice
+    );
+    press(&mut a, "\u{1b}");
+    code(&mut a, KeyCode::Esc);
+    assert!(matches!(a.mode, Mode::Normal));
+}
+
+#[test]
+fn a_command_that_is_not_a_plain_call_refuses_cancel() {
+    let mut a = app();
+    a.pending.push(pending_call("start tx", None, 3));
+    let mut fx = Vec::new();
+    a.cancel_pending(0, &mut fx);
+    assert!(fx.is_empty());
+    assert!(
+        a.notice
+            .as_ref()
+            .is_some_and(|n| n.text.contains("cannot be cancelled")),
+        "{:?}",
+        a.notice
+    );
 }

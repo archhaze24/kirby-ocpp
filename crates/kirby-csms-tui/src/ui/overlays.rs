@@ -2,6 +2,7 @@
 
 use kirby_ocpp_tui::forms::SECRET_HINT;
 use kirby_ocpp_tui::text::{sanitize, truncate, width, wrap_text};
+use kirby_ocpp_tui::theme::{Level, level_mark};
 use kirby_ocpp_tui::ui::{dim, popup_width};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -212,8 +213,18 @@ pub(super) fn results(f: &mut Frame<'_>, app: &App, list: &ResultsList, area: Re
         .iter()
         .map(|r| {
             let color = if r.ok { Color::Green } else { Color::Red };
+            let mark = match (app.mono, r.ok) {
+                (false, _) => String::new(),
+                (true, true) => format!("{} ", level_mark(Level::Success)),
+                (true, false) => format!("{} ", level_mark(Level::Error)),
+            };
             ListItem::new(truncate(
-                &format!("{}  {}: {}", r.at.format("%H:%M:%S"), r.label, r.summary),
+                &format!(
+                    "{}  {mark}{}: {}",
+                    r.at.format("%H:%M:%S"),
+                    r.label,
+                    r.summary
+                ),
                 w,
             ))
             .style(Style::new().fg(color))

@@ -10,6 +10,7 @@ use kirby_csms_core::{
     event_frame,
 };
 use kirby_ocpp_core::station::{Direction, Event, FrameRecord, LogLevel, LogRecord};
+use kirby_ocpp_core::timefmt::TimeMode;
 use kirby_ocpp_tui::app::{Detail, NoticeLevel};
 use kirby_ocpp_tui::logview::{LOG_CAPACITY, LogEntry, LogFilter, LogStore};
 use kirby_ocpp_tui::text::TextInput;
@@ -91,6 +92,8 @@ pub enum Mode {
     Form(Box<Form>),
     Confirm(Confirm),
     Results(ResultsList),
+    /// The commands waiting for an answer; the index is the selected row.
+    Pending(usize),
 }
 
 /// A transient message for the status line.
@@ -243,6 +246,15 @@ pub struct App {
     info_dirty: bool,
     /// Commands sent and not answered yet.
     pub pending: usize,
+    /// The commands behind `pending`, oldest first (what the pending list shows).
+    pub inflight: Vec<Inflight>,
+    pub(crate) next_call_id: u64,
+    /// Calls the user cancelled whose answer may still be on its way to [`update`].
+    pub(crate) cancelled: VecDeque<u64>,
+    /// Draw without color; states then also carry text markers.
+    pub mono: bool,
+    /// Clock of the log rows.
+    pub time: TimeMode,
     /// The last answers per station, newest first.
     pub results: HashMap<String, VecDeque<ResultRecord>>,
     /// Response rules and faults the engine has active.
@@ -254,6 +266,19 @@ pub struct App {
     last_auth_notice: Option<DateTime<Utc>>,
     next_request_id: i32,
 }
+
+/// A command sent to a station that has no answer yet.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Inflight {
+    pub id: u64,
+    pub station: String,
+    pub command: Command,
+    /// When the command was sent (the clock of [`App::now`]).
+    pub since: DateTime<Utc>,
+}
+
+/// Cancelled calls remembered for their late [`Msg::CommandDone`].
+pub(crate) const CANCELLED_CAP: usize = 64;
 
 /// Input to [`update`].
 #[derive(Debug)]
@@ -290,6 +315,8 @@ pub enum Msg {
     Notice(NoticeLevel, String),
     /// A command finished, from [`Effect::Send`].
     CommandDone {
+        /// The id of the [`Effect::Send`] that started it.
+        id: u64,
         station: String,
         command: Command,
         outcome: CmdOutcome,
@@ -317,8 +344,16 @@ pub enum Effect {
     /// Send a command to a station in the background; the answer comes back as
     /// [`Msg::CommandDone`].
     Send {
+        /// Names the call in [`Msg::CommandDone`] and [`Effect::CancelCall`].
+        id: u64,
         station: String,
         command: Command,
+    },
+    /// Stop waiting for the call `id`: its task is dropped. The engine frees the station queue
+    /// once the call timeout has passed, and an answer that still arrives is logged and
+    /// ignored.
+    CancelCall {
+        id: u64,
     },
     /// Answer every `action` CALL (of `station` only, when set) with `payload` as a CALLRESULT.
     Respond {
@@ -378,6 +413,11 @@ impl App {
             dirty_states: BTreeSet::new(),
             info_dirty: false,
             pending: 0,
+            inflight: Vec::new(),
+            next_call_id: 1,
+            cancelled: VecDeque::new(),
+            mono: false,
+            time: TimeMode::Utc,
             results: HashMap::new(),
             rules: Rules::default(),
             security_profile: 0,
@@ -827,10 +867,20 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
         }
         Msg::Notice(level, text) => app.notify(level, text),
         Msg::CommandDone {
+            id,
             station,
             command,
             outcome,
-        } => app.command_done(&station, &command, &outcome),
+        } => {
+            // The answer of a call the user cancelled was already reported as cancelled.
+            if let Some(i) = app.cancelled.iter().position(|c| *c == id) {
+                app.cancelled.remove(i);
+            } else {
+                app.inflight.retain(|c| c.id != id);
+                app.clamp_pending_selection();
+                app.command_done(&station, &command, &outcome);
+            }
+        }
         Msg::Rules(rules) => app.rules = rules,
     }
     fx

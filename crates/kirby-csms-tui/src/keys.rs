@@ -40,7 +40,27 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
             _ => app.notify(NoticeLevel::Info, "cancelled"),
         },
         Mode::Results(list) => results_mode(app, list, key),
+        Mode::Pending(sel) => pending_mode(app, sel, key, fx),
     }
+}
+
+/// Keys of the pending-commands list: move, `x` / `Delete` cancels the selected row.
+fn pending_mode(app: &mut App, sel: usize, key: KeyEvent, fx: &mut Vec<Effect>) {
+    let last = app.inflight.len().saturating_sub(1);
+    let sel = match key.code {
+        KeyCode::Esc | KeyCode::Char('q' | 'W') | KeyCode::Enter => return,
+        KeyCode::Up | KeyCode::Char('k') => sel.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => (sel + 1).min(last),
+        KeyCode::Home => 0,
+        KeyCode::End => last,
+        KeyCode::Char('x') | KeyCode::Delete => {
+            app.mode = Mode::Pending(sel);
+            app.cancel_call(sel, fx);
+            return;
+        }
+        _ => sel,
+    };
+    app.mode = Mode::Pending(sel.min(last));
 }
 
 /// Pasted text goes into an open input, form or palette; elsewhere it is ignored.
@@ -288,8 +308,9 @@ pub const HELP: &[&str] = &[
     "Up Down j k             move in the focused pane",
     "PgUp PgDn Home End      page / first / last (log: oldest / newest)",
     "Left Right Tab          change focused pane (stations, log)",
-    "/                       filter stations by id (log pane: search the log)",
+    "/                       narrow the focused pane: filter stations by id, or search the log",
     "Esc                     clear the log search, then the station filter",
+    "W                       pending commands with their elapsed time (x cancels the selected one, Esc closes)",
     "a                       log of the selected station <-> all stations",
     ": (colon)               command palette: every action below, fuzzy search",
     "?                       this help",
@@ -298,9 +319,10 @@ pub const HELP: &[&str] = &[
     "Actions on the selected station (a form opens; Enter sends, Esc cancels, Tab next field, Left/Right or a letter picks an option); answers show up in the status line:",
     "     t remote start   x remote stop   R reset (asks)   c change config   g get config   T trigger message   u unlock   A availability   C clear cache   P charging profile   D data transfer   w raw call (any action, JSON payload)   r last results (Enter opens)   F forget a disconnected station (asks)   n copy station id",
     "Security Whitepaper (selected station): l get log   I install certificate   d delete certificate   L installed certificates   E extended trigger   S signed firmware update   X certificate signed   e security events the station reported (certificates: paste the PEM; line breaks become spaces and are rebuilt on submit)",
+    "More actions (selected station): K clear charging profile   H composite schedule   V reserve now   U update firmware   O get diagnostics   B send local list",
     "Scripted behaviour (every station, or one when the station field is set): m response rule, i inject fault (call_error, silence, close, invalid_payload), M clear every rule and fault; remove one rule from the palette",
     "",
     "Log pane: Enter detail (scroll, c copies), y copy row, Y copy visible rows, f filter (all, calls, errors, from stations), s search, p pause/follow, G newest",
     "",
-    "List: dot green connected, dim disconnected, yellow replaced; tx = active transactions",
+    "List: ● connected, ○ disconnected, yellow ● replaced by a newer connection (◐ without color); tx = active transactions. Color is never the only cue: --color never or NO_COLOR draws with reverse video, bold and markers (+ ok, ! warning, x error) instead",
 ];

@@ -50,7 +50,13 @@ fn failed(text: &str) -> CmdOutcome {
 
 fn only_send(fx: Vec<Effect>) -> (String, Command) {
     match <[Effect; 1]>::try_from(fx) {
-        Ok([Effect::Send { station, command }]) => (station, command),
+        Ok(
+            [
+                Effect::Send {
+                    station, command, ..
+                },
+            ],
+        ) => (station, command),
         other => panic!("expected one Send, got {other:?}"),
     }
 }
@@ -357,6 +363,7 @@ fn forget_asks_and_only_applies_to_disconnected_stations() {
     update(
         &mut app,
         Msg::CommandDone {
+            id: 0,
             station: "CP-1".into(),
             command: Command::ClearCache,
             outcome: ok(json!({"status": "Accepted"})),
@@ -391,6 +398,7 @@ fn answers_become_notices_and_a_per_station_history() {
     update(
         &mut app,
         Msg::CommandDone {
+            id: 0,
             station: "CP-1".into(),
             command: Command::Reset(ResetType::Soft),
             outcome: ok(json!({"status": "Accepted"})),
@@ -407,6 +415,7 @@ fn answers_become_notices_and_a_per_station_history() {
     update(
         &mut app,
         Msg::CommandDone {
+            id: 0,
             station: "CP-1".into(),
             command: Command::UnlockConnector { connector: 1 },
             outcome: ok(json!({"status": "UnlockFailed"})),
@@ -419,6 +428,7 @@ fn answers_become_notices_and_a_per_station_history() {
     update(
         &mut app,
         Msg::CommandDone {
+            id: 0,
             station: "CP-1".into(),
             command: Command::ClearCache,
             outcome: ok(json!({})),
@@ -428,6 +438,7 @@ fn answers_become_notices_and_a_per_station_history() {
     update(
         &mut app,
         Msg::CommandDone {
+            id: 0,
             station: "CP-1".into(),
             command: Command::Reset(ResetType::Hard),
             outcome: failed("CALLERROR NotImplemented: nope"),
@@ -464,6 +475,7 @@ fn history_is_capped_per_station() {
         update(
             &mut app,
             Msg::CommandDone {
+                id: 0,
                 station: "CP-1".into(),
                 command: Command::ClearCache,
                 outcome: ok(json!({"status": "Accepted", "n": i})),
@@ -478,6 +490,7 @@ fn history_is_capped_per_station() {
     update(
         &mut app,
         Msg::CommandDone {
+            id: 0,
             station: "ghost".into(),
             command: Command::ClearCache,
             outcome: failed("unknown station"),
@@ -501,6 +514,7 @@ fn get_configuration_opens_a_readable_popup_unless_the_user_is_busy() {
         update(
             app,
             Msg::CommandDone {
+                id: 0,
                 station: "CP-1".into(),
                 command: Command::GetConfiguration { keys: vec![] },
                 outcome: ok(answer.clone()),
@@ -540,6 +554,7 @@ fn hostile_answers_are_sanitised() {
     update(
         &mut app,
         Msg::CommandDone {
+            id: 0,
             station: "CP-1".into(),
             command: Command::ClearCache,
             outcome: failed("CALLERROR X: \u{1b}[31mred\u{7}"),
@@ -727,6 +742,7 @@ async fn executor_drives_a_real_station() {
         &mut exec,
         &mut rx,
         Effect::Send {
+            id: 0,
             station: "CP-E".into(),
             command: Command::RemoteStart {
                 id_tag: "ABC".into(),
@@ -751,6 +767,7 @@ async fn executor_drives_a_real_station() {
         &mut exec,
         &mut rx,
         Effect::Send {
+            id: 0,
             station: "CP-E".into(),
             command: Command::ChangeConfiguration {
                 key: "HeartbeatInterval".into(),
@@ -769,6 +786,7 @@ async fn executor_drives_a_real_station() {
         &mut exec,
         &mut rx,
         Effect::Send {
+            id: 0,
             station: "CP-E".into(),
             command: Command::GetConfiguration {
                 keys: vec!["HeartbeatInterval".into(), "NoSuchKey".into()],
@@ -791,6 +809,7 @@ async fn executor_drives_a_real_station() {
         &mut exec,
         &mut rx,
         Effect::Send {
+            id: 0,
             station: "CP-E".into(),
             command: Command::Raw {
                 action: "NoSuchAction".into(),
@@ -816,6 +835,7 @@ async fn executor_drives_a_real_station() {
         &mut exec,
         &mut rx,
         Effect::Send {
+            id: 0,
             station: "nobody".into(),
             command: Command::ClearCache,
         },
@@ -915,6 +935,7 @@ async fn run_loop_executes_a_hotkey_command_in_the_background() {
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
     let options = TuiOptions {
         tick_rate: Duration::from_millis(10),
+        ..TuiOptions::default()
     };
     timeout(
         STEP,

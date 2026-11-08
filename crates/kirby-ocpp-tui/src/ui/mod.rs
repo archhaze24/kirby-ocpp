@@ -4,7 +4,7 @@ mod browser;
 mod overlays;
 mod panes;
 
-pub use overlays::help_lines;
+pub use overlays::{PendingRow, help_lines, pending_line, pending_list};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -16,6 +16,7 @@ use crate::actions::Tab;
 use crate::app::{App, ConfirmAction, Mode, NoticeLevel};
 use crate::fleet::{FleetApp, station_marks, visible_range};
 use crate::text::{sanitize, truncate, width};
+use crate::theme::{Level, level_mark};
 
 /// Width from which the three-column layout is used.
 pub const WIDE: u16 = 110;
@@ -27,11 +28,21 @@ pub fn dim() -> Style {
 
 pub fn draw(f: &mut Frame<'_>, app: &App) {
     draw_in(f, app, f.area());
+    if app.mono {
+        crate::theme::apply_monochrome(f.buffer_mut());
+    }
 }
 
 /// Draws the whole fleet UI: with several stations a selector row on top and the
 /// selected station below; with one station exactly [`draw`].
 pub fn draw_fleet(f: &mut Frame<'_>, fleet: &FleetApp) {
+    draw_fleet_colored(f, fleet);
+    if fleet.current().mono {
+        crate::theme::apply_monochrome(f.buffer_mut());
+    }
+}
+
+fn draw_fleet_colored(f: &mut Frame<'_>, fleet: &FleetApp) {
     if !fleet.is_fleet() || f.area().height < 2 {
         draw_in(f, fleet.current(), f.area());
         return;
@@ -260,19 +271,34 @@ fn tab_line(app: &App, w: usize) -> Line<'static> {
 fn draw_footer(f: &mut Frame<'_>, app: &App, area: Rect) {
     let w = usize::from(area.width);
     let first = if let Some(n) = &app.notice {
-        let color = match n.level {
-            NoticeLevel::Info => Color::Cyan,
-            NoticeLevel::Success => Color::Green,
-            NoticeLevel::Error => Color::Red,
+        let (color, level) = match n.level {
+            NoticeLevel::Info => (Color::Cyan, Level::Info),
+            NoticeLevel::Success => (Color::Green, Level::Success),
+            NoticeLevel::Error => (Color::Red, Level::Error),
         };
-        Line::styled(truncate(&format!(" {}", n.text), w), Style::new().fg(color))
+        let mark = if app.mono {
+            format!(" {}", level_mark(level))
+        } else {
+            String::new()
+        };
+        Line::styled(
+            truncate(&format!("{mark} {}", n.text), w),
+            Style::new().fg(color),
+        )
     } else if let Some(label) = app.pending.first() {
         let more = match app.pending.len() {
             0 | 1 => String::new(),
             n => format!(" (+{})", n - 1),
         };
+        let elapsed = crate::app::elapsed_text(app.now.saturating_duration_since(label.since));
         Line::styled(
-            truncate(&format!(" waiting... {}{more}", sanitize(label)), w),
+            truncate(
+                &format!(
+                    " waiting... {} {elapsed}{more}  (W: list, cancel)",
+                    sanitize(&label.label)
+                ),
+                w,
+            ),
             Style::new().fg(Color::Yellow),
         )
     } else if let (Mode::Normal, Some(a)) = (&app.mode, app.selected_action()) {
@@ -303,15 +329,24 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     match &app.mode {
         Mode::Normal => {
             let mut v = Vec::new();
+            if !app.pending.is_empty() {
+                v.push(("W", "pending"));
+            }
             if app.focus == Focus::Log {
-                v.extend([
-                    ("Enter", "detail"),
-                    ("y", "copy"),
-                    ("f", "filter"),
-                    ("s", "search"),
-                    ("p", "pause"),
-                ]);
-            } else {
+                v.push(("Enter", "detail"));
+                // The log letters are accelerators of the Logs tab only.
+                if app.tab == Tab::Logs {
+                    v.extend([
+                        ("y", "copy"),
+                        ("f", "filter"),
+                        ("s", "search"),
+                        ("p", "pause"),
+                    ]);
+                } else {
+                    v.push(("6", "log keys"));
+                }
+            } else if app.focus == Focus::Actions {
+                // Enter on the connector list does nothing, so it is not hinted there.
                 v.push(("Enter", "run"));
             }
             v.extend([
@@ -323,6 +358,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ]);
             v
         }
+        Mode::Pending(_) => vec![("x", "cancel"), ("↑↓", "select"), ("Esc", "close")],
         Mode::Palette(_) => vec![("Enter", "run"), ("Esc", "close"), ("↑↓", "select")],
         Mode::Form(_) => vec![
             ("Enter", "submit"),

@@ -442,6 +442,7 @@ mod commands {
             update(
                 &mut app,
                 Msg::CommandDone {
+                    id: 0,
                     station: "CP-1".into(),
                     command: Command::ClearCache,
                     outcome,
@@ -523,6 +524,7 @@ mod commands {
                 update(
                     &mut app,
                     Msg::CommandDone {
+                        id: 0,
                         station: "CP-1".into(),
                         command: Command::ClearCache,
                         outcome: CmdOutcome {
@@ -617,4 +619,81 @@ fn footer_keeps_help_and_palette_hints_in_narrow_terminals() {
 #[test]
 fn help_starts_with_first_steps() {
     assert!(crate::keys::HELP[0].starts_with("First steps"));
+}
+
+/// The keys a footer hint stands for.
+fn hint_codes(hint: &str) -> Vec<crossterm::event::KeyCode> {
+    use crossterm::event::KeyCode;
+    match hint {
+        "Enter" => vec![KeyCode::Enter],
+        "↑↓" => vec![KeyCode::Up, KeyCode::Down],
+        "←→" => vec![KeyCode::Left, KeyCode::Right],
+        other => other.chars().map(KeyCode::Char).collect(),
+    }
+}
+
+fn fingerprint(a: &App) -> String {
+    format!(
+        "{:?} {} {:?} {} {} {:?} {}",
+        a.focus,
+        a.station_filter,
+        a.view,
+        a.log().follow,
+        a.quit,
+        a.log().selected_index(),
+        a.notice.as_ref().map_or("", |n| n.text.as_str()),
+    ) + &format!("{:?}", std::mem::discriminant(&a.mode))
+}
+
+#[test]
+fn every_footer_hint_key_does_what_its_label_says() {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    let fresh = |focus: crate::app::Focus| {
+        let mut a = loaded();
+        a.focus = focus;
+        a.inflight.push(crate::app::Inflight {
+            id: 1,
+            station: "CP-1".into(),
+            command: crate::command::Command::ClearCache,
+            since: a.now,
+        });
+        a
+    };
+    for focus in [crate::app::Focus::Stations, crate::app::Focus::Log] {
+        for (k, label) in hints(&fresh(focus)) {
+            let did_something = hint_codes(k).into_iter().any(|code: KeyCode| {
+                let mut a = fresh(focus);
+                let before = fingerprint(&a);
+                let fx = update(&mut a, Msg::Key(KeyEvent::new(code, KeyModifiers::NONE)));
+                !fx.is_empty() || fingerprint(&a) != before
+            });
+            assert!(
+                did_something,
+                "{focus:?}: the hint `{k} {label}` does nothing"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_slash_hint_names_the_station_filter_only_on_the_station_list() {
+    let keys = |a: &App| hints(a).into_iter().map(|(k, _)| k).collect::<Vec<_>>();
+    let mut a = loaded();
+    a.focus = crate::app::Focus::Stations;
+    assert!(keys(&a).contains(&"/"));
+    a.focus = crate::app::Focus::Log;
+    assert!(!keys(&a).contains(&"/") && keys(&a).contains(&"s"));
+}
+
+#[test]
+fn every_hotkey_of_the_action_table_is_in_the_help() {
+    let help = crate::keys::HELP.join("\n");
+    for action in crate::actions::CATALOG {
+        let Some(key) = action.key else { continue };
+        assert!(
+            help.contains(&format!("{key} ")),
+            "the help does not mention the key {key} ({})",
+            action.label()
+        );
+    }
 }

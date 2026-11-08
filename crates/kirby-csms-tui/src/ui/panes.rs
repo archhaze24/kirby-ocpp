@@ -5,6 +5,7 @@ use kirby_csms_core::{StationInfo, StationState, TransactionStatus};
 use kirby_ocpp_core::station::{Direction, LogLevel};
 use kirby_ocpp_tui::logview::{FrameKind, LogEntry};
 use kirby_ocpp_tui::text::{sanitize, truncate, truncate_middle, width};
+use kirby_ocpp_tui::theme::{Level, level_mark};
 use kirby_ocpp_tui::ui::dim;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -57,9 +58,10 @@ fn pad(s: &str, w: usize) -> String {
 
 // ---- station list ---------------------------------------------------------------------
 
-fn station_row(s: &Summary, inner_w: usize, selected: bool) -> Line<'static> {
+fn station_row(s: &Summary, inner_w: usize, selected: bool, mono: bool) -> Line<'static> {
     let (dot, color) = if s.replaced {
-        ("●", Color::Yellow)
+        // Monochrome: a half-filled dot tells a replaced connection from a live one.
+        (if mono { "◐" } else { "●" }, Color::Yellow)
     } else if s.connected {
         ("●", Color::Green)
     } else {
@@ -107,7 +109,7 @@ pub fn stations(f: &mut Frame<'_>, app: &App, area: Rect) {
     let lines: Vec<Line<'static>> = (top..len.min(top + h))
         .filter_map(|row| {
             app.visible_at(row)
-                .map(|s| station_row(s, inner_w, Some(row) == cursor && focused))
+                .map(|s| station_row(s, inner_w, Some(row) == cursor && focused, app.mono))
         })
         .collect();
     let mut title = String::from("Stations");
@@ -417,10 +419,11 @@ fn transactions(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) 
 // ---- log ------------------------------------------------------------------------------
 
 fn row_line(app: &App, e: &LogEntry, inner_w: usize, selected: bool) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        format!("{} ", e.ts.format("%H:%M:%S%.3f")),
-        dim(),
-    )];
+    let mut spans = Vec::new();
+    let stamp = app.time.prefix(e.ts);
+    if !stamp.is_empty() {
+        spans.push(Span::styled(stamp, dim()));
+    }
     if app.view == LogView::All {
         let id = app.entry_station(e).map_or_else(String::new, sanitize);
         spans.push(Span::styled(
@@ -460,7 +463,17 @@ fn row_line(app: &App, e: &LogEntry, inner_w: usize, selected: bool) -> Line<'st
                 LogLevel::Warn => Color::Yellow,
                 LogLevel::Error => Color::Red,
             };
-            ("●", color, e.summary.clone())
+            let mark = if app.mono {
+                level_mark(match l.level {
+                    LogLevel::Info => Level::Info,
+                    LogLevel::Success => Level::Success,
+                    LogLevel::Warn => Level::Warn,
+                    LogLevel::Error => Level::Error,
+                })
+            } else {
+                "●"
+            };
+            (mark, color, e.summary.clone())
         }
         _ => ("?", Color::Gray, String::new()),
     };
