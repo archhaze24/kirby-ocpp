@@ -1,0 +1,55 @@
+name = "conformance-configuration"
+description = "ChangeConfiguration and GetConfiguration: accepted change, read-only key, unknown key"
+tags = ["conformance"]
+
+# The CSMS script sends the five calls below, in this order, and checks the
+# answers: Accepted and the new value, Rejected for the read-only key,
+# NotSupported for the unknown key, unknownKey in the GetConfiguration answer.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:configuration"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:configuration" }
+
+[[steps]]
+name = "ChangeConfiguration HeartbeatInterval"
+action = "expect_call"
+call = "ChangeConfiguration"
+direction = "in"
+match = { key = "HeartbeatInterval", value = "60" }
+
+[[steps]]
+name = "GetConfiguration HeartbeatInterval"
+action = "expect_call"
+call = "GetConfiguration"
+direction = "in"
+match = { key = ["HeartbeatInterval"] }
+
+[[steps]]
+name = "ChangeConfiguration of a read-only key"
+action = "expect_call"
+call = "ChangeConfiguration"
+direction = "in"
+match = { key = "NumberOfConnectors" }
+
+[[steps]]
+name = "ChangeConfiguration of an unknown key"
+action = "expect_call"
+call = "ChangeConfiguration"
+direction = "in"
+match = { key = "KirbyNoSuchKey" }
+
+[[steps]]
+name = "GetConfiguration of an unknown key"
+action = "expect_call"
+call = "GetConfiguration"
+direction = "in"
+match = { key = ["KirbyNoSuchKey"] }

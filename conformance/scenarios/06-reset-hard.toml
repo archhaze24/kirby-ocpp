@@ -1,0 +1,42 @@
+name = "conformance-reset-hard"
+description = "A hard Reset is accepted, the connection is closed and the station reconnects and registers again"
+tags = ["conformance"]
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:reset-hard"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:reset-hard" }
+
+[[steps]]
+name = "Reset (Hard) arrives"
+action = "expect_call"
+call = "Reset"
+direction = "in"
+match = { type = "Hard" }
+
+[[steps]]
+name = "the station sends BootNotification on the new connection"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+timeout_ms = 15000
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the station is connected again"
+action = "wait_for"
+condition = { kind = "connected" }
+timeout_ms = 10000

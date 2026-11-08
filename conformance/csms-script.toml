@@ -1,0 +1,497 @@
+name = "conformance"
+description = "Drives the scenarios of conformance/scenarios against a station: waits for the station's ready message, prepares answers, sends the CSMS commands and checks the replies"
+tags = ["conformance"]
+
+# Run it next to the scenarios (see docs/ci.md):
+#
+#   kirby-csms --listen 127.0.0.1:9000 --no-tui --script conformance/csms-script.toml --timeout 180 &
+#   kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-CONF suite conformance/scenarios --tag conformance
+#
+# Every scenario opens with a DataTransfer from vendor "kirby.conformance" whose
+# messageId is "ready:<topic>". The section of this script for that topic waits for it,
+# prepares what the scenario needs, and sends "go:<topic>" when the scenario must wait for
+# the preparation. The sections run in the order of the scenario file names; a run of a
+# subset of the scenarios needs a script with only their sections.
+
+[vars]
+station = "CP-CONF"
+vendor = "kirby.conformance"
+
+# ---------------------------------------------------------------------------------------
+# 01 conformance-authorize-rejected
+
+[[steps]]
+name = "authorize-rejected: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:authorize-rejected" }
+timeout_ms = 30000
+
+[[steps]]
+name = "authorize-rejected: the next Authorize is Blocked"
+action = "inject_fault"
+call = "Authorize"
+station = "${station}"
+kind = "invalid_payload"
+payload = { idTagInfo = { status = "Blocked" } }
+times = 1
+
+[[steps]]
+name = "authorize-rejected: the next StartTransaction is Invalid"
+action = "inject_fault"
+call = "StartTransaction"
+station = "${station}"
+kind = "invalid_payload"
+payload = { transactionId = 9001, idTagInfo = { status = "Invalid" } }
+times = 1
+
+[[steps]]
+name = "authorize-rejected: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:authorize-rejected" }
+
+# ---------------------------------------------------------------------------------------
+# 02 conformance-boot-pending
+
+[[steps]]
+name = "boot-pending: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:boot-pending" }
+timeout_ms = 30000
+
+[[steps]]
+name = "boot-pending: the next two BootNotification CALLs are Pending"
+action = "inject_fault"
+call = "BootNotification"
+station = "${station}"
+kind = "invalid_payload"
+payload = { status = "Pending", interval = 1, currentTime = "2026-01-01T00:00:00Z" }
+times = 2
+
+[[steps]]
+name = "boot-pending: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:boot-pending" }
+
+# ---------------------------------------------------------------------------------------
+# 03 conformance-boot-rejected
+
+[[steps]]
+name = "boot-rejected: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:boot-rejected" }
+timeout_ms = 30000
+
+[[steps]]
+name = "boot-rejected: the next two BootNotification CALLs are Rejected"
+action = "inject_fault"
+call = "BootNotification"
+station = "${station}"
+kind = "invalid_payload"
+payload = { status = "Rejected", interval = 1, currentTime = "2026-01-01T00:00:00Z" }
+times = 2
+
+[[steps]]
+name = "boot-rejected: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:boot-rejected" }
+
+# ---------------------------------------------------------------------------------------
+# 04 conformance-remote-start-stop
+
+[[steps]]
+name = "remote-start: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:remote-start" }
+timeout_ms = 30000
+
+[[steps]]
+name = "remote-start: the next StartTransaction gets transaction id 4242"
+action = "inject_fault"
+call = "StartTransaction"
+station = "${station}"
+kind = "invalid_payload"
+payload = { transactionId = 4242, idTagInfo = { status = "Accepted" } }
+times = 1
+
+[[steps]]
+name = "remote-start: RemoteStartTransaction is Accepted"
+action = "call"
+station = "${station}"
+call = "RemoteStartTransaction"
+payload = { idTag = "CONF-TAG", connectorId = 1 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "remote-stop: transaction running"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:remote-stop" }
+timeout_ms = 30000
+
+[[steps]]
+name = "remote-stop: RemoteStopTransaction is Accepted"
+action = "call"
+station = "${station}"
+call = "RemoteStopTransaction"
+payload = { transactionId = 4242 }
+expect_status = "Accepted"
+
+# ---------------------------------------------------------------------------------------
+# 05 conformance-reset-soft
+
+[[steps]]
+name = "reset-soft: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reset-soft" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reset-soft: Reset (Soft) is Accepted"
+action = "call"
+station = "${station}"
+call = "Reset"
+payload = { type = "Soft" }
+expect_status = "Accepted"
+
+# ---------------------------------------------------------------------------------------
+# 06 conformance-reset-hard
+
+[[steps]]
+name = "reset-hard: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reset-hard" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reset-hard: Reset (Hard) is Accepted"
+action = "call"
+station = "${station}"
+call = "Reset"
+payload = { type = "Hard" }
+expect_status = "Accepted"
+
+# ---------------------------------------------------------------------------------------
+# 07 conformance-unlock-connector
+
+[[steps]]
+name = "unlock-connector: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:unlock-connector" }
+timeout_ms = 30000
+
+[[steps]]
+name = "unlock-connector: connector 1 is Unlocked"
+action = "call"
+station = "${station}"
+call = "UnlockConnector"
+payload = { connectorId = 1 }
+expect_status = "Unlocked"
+
+[[steps]]
+name = "unlock-connector: connector 99 is NotSupported"
+action = "call"
+station = "${station}"
+call = "UnlockConnector"
+payload = { connectorId = 99 }
+expect_status = "NotSupported"
+
+# ---------------------------------------------------------------------------------------
+# 08 conformance-trigger-message
+
+[[steps]]
+name = "trigger-message: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:trigger-message" }
+timeout_ms = 30000
+
+[[steps]]
+name = "trigger-message: Heartbeat"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "Heartbeat" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger-message: MeterValues"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "MeterValues", connectorId = 1 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger-message: DiagnosticsStatusNotification"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "DiagnosticsStatusNotification" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger-message: FirmwareStatusNotification"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "FirmwareStatusNotification" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger-message: StatusNotification"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "StatusNotification", connectorId = 1 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger-message: BootNotification"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "BootNotification" }
+expect_status = "Accepted"
+
+# ---------------------------------------------------------------------------------------
+# 09 conformance-configuration
+
+[[steps]]
+name = "configuration: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:configuration" }
+timeout_ms = 30000
+
+[[steps]]
+name = "configuration: HeartbeatInterval is Accepted"
+action = "call"
+station = "${station}"
+call = "ChangeConfiguration"
+payload = { key = "HeartbeatInterval", value = "60" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "configuration: GetConfiguration returns the new value"
+action = "call"
+station = "${station}"
+call = "GetConfiguration"
+payload = { key = ["HeartbeatInterval"] }
+expect_payload = { configurationKey = [ { key = "HeartbeatInterval", readonly = false, value = "60" } ] }
+
+[[steps]]
+name = "configuration: a read-only key is Rejected"
+action = "call"
+station = "${station}"
+call = "ChangeConfiguration"
+payload = { key = "NumberOfConnectors", value = "2" }
+expect_status = "Rejected"
+
+[[steps]]
+name = "configuration: an unknown key is NotSupported"
+action = "call"
+station = "${station}"
+call = "ChangeConfiguration"
+payload = { key = "KirbyNoSuchKey", value = "1" }
+expect_status = "NotSupported"
+
+[[steps]]
+name = "configuration: GetConfiguration lists the unknown key"
+action = "call"
+station = "${station}"
+call = "GetConfiguration"
+payload = { key = ["KirbyNoSuchKey"] }
+expect_payload = { unknownKey = ["KirbyNoSuchKey"] }
+
+# ---------------------------------------------------------------------------------------
+# 10 conformance-reservation
+
+[[steps]]
+name = "reservation: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reservation: ReserveNow is Accepted"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { connectorId = 1, expiryDate = "2099-01-01T00:00:00Z", idTag = "CONF-TAG", reservationId = 7 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: connector reserved"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-cancel" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reservation: CancelReservation is Accepted"
+action = "call"
+station = "${station}"
+call = "CancelReservation"
+payload = { reservationId = 7 }
+expect_status = "Accepted"
+
+# ---------------------------------------------------------------------------------------
+# 11 conformance-charging-profile
+
+[[steps]]
+name = "charging-profile: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:charging-profile" }
+timeout_ms = 30000
+
+[[steps]]
+name = "charging-profile: a valid profile is Accepted"
+action = "call"
+station = "${station}"
+call = "SetChargingProfile"
+payload = { connectorId = 1, csChargingProfiles = { chargingProfileId = 1, stackLevel = 0, chargingProfilePurpose = "TxDefaultProfile", chargingProfileKind = "Absolute", chargingSchedule = { chargingRateUnit = "W", chargingSchedulePeriod = [ { startPeriod = 0, limit = 7000.0 } ] } } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "charging-profile: a stack level over the limit is Rejected"
+action = "call"
+station = "${station}"
+call = "SetChargingProfile"
+payload = { connectorId = 1, csChargingProfiles = { chargingProfileId = 2, stackLevel = 9999, chargingProfilePurpose = "TxDefaultProfile", chargingProfileKind = "Absolute", chargingSchedule = { chargingRateUnit = "W", chargingSchedulePeriod = [ { startPeriod = 0, limit = 7000.0 } ] } } }
+expect_status = "Rejected"
+
+[[steps]]
+name = "charging-profile: GetCompositeSchedule is Accepted"
+action = "call"
+station = "${station}"
+call = "GetCompositeSchedule"
+payload = { connectorId = 1, duration = 3600 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "charging-profile: ClearChargingProfile is Accepted"
+action = "call"
+station = "${station}"
+call = "ClearChargingProfile"
+payload = { id = 1 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "charging-profile: clearing it again is Unknown"
+action = "call"
+station = "${station}"
+call = "ClearChargingProfile"
+payload = { id = 1 }
+expect_status = "Unknown"
+
+# ---------------------------------------------------------------------------------------
+# 12 conformance-firmware-status
+
+[[steps]]
+name = "firmware-status: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:firmware-status" }
+timeout_ms = 30000
+
+[[steps]]
+name = "firmware-status: UpdateFirmware is answered"
+action = "call"
+station = "${station}"
+call = "UpdateFirmware"
+payload = { location = "https://example.com/firmware.bin", retrieveDate = "2020-01-01T00:00:00Z" }
+expect_payload = {}
+
+# ---------------------------------------------------------------------------------------
+# 13 conformance-diagnostics-status
+
+[[steps]]
+name = "diagnostics-status: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:diagnostics-status" }
+timeout_ms = 30000
+
+[[steps]]
+name = "diagnostics-status: GetDiagnostics is answered"
+action = "call"
+station = "${station}"
+call = "GetDiagnostics"
+payload = { location = "ftp://example.com/diagnostics" }
+expect_payload = {}
+
+# ---------------------------------------------------------------------------------------
+# 14 conformance-meter-values
+
+[[steps]]
+name = "meter-values: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:meter-values" }
+timeout_ms = 30000
+
+[[steps]]
+name = "meter-values: two sampled measurands are Accepted"
+action = "call"
+station = "${station}"
+call = "ChangeConfiguration"
+payload = { key = "MeterValuesSampledData", value = "Energy.Active.Import.Register,Power.Active.Import" }
+expect_status = "Accepted"
+
+# ---------------------------------------------------------------------------------------
+# 15 conformance-scripted-replies
+
+[[steps]]
+name = "scripted-replies: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:scripted-replies" }
+timeout_ms = 30000
+
+[[steps]]
+name = "scripted-replies: the scripted Reset answer is Rejected"
+action = "call"
+station = "${station}"
+call = "Reset"
+payload = { type = "Soft" }
+expect_status = "Rejected"
+
+[[steps]]
+name = "scripted-replies: the scripted UnlockConnector answer is a CALLERROR"
+action = "call"
+station = "${station}"
+call = "UnlockConnector"
+payload = { connectorId = 1 }
+expect_error = true

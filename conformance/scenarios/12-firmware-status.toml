@@ -1,0 +1,50 @@
+name = "conformance-firmware-status"
+description = "UpdateFirmware: the station reports Downloading, Downloaded, Installing and Installed, in that order"
+tags = ["conformance"]
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:firmware-status"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:firmware-status" }
+
+[[steps]]
+name = "UpdateFirmware arrives"
+action = "expect_call"
+call = "UpdateFirmware"
+direction = "in"
+
+[[steps]]
+name = "Downloading"
+action = "expect_call"
+call = "FirmwareStatusNotification"
+direction = "out"
+match = { status = "Downloading" }
+
+[[steps]]
+name = "Downloaded"
+action = "expect_call"
+call = "FirmwareStatusNotification"
+direction = "out"
+match = { status = "Downloaded" }
+
+[[steps]]
+name = "Installing"
+action = "expect_call"
+call = "FirmwareStatusNotification"
+direction = "out"
+match = { status = "Installing" }
+
+[[steps]]
+name = "Installed"
+action = "expect_call"
+call = "FirmwareStatusNotification"
+direction = "out"
+match = { status = "Installed" }

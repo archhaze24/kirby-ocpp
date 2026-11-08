@@ -1,0 +1,52 @@
+name = "conformance-meter-values"
+description = "MeterValues carries the configured measurands with their units, in the order of MeterValuesSampledData"
+tags = ["conformance"]
+
+# The CSMS script sets MeterValuesSampledData to
+# Energy.Active.Import.Register,Power.Active.Import and checks Accepted.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:meter-values"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:meter-values" }
+
+[[steps]]
+name = "ChangeConfiguration MeterValuesSampledData arrives"
+action = "expect_call"
+call = "ChangeConfiguration"
+direction = "in"
+match = { key = "MeterValuesSampledData" }
+
+[[steps]]
+action = "plug"
+connector = 1
+
+[[steps]]
+action = "start_tx"
+connector = 1
+id_tag = "CONF-TAG"
+
+[[steps]]
+action = "meter"
+connector = 1
+wh_delta = 1000
+
+[[steps]]
+name = "MeterValues holds exactly the two configured measurands"
+action = "expect_call"
+call = "MeterValues"
+direction = "out"
+match = { connectorId = 1, meterValue = [ { sampledValue = [ { context = "Sample.Periodic", format = "Raw", measurand = "Energy.Active.Import.Register", unit = "Wh", value = "1000" }, { context = "Sample.Periodic", format = "Raw", measurand = "Power.Active.Import", unit = "W" } ] } ] }
+
+[[steps]]
+action = "stop_tx"
+connector = 1
+reason = "Local"

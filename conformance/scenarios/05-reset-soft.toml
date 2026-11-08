@@ -1,0 +1,41 @@
+name = "conformance-reset-soft"
+description = "A soft Reset is accepted and the station registers again on the same connection"
+tags = ["conformance"]
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:reset-soft"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:reset-soft" }
+
+[[steps]]
+name = "Reset (Soft) arrives"
+action = "expect_call"
+call = "Reset"
+direction = "in"
+match = { type = "Soft" }
+
+[[steps]]
+name = "the station sends BootNotification again"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+timeout_ms = 10000
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the connection stayed up"
+action = "wait_for"
+condition = { kind = "connected" }

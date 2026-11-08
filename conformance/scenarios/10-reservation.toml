@@ -1,0 +1,49 @@
+name = "conformance-reservation"
+description = "ReserveNow reserves the connector, CancelReservation releases it"
+tags = ["conformance"]
+
+# The CSMS script sends ReserveNow, checks Accepted, and sends
+# CancelReservation once the station reports the connector as Reserved.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:reservation"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:reservation" }
+
+[[steps]]
+name = "ReserveNow arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { connectorId = 1, reservationId = 7, idTag = "CONF-TAG" }
+
+[[steps]]
+name = "the connector is Reserved"
+action = "wait_for"
+condition = { kind = "connector_status", connector = 1, status = "Reserved" }
+
+[[steps]]
+name = "tell the CSMS the connector is reserved"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:reservation-cancel"
+
+[[steps]]
+name = "CancelReservation arrives"
+action = "expect_call"
+call = "CancelReservation"
+direction = "in"
+match = { reservationId = 7 }
+
+[[steps]]
+name = "the connector is Available again"
+action = "wait_for"
+condition = { kind = "connector_status", connector = 1, status = "Available" }

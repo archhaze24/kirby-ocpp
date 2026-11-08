@@ -1,0 +1,61 @@
+name = "conformance-boot-pending"
+description = "BootNotification answered Pending: the station stays pending and sends BootNotification again after the interval until it is accepted"
+tags = ["conformance"]
+
+# The CSMS script answers the next two BootNotification CALLs with
+# status Pending and interval 1, then sends the go message. The third one
+# gets the normal Accepted answer.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:boot-pending"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:boot-pending" }
+
+[[steps]]
+name = "the CSMS has prepared its answers"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby.conformance", messageId = "go:boot-pending" }
+
+[[steps]]
+action = "boot"
+
+[[steps]]
+name = "the registration is pending"
+action = "wait_for"
+condition = { kind = "registration", status = "Pending" }
+
+[[steps]]
+name = "first BootNotification"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+
+[[steps]]
+name = "BootNotification again after the interval"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+timeout_ms = 5000
+
+[[steps]]
+name = "BootNotification once more"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+timeout_ms = 5000
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 5000

@@ -1,0 +1,59 @@
+name = "conformance-trigger-message"
+description = "TriggerMessage makes the station send the requested message, in the order requested"
+tags = ["conformance"]
+
+# The CSMS script sends one TriggerMessage per message below, in this order,
+# and checks that every one is Accepted.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:trigger-message"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:trigger-message" }
+
+[[steps]]
+name = "triggered Heartbeat"
+action = "expect_call"
+call = "Heartbeat"
+direction = "out"
+
+[[steps]]
+name = "triggered MeterValues for connector 1"
+action = "expect_call"
+call = "MeterValues"
+direction = "out"
+match = { connectorId = 1 }
+
+[[steps]]
+name = "triggered DiagnosticsStatusNotification"
+action = "expect_call"
+call = "DiagnosticsStatusNotification"
+direction = "out"
+match = { status = "Idle" }
+
+[[steps]]
+name = "triggered FirmwareStatusNotification"
+action = "expect_call"
+call = "FirmwareStatusNotification"
+direction = "out"
+match = { status = "Idle" }
+
+[[steps]]
+name = "triggered StatusNotification for connector 1"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { connectorId = 1, status = "Available" }
+
+[[steps]]
+name = "triggered BootNotification"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"

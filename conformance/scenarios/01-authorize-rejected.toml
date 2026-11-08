@@ -1,0 +1,55 @@
+name = "conformance-authorize-rejected"
+description = "A refused idTag: Authorize answered Blocked, StartTransaction answered Invalid (the transaction ends with DeAuthorized)"
+tags = ["conformance"]
+
+# The CSMS script answers the next Authorize with Blocked and the next
+# StartTransaction with Invalid, then sends the go message.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:authorize-rejected"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:authorize-rejected" }
+
+[[steps]]
+name = "the CSMS has prepared its answers"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby.conformance", messageId = "go:authorize-rejected" }
+
+[[steps]]
+name = "Authorize is answered Blocked"
+action = "authorize"
+id_tag = "CONF-BLOCKED"
+expect = { status = "Blocked" }
+
+[[steps]]
+action = "plug"
+connector = 1
+
+[[steps]]
+name = "StartTransaction is answered Invalid"
+action = "start_tx"
+connector = 1
+id_tag = "CONF-INVALID"
+expect = { status = "Invalid" }
+
+[[steps]]
+name = "the refused transaction is closed with DeAuthorized"
+action = "expect_call"
+call = "StopTransaction"
+direction = "out"
+match = { transactionId = 9001, reason = "DeAuthorized" }
+
+[[steps]]
+name = "no transaction is left on the connector"
+action = "wait_for"
+condition = { kind = "tx_idle", connector = 1 }

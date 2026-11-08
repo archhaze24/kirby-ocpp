@@ -1,0 +1,36 @@
+name = "conformance-diagnostics-status"
+description = "GetDiagnostics: the station reports Uploading and Uploaded, in that order"
+tags = ["conformance"]
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:diagnostics-status"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:diagnostics-status" }
+
+[[steps]]
+name = "GetDiagnostics arrives"
+action = "expect_call"
+call = "GetDiagnostics"
+direction = "in"
+
+[[steps]]
+name = "Uploading"
+action = "expect_call"
+call = "DiagnosticsStatusNotification"
+direction = "out"
+match = { status = "Uploading" }
+
+[[steps]]
+name = "Uploaded"
+action = "expect_call"
+call = "DiagnosticsStatusNotification"
+direction = "out"
+match = { status = "Uploaded" }

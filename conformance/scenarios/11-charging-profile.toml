@@ -1,0 +1,54 @@
+name = "conformance-charging-profile"
+description = "SetChargingProfile accepts a valid profile and refuses one above the stack level limit; GetCompositeSchedule and ClearChargingProfile follow"
+tags = ["conformance"]
+
+# The CSMS script sends the five calls below, in this order, and checks the
+# answers (Accepted, Rejected, Accepted, Accepted, Accepted then Unknown).
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:charging-profile"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:charging-profile" }
+
+[[steps]]
+name = "SetChargingProfile arrives"
+action = "expect_call"
+call = "SetChargingProfile"
+direction = "in"
+match = { connectorId = 1 }
+
+[[steps]]
+name = "SetChargingProfile with a stack level over the limit arrives"
+action = "expect_call"
+call = "SetChargingProfile"
+direction = "in"
+match = { connectorId = 1 }
+
+[[steps]]
+name = "GetCompositeSchedule arrives"
+action = "expect_call"
+call = "GetCompositeSchedule"
+direction = "in"
+match = { connectorId = 1 }
+
+[[steps]]
+name = "ClearChargingProfile arrives"
+action = "expect_call"
+call = "ClearChargingProfile"
+direction = "in"
+match = { id = 1 }
+
+[[steps]]
+name = "ClearChargingProfile of the cleared profile arrives"
+action = "expect_call"
+call = "ClearChargingProfile"
+direction = "in"
+match = { id = 1 }

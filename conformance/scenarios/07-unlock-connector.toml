@@ -1,0 +1,30 @@
+name = "conformance-unlock-connector"
+description = "UnlockConnector on a known connector is Unlocked, on an unknown connector NotSupported"
+tags = ["conformance"]
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:unlock-connector"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:unlock-connector" }
+
+[[steps]]
+name = "UnlockConnector for connector 1 arrives"
+action = "expect_call"
+call = "UnlockConnector"
+direction = "in"
+match = { connectorId = 1 }
+
+[[steps]]
+name = "UnlockConnector for an unknown connector arrives"
+action = "expect_call"
+call = "UnlockConnector"
+direction = "in"
+match = { connectorId = 99 }

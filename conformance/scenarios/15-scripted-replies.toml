@@ -1,0 +1,52 @@
+name = "conformance-scripted-replies"
+description = "The station answers CSMS commands with scripted replies: a Rejected Reset and a CALLERROR for UnlockConnector"
+tags = ["conformance"]
+
+# The CSMS script sends Reset (Soft) and UnlockConnector for connector 1 and
+# checks that it receives the scripted answers.
+
+[[steps]]
+name = "the next Reset is answered Rejected"
+action = "reply"
+call = "Reset"
+result = { status = "Rejected" }
+must_fire = true
+
+[[steps]]
+name = "the next UnlockConnector is answered with a CALLERROR"
+action = "reply"
+call = "UnlockConnector"
+error = { code = "NotSupported", description = "no lock on this connector" }
+must_fire = true
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:scripted-replies"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:scripted-replies" }
+
+[[steps]]
+name = "Reset arrives"
+action = "expect_call"
+call = "Reset"
+direction = "in"
+match = { type = "Soft" }
+
+[[steps]]
+name = "UnlockConnector arrives"
+action = "expect_call"
+call = "UnlockConnector"
+direction = "in"
+match = { connectorId = 1 }
+
+[[steps]]
+name = "the rejected Reset did not restart the station"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }

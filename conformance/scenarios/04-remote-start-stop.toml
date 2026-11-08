@@ -1,0 +1,62 @@
+name = "conformance-remote-start-stop"
+description = "RemoteStartTransaction starts a transaction with the given idTag, RemoteStopTransaction ends it with reason Remote"
+tags = ["conformance"]
+
+# The CSMS script answers the next StartTransaction with transaction id 4242,
+# sends RemoteStartTransaction, and sends RemoteStopTransaction for 4242 once
+# the station reports that it is ready for it.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:remote-start"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby.conformance", messageId = "ready:remote-start" }
+
+[[steps]]
+name = "RemoteStartTransaction arrives"
+action = "expect_call"
+call = "RemoteStartTransaction"
+direction = "in"
+match = { idTag = "CONF-TAG", connectorId = 1 }
+
+[[steps]]
+name = "the station starts the transaction for that idTag"
+action = "expect_call"
+call = "StartTransaction"
+direction = "out"
+match = { connectorId = 1, idTag = "CONF-TAG" }
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", connector = 1 }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "ready:remote-stop"
+
+[[steps]]
+name = "RemoteStopTransaction arrives"
+action = "expect_call"
+call = "RemoteStopTransaction"
+direction = "in"
+match = { transactionId = 4242 }
+
+[[steps]]
+name = "the station stops the transaction with reason Remote"
+action = "expect_call"
+call = "StopTransaction"
+direction = "out"
+match = { transactionId = 4242, reason = "Remote" }
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", connector = 1 }
