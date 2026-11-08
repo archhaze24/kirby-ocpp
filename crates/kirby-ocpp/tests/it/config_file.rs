@@ -216,7 +216,7 @@ fn relative_paths_resolve_against_the_file_directory() {
         ("tls_ca", "certs/ca.pem"),
         ("log_file", "x.log"),
     ] {
-        let expected = base.join(rest);
+        let expected = std::path::absolute(base.join(rest)).unwrap();
         let line = format!("{key} = {:?}", expected.to_str().unwrap());
         assert!(text.contains(&line), "missing `{line}` in:\n{text}");
     }

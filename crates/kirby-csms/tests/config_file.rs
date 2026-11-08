@@ -79,6 +79,11 @@ fn write(dir: &Path, name: &str, text: &str) -> String {
     path.to_str().unwrap().to_owned()
 }
 
+/// `text` as a TOML basic string (backslashes of Windows paths escaped).
+fn toml_str(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\"))
+}
+
 /// The effective configuration as TOML text; the command must succeed.
 fn print(args: &[&str], env: &[(&str, &str)]) -> String {
     let mut all = args.to_vec();
@@ -246,9 +251,12 @@ times = 2
         "{first}"
     );
     assert!(first.contains("validate_inbound = false"), "{first}");
-    let keys_path = format!("{}", dir.path().join("keys.txt").display());
+    let keys_path = dir.path().join("keys.txt");
     assert!(
-        first.contains(&format!("auth_keys_file = \"{keys_path}\"")),
+        first.contains(&format!(
+            "auth_keys_file = {}",
+            toml_str(keys_path.to_str().unwrap())
+        )),
         "{first}"
     );
 
@@ -572,7 +580,10 @@ fn a_set_token_variable_wins_over_a_token_file_of_the_file() {
     let file = write(
         dir.path(),
         "csms.toml",
-        &format!("[api]\napi_listen = \"127.0.0.1:0\"\napi_token_file = \"{token}\"\n"),
+        &format!(
+            "[api]\napi_listen = \"127.0.0.1:0\"\napi_token_file = {}\n",
+            toml_str(&token)
+        ),
     );
     let printed = print(&["--config", &file], &[("KIRBY_CSMS_API_TOKEN", "fromenv")]);
     assert!(!printed.contains("api_token_file ="), "{printed}");
@@ -590,26 +601,36 @@ fn relative_paths_resolve_against_the_file_directory() {
         "[output]\nlog_file = \"events.log\"\n[security]\nauth_keys_file = \"keys/all.txt\"\nsecurity_profile = 1\n[[station]]\nid = \"CP\"\nauth_key_file = \"cp.key\"\n",
     );
     let printed = print(&["--config", &file], &[]);
-    let base = nested.display();
+    let line = |key: &str, rest: &str| {
+        // Printed paths are normalized by `std::path::absolute` (backslashes on Windows).
+        let joined = std::path::absolute(nested.join(rest)).unwrap();
+        format!("{key} = {}", toml_str(joined.to_str().unwrap()))
+    };
     assert!(
-        printed.contains(&format!("log_file = \"{base}/events.log\"")),
+        printed.contains(&line("log_file", "events.log")),
         "{printed}"
     );
     assert!(
-        printed.contains(&format!("auth_keys_file = \"{base}/keys/all.txt\"")),
+        printed.contains(&line("auth_keys_file", "keys/all.txt")),
         "{printed}"
     );
     assert!(
-        printed.contains(&format!("auth_key_file = \"{base}/cp.key\"")),
+        printed.contains(&line("auth_key_file", "cp.key")),
         "{printed}"
     );
     // A path given by flag keeps resolving against the working directory.
     let flagged = print(&["--config", &file, "--log-file", "here.log"], &[]);
     let cwd = std::env::current_dir().unwrap();
-    assert!(
-        flagged.contains(&format!("log_file = \"{}/here.log\"", cwd.display())),
-        "{flagged}"
+    let here = format!(
+        "log_file = {}",
+        toml_str(
+            std::path::absolute(cwd.join("here.log"))
+                .unwrap()
+                .to_str()
+                .unwrap()
+        )
     );
+    assert!(flagged.contains(&here), "{flagged}");
 }
 
 /// A running `kirby-csms` (JSON mode); killed on drop.

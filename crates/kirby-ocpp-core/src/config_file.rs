@@ -1080,9 +1080,10 @@ mod tests {
                 .contains("UTF-8")
         );
         let directory = load(dir.path(), &SCHEMA, None).expect_err("must fail");
+        // Opening a directory fails on Windows ("Access is denied") before the file type check.
         assert!(
-            directory.to_string().contains("not a regular file")
-                || directory.to_string().contains("directory")
+            directory.to_string().starts_with("configuration file "),
+            "{directory}"
         );
     }
 
@@ -1124,7 +1125,8 @@ mod tests {
         let list = plain.blocks("entry");
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].text("id"), Some("a"));
-        assert_eq!(list[0].text("file"), Some("/etc/k/k/a.key"));
+        let expected = std::path::absolute("/etc/k").expect("abs").join("k/a.key");
+        assert_eq!(list[0].text("file"), expected.to_str());
         assert_eq!(list[1].integer("count"), Some(2));
         let chosen = parse(text, Some("p")).expect("valid");
         assert_eq!(chosen.blocks("entry").len(), 1);
@@ -1156,11 +1158,16 @@ mod tests {
     #[test]
     fn blocks_render_and_round_trip() {
         let values = [("ws_ping", Value::Integer(5))];
+        let key_path = std::path::absolute("/x/a.key")
+            .expect("abs")
+            .to_str()
+            .expect("utf8")
+            .to_owned();
         let blocks = [(
             "entry",
             vec![
                 vec![
-                    ("file", Value::Text("/x/a.key".to_owned())),
+                    ("file", Value::Text(key_path.clone())),
                     ("id", Value::Text("a".to_owned())),
                 ],
                 vec![
@@ -1172,7 +1179,10 @@ mod tests {
         let text = render_with_blocks(&SCHEMA, &values, &blocks, &[]);
         let parsed = parse(&text, None).expect("rendered text parses");
         assert_eq!(parsed.blocks("entry").len(), 2);
-        assert_eq!(parsed.blocks("entry")[0].text("file"), Some("/x/a.key"));
+        assert_eq!(
+            parsed.blocks("entry")[0].text("file"),
+            Some(key_path.as_str())
+        );
         let json = render_json(&SCHEMA, &values, &blocks);
         assert_eq!(json["connection"]["ws_ping"], 5);
         assert_eq!(json["entry"][1]["count"], 3);
