@@ -7,7 +7,7 @@ Two TOML formats drive a test run without a human:
 
 Both stop at the first failing step, print a PASS/FAIL/SKIP report, can write a JSON report and a JUnit XML file, and use the same exit codes ([Exit codes](configuration.md#exit-codes)).
 
-Contents: [Emulator scenarios](#emulator-scenarios) · [Running scenarios](#running-scenarios) · [Suite runs](#suite-runs) · [Fleet runs](#fleet-runs) · [CSMS scripts](#csms-scripts) · [Reports](#reports) · [Related pages](#related-pages)
+Contents: [Emulator scenarios](#emulator-scenarios) · [Running scenarios](#running-scenarios) · [Suite runs](#suite-runs) · [Conformance family](#conformance-family) · [Fleet runs](#fleet-runs) · [CSMS scripts](#csms-scripts) · [Reports](#reports) · [Related pages](#related-pages)
 
 ## Emulator scenarios
 
@@ -119,8 +119,8 @@ Rules:
 - `${name}` is replaced right before the step runs, so a variable captured by an earlier step is visible. An unknown variable, a malformed `${` or a bad result fails that step with a message naming the variable.
 - A string that is exactly `${name}` takes the variable's JSON type (`connectorId = "${n}"` sends a number when `n` is a number). Inside longer text the variable becomes text: strings without quotes, booleans as `true` or `false`, and numbers as written on the command line (`--var n=1.50` gives `1.50`, `--var n=1e3` gives `1e3`); a number declared in `[vars]` prints in its canonical form (`1.5`). An exact `"${n}"` still sends the number as a JSON number. An object or array inside longer text is an error.
 - `$${` is a literal `${`.
-- Substituted fields: the JSON of `payload` and `match`, `expect.status`, `expect.payload`, and the string fields `id_tag`, `call`, `vendor_id`, `message_id`, `data`, `info`, `tech_info`, `event_type`, `rule`.
-  - Typed fields (`connector`, `reason`, `status`, `error_code`, `wh_delta`, `ms`, `timeout_ms`, `condition`, `direction`, `validate`) are never substituted: a variable cannot make a connector number or a timeout.
+- Substituted fields: the JSON of `payload`, `match`, `result` and `error`, `expect.status`, `expect.payload`, and the string fields `id_tag`, `call`, `vendor_id`, `message_id`, `data`, `info`, `tech_info`, `event_type`, `rule`.
+  - Typed fields (`connector`, `reason`, `status`, `error_code`, `wh_delta`, `ms`, `timeout_ms`, `condition`, `direction`, `validate`, `times`, `delay_ms`, `must_fire`) are never substituted: a variable cannot make a connector number or a timeout.
   - A placeholder in `id_tag` is checked at load time as plain text (at most 20 characters), the substituted value again when the step runs.
   - `rule`, `event_type` and `clear_rules` `call` with a `${name}` placeholder are validated only when the step runs; text that only contains `$${` escapes is validated at load time after unescaping. One substitution may produce at most about 1 MiB (serialized); a larger result fails the step.
   - Values that come from the CSMS (captured variables, answers) are cut to about 200 characters in failure reasons.
@@ -187,6 +187,7 @@ Every step has `action` plus the fields of that action, and may add `name` (show
 | `data_transfer` | `vendor_id`, optional `message_id`, `data` | Send DataTransfer |
 | `set_rule` | `rule` | Add a [response rule](emulator.md#response-rules), for example `"Reset=reject*2"` |
 | `clear_rules` | optional `call` | Remove the rule of one command, or all rules when omitted |
+| `reply` | `call`, exactly one of `result` and `error`, optional `times` (default 1), `delay_ms` (default 0), `must_fire` (default `false`) | Answer the next CSMS CALL(s) of that command with a scripted CALLRESULT or CALLERROR, see [reply](#reply) |
 | `request_certificate` | none | Security Whitepaper: key pair, CSR and `SignCertificate` |
 | `repeat` | `count`, optional `var`, nested `steps` | Run the nested steps `count` times, see [Loops](#loops) |
 | `security_event` | `event_type`, optional `tech_info` | Send SecurityEventNotification; the event type (case-insensitive, one of the whitepaper's 21 names) is checked when the file loads |
@@ -222,6 +223,48 @@ Waits for a CALL frame, sent (`direction = "out"`) or received (`"in"`), whose a
 The CALLs it considers are those seen since the previous matched `expect_call` (or the scenario start), so a CALL sent before the step still counts. A match consumes everything up to it; later `expect_call` steps cannot match the same CALL. The runner remembers only CALLs some `expect_call` names, and keeps a payload only if some step uses `match`. At most 10 000 unmatched CALLs (about 16 MiB) are kept.
 
 If events were lost because the runner fell behind and the wanted CALL is not among the frames seen before the loss, the step fails with "the scenario runner fell behind"; it reports the loss once, so it does not poison later `expect_call` steps.
+
+### reply
+
+`reply` scripts the station's answer to a command the CSMS sends. Where [`set_rule`](emulator.md#response-rules) makes the station misbehave in a fixed way, `reply` gives the exact CALLRESULT payload or CALLERROR, so a scenario can test how the CSMS handles a refusal, an odd status or an error it did not expect.
+
+```toml
+[[steps]]
+action = "reply"
+call = "Reset"                       # a command the station handles; case-insensitive
+result = { status = "Rejected" }     # the CALLRESULT payload ...
+
+[[steps]]
+action = "reply"
+call = "UnlockConnector"
+error = { code = "NotSupported", description = "no lock on this connector", details = {} }   # ... or a CALLERROR
+times = 2                            # answer the next two CALLs (default 1)
+delay_ms = 500                       # hold each answer back (default 0)
+must_fire = true                     # fail the step when the reply was not used up (default false)
+```
+
+Keys:
+
+| Key | Meaning |
+| --- | --- |
+| `call` | The action of the CSMS command to answer: one of the 26 commands the station handles (the list of [response rules](emulator.md#response-rules)), case-insensitive. Required. |
+| `result` | The CALLRESULT payload, a table sent as given. It is checked against the OCPP response schema of `call` when the file loads (unless it holds a `${...}` placeholder, then when the step runs); the station never sends an answer that breaks the schema. |
+| `error` | A CALLERROR: `code` (one of the ten OCPP 1.6 error codes, case-insensitive; required), `description` (default empty) and `details` (a table, default `{}`). |
+| `times` | How many CALLs the reply answers, 1 to 1000 (default 1). |
+| `delay_ms` | Milliseconds to hold each answer back, 0 to 3600000 (default 0). The station keeps working meanwhile. |
+| `must_fire` | When `true`, the `reply` step is reported as failed if the reply was not used up (all `times` answered) by the end of the scenario. Default `false`. |
+
+Exactly one of `result` and `error` is required. `capture` on a `reply` is a load error and `expect` has no effect; to read the CALL it answers, follow it with an [`expect_call`](#expect_call) of direction `in`. Unknown keys are load errors, and `evse` and `id_token` stay reserved.
+
+Semantics:
+
+- The step arms the reply and finishes at once. The first matching CSMS CALL after that is answered by the reply instead of the station's own handler, which does not run: the station state does not change (a scripted `Accepted` for `RemoteStartTransaction` starts nothing). A CALL that arrived before the step was answered normally.
+- Replies are used oldest first. A reply with `times = 3` answers three CALLs of its action and is then gone; replies of different actions are independent.
+- A scripted reply takes precedence over a [response rule](emulator.md#response-rules) for the same action. The rule is not used up by it and applies to later CALLs.
+- Every CALL still gets exactly one answer: the scripted one, delayed or not.
+- Order with `expect_call`: arm the reply first, then use `expect_call` with `direction = "in"` to wait for the CALL. The `expect_call` sees the CALL whichever way the station answered it. The CSMS side sees the scripted answer, so a CSMS script or the CSMS under test asserts on it.
+- Nothing armed outlives the scenario: when the last step ends (passed, failed or cancelled) the unused replies are removed, so the next scenario on the same station starts clean. An unused reply is no failure unless the step says `must_fire = true`; the failure is shown on that `reply` step in the final report, and only when the scenario did not fail earlier for another reason.
+- At most 256 replies can be armed at once.
 
 ### Expect
 
@@ -379,6 +422,62 @@ status=$?
 wait $CSMS || status=1
 exit $status
 ```
+
+## Conformance family
+
+The repository ships a family of scenarios tagged `conformance` that checks how a station behaves when the central system sends its commands and misbehaves: refused tags, `Pending` and `Rejected` boot answers, remote start and stop, resets, unlock, trigger messages, configuration, reservation, charging profiles, firmware and diagnostics status sequences, meter value formats and scripted replies. The files are in `conformance/scenarios/` (`01-authorize-rejected.toml` to `15-scripted-replies.toml`, scenario names `conformance-<topic>`), next to the script that drives them, `conformance/csms-script.toml`. They live in the source tree, not in the [built-in scenarios](#built-in-scenarios), and are not part of the release archives; the commands below run from a checkout.
+
+Why not built-ins: every scenario needs a peer that sends CALLs and prepares answers, so none passes against a passive central system. `suite --all-builtins`, `scenarios list` and the nine built-ins are unchanged.
+
+### How the two sides are driven
+
+A scenario runs on an emulated station; a [CSMS script](#csms-scripts) runs in `kirby-csms`. They meet through DataTransfer messages of vendor `kirby.conformance`:
+
+1. The scenario opens with a DataTransfer whose `messageId` is `ready:<topic>`. The script section for that topic waits for it (`wait_call`).
+2. The script prepares what the scenario needs (`inject_fault` with kind `invalid_payload` answers the next CALLs of an action with a given payload and uses itself up, so nothing leaks into the next scenario), and sends the CSMS commands. Where the scenario must not act before the preparation is done, the script sends `go:<topic>` and the scenario waits for it with `expect_call` of direction `in`.
+3. A second `ready:<topic>-...` message from the scenario lets the script continue after a state change it has to wait for (for example the running transaction before `RemoteStopTransaction`).
+4. The scenario asserts what the station sent and its state (`expect_call`, `wait_for`); the script asserts the answers to its commands (`expect_status`, `expect_payload`, `expect_error`). Both verdicts count: `suite` and `kirby-csms --script` each exit 0 only when everything passed.
+
+Every scenario uses `expect_call` on its own `ready:` message to start its observation window, so frames from the station's startup are not mistaken for the ones under test.
+
+```bash
+kirby-csms --listen 127.0.0.1:9000 --no-tui --script conformance/csms-script.toml --timeout 180 --junit csms-junit.xml &
+CSMS=$!
+kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-CONF --no-tui suite conformance/scenarios \
+  --tag conformance --junit junit.xml --report suite.json
+status=$?
+wait $CSMS || status=1
+exit $status
+```
+
+Rules for a run:
+
+- Use the station id `CP-CONF` (the script's variable `station`; `kirby-csms --script ... --var station=ID` and `suite --id ID` change both).
+- Run the whole family in one go, in file order, with the default `--jobs 1` and without `--retries`: the script waits for the scenarios in order, and a repeated scenario would find the script already past its section. To run a subset, copy the script and keep only the sections of those topics (each section is a block between the `# NN conformance-...` comment lines, in the order of the scenario files).
+- A run takes about six seconds. A scenario against a central system that never sends the commands (for example a plain `kirby-csms`) fails at its first `expect_call` of direction `in`.
+- To use another central system as the sender, make it send the commands of a scenario, with the payloads of the script section, after it received the scenario's `ready:` message; the table below and the sections of the script list the commands and answers.
+
+| Scenario | The script sends or prepares | The scenario asserts |
+| --- | --- | --- |
+| `conformance-authorize-rejected` | Next Authorize answered `Blocked`, next StartTransaction answered `Invalid` with transaction id 9001 | Authorize status `Blocked`; `start_tx` status `Invalid`; a StopTransaction for 9001 with reason `DeAuthorized`; no transaction left on connector 1 |
+| `conformance-boot-pending` | Next two BootNotification CALLs answered `Pending` with interval 1 | Registration `Pending`; the BootNotification CALLs are sent again (three in all); registration `Accepted` after the normal answer |
+| `conformance-boot-rejected` | The same with `Rejected` | The same with `Rejected` |
+| `conformance-remote-start-stop` | StartTransaction answered with id 4242; RemoteStartTransaction (connector 1, idTag `CONF-TAG`), then RemoteStopTransaction for 4242; both must be `Accepted` | The commands arrive; StartTransaction for the tag and connector; transaction active; StopTransaction 4242 with reason `Remote`; connector idle |
+| `conformance-reset-soft` | Reset `Soft`, must be `Accepted` | Reset arrives; a new BootNotification on the same connection; registration `Accepted`; still connected |
+| `conformance-reset-hard` | Reset `Hard`, must be `Accepted` | Reset arrives; a BootNotification after the station reconnected; registration `Accepted`; connected |
+| `conformance-unlock-connector` | UnlockConnector for connector 1 (`Unlocked`) and 99 (`NotSupported`) | Both commands arrive |
+| `conformance-trigger-message` | TriggerMessage for Heartbeat, MeterValues (connector 1), DiagnosticsStatusNotification, FirmwareStatusNotification, StatusNotification (connector 1) and BootNotification, each `Accepted` | The messages arrive in that order, with status `Idle`, `Idle` and `Available` where the message has one |
+| `conformance-configuration` | ChangeConfiguration `HeartbeatInterval=60` (`Accepted`), GetConfiguration returning the new value, a change of read-only `NumberOfConnectors` (`Rejected`), an unknown key (`NotSupported`), GetConfiguration listing it in `unknownKey` | The five commands arrive |
+| `conformance-reservation` | ReserveNow (connector 1, id 7, idTag `CONF-TAG`, expiry in 2099; `Accepted`), then CancelReservation 7 (`Accepted`) | Connector 1 `Reserved`, then `Available` again |
+| `conformance-charging-profile` | SetChargingProfile with a valid profile (`Accepted`) and with stack level 9999 (`Rejected`), GetCompositeSchedule (`Accepted`), ClearChargingProfile 1 (`Accepted`, then `Unknown`) | The commands arrive |
+| `conformance-firmware-status` | UpdateFirmware with a retrieve date in the past | FirmwareStatusNotification `Downloading`, `Downloaded`, `Installing`, `Installed`, in order |
+| `conformance-diagnostics-status` | GetDiagnostics | DiagnosticsStatusNotification `Uploading`, `Uploaded`, in order |
+| `conformance-meter-values` | ChangeConfiguration `MeterValuesSampledData=Energy.Active.Import.Register,Power.Active.Import` (`Accepted`) | A MeterValues with exactly those two samples after `meter`: context `Sample.Periodic`, format `Raw`, units `Wh` and `W`, energy `1000` |
+| `conformance-scripted-replies` | Reset (`Soft`) and UnlockConnector, expecting a `Rejected` Reset answer and a CALLERROR | Two [`reply`](#reply) steps with `must_fire`; both commands arrive; the station stayed registered |
+
+The scenarios stop at the first failing step like any scenario, with the step name in the report (`PASS conformance-reset-soft`, `FAIL conformance-reset-soft: Reset (Soft) arrives - timed out ...`). They appear in reports and JUnit like any other scenario; the scenario names are stable, and the family grows by new files and by new sections in the script.
+
+A test in the `kirby-csms` crate (`tests/conformance.rs`) runs the whole family against the real `kirby-csms` binary and the script.
 
 ## Fleet runs
 
@@ -668,6 +767,8 @@ These are public contracts and follow Semantic Versioning:
 * The scenario and script file format. New optional keys and actions are minor changes. Removing or renaming a key, or changing what a valid file means, is a major change. The `schema` key names the format version; a build refuses a schema it does not know instead of guessing.
 * The JSON report. Fields are added in minor releases and never renamed or removed within one `schema`. Consumers must ignore fields they do not know. A breaking change increments `schema`.
 * The JUnit layout (suite and case names, properties) is part of the report contract. Test case names are stable labels so that CI history can follow a test across runs.
+* The `reply` step: its keys (`call`, `result`, `error`, `times`, `delay_ms`, `must_fire`) and the rules above. Version-neutral by design: an OCPP 2.x build keeps the keys and takes the action names and payloads of its protocol.
+* The conformance family: scenario names (`conformance-<topic>`), the tag `conformance`, the `kirby.conformance` handshake and the station id `CP-CONF`. Scenarios and script sections are added in minor releases; a scenario is not renamed within a major version.
 * Flag names. A flag is not renamed within a major version. `--ocpp-version`, `--protocol` and `--format` are reserved for future use; `suite` therefore selects GitHub output with the plain switch `--github-annotations`.
 
 ## Related pages

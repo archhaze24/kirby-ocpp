@@ -98,6 +98,33 @@ Expected: three `PASS` lines and `PASSED`, exit 0. Against a CSMS that accepts t
 
 Reference: [Expect](scenarios.md#expect), [CSMS scripts](scenarios.md#csms-scripts), [HTTP API](api.md#rules-and-faults).
 
+## Answer a CSMS command with a scripted reply
+
+Goal: see how a CSMS reacts when the station refuses a command or fails it with a CALLERROR. A `reply` step arms the answer; the next matching command gets it instead of the station's own handler.
+
+```toml
+# refused-reset.toml
+name = "refused-reset"
+
+[[steps]]
+action = "reply"
+call = "Reset"
+result = { status = "Rejected" }
+must_fire = true                    # fail when the CSMS never sent the Reset
+
+[[steps]]
+action = "expect_call"
+call = "Reset"
+direction = "in"
+timeout_ms = 60000                  # time to send a Reset from the CSMS
+```
+
+```bash
+kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-1 --no-tui run --scenario refused-reset.toml
+```
+
+The scenario waits for a `Reset` from the central system, answers it `Rejected` and passes; the station does not restart. [reply](scenarios.md#reply) has `error`, `times` and `delay_ms`. The [conformance family](scenarios.md#conformance-family) uses the same step with a script that sends the commands.
+
 ## Lost connection and reconnect
 
 Goal: check what your CSMS does when a station drops, and that the station comes back.

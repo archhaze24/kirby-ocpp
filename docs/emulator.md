@@ -40,14 +40,24 @@ Seven tabs, switched with `1`-`7` or `Tab`/`Shift-Tab`: Station, Connector, Tran
 | `[` `]` | Previous / next connector |
 | `Enter` | Run the selected action / open the selected log row |
 | letters | Accelerator of an action of the current tab (shown in the list) |
-| `/`, `:` or `Ctrl-P` | Command palette (fuzzy search over all actions); `/` searches the log when the log pane is focused on the Logs tab |
+| `:` or `Ctrl-P` | Command palette (fuzzy search over all actions) |
+| `/` | Search where the screen has a search (the log pane on the Logs tab, the data browser); anywhere else it opens the command palette |
+| `W` | Pending commands with their elapsed time; `x` or `Delete` cancels the selected one, `Esc` closes (see below) |
 | `Esc` | Close a dialog; in the main view, clear the log search |
 | `?` | Help (`Esc`, `?`, `q` or `Enter` closes it) |
 | `q`, `Ctrl-C` | Quit. Asks first (default No) while a scenario is running, a connector has an active transaction, or the fleet has more than one station; a second `Ctrl-C` while the question is open quits at once. In a form, the data browser or another view, `Ctrl-C` asks the same way and a "no" brings the view back; during another confirmation it quits at once |
 
 Confirmations (quit, clear log, clear list, ...) accept only `y`/`Y`; any other key cancels. The quit question also accepts `q`.
 
-The footer always ends with the `? help` and `: palette` hints, even in a narrow terminal; other hints are dropped first. While a command that waits for the CSMS is in flight (from a key, the palette or a form), the footer shows `waiting... <action>` until the result arrives; a notice takes that line while it is shown, and the marker is dropped when the connection goes down.
+The footer always ends with the `? help` and `: palette` hints, even in a narrow terminal; other hints are dropped first. The hints list only keys that work in the current pane: the log letters (`y`, `f`, `s`, `p`) are accelerators of the Logs tab, so on other tabs a focused log pane hints `Enter detail` and `6 log keys`. While a command that waits for the CSMS is in flight (from a key, the palette or a form), the footer shows `waiting... <action> <elapsed>` until the result arrives and a `W pending` hint; a notice takes that line while it is shown, and the marker is dropped when the connection goes down.
+
+#### Pending commands
+
+`W` (or `Pending calls...` on the Station tab or in the palette) lists the commands that wait for the CSMS, oldest first, with the time since they were sent (`7s`, `1m05s`; the list updates every second). `x` cancels the selected row: the UI stops waiting and the command completes with a `cancelled` error. The cancel goes to the station, which forgets the oldest unanswered call of that action: an answer that still arrives is logged as a frame and ignored. The CALL itself is already on the wire and cannot be recalled, so the station may keep waiting up to the call timeout before it sends the next call. Cancel covers plain calls (`BootNotification`, `Heartbeat`, `StatusNotification`, `DataTransfer`, the diagnostics and firmware status notifications, `Authorize` and raw calls). `StartTransaction`, `StopTransaction` and `MeterValues` are refused (the row says `no cancel`): the CSMS may already have acted on them, and the station state follows its answer. The list shows commands sent from the UI; calls the station makes by itself (heartbeats, meter values) appear only in the log.
+
+#### Monochrome
+
+Color is never the only cue. `--color never`, or a non-empty `NO_COLOR` (`--color always` wins over it), draws the UI without color: the connection chips, the active tab and selections are reverse video, errors and warnings are bold, dim text stays dim, and log lines and notices start with a marker (`i` info, `+` success, `!` warning, `x` error) instead of `●`. Frame rows already carry `CALL`/`RES`/`ERR` and `→`/`←`. `--time utc|local|none` sets the clock in front of log rows (default `utc`); copy and export always use UTC.
 
 First steps: the station connects and boots at startup, and the header shows the connection state. On the Station tab `x` disconnects and `c` connects again (pressing `c` while connected says so). Press `:` and type an action name (BootNotification, Heartbeat, StartTransaction) to run it, or open the Scenarios tab (`7`). Every frame lands in the log. The help popup (`?`) opens with the same hints; it wraps to the terminal width.
 
@@ -88,7 +98,7 @@ The data behind the pages (`Snapshot::config`, `local_list`, `charging_profiles`
 
 ### Log view
 
-Logs tab. Keys:
+Logs tab. `Enter` opens the detail of the selected row in the log pane of every tab; the letters below are accelerators of the Logs tab. Keys:
 
 | Key | Action |
 | --- | --- |
@@ -177,7 +187,9 @@ The check sends one BootNotification, so a Central System that registers or coun
 
 `run` and `suite` print the report only. `-v, --verbose` adds the frame and log lines as they happen (what plain headless mode always prints); `-q, --quiet` leaves only errors (stderr) and the final verdict line. `--json` keeps printing events as before. The exact output of each level is in the [configuration reference](configuration.md#output-levels). `--log-file` always gets the full event log.
 
-Human output (not `--json`, not the terminal UI) colors PASS green, FAIL red and SKIP and warnings yellow when `--color auto` (the default) finds a terminal and no `NO_COLOR` variable (set and not empty). `--color always` and `--color never` decide explicitly, also over `NO_COLOR`. Text from the CSMS is sanitized before it is colored, so it cannot add escape sequences.
+Human output (not `--json`, not the terminal UI) colors PASS green, FAIL red and SKIP and warnings yellow when `--color auto` (the default) finds a terminal and no `NO_COLOR` variable (set and not empty). `--color always` and `--color never` decide explicitly, also over `NO_COLOR`. Text from the CSMS is sanitized before it is colored, so it cannot add escape sequences. The terminal UI follows the same switch without needing a pipe check: `--color never` or `NO_COLOR` draws it [without color](#monochrome).
+
+`--time utc|local|none` (`KIRBY_OCPP_TIME`, `[output] time`) sets the clock in front of event and frame lines, in the terminal UI log and in human output: `utc` (the default, `HH:MM:SS.mmm`), `local` (the same in the time zone of this machine) or `none` (no prefix). `--json` keeps its own timestamp fields, and log copy and export keep UTC.
 
 ## Version, completions and validation
 

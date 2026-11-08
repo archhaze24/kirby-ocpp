@@ -2,7 +2,7 @@
 
 Use `kirby-ocpp` and `kirby-csms` as test runners: the exit code gates the job, JUnit XML feeds the test report, and the JSON report keeps the evidence. This page has ready workflows for GitHub Actions and GitLab CI, the exit-code and timeout rules, and a guide to reading failures.
 
-Contents: [Overview](#overview) · [GitHub Actions](#github-actions) · [GitLab CI](#gitlab-ci) · [Exit codes and timeouts](#exit-codes-and-timeouts) · [Reports](#reports) · [Read a failure](#read-a-failure) · [Avoid flaky runs](#avoid-flaky-runs) · [Related pages](#related-pages)
+Contents: [Overview](#overview) · [GitHub Actions](#github-actions) · [Conformance job](#conformance-job) · [GitLab CI](#gitlab-ci) · [Exit codes and timeouts](#exit-codes-and-timeouts) · [Reports](#reports) · [Read a failure](#read-a-failure) · [Avoid flaky runs](#avoid-flaky-runs) · [Related pages](#related-pages)
 
 ## Overview
 
@@ -105,6 +105,53 @@ kirby-ocpp --url ws://127.0.0.1:9000/ocpp suite scenarios/ --skip-tag slow --ski
 ```
 
 `--filter` and `--skip` take globs over the scenario name, `--tag` needs every given tag, `--skip-tag` drops on any. A selection that matches nothing exits 2, so a typo in a tag fails the job instead of passing with no tests.
+
+### Conformance job
+
+The scenarios of the [conformance family](scenarios.md#conformance-family) run against `kirby-csms` and its script, which sends the CSMS commands. A job in a checkout of the repository:
+
+```yaml
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install kirby
+        run: npm install -g kirby-ocpp kirby-csms
+
+      - name: Run the family
+        run: |
+          kirby-csms --listen 127.0.0.1:9000 --no-tui --script conformance/csms-script.toml \
+            --timeout 180 --junit csms-junit.xml --report csms-report.json > csms.log 2>&1 &
+          CSMS=$!
+          for _ in $(seq 50); do
+            grep -q '^listening on' csms.log && break
+            sleep 0.2
+          done
+          kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-CONF --no-tui \
+            suite conformance/scenarios --tag conformance \
+            --junit junit.xml --report suite.json --github-annotations
+          status=$?
+          wait $CSMS || status=1
+          exit $status
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: conformance
+          path: |
+            junit.xml
+            suite.json
+            csms-junit.xml
+            csms-report.json
+```
+
+The emulator and the script each exit non-zero when something failed, so the step needs both exit codes. Run the whole family in one go with `--jobs 1` (the default) and no `--retries`; the script waits for the scenarios in file order. A failure shows up in `junit.xml` (scenario and step) or in `csms-junit.xml` (the answer the station gave).
 
 ## GitLab CI
 

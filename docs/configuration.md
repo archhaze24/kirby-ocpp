@@ -86,7 +86,8 @@ Profiles and certificates are explained in [Security](security.md).
 | `--json` | | | One JSON object per line (events and the `run` report); never opens the UI. Never colored |
 | `-v, --verbose` | | off | `run` and `suite` also print the event and frame lines (see [Output levels](#output-levels)); excludes `--quiet` |
 | `-q, --quiet` | | off | `run` and `suite` print only errors and the final verdict line (see [Output levels](#output-levels)) |
-| `--color <WHEN>` | | `auto` | Colorize PASS (green), FAIL (red), SKIP and warnings (yellow) in human output: `auto` (only when stdout is a terminal and `NO_COLOR` is unset or empty), `always`, `never`. Explicit `always` or `never` wins over `NO_COLOR`; the terminal UI is unchanged |
+| `--color <WHEN>` | | `auto` | Colorize PASS (green), FAIL (red), SKIP and warnings (yellow) in human output: `auto` (only when stdout is a terminal and `NO_COLOR` is unset or empty), `always`, `never`. Explicit `always` or `never` wins over `NO_COLOR`. The terminal UI follows the same choice without a terminal check: `never` (or a non-empty `NO_COLOR`) draws it without color, with reverse video, bold and text markers instead |
+| `--time <ZONE>` | `KIRBY_OCPP_TIME` | `utc` | Clock in front of event and frame lines in the terminal UI log and in human output: `utc` (`HH:MM:SS.mmm`), `local` (this machine's time zone) or `none` (no prefix). `--json` timestamps, log copy and export are unchanged |
 | `--log-file <PATH>` | | none | Also append the event log to this file, with the UI too. A new file is created `0600` on unix (frames hold idTags); an existing file keeps its mode. A helper thread writes it; lines that cannot be written in time are dropped and a `note` line reports the count |
 | `--licenses` | | | Print third-party license notices and exit |
 | `-V, --version`, `-h, --help` | | | `--version` prints one line; `kirby-ocpp version` prints the build details |
@@ -225,7 +226,7 @@ For every setting: command-line flag, then environment variable, then the select
 | `[reconnect]` | `reconnect`, `no_reconnect`, `reconnect_initial_ms`, `reconnect_max_ms`, `reconnect_max_attempts` |
 | `[fleet]` | `count`, `id_template`, `first_index`, `stagger_ms` |
 | `[faults]` | `rule` (array of `ACTION=BEHAVIOR[*COUNT]` strings, see [Response rules](#response-rules---rule)) |
-| `[output]` | `show_secrets`, `no_tui`, `json`, `log_file`, `verbose`, `quiet`, `color` |
+| `[output]` | `show_secrets`, `no_tui`, `json`, `log_file`, `verbose`, `quiet`, `color`, `time` |
 
 The meaning, default and range of each key are those of the flag with the same name in the tables above. Pure switches (`tls_skip_verify`, `no_persist`, `show_secrets`, ...) take `true` or `false`; `false` leaves the switch off.
 
@@ -376,6 +377,8 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--log-file <PATH>` | `KIRBY_CSMS_LOG_FILE` | none | Append every event as a JSON line (new file `0600` on unix, an existing file keeps its mode) (helper thread; late lines are dropped and a `note` line counts them) |
 | `--stdin` | `KIRBY_CSMS_STDIN` | auto | Read JSON-line commands from stdin even on a terminal (automatic when stdin is not a terminal and there is no `--script`) |
 | `--no-tui` | `KIRBY_CSMS_NO_TUI` | auto | Never open the UI, print events to stdout (automatic when stdout or stdin is not a terminal, and with `--json`, `--script` or `--stdin`) |
+| `--color <WHEN>` | `KIRBY_CSMS_COLOR` | `auto` | Color of the terminal UI: `auto` (color unless `NO_COLOR` is set and not empty), `always` (wins over `NO_COLOR`) or `never`. Without color the UI uses reverse video, bold and text markers instead. Headless output is never colored |
+| `--time <ZONE>` | `KIRBY_CSMS_TIME` | `utc` | Clock in front of log rows in the terminal UI and event lines in headless output: `utc` (`HH:MM:SS.mmm`), `local` (this machine's time zone) or `none` (no prefix). `--json` timestamps, log copy and export are unchanged |
 | `--script <FILE>` | `KIRBY_CSMS_SCRIPT` | none | Run a TOML script against connecting stations, print the report, exit |
 | `--report <PATH>` | | none | Script report as JSON; needs `--script` |
 | `--junit <PATH>` | | none | Script report as JUnit XML; needs `--script` |
@@ -418,7 +421,7 @@ For every setting: command-line flag, then environment variable, then the select
 | `[tls]` | `tls_cert`, `tls_key`, `tls_client_ca` |
 | `[security]` | `security_profile`, `auth_keys_file`, `default_auth_key_file`, `show_secrets` |
 | `[behavior]` | `transaction_ids`, `heartbeat_interval`, `validate_inbound`, `ping_interval`, `pong_timeout`, `call_timeout`, `history_cap`, `transaction_history_cap` |
-| `[output]` | `json`, `log_file`, `stdin`, `no_tui` |
+| `[output]` | `json`, `log_file`, `stdin`, `no_tui`, `color`, `time` |
 
 ### Secrets
 

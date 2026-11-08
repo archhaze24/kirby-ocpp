@@ -9,7 +9,7 @@ Legend: **full** = implemented as specified for emulator purposes; **partial** =
 
 Validation: outgoing and incoming CALL and CALLRESULT payloads are validated against the schemas (the Rust build embeds them). An incoming CALL that fails validation gets a CALLERROR (unknown actions are answered with a CALLERROR). Behavior is covered by the unit and integration tests in `crates/kirby-ocpp-core` and `crates/kirby-ocpp/tests`, driven by the in-process mock CSMS in `crates/kirby-ocpp-testkit`.
 
-Contents: [Profiles](#profiles) · [Charge point to central system](#charge-point-to-central-system) · [Central system to charge point](#central-system-to-charge-point) · [Configuration keys](#configuration-keys) · [Testing aids](#testing-aids-deliberate-non-conformance) · [Security Whitepaper](#security-whitepaper-behavior-certificates-logs-extended-trigger) · [Known limits](#known-limits) · [Differences from the TypeScript version](#intentional-differences-from-the-earlier-typescript-version) · [CSMS engine](#csms-engine-behavior-kirby-csms-core)
+Contents: [Profiles](#profiles) · [Charge point to central system](#charge-point-to-central-system) · [Central system to charge point](#central-system-to-charge-point) · [Configuration keys](#configuration-keys) · [Testing aids](#testing-aids-deliberate-non-conformance) · [Conformance scenarios](#conformance-scenarios) · [Security Whitepaper](#security-whitepaper-behavior-certificates-logs-extended-trigger) · [Known limits](#known-limits) · [Differences from the TypeScript version](#intentional-differences-from-the-earlier-typescript-version) · [CSMS engine](#csms-engine-behavior-kirby-csms-core)
 
 ## Profiles
 
@@ -94,6 +94,29 @@ Capability and limit keys (for example `NumberOfConnectors`, the `*MaxLength` ke
 
 Response rules (`--rule`, `KIRBY_OCPP_RULES`, TUI, scenario steps `set_rule` / `clear_rules`) make the station answer a CSMS command in a way the specification forbids, on purpose: `reject` (the action's rejection status, or CALLERROR `NotSupported` where the response has none: `GetConfiguration`, `GetLocalListVersion`, `ClearChargingProfile`, `GetDiagnostics`, `UpdateFirmware`), `delay:MS`, `error:CODE[:TEXT]`, `drop` (close the socket without a reply) and `ignore` (no reply, so the CSMS times out; the "every CALL gets one reply" rule is deliberately waived, bypassing the `InternalError` drop fallback).
 - Without a rule the station behaves as described above. Rules are runtime only; except for `delay` the command is not executed. See the README for the syntax.
+
+Scenario `reply` steps ([scenarios.md](scenarios.md#reply)) answer a CSMS command with a scripted CALLRESULT or CALLERROR instead of the handler: the command is not executed, the payload must satisfy the response schema (the station never sends one that does not), and the reply is armed per scenario and removed when it ends. A scripted reply wins over a response rule for the same action.
+
+## Conformance scenarios
+
+The scenario family in `conformance/scenarios` (tag `conformance`, [how it runs](scenarios.md#conformance-family)) exercises these behaviors of the station against the commands of a driving central system, and a test runs it on every build:
+
+| Behavior | Scenario |
+| --- | --- |
+| A non-`Accepted` `Authorize` or `StartTransaction` idTagInfo; the refused transaction is closed with `DeAuthorized` (`StopTransactionOnInvalidId`) | `conformance-authorize-rejected` |
+| BootNotification `Pending` and `Rejected`: retried after the CSMS interval until accepted | `conformance-boot-pending`, `conformance-boot-rejected` |
+| RemoteStartTransaction, RemoteStopTransaction (reason `Remote`) | `conformance-remote-start-stop` |
+| Reset `Soft` (same connection) and `Hard` (reconnect), both followed by a BootNotification | `conformance-reset-soft`, `conformance-reset-hard` |
+| UnlockConnector: `Unlocked` for a known connector, `NotSupported` for an unknown one | `conformance-unlock-connector` |
+| TriggerMessage for six messages, sent in the requested order | `conformance-trigger-message` |
+| ChangeConfiguration (accepted, read-only `Rejected`, unknown `NotSupported`) and GetConfiguration (`unknownKey`) | `conformance-configuration` |
+| ReserveNow and CancelReservation, with the connector status `Reserved` and back | `conformance-reservation` |
+| SetChargingProfile (valid, stack level over the limit), GetCompositeSchedule, ClearChargingProfile (`Accepted`, then `Unknown`) | `conformance-charging-profile` |
+| Firmware status sequence `Downloading`, `Downloaded`, `Installing`, `Installed`; diagnostics `Uploading`, `Uploaded` | `conformance-firmware-status`, `conformance-diagnostics-status` |
+| MeterValues samples follow `MeterValuesSampledData` (measurand order, context, format, units) | `conformance-meter-values` |
+| Scripted `reply` steps (a `Rejected` Reset, a CALLERROR) | `conformance-scripted-replies` |
+
+The family checks the station and the CSMS answers it prepares; it is not an OCA conformance suite.
 
 Local edits (TUI data browser, `Command::SetConfiguration`, `SetLocalListEntry`, `RemoveLocalListEntry`, `ClearLocalList`, `InstallChargingProfile`, `ClearChargingProfiles`) are not messages and have no spec equivalent; they reuse the rules of `ChangeConfiguration`, `SendLocalList`, `SetChargingProfile` and `ClearChargingProfile`.
 - The local list version is the one thing they decide themselves: an edit is a differential update with version `current + 1` (a CSMS that tracks versions sees a mismatch, which is the point of testing it), and a local clear is a full update with an empty list and version `0` ("no list").

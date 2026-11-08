@@ -66,7 +66,7 @@ With a terminal on both stdin and stdout and none of `--no-tui`, `--json`, `--sc
 
 Layout:
 
-- Left: the stations (dot: green connected, dim disconnected, yellow replaced by a newer connection; vendor and model; `txN` active transactions). The header shows the listen address, connected/total stations and frame counters.
+- Left: the stations (`●` green connected, dim `○` disconnected, yellow `●` replaced by a newer connection; vendor and model; `txN` active transactions). The header shows the listen address, connected/total stations and frame counters.
 - Right, top: details of the selected station (boot info, remote address, subprotocol, connectors, transactions with energy and power, last heartbeat, firmware and diagnostics status, counters).
 - Right, bottom: the frame log of that station with CALL/RESULT correlation and round-trip times.
 - Before any station has connected the details pane shows the listen address, a station URL to copy (`ws://<this-host>:9000/<station id>` for an unspecified listen host; a path prefix before the id is accepted) and, at security profile 0, a dim note that any peer can connect. The footer always ends with the `? help` and `: actions` hints, even in a narrow terminal, and the help popup opens with a short "First steps" paragraph.
@@ -79,8 +79,9 @@ Navigation:
 | --- | --- |
 | `Up` `Down` `j` `k`, `PgUp` `PgDn`, `Home` `End` | move in the focused pane |
 | `Left` `Right` `Tab` `Shift-Tab` | focus the station list / the log |
-| `/` | filter stations by id (fuzzy); in the log pane: search the log |
+| `/` | narrow the focused pane: filter the stations by id (fuzzy), or search the log when the log pane is focused (`s` also searches the log) |
 | `Esc` | clear the log search, then the station filter |
+| `W` | pending commands with their elapsed time; `x` or `Delete` cancels the selected one, `Esc` closes (see below) |
 | `a` | log of the selected station / merged live log of all stations |
 | `Enter` (log) | frame detail with pretty JSON and its request or answer (`c` copies) |
 | `y` `Y` | copy the row / all visible rows (clipboard tool, else OSC 52) |
@@ -119,6 +120,10 @@ Actions on the selected station:
 | `n` | copy the station id |
 
 Forms: `Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels. Fields are checked as you type and the request is checked against the OCPP 1.6J schema before anything is sent; errors show under the field. A field takes at most 256 KiB (typed or pasted; the rest is dropped and the field says so). DataTransfer limits `vendorId` to 255 characters, `messageId` to 50 and `data` to 64 KiB. Ids and numbers are trimmed; the values of ChangeConfiguration and DataTransfer `data` keep their leading and trailing spaces.
+
+Pending commands: `W` (or `Pending calls` in the palette) lists every command that waits for a station, oldest first, with the time since it was sent (`7s`, `1m05s`; the list updates every second). `x` cancels the selected one: the UI stops waiting and reports `cancelled` in the status line and the results history. The command itself is already on the wire and cannot be recalled; the engine releases the station's call queue when the call timeout (`--call-timeout`) has passed, and an answer that still arrives is recorded in the log and ignored. The footer shows `W pending` while commands wait.
+
+Colors and markers: every state is also written in words or marks, so `--color never` (or a non-empty `NO_COLOR`; `--color always` wins over it) draws the same screen without color: filled chips and the selected row are reverse video, errors and warnings are bold, a replaced station shows `◐`, and log lines start with `i`, `+`, `!` or `x` (info, success, warning, error) instead of `●`. `--time utc|local|none` sets the clock in front of log rows (default `utc`, the same as before; copy and export keep UTC).
 
 Results: commands run in the background, several can be in flight (the header shows `N pending`). The answer appears in the status line (`Reset (Soft) on CP-1: Accepted`, or the CALLERROR code and text, or a timeout) and is kept in a history of the last 20 results per station (`r`). Answers that carry content (GetConfiguration as a readable key list with `(readonly)` marks and unknown keys, raw calls, DataTransfer with data, GetCompositeSchedule, hash data) open in a popup (`c` copies).
 
