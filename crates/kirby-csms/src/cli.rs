@@ -44,7 +44,7 @@ pub struct Cli {
     pub listen: SocketAddr,
 
     /// Address of the local HTTP control API (off by default); port 0 picks a free port. A
-    /// non-loopback address needs --api-token or --api-token-file
+    /// non-loopback address needs a token (--api-token or --api-token-file) and --api-tls-cert
     #[arg(long, env = "KIRBY_CSMS_API_LISTEN", value_name = "ADDR")]
     pub api_listen: Option<SocketAddr>,
 
@@ -63,6 +63,29 @@ pub struct Cli {
         requires = "api_listen"
     )]
     pub api_token_file: Option<PathBuf>,
+
+    /// Server certificate chain (PEM) that makes the API serve HTTPS; needs --api-tls-key and
+    /// --api-listen. A non-loopback --api-listen needs it
+    #[arg(
+        long, env = "KIRBY_CSMS_API_TLS_CERT", value_name = "FILE", value_parser = non_empty_path,
+        requires = "api_tls_key", requires = "api_listen"
+    )]
+    pub api_tls_cert: Option<PathBuf>,
+
+    /// Server private key (PEM) of the API certificate; needs --api-tls-cert
+    #[arg(
+        long, env = "KIRBY_CSMS_API_TLS_KEY", value_name = "FILE", value_parser = non_empty_path,
+        requires = "api_tls_cert"
+    )]
+    pub api_tls_key: Option<PathBuf>,
+
+    /// Trusted CA certificate(s) (PEM) for API clients; every client must present a certificate
+    /// signed by them (mutual TLS); needs --api-tls-cert
+    #[arg(
+        long, env = "KIRBY_CSMS_API_TLS_CLIENT_CA", value_name = "FILE",
+        value_parser = non_empty_path, requires = "api_tls_cert"
+    )]
+    pub api_tls_client_ca: Option<PathBuf>,
 
     /// Server certificate chain (PEM) for wss://; needs --tls-key
     #[arg(long, env = "KIRBY_CSMS_TLS_CERT", value_name = "FILE", value_parser = non_empty_path, requires = "tls_key")]
@@ -376,7 +399,17 @@ pub fn command() -> clap::Command {
 /// `--help` headings: the heading of a group of flags and the ids of its arguments.
 const HEADINGS: &[(&str, &[&str])] = &[
     ("Listener", &["listen", "subprotocol"]),
-    ("API", &["api_listen", "api_token", "api_token_file"]),
+    (
+        "API",
+        &[
+            "api_listen",
+            "api_token",
+            "api_token_file",
+            "api_tls_cert",
+            "api_tls_key",
+            "api_tls_client_ca",
+        ],
+    ),
     ("TLS", &["tls_cert", "tls_key", "tls_client_ca"]),
     (
         "Security",
@@ -510,7 +543,7 @@ fn script_var(text: &str) -> Result<(String, serde_json::Value), String> {
 
 impl Cli {
     /// The API token (`--api-token`, or the content of `--api-token-file`), checked against
-    /// the listen address: a non-loopback address needs a token.
+    /// the listen address: a non-loopback address needs a token and TLS.
     pub fn api_token(&self) -> Result<Option<String>, String> {
         let token = if let Some(path) = &self.api_token_file {
             let text = std::fs::read_to_string(path)
@@ -533,12 +566,20 @@ impl Cli {
             );
         }
         if let Some(addr) = self.api_listen
-            && token.is_none()
             && !addr.ip().is_loopback()
         {
-            return Err(format!(
-                "--api-listen {addr} is not a loopback address: set --api-token or --api-token-file"
-            ));
+            if token.is_none() {
+                return Err(format!(
+                    "--api-listen {addr} is not a loopback address: set --api-token or --api-token-file"
+                ));
+            }
+            if self.api_tls_cert.is_none() {
+                return Err(format!(
+                    "--api-listen {addr} is not a loopback address: the token would travel in \
+                     clear text; set --api-tls-cert and --api-tls-key, or listen on a loopback \
+                     address"
+                ));
+            }
         }
         Ok(token)
     }

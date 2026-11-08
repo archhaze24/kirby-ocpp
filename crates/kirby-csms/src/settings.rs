@@ -49,6 +49,9 @@ pub const SCHEMA: Schema = Schema {
                     },
                 ),
                 KeySpec::new("api_token_file", Kind::Path),
+                KeySpec::new("api_tls_cert", Kind::Path),
+                KeySpec::new("api_tls_key", Kind::Path),
+                KeySpec::new("api_tls_client_ca", Kind::Path),
             ],
         },
         Section {
@@ -562,6 +565,9 @@ impl Cli {
         }
         for (key, file) in [
             ("api_token_file", &self.api_token_file),
+            ("api_tls_cert", &self.api_tls_cert),
+            ("api_tls_key", &self.api_tls_key),
+            ("api_tls_client_ca", &self.api_tls_client_ca),
             ("tls_cert", &self.tls_cert),
             ("tls_key", &self.tls_key),
             ("tls_client_ca", &self.tls_client_ca),

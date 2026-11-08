@@ -134,6 +134,39 @@ pub(super) fn query_param(uri: &Uri, name: &str) -> Result<Option<String>, Strin
     Ok(found)
 }
 
+/// The query parameters of the request, percent-decoded, as pairs in the order of `names`
+/// (`None` for a parameter that was not sent). A parameter that is not in `names`, and a
+/// repeated one, is an error.
+pub(super) fn query_params<const N: usize>(
+    uri: &Uri,
+    names: [&str; N],
+) -> Result<[Option<String>; N], String> {
+    let mut found: [Option<String>; N] = std::array::from_fn(|_| None);
+    let Some(query) = uri.query() else {
+        return Ok(found);
+    };
+    for pair in query.split('&').filter(|pair| !pair.is_empty()) {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let Some(slot) = names.iter().position(|name| *name == key) else {
+            return Err(format!(
+                "unknown query parameter; supported: {}",
+                names.join(", ")
+            ));
+        };
+        if pair.split_once('=').is_none() {
+            return Err(format!("query parameter `{key}` needs a value"));
+        }
+        let Some(cell) = found.get_mut(slot) else {
+            continue;
+        };
+        if cell.is_some() {
+            return Err(format!("repeated query parameter `{key}`"));
+        }
+        *cell = Some(percent_decode(value));
+    }
+    Ok(found)
+}
+
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());

@@ -85,7 +85,8 @@ async fn main() -> ExitCode {
     ) {
         eprintln!("listening on {}", handle.url());
         if let Some(plan) = &api_plan {
-            eprintln!("api listening on http://{}", plan.addr);
+            let scheme = if plan.tls.is_some() { "https" } else { "http" };
+            eprintln!("api listening on {scheme}://{}", plan.addr);
         }
         startup_notes(&handle, cli.json, None);
         match kirby_csms_tui::Session::enter() {
@@ -111,12 +112,11 @@ async fn main() -> ExitCode {
     let script_events = script.is_some().then(|| handle.subscribe());
     headless::announce(&out, &handle);
     if let Some(plan) = &api_plan {
-        headless::announce_api(&out, plan.addr);
+        headless::announce_api(&out, plan.addr, plan.tls.is_some());
     }
     startup_notes(&handle, cli.json, Some(&out));
     let slots = commands::new_slots();
-    let api =
-        api_plan.map(|plan| api::spawn(plan.listener, handle.clone(), slots.clone(), plan.token));
+    let api = api_plan.map(|plan| plan.spawn(&handle, &slots));
     let sink = (session.is_none() || cli.log_file.is_some())
         .then(|| Sink::spawn(&handle, sink_events, out.clone()));
 
@@ -192,6 +192,9 @@ fn print_config(cli: &mut Cli) -> ExitCode {
 /// `--check-config`: everything that is checked before the server binds has passed.
 fn check_config(cli: &Cli) -> ExitCode {
     if let Err(error) = cli.api_token() {
+        return usage_error(&error);
+    }
+    if let Err(error) = load_api_tls(cli) {
         return usage_error(&error);
     }
     let source = match (&cli.config, &cli.profile) {
@@ -272,12 +275,41 @@ struct ApiPlan {
     listener: tokio::net::TcpListener,
     addr: std::net::SocketAddr,
     token: Option<String>,
+    tls: Option<std::sync::Arc<api::TlsConfig>>,
+}
+
+impl ApiPlan {
+    /// Starts serving on the bound listener.
+    fn spawn(
+        self,
+        handle: &CsmsHandle,
+        slots: &std::sync::Arc<tokio::sync::Semaphore>,
+    ) -> api::Api {
+        api::spawn(
+            self.listener,
+            handle.clone(),
+            slots.clone(),
+            self.token,
+            self.tls,
+        )
+    }
+}
+
+/// Loads the certificate, key and optional client CA of the API (`--api-tls-cert`).
+fn load_api_tls(cli: &Cli) -> Result<Option<std::sync::Arc<api::TlsConfig>>, String> {
+    let (Some(cert), Some(key)) = (&cli.api_tls_cert, &cli.api_tls_key) else {
+        return Ok(None);
+    };
+    read_tls(cert, key, cli.api_tls_client_ca.as_deref())
+        .map(Some)
+        .map_err(|error| format!("API TLS: {error}"))
 }
 
 /// Validates the API flags and binds its listener (before the CSMS starts, so a busy port
 /// fails early). `None` when `--api-listen` is not given.
 async fn prepare_api(cli: &Cli) -> Result<Option<ApiPlan>, ExitCode> {
     let token = cli.api_token().map_err(|error| usage_error(&error))?;
+    let tls = load_api_tls(cli).map_err(|error| usage_error(&error))?;
     let Some(addr) = cli.api_listen else {
         return Ok(None);
     };
@@ -290,6 +322,7 @@ async fn prepare_api(cli: &Cli) -> Result<Option<ApiPlan>, ExitCode> {
         listener,
         addr,
         token,
+        tls,
     }))
 }
 
@@ -401,6 +434,17 @@ fn load_tls(
     key: &Path,
     client_ca: Option<&Path>,
 ) -> Result<(), String> {
+    config.tls = Some(read_tls(cert, key, client_ca)?);
+    Ok(())
+}
+
+/// Reads the PEM files and builds the rustls configuration (shared by the OCPP listener and
+/// the API); a client CA turns on mutual TLS.
+fn read_tls(
+    cert: &Path,
+    key: &Path,
+    client_ca: Option<&Path>,
+) -> Result<std::sync::Arc<api::TlsConfig>, String> {
     let read = |path: &Path| {
         std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
     };
@@ -409,8 +453,7 @@ fn load_tls(
         Some(ca) => server_config_with_client_ca(&cert, &key, &read(ca)?),
         None => server_config_from_pem(&cert, &key),
     };
-    config.tls = Some(tls.map_err(|e| e.to_string())?);
-    Ok(())
+    tls.map_err(|e| e.to_string())
 }
 
 /// SIGINT and SIGTERM, registered up front so no signal is lost between startup and the wait.

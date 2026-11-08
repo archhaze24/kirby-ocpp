@@ -15,10 +15,28 @@ use super::json::{query_param, read_json, station_id};
 use crate::commands;
 
 pub(super) async fn list_rules(State(state): State<ApiState>) -> Response {
+    let protocol_rules: Vec<Value> = global_protocol_rules(&state)
+        .into_iter()
+        .map(|(action, protocol)| json!({"action": action, "protocol": protocol}))
+        .collect();
     reply(
         StatusCode::OK,
-        &json!({"rules": state.handle.responder_actions()}),
+        &json!({
+            "rules": state.handle.responder_actions(),
+            "protocol_rules": protocol_rules,
+        }),
     )
+}
+
+/// The global rules limited to one protocol, as (action, protocol), sorted by action.
+fn global_protocol_rules(state: &ApiState) -> Vec<(String, String)> {
+    state
+        .handle
+        .scoped_rules(None)
+        .into_iter()
+        .filter(|rule| rule.scope.station.is_none())
+        .filter_map(|rule| rule.scope.protocol.map(|protocol| (rule.action, protocol)))
+        .collect()
 }
 
 /// The path action of a rule, which must be an action a charge point can send.
@@ -50,7 +68,11 @@ pub(super) async fn put_rule(
     action: Result<Path<String>, PathRejection>,
     request: Request<Body>,
 ) -> Response {
-    let action = match rule_action(action, None) {
+    let protocol = match protocol_param(request.uri()) {
+        Ok(protocol) => protocol,
+        Err(response) => return *response,
+    };
+    let action = match rule_action(action, protocol.as_deref()) {
         Ok(action) => action,
         Err(response) => return *response,
     };
@@ -58,7 +80,13 @@ pub(super) async fn put_rule(
         Ok(payload) => payload,
         Err(response) => return *response,
     };
-    let _ = commands::set_rule(&state.handle, &Scope::global(), &action, payload);
+    let scope = Scope {
+        station: None,
+        protocol,
+    };
+    if let Err(message) = commands::set_rule(&state.handle, &scope, &action, payload) {
+        return error(StatusCode::CONFLICT, "conflict", &message);
+    }
     reply(StatusCode::OK, &json!({"action": action, "set": true}))
 }
 
@@ -219,12 +247,25 @@ pub(super) async fn delete_station_rule(
 pub(super) async fn delete_rule(
     State(state): State<ApiState>,
     action: Result<Path<String>, PathRejection>,
+    uri: Uri,
 ) -> Response {
-    let action = match rule_action(action, None) {
+    let protocol = match protocol_param(&uri) {
+        Ok(protocol) => protocol,
+        Err(response) => return *response,
+    };
+    let action = match rule_action(action, protocol.as_deref()) {
         Ok(action) => action,
         Err(response) => return *response,
     };
-    let existed = state.handle.clear_responder(&action);
+    let existed = match protocol {
+        Some(protocol) => {
+            let stored = global_protocol_rules(&state)
+                .into_iter()
+                .any(|(held, scope)| held == action && scope == protocol);
+            stored && state.handle.clear_scoped_rule(None, &action)
+        }
+        None => state.handle.clear_responder(&action),
+    };
     reply(
         StatusCode::OK,
         &json!({"action": action, "cleared": existed}),

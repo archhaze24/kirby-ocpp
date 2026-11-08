@@ -1,4 +1,5 @@
-//! Local HTTP control API (`--api-listen`): JSON in and out, plain HTTP, optional bearer token.
+//! Local HTTP control API (`--api-listen`): JSON in and out, plain HTTP or HTTPS
+//! (`--api-tls-cert`), optional bearer token.
 //! It only uses [`CsmsHandle`] and the command code shared with the stdin handler.
 //!
 //! Layout: `server` (accept loop, socket limits), `limits` (constants), `auth`, `meta` (route
@@ -7,10 +8,14 @@
 
 mod auth;
 mod error;
+mod event_log;
+mod export;
 mod json;
 mod limits;
 mod meta;
+mod metrics;
 mod routes_calls;
+mod routes_history;
 mod routes_rules;
 mod routes_stations;
 mod server;
@@ -21,28 +26,35 @@ mod tests;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::Router;
+use axum::extract::Request;
 use axum::http::StatusCode;
-use axum::middleware;
+use axum::middleware::{self, Next};
 use axum::routing::{delete, get, post, put};
 use kirby_csms_core::CsmsHandle;
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
+
+/// The rustls server configuration of the API (see `--api-tls-cert`).
+pub type TlsConfig = tokio_rustls::rustls::ServerConfig;
 
 use self::auth::auth;
 use self::error::error;
+use self::event_log::{EventLog, spawn_pump};
 use self::limits::{Limits, MAX_CONNECTIONS, MAX_STREAMS};
 use self::meta::{finish_response, health, index, options};
+use self::metrics::{Metrics, metrics};
 use self::routes_calls::call;
+use self::routes_history::{history, transactions};
 use self::routes_rules::{
     clear_faults, delete_rule, delete_station_rule, faults_remaining, get_station_rule,
     inject_fault, list_rules, list_station_rules, put_rule, put_station_rule, remove_fault,
 };
-use self::routes_stations::{forget_station, get_station, history, list_stations};
+use self::routes_stations::{forget_station, get_station, list_stations};
 use self::server::serve;
 use self::sse::events;
 
@@ -52,15 +64,16 @@ struct ApiState {
     slots: Arc<Semaphore>,
     token: Option<Arc<str>>,
     streams: Arc<Semaphore>,
-    stopped: watch::Receiver<bool>,
     /// The address the API listens on.
     bound: IpAddr,
     /// Request-body bytes still available to in-flight calls, see [`limits::PAYLOAD_BUDGET`].
     payload: Arc<Semaphore>,
     /// How long an event stream lasts.
     stream_max_age: Duration,
-    /// Source of the SSE `id:` values: one counter for the whole server.
-    event_ids: Arc<AtomicU64>,
+    /// The events of `GET /v1/events`, with their ids.
+    log: Arc<EventLog>,
+    /// Counters served by `GET /v1/metrics`.
+    metrics: Arc<Metrics>,
 }
 
 /// A running API server.
@@ -76,15 +89,18 @@ pub async fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
 }
 
 /// Serves the API on `listener` until [`Api::finish`].
+/// With `tls` the listener serves HTTPS (HTTP/1.1 only), otherwise plain HTTP.
 pub fn spawn(
     listener: TcpListener,
     handle: CsmsHandle,
     slots: Arc<Semaphore>,
     token: Option<String>,
+    tls: Option<Arc<TlsConfig>>,
 ) -> Api {
-    spawn_with(listener, handle, slots, token, Limits::DEFAULT)
+    spawn_inner(listener, handle, slots, token, Limits::DEFAULT, tls)
 }
 
+#[cfg(test)]
 fn spawn_with(
     listener: TcpListener,
     handle: CsmsHandle,
@@ -92,6 +108,22 @@ fn spawn_with(
     token: Option<String>,
     limits: Limits,
 ) -> Api {
+    spawn_inner(listener, handle, slots, token, limits, None)
+}
+
+fn spawn_inner(
+    listener: TcpListener,
+    handle: CsmsHandle,
+    slots: Arc<Semaphore>,
+    token: Option<String>,
+    limits: Limits,
+    tls: Option<Arc<TlsConfig>>,
+) -> Api {
+    let tls = tls.map(|config| {
+        let mut config = (*config).clone();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        TlsAcceptor::from(Arc::new(config))
+    });
     let (stop, stopped) = watch::channel(false);
     let bound = listener
         .local_addr()
@@ -101,18 +133,25 @@ fn spawn_with(
         slots,
         token: token.map(Arc::from),
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
-        stopped: stopped.clone(),
         bound,
         payload: Arc::new(Semaphore::new(limits.payload_budget)),
         stream_max_age: limits.stream_max_age,
-        event_ids: Arc::new(AtomicU64::new(0)),
+        log: EventLog::new(unix_micros()),
+        metrics: Metrics::new(),
     };
+    spawn_pump(
+        &state.handle,
+        Arc::clone(&state.log),
+        Arc::clone(&state.metrics),
+        stopped.clone(),
+    );
     let app = router(state);
     let task = tokio::spawn(serve(
         listener,
         app,
         Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         limits,
+        tls,
         stopped,
     ));
     Api { stop, task }
@@ -131,13 +170,17 @@ impl Api {
 
 fn router(state: ApiState) -> Router {
     // `finish_response` wraps the whole router: layers added with `Router::layer` sit inside
-    // each route's method router, which sets its own `Allow` after them.
+    // each route's method router, which sets its own `Allow` after them. The response counter
+    // is the outermost layer, so it also counts the `401`, `403` and `404` answers.
+    let counters = Arc::clone(&state.metrics);
     let routes = Router::new()
         .route("/v1", get(index))
         .route("/v1/health", get(health))
         .route("/v1/stations", get(list_stations))
         .route("/v1/stations/{id}", get(get_station).delete(forget_station))
         .route("/v1/stations/{id}/history", get(history))
+        .route("/v1/transactions", get(transactions))
+        .route("/v1/metrics", get(metrics))
         .route("/v1/stations/{id}/calls", post(call))
         .route("/v1/events", get(events))
         .route("/v1/stations/{id}/rules", get(list_station_rules))
@@ -170,4 +213,20 @@ fn router(state: ApiState) -> Router {
     Router::new()
         .fallback_service(routes)
         .layer(middleware::from_fn(finish_response))
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            let counters = Arc::clone(&counters);
+            async move {
+                let response = next.run(request).await;
+                counters.count_response(response.status());
+                response
+            }
+        }))
+}
+
+/// The time in microseconds since the Unix epoch: the seed of the event ids, so that an id
+/// from an earlier run is smaller than every id of this one.
+fn unix_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| u64::try_from(elapsed.as_micros()).unwrap_or(0))
 }

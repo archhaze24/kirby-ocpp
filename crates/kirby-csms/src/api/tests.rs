@@ -284,7 +284,13 @@ async fn finish_closes_connections_that_are_still_open() {
         .unwrap();
     let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let api = spawn(listener, csms.clone(), Arc::new(Semaphore::new(4)), None);
+    let api = spawn(
+        listener,
+        csms.clone(),
+        Arc::new(Semaphore::new(4)),
+        None,
+        None,
+    );
     // One connection idle, one with a request body that never completes.
     let mut idle = TcpStream::connect(addr).await.unwrap();
     let mut stalled = TcpStream::connect(addr).await.unwrap();
@@ -310,5 +316,57 @@ async fn finish_closes_connections_that_are_still_open() {
             .expect("connection still open after finish");
         drop(read);
     }
+    csms.shutdown().await;
+}
+
+/// Reads an event stream to its end; returns the text.
+async fn read_stream(addr: std::net::SocketAddr, headers: &str) -> String {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream
+        .write_all(format!("GET /v1/events HTTP/1.1\r\nHost: {addr}\r\n{headers}\r\n").as_bytes())
+        .await
+        .unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+        .await
+        .expect("stream did not end")
+        .ok();
+    String::from_utf8_lossy(&raw).into_owned()
+}
+
+/// The note that ends a stream at its maximum age carries an id a client can resume from:
+/// reconnecting with it is no `resync`, and nothing between is lost.
+#[tokio::test]
+async fn the_id_of_the_maximum_age_note_resumes_the_stream() {
+    let csms = CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let api = spawn_with(
+        listener,
+        csms.clone(),
+        Arc::new(Semaphore::new(4)),
+        None,
+        Limits {
+            stream_max_age: Duration::from_millis(300),
+            ..LONG
+        },
+    );
+    let first = read_stream(addr, "").await;
+    assert!(first.contains("maximum age"), "{first}");
+    let last_id = first
+        .lines()
+        .filter_map(|line| line.strip_prefix("id: "))
+        .next_back()
+        .expect("the note has an id")
+        .to_owned();
+    let second = read_stream(addr, &format!("Last-Event-ID: {last_id}\r\n")).await;
+    assert!(!second.contains("resync"), "{second}");
+    assert!(second.contains("maximum age"), "{second}");
+    // An id from before this run is a resync.
+    let stale = read_stream(addr, "Last-Event-ID: 5\r\n").await;
+    assert!(stale.contains("event: resync"), "{stale}");
+    api.finish().await;
     csms.shutdown().await;
 }

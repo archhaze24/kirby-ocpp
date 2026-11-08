@@ -34,6 +34,14 @@ pub(super) const PAYLOAD_BUDGET: usize = 32 * 1024 * 1024;
 /// Time a client gets to send the whole request body.
 pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long a TLS handshake may take, from accept to the first application byte; a peer that
+/// is slower (or silent) is dropped.
+pub(super) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Handshakes running at the same time. Over the cap a new connection is closed at once, so
+/// idle or hostile peers cannot use up the CPU or all connection slots.
+pub(super) const MAX_HANDSHAKES: usize = 64;
+
 /// Timing limits of the server; tests use short ones.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Limits {

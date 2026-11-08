@@ -20,7 +20,12 @@ use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinSet;
 use tokio::time::Sleep;
 
-use super::limits::{DRAIN_BYTES, DRAIN_TIME, HEAD_TIMEOUT, Limits, SHUTDOWN_GRACE, Streaming};
+use tokio_rustls::TlsAcceptor;
+
+use super::limits::{
+    DRAIN_BYTES, DRAIN_TIME, HANDSHAKE_TIMEOUT, HEAD_TIMEOUT, Limits, MAX_HANDSHAKES,
+    SHUTDOWN_GRACE, Streaming,
+};
 
 /// An accepted connection's socket. It gives up when
 /// - a write makes no progress for `after` (a client that stopped reading),
@@ -179,9 +184,11 @@ pub(super) async fn serve(
     app: Router,
     slots: Arc<Semaphore>,
     limits: Limits,
+    tls: Option<TlsAcceptor>,
     mut stopped: watch::Receiver<bool>,
 ) {
     let mut connections = JoinSet::new();
+    let handshakes = Arc::new(Semaphore::new(MAX_HANDSHAKES));
     loop {
         tokio::select! {
             () = wait_stopped(&mut stopped) => break,
@@ -200,27 +207,38 @@ pub(super) async fn serve(
                 };
                 enable_keepalive(&stream);
                 let streaming = Arc::new(AtomicBool::new(false));
-                let io = TokioIo::new(StallIo::new(stream, limits, Arc::clone(&streaming)));
-                let service = TowerToHyperService::new(
-                    app.clone().layer(Extension(Streaming(streaming))),
-                );
+                let app = app.clone().layer(Extension(Streaming(Arc::clone(&streaming))));
                 let mut stop = stopped.clone();
-                connections.spawn(async move {
-                    let _permit = permit;
-                    let connection = http1::Builder::new()
-                        .timer(TokioTimer::new())
-                        .header_read_timeout(HEAD_TIMEOUT)
-                        .keep_alive(false)
-                        .serve_connection(io, service);
-                    tokio::pin!(connection);
-                    tokio::select! {
-                        _ = connection.as_mut() => {}
-                        () = wait_stopped(&mut stop) => {
-                            connection.as_mut().graceful_shutdown();
-                            let _ = connection.await;
-                        }
-                    }
-                });
+                if let Some(acceptor) = &tls {
+                    // Over the handshake cap the socket is dropped (closed) at once.
+                    let Ok(handshake) = Arc::clone(&handshakes).try_acquire_owned() else {
+                        continue;
+                    };
+                    let acceptor = acceptor.clone();
+                    connections.spawn(async move {
+                        let _permit = permit;
+                        // A failed, slow or silent handshake just ends the connection: nothing
+                        // the peer sent is logged.
+                        let accepted =
+                            tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream));
+                        let stream = tokio::select! {
+                            accepted = accepted => match accepted {
+                                Ok(Ok(stream)) => stream,
+                                _ => return,
+                            },
+                            () = wait_stopped(&mut stop) => return,
+                        };
+                        drop(handshake);
+                        let io = StallIo::new(stream, limits, streaming);
+                        run_connection(io, app, stop).await;
+                    });
+                } else {
+                    connections.spawn(async move {
+                        let _permit = permit;
+                        let io = StallIo::new(stream, limits, streaming);
+                        run_connection(io, app, stop).await;
+                    });
+                }
             }
         }
     }
@@ -230,6 +248,28 @@ pub(super) async fn serve(
     })
     .await;
     connections.shutdown().await;
+}
+
+/// Serves one request on `io` (plain or TLS), then closes; on the stop signal the request in
+/// flight is finished first.
+async fn run_connection<T>(io: StallIo<T>, app: Router, mut stop: watch::Receiver<bool>)
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let service = TowerToHyperService::new(app);
+    let connection = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(HEAD_TIMEOUT)
+        .keep_alive(false)
+        .serve_connection(TokioIo::new(io), service);
+    tokio::pin!(connection);
+    tokio::select! {
+        _ = connection.as_mut() => {}
+        () = wait_stopped(&mut stop) => {
+            connection.as_mut().graceful_shutdown();
+            let _ = connection.await;
+        }
+    }
 }
 
 /// Resolves once the server stops.

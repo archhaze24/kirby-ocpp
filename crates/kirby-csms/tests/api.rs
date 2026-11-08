@@ -578,12 +578,55 @@ impl Sse {
         &self.buf
     }
 
-    /// The JSON objects of all `data:` lines read so far.
+    /// The JSON objects of all complete `data:` lines read so far (a read can end in the
+    /// middle of the last line).
     fn data(&self) -> Vec<Value> {
         self.buf
-            .lines()
+            .split_inclusive('\n')
+            .filter_map(|line| line.strip_suffix('\n'))
             .filter_map(|line| line.strip_prefix("data: "))
             .filter_map(|data| serde_json::from_str(data).ok())
+            .collect()
+    }
+
+    /// Reads until a complete `data:` object satisfies `found`; returns it.
+    async fn wait_event(&mut self, found: impl Fn(&Value) -> bool) -> Value {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                if let Some(value) = self.data().into_iter().find(&found) {
+                    return value;
+                }
+                let mut chunk = [0_u8; 4096];
+                let n = self.stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "stream closed; got {:?}", self.buf);
+                self.buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timeout waiting for an event; got {:?}", self.buf))
+    }
+
+    /// Reads until at least `count` complete `id:` lines have arrived.
+    async fn wait_ids(&mut self, count: usize) {
+        tokio::time::timeout(WAIT, async {
+            while self.ids().len() < count {
+                let mut chunk = [0_u8; 4096];
+                let n = self.stream.read(&mut chunk).await.unwrap();
+                assert!(n > 0, "stream closed; got {:?}", self.buf);
+                self.buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timeout waiting for {count} ids; got {:?}", self.buf));
+    }
+
+    /// The `id:` values of all complete `id:` lines read so far.
+    fn ids(&self) -> Vec<u64> {
+        self.buf
+            .split_inclusive('\n')
+            .filter_map(|line| line.strip_suffix('\n'))
+            .filter_map(|line| line.strip_prefix("id: "))
+            .filter_map(|id| id.parse().ok())
             .collect()
     }
 }
@@ -715,7 +758,10 @@ async fn rules_round_trip() {
     let addr = &csms.api_addr;
 
     let (status, body) = csms.get("/v1/rules").await;
-    assert_eq!((status, body), (200, json!({"rules": []})));
+    assert_eq!(
+        (status, body),
+        (200, json!({"rules": [], "protocol_rules": []}))
+    );
     let put = http(
         addr,
         "PUT",
@@ -727,7 +773,7 @@ async fn rules_round_trip() {
     assert_eq!(put.0, 200, "{}", put.1);
     assert_eq!(
         csms.get("/v1/rules").await.1,
-        json!({"rules": ["Heartbeat"]})
+        json!({"rules": ["Heartbeat"], "protocol_rules": []})
     );
     assert_eq!(
         heartbeat_time(station.send(Command::Heartbeat).await),
@@ -735,7 +781,10 @@ async fn rules_round_trip() {
     );
     let (status, body) = http(addr, "DELETE", "/v1/rules/Heartbeat", &[], None).await;
     assert_eq!((status, body["cleared"].as_bool()), (200, Some(true)));
-    assert_eq!(csms.get("/v1/rules").await.1, json!({"rules": []}));
+    assert_eq!(
+        csms.get("/v1/rules").await.1,
+        json!({"rules": [], "protocol_rules": []})
+    );
     assert_ne!(
         heartbeat_time(station.send(Command::Heartbeat).await),
         "2030-01-01T00:00:00Z"
@@ -765,6 +814,66 @@ async fn rules_round_trip() {
         http(addr, "DELETE", "/v1/rules/Reset", &[], None).await.0,
         400
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn protocol_scoped_global_rules_are_listed_set_and_removed() {
+    use kirby_ocpp_core::station::Command;
+    let csms = Csms::start(&[]);
+    let station = station(&csms.station_addr, "CP-1").await;
+    let addr = &csms.api_addr;
+    let time = "2031-02-03T04:05:06Z";
+    let path = "/v1/rules/Heartbeat?protocol=ocpp1.6";
+
+    let put = http(
+        addr,
+        "PUT",
+        path,
+        &[],
+        Some(&json!({"currentTime": time}).to_string()),
+    )
+    .await;
+    assert_eq!(put.0, 200, "{}", put.1);
+    // Visible in the list; the unscoped list stays empty.
+    assert_eq!(
+        csms.get("/v1/rules").await.1,
+        json!({"rules": [], "protocol_rules": [{"action": "Heartbeat", "protocol": "ocpp1.6"}]})
+    );
+    assert_eq!(heartbeat_time(station.send(Command::Heartbeat).await), time);
+
+    // Bad protocol and a protocol with no such action are refused.
+    for bad in [
+        "/v1/rules/Heartbeat?protocol=nope",
+        "/v1/rules/Heartbeat?protocol=ocpp2.0.1",
+    ] {
+        assert_eq!(
+            http(addr, "PUT", bad, &[], Some("{}")).await.0,
+            400,
+            "{bad}"
+        );
+        assert_eq!(http(addr, "DELETE", bad, &[], None).await.0, 400, "{bad}");
+    }
+
+    // Without the protocol the plain delete does not touch the scoped rule.
+    let (_, body) = http(addr, "DELETE", "/v1/rules/Heartbeat", &[], None).await;
+    assert_eq!(body["cleared"], false);
+    assert_eq!(
+        csms.get("/v1/rules").await.1["protocol_rules"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(heartbeat_time(station.send(Command::Heartbeat).await), time);
+
+    let (status, body) = http(addr, "DELETE", path, &[], None).await;
+    assert_eq!((status, body["cleared"].as_bool()), (200, Some(true)));
+    assert_eq!(
+        csms.get("/v1/rules").await.1,
+        json!({"rules": [], "protocol_rules": []})
+    );
+    assert_ne!(heartbeat_time(station.send(Command::Heartbeat).await), time);
+    let (_, body) = http(addr, "DELETE", path, &[], None).await;
+    assert_eq!(body["cleared"], false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1440,7 +1549,9 @@ async fn connected_event_ids_and_string_transaction_ids() {
         .start_transaction(ConnectorId::new(1), IdTag::new("TAG").unwrap())
         .await
         .unwrap();
-    events.read_until("\"active_transactions\":[{").await;
+    events
+        .wait_event(|e| e["type"] == "state" && e["active_transactions"][0].is_object())
+        .await;
 
     let data = events.data();
     let connected = data.iter().find(|e| e["type"] == "connected").unwrap();
@@ -1483,6 +1594,15 @@ async fn connected_event_ids_and_string_transaction_ids() {
         detail["state"]["transactions"][0]["id"].is_string(),
         "{detail}"
     );
+    // `evse` is always present and null for OCPP 1.6.
+    for tx in [
+        &list["stations"][0]["active_transactions"][0],
+        &detail["active_transactions"][0],
+        &state["active_transactions"][0],
+    ] {
+        assert_eq!(tx.get("evse"), Some(&Value::Null), "{tx}");
+        assert!(tx["connector"].is_number(), "{tx}");
+    }
 }
 
 /// The sorted top-level keys of a JSON object.
@@ -1715,12 +1835,13 @@ async fn golden_key_sets_of_the_shapes() {
 
     // History frames and events.
     let (_, history) = csms.get("/v1/stations/CP-1/history").await;
-    assert_eq!(keys(&history), ["frames", "station"]);
+    assert_eq!(keys(&history), ["frames", "gap", "next_cursor", "station"]);
     let frame = &history["frames"][0];
     assert_eq!(
         keys(frame),
         [
             "action",
+            "cursor",
             "direction",
             "id",
             "kind",
@@ -1745,7 +1866,10 @@ async fn golden_key_sets_of_the_shapes() {
         .iter()
         .find(|event| event["type"] == "frame" && event["kind"] == "call")
         .unwrap();
-    assert_eq!(keys(call), keys(frame));
+    // A history frame is an event frame plus its `cursor`.
+    let mut history_keys = keys(frame);
+    history_keys.retain(|key| *key != "cursor");
+    assert_eq!(keys(call), history_keys);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -1835,7 +1959,7 @@ async fn station_rules_beat_global_rules_and_round_trip() {
     // The global list is unchanged by station rules.
     assert_eq!(
         csms.get("/v1/rules").await.1,
-        json!({"rules": ["Heartbeat"]})
+        json!({"rules": ["Heartbeat"], "protocol_rules": []})
     );
     assert_eq!(
         csms.get("/v1/stations/CP-2/rules").await.1["rules"],
@@ -2182,4 +2306,678 @@ async fn scoped_fault_requests_are_validated_and_bounded() {
         .collect();
     top.sort_unstable();
     assert_eq!(top, ["faults", "remaining"]);
+}
+
+// ---- read side: history cursors, export, event resume, metrics -------------------------
+
+/// One `GET` with `Connection: close`; returns the status, the head and the body as text.
+async fn http_text(addr: &str, path: &str, headers: &[(&str, &str)]) -> (u16, String, String) {
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    let mut request = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    for (name, value) in headers {
+        let _ = write!(request, "{name}: {value}\r\n");
+    }
+    request.push_str("\r\n");
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut raw = Vec::new();
+    tokio::time::timeout(WAIT, stream.read_to_end(&mut raw))
+        .await
+        .expect("response timeout")
+        .unwrap();
+    let text = String::from_utf8(raw).unwrap();
+    let (head, body) = text.split_once("\r\n\r\n").expect("complete response");
+    let status = head.split(' ').nth(1).unwrap().parse().unwrap();
+    (status, head.to_owned(), body.to_owned())
+}
+
+/// The value of response header `name` (case-insensitive).
+fn header_of(head: &str, name: &str) -> Option<String> {
+    head.lines().skip(1).find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        key.eq_ignore_ascii_case(name)
+            .then(|| value.trim().to_owned())
+    })
+}
+
+fn cursors_of(page: &Value) -> Vec<String> {
+    page["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|frame| frame["cursor"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// Waits until the station's startup traffic is over: the answer to its startup
+/// `SecurityEventNotification`, the last thing the emulator sends on its own.
+async fn settled(csms: &Csms, id: &str) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let (_, page) = csms
+                .get(&format!(
+                    "/v1/stations/{id}/history?action=SecurityEventNotification&kind=result"
+                ))
+                .await;
+            if !page["frames"].as_array().unwrap().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the station did not settle");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_pages_walk_forward_and_poll_without_repeats() {
+    let csms = Csms::start(&[]);
+    let _station = station(&csms.station_addr, "CP-1").await;
+    settled(&csms, "CP-1").await;
+    let (status, all) = csms.get("/v1/stations/CP-1/history").await;
+    assert_eq!(status, 200, "{all}");
+    let every = cursors_of(&all);
+    assert!(every.len() >= 6, "{all}");
+    assert_eq!(all["gap"], false);
+    assert_eq!(all["next_cursor"], *every.last().unwrap());
+    assert!(every.iter().all(|cursor| cursor.starts_with('c')));
+
+    // Walk the history three frames at a time from the start.
+    let mut walked = Vec::new();
+    let mut cursor = "c0".to_owned();
+    loop {
+        let (status, page) = csms
+            .get(&format!("/v1/stations/CP-1/history?since={cursor}&limit=3"))
+            .await;
+        assert_eq!(status, 200, "{page}");
+        let found = cursors_of(&page);
+        if found.is_empty() {
+            assert_eq!(
+                page["next_cursor"], cursor,
+                "an empty page keeps the cursor"
+            );
+            break;
+        }
+        assert!(found.len() <= 3);
+        assert_eq!(page["next_cursor"], *found.last().unwrap());
+        walked.extend(found);
+        cursor = page["next_cursor"].as_str().unwrap().to_owned();
+    }
+    assert_eq!(walked, every);
+
+    // Without `since`, `limit` keeps the newest frames.
+    let (_, newest) = csms.get("/v1/stations/CP-1/history?limit=2").await;
+    assert_eq!(cursors_of(&newest), every[every.len() - 2..]);
+    let (_, none) = csms.get("/v1/stations/CP-1/history?limit=0").await;
+    assert_eq!(cursors_of(&none).len(), 0);
+    assert_eq!(none["next_cursor"], *every.last().unwrap());
+
+    // A poll after new traffic gets exactly the new frames.
+    let (_, answer) = csms
+        .post_call(
+            "CP-1",
+            &json!({"action": "GetConfiguration", "payload": {}}),
+        )
+        .await;
+    assert_eq!(answer["outcome"], "result", "{answer}");
+    let (_, fresh) = csms
+        .get(&format!("/v1/stations/CP-1/history?since={cursor}"))
+        .await;
+    let kinds: Vec<&str> = fresh["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|frame| frame["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["call", "result"], "{fresh}");
+    assert_eq!(fresh["frames"][0]["direction"], "out");
+    assert_eq!(fresh["frames"][0]["action"], "GetConfiguration");
+    assert_eq!(fresh["frames"][1]["direction"], "in");
+    assert_eq!(fresh["gap"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_filters_select_frames_and_replies_follow_their_call() {
+    let csms = Csms::start(&[]);
+    let _station = station(&csms.station_addr, "CP-1").await;
+    settled(&csms, "CP-1").await;
+    let (_, answer) = csms
+        .post_call("CP-1", &json!({"action": "GetConfiguration"}))
+        .await;
+    assert_eq!(answer["outcome"], "result", "{answer}");
+    let get = |query: &'static str| {
+        let csms = &csms;
+        async move {
+            let (status, page) = csms
+                .get(&format!("/v1/stations/CP-1/history?{query}"))
+                .await;
+            assert_eq!(status, 200, "{query}: {page}");
+            page["frames"].as_array().unwrap().clone()
+        }
+    };
+    // A CALL and its answer, found by the action of the CALL.
+    let boot = get("action=BootNotification").await;
+    assert_eq!(boot.len(), 2, "{boot:?}");
+    assert_eq!(boot[0]["kind"], "call");
+    assert_eq!(boot[1]["kind"], "result");
+    assert_eq!(boot[1]["direction"], "out");
+    assert_eq!(get("action=GetConfiguration").await.len(), 2);
+    assert_eq!(get("action=NoSuchAction").await.len(), 0);
+    let calls = get("kind=call").await;
+    assert!(calls.len() >= 5 && calls.iter().all(|frame| frame["kind"] == "call"));
+    let out = get("direction=out").await;
+    assert!(out.iter().all(|frame| frame["direction"] == "out"));
+    let reply_in = get("kind=result&direction=in&action=GetConfiguration").await;
+    assert_eq!(reply_in.len(), 1, "{reply_in:?}");
+    // The action is percent-decoded like the other parameters.
+    assert_eq!(get("action=Boot%4Eotification").await.len(), 2);
+    // `limit` applies after the filters.
+    assert_eq!(get("kind=call&limit=1").await.len(), 1);
+
+    // Bad values.
+    for query in [
+        "limit=-1",
+        "limit=",
+        "since=",
+        "since=zz",
+        "since=42",
+        "since=c",
+        "since=c-1",
+        "since=c99999999999999999999999",
+        "kind=frame",
+        "kind=",
+        "direction=sideways",
+        "action=",
+        "format=xml",
+        "format=",
+        "bogus=1",
+        "limit=1&limit=2",
+    ] {
+        let (status, body) = csms
+            .get(&format!("/v1/stations/CP-1/history?{query}"))
+            .await;
+        assert_eq!(status, 400, "{query}: {body}");
+        assert_eq!(body["error"]["code"], "bad_request", "{query}");
+    }
+    // A cursor from the future is refused.
+    let (_, last) = csms.get("/v1/stations/CP-1/history?limit=1").await;
+    let newest: u64 = last["next_cursor"].as_str().unwrap()[1..].parse().unwrap();
+    let (status, body) = csms
+        .get(&format!(
+            "/v1/stations/CP-1/history?since=c{}",
+            newest + 1000
+        ))
+        .await;
+    assert_eq!(status, 400, "{body}");
+    // An old cursor is fine and not a gap while nothing was dropped.
+    let (status, page) = csms.get("/v1/stations/CP-1/history?since=c1").await;
+    assert_eq!(status, 200);
+    assert_eq!(page["gap"], false);
+    let (status, _) = csms.get("/v1/stations/GHOST/history?since=c1").await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_reports_a_gap_when_frames_were_dropped() {
+    let csms = Csms::start(&["--history-cap", "4"]);
+    let _station = station(&csms.station_addr, "CP-1").await;
+    settled(&csms, "CP-1").await;
+    let (_, page) = csms.get("/v1/stations/CP-1/history?since=c1").await;
+    assert_eq!(page["gap"], true, "{page}");
+    assert_eq!(cursors_of(&page).len(), 4);
+    // From the newest frame on nothing was lost.
+    let (_, tail) = csms
+        .get(&format!(
+            "/v1/stations/CP-1/history?since={}",
+            page["next_cursor"].as_str().unwrap()
+        ))
+        .await;
+    assert_eq!(tail["gap"], false);
+    let (_, text, body) = {
+        let (status, head, body) = http_text(&csms.api_addr, "/v1/metrics", &[]).await;
+        assert_eq!(status, 200);
+        (status, head, body)
+    };
+    let dropped: u64 = body
+        .lines()
+        .find_map(|line| line.strip_prefix("kirby_csms_history_frames_dropped_total "))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(dropped > 0, "{text}\n{body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_exports_ndjson_and_csv_safely() {
+    let csms = Csms::start(&[]);
+    // Station ids are attacker controlled: one that a spreadsheet would read as a formula.
+    let _station = station(&csms.station_addr, "=CP,1").await;
+    settled(&csms, "=CP%2C1").await;
+    let path = "/v1/stations/=CP%2C1/history";
+    let (status, all) = csms.get(path).await;
+    assert_eq!(status, 200, "{all}");
+    let expected = all["frames"].as_array().unwrap().len();
+
+    let (status, head, body) =
+        http_text(&csms.api_addr, &format!("{path}?format=ndjson"), &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        header_of(&head, "content-type").as_deref(),
+        Some("application/x-ndjson")
+    );
+    let lines: Vec<Value> = body
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), expected);
+    assert_eq!(lines[0]["cursor"], all["frames"][0]["cursor"]);
+    assert_eq!(lines[0]["station"], "=CP,1");
+
+    let (status, head, body) = http_text(&csms.api_addr, &format!("{path}?format=csv"), &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        header_of(&head, "content-type").as_deref(),
+        Some("text/csv; charset=utf-8")
+    );
+    let rows: Vec<&str> = body.split("\r\n").collect();
+    assert_eq!(
+        rows[0],
+        "cursor,ts,station,direction,kind,id,action,payload,code,description,details"
+    );
+    // Header, one row per frame, and the empty string after the last CRLF.
+    assert_eq!(rows.len(), expected + 2, "{body}");
+    assert_eq!(rows.last(), Some(&""));
+    // The station id is prefixed against formulas and quoted for its comma.
+    assert!(rows[1].contains(",\"'=CP,1\","), "{}", rows[1]);
+    assert!(rows[1].contains(",in,call,"), "{}", rows[1]);
+    assert!(rows[1].contains("BootNotification"), "{}", rows[1]);
+    // The same filters apply to every format.
+    let (_, _, filtered) = http_text(
+        &csms.api_addr,
+        &format!("{path}?format=csv&kind=call&limit=1"),
+        &[],
+    )
+    .await;
+    assert_eq!(filtered.split("\r\n").count(), 3, "{filtered}");
+    let (status, _, _) = http_text(&csms.api_addr, &format!("{path}?format=yaml"), &[]).await;
+    assert_eq!(status, 400);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_transaction_list_filters_and_exports() {
+    use kirby_ocpp_core::ids::{ConnectorId, IdTag};
+    let csms = Csms::start(&[]);
+    let (status, empty) = csms.get("/v1/transactions").await;
+    assert_eq!(status, 200);
+    assert_eq!(empty, json!({"transactions": [], "truncated": false}));
+
+    let station = station(&csms.station_addr, "CP-1").await;
+    let _other = self::station(&csms.station_addr, "CP-2").await;
+    station
+        .start_transaction(ConnectorId::new(1), IdTag::new("TAG").unwrap())
+        .await
+        .unwrap();
+    let (_, listed) = loop {
+        let (status, listed) = csms.get("/v1/transactions?state=active").await;
+        assert_eq!(status, 200, "{listed}");
+        if !listed["transactions"].as_array().unwrap().is_empty() {
+            break (status, listed);
+        }
+        tokio::task::yield_now().await;
+    };
+    let tx = &listed["transactions"][0];
+    assert_eq!(listed["truncated"], false);
+    assert_eq!(tx["station"], "CP-1");
+    assert!(tx["id"].is_string(), "{tx}");
+    assert_eq!(tx["status"], "active");
+    assert_eq!(tx["connector"], 1);
+    assert_eq!(tx["id_tag"], "TAG");
+    assert_eq!(
+        keys(tx),
+        [
+            "connector",
+            "energy_wh",
+            "id",
+            "id_tag",
+            "id_tag_status",
+            "last_meter_at",
+            "meter_start",
+            "meter_stop",
+            "power_w",
+            "started_at",
+            "station",
+            "status",
+            "stop_reason",
+            "stopped_at",
+        ]
+    );
+
+    let count = |body: &Value| body["transactions"].as_array().unwrap().len();
+    assert_eq!(count(&csms.get("/v1/transactions").await.1), 1);
+    assert_eq!(
+        count(&csms.get("/v1/transactions?state=stopped").await.1),
+        0
+    );
+    assert_eq!(count(&csms.get("/v1/transactions?station=CP-1").await.1), 1);
+    assert_eq!(count(&csms.get("/v1/transactions?station=CP-2").await.1), 0);
+    assert_eq!(
+        count(&csms.get("/v1/transactions?station=GHOST").await.1),
+        0
+    );
+    assert_eq!(
+        count(
+            &csms
+                .get("/v1/transactions?since=2000-01-01T00:00:00Z")
+                .await
+                .1
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &csms
+                .get("/v1/transactions?since=2999-01-01T00:00:00Z")
+                .await
+                .1
+        ),
+        0
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stopped_transaction_changes_state_and_exports_as_csv() {
+    use kirby_ocpp_core::ids::{ConnectorId, IdTag};
+    let csms = Csms::start(&[]);
+    let station = station(&csms.station_addr, "CP-1").await;
+    station
+        .start_transaction(ConnectorId::new(1), IdTag::new("TAG").unwrap())
+        .await
+        .unwrap();
+    let tx = loop {
+        let (_, listed) = csms.get("/v1/transactions?state=active").await;
+        if let Some(tx) = listed["transactions"].as_array().unwrap().first() {
+            break tx.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let started = tx["started_at"].as_str().unwrap().to_owned();
+    let count = |body: &Value| body["transactions"].as_array().unwrap().len();
+    // A stopped transaction moves between the two states and keeps its fields.
+    station
+        .stop_transaction(
+            ConnectorId::new(1),
+            kirby_ocpp_core::ocpp::types::StopReason::Local,
+        )
+        .await
+        .unwrap();
+    let stopped = loop {
+        let (_, listed) = csms.get("/v1/transactions?state=stopped").await;
+        if let Some(tx) = listed["transactions"].as_array().unwrap().first() {
+            break tx.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(stopped["status"], "stopped");
+    assert_eq!(stopped["id"], tx["id"]);
+    assert!(stopped["stopped_at"].is_string(), "{stopped}");
+    assert_eq!(stopped["stop_reason"], "Local");
+    assert_eq!(count(&csms.get("/v1/transactions?state=active").await.1), 0);
+    assert_eq!(count(&csms.get("/v1/transactions").await.1), 1);
+    let (_, cut) = csms.get("/v1/transactions?limit=0").await;
+    assert_eq!(count(&cut), 0);
+    assert_eq!(cut["truncated"], true);
+
+    let (status, head, body) = http_text(&csms.api_addr, "/v1/transactions?format=csv", &[]).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        header_of(&head, "content-type").as_deref(),
+        Some("text/csv; charset=utf-8")
+    );
+    assert_eq!(header_of(&head, "x-truncated").as_deref(), Some("false"));
+    let rows: Vec<&str> = body.split("\r\n").collect();
+    assert_eq!(
+        rows[0],
+        "station,id,connector,id_tag,id_tag_status,meter_start,started_at,status,meter_stop,\
+         stopped_at,stop_reason,energy_wh,power_w,last_meter_at"
+    );
+    assert!(rows[1].starts_with("CP-1,"), "{}", rows[1]);
+    assert!(rows[1].contains(&started), "{}", rows[1]);
+    assert_eq!(rows.len(), 3, "{body}");
+    let (_, head, _) = http_text(&csms.api_addr, "/v1/transactions?format=csv&limit=0", &[]).await;
+    assert_eq!(header_of(&head, "x-truncated").as_deref(), Some("true"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_transaction_list_refuses_bad_parameters() {
+    let csms = Csms::start(&[]);
+    for query in [
+        "state=completed",
+        "state=",
+        "since=yesterday",
+        "since=2030-01-01",
+        "limit=10001",
+        "limit=-1",
+        "format=ndjson",
+        "format=xml",
+        "bogus=1",
+        "station=",
+        "limit=1&limit=2",
+    ] {
+        let (status, body) = csms.get(&format!("/v1/transactions?{query}")).await;
+        assert_eq!(status, 400, "{query}: {body}");
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_event_stream_resumes_after_the_last_event_id() {
+    let csms = Csms::start(&[]);
+    // A stream that stays open is the reference for what happened.
+    let (_, mut reference) = Sse::open(&csms.api_addr, "/v1/events", &[]).await;
+    let (_, mut first) = Sse::open(&csms.api_addr, "/v1/events", &[]).await;
+    let _s1 = station(&csms.station_addr, "CP-1").await;
+    first
+        .wait_event(|e| e["type"] == "state" && e["connectors"]["1"] == "Available")
+        .await;
+    let seen = *first.ids().last().unwrap();
+    drop(first);
+
+    // Events the first stream missed.
+    let _s2 = station(&csms.station_addr, "CP-2").await;
+    reference
+        .wait_event(|e| {
+            e["type"] == "state" && e["station"] == "CP-2" && e["connectors"]["1"] == "Available"
+        })
+        .await;
+    let ids_after: Vec<u64> = reference
+        .ids()
+        .into_iter()
+        .filter(|id| *id > seen)
+        .collect();
+    assert!(ids_after.len() >= 4, "{ids_after:?}");
+
+    let (status, mut resumed) = Sse::open(
+        &csms.api_addr,
+        "/v1/events",
+        &[("Last-Event-ID", &seen.to_string())],
+    )
+    .await;
+    assert_eq!(status, 200);
+    let wanted = ids_after.len();
+    resumed.wait_ids(wanted).await;
+    let got: Vec<u64> = resumed.ids().into_iter().take(wanted).collect();
+    // Exactly the missed events, in order, with the ids the reference saw: no gap, no repeat.
+    assert_eq!(got, ids_after);
+    assert_eq!(got[0], seen + 1);
+    assert!(got.windows(2).all(|pair| pair[1] == pair[0] + 1), "{got:?}");
+    assert!(!resumed.buf.contains("event: resync"), "{}", resumed.buf);
+
+    // The query form resumes the same way, and a station filter keeps its meaning.
+    let (status, mut by_query) = Sse::open(
+        &csms.api_addr,
+        &format!("/v1/events?station=CP-2&last_event_id={seen}"),
+        &[],
+    )
+    .await;
+    assert_eq!(status, 200);
+    by_query
+        .wait_event(|e| e["type"] == "state" && e["station"] == "CP-2")
+        .await;
+    assert!(by_query.data().iter().all(|e| e["station"] == "CP-2"));
+    assert!(by_query.ids().iter().all(|id| *id > seen));
+    assert!(!by_query.buf.contains("event: resync"));
+
+    // Live events follow the replay with the next id, once.
+    let live = *resumed.ids().last().unwrap();
+    let _s3 = station(&csms.station_addr, "CP-3").await;
+    resumed
+        .wait_event(|e| e["type"] == "connected" && e["station"] == "CP-3")
+        .await;
+    let all = resumed.ids();
+    assert!(all.windows(2).all(|pair| pair[1] == pair[0] + 1), "{all:?}");
+    assert!(all.iter().filter(|id| **id > live).count() >= 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unusable_event_id_gets_a_resync_and_the_stream_goes_on() {
+    let csms = Csms::start(&[]);
+    let _s1 = station(&csms.station_addr, "CP-1").await;
+    // Too old (an id of an earlier run), from the future, and not an id at all.
+    for header in [
+        "1",
+        "99999999999999999999",
+        "9223372036854775807",
+        "abc",
+        "-5",
+        "",
+    ] {
+        let (status, mut stream) =
+            Sse::open(&csms.api_addr, "/v1/events", &[("Last-Event-ID", header)]).await;
+        assert_eq!(status, 200, "{header:?}");
+        let resync = stream.wait_event(|e| e["type"] == "resync").await;
+        assert!(resync["text"].as_str().unwrap().contains("current state"));
+        assert!(stream.buf.contains("event: resync\n"), "{header:?}");
+        // Nothing is replayed before it: the resync is the first message.
+        let body = stream.buf.split_once("\r\n\r\n").unwrap().1;
+        let first_event = body.lines().find(|line| line.starts_with("event: "));
+        assert_eq!(first_event, Some("event: resync"), "{header:?}: {body}");
+    }
+    // After the resync the stream is live, and the resync carries the id of the head, which
+    // a client keeps as its position.
+    let (_, mut stream) = Sse::open(&csms.api_addr, "/v1/events", &[("Last-Event-ID", "1")]).await;
+    stream.wait_event(|e| e["type"] == "resync").await;
+    let head = stream.ids()[0];
+    let _s2 = station(&csms.station_addr, "CP-2").await;
+    stream
+        .wait_event(|e| e["type"] == "connected" && e["station"] == "CP-2")
+        .await;
+    let ids = stream.ids();
+    assert_eq!(ids[1], head + 1, "{ids:?}");
+    // Reconnecting with the resync's id resumes without another resync.
+    let (_, mut again) = Sse::open(
+        &csms.api_addr,
+        "/v1/events",
+        &[("Last-Event-ID", &head.to_string())],
+    )
+    .await;
+    again
+        .wait_event(|e| e["type"] == "connected" && e["station"] == "CP-2")
+        .await;
+    assert!(!again.buf.contains("event: resync"), "{}", again.buf);
+    assert_eq!(again.ids()[0], head + 1);
+
+    // A bad query value is a plain 400.
+    for query in [
+        "last_event_id=abc",
+        "last_event_id=",
+        "last_event_id=1&last_event_id=2",
+    ] {
+        let (status, body) = csms.get(&format!("/v1/events?{query}")).await;
+        assert_eq!(status, 400, "{query}: {body}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn metrics_follow_the_traffic_and_need_the_token() {
+    let csms = Csms::start(&["--api-token", "secret"]);
+    let auth = [("Authorization", "Bearer secret")];
+    let (status, _, _) = http_text(&csms.api_addr, "/v1/metrics", &[]).await;
+    assert_eq!(status, 401);
+
+    let (_, mut events) = Sse::open(&csms.api_addr, "/v1/events", &auth).await;
+    let _station = station(&csms.station_addr, "CP-1").await;
+    let (status, _, _) = http_text(&csms.api_addr, "/v1/nothing", &auth).await;
+    assert_eq!(status, 404);
+    for (action, payload) in [("Authorize", json!({"idTagInfo": {"status": "Blocked"}}))] {
+        let (status, _) = http(
+            &csms.api_addr,
+            "PUT",
+            &format!("/v1/rules/{action}"),
+            &auth,
+            Some(&payload.to_string()),
+        )
+        .await;
+        assert_eq!(status, 200);
+    }
+    let (status, _) = http(
+        &csms.api_addr,
+        "POST",
+        "/v1/faults",
+        &auth,
+        Some(&json!({"action": "Heartbeat", "kind": "silence", "times": 3}).to_string()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    // The log counts a frame before it publishes the event: once the event is on the stream,
+    // the counter has it.
+    events
+        .wait_event(|e| e["type"] == "frame" && e["action"] == "BootNotification")
+        .await;
+
+    let (status, head, body) = http_text(&csms.api_addr, "/v1/metrics", &auth).await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        header_of(&head, "content-type").as_deref(),
+        Some("text/plain; version=0.0.4; charset=utf-8")
+    );
+    let has = |line: &str| body.lines().any(|found| found == line);
+    for line in [
+        "kirby_csms_stations_known 1",
+        "kirby_csms_stations_connected 1",
+        "kirby_csms_faults_active 1",
+        "kirby_csms_fault_occurrences_remaining 3",
+        "kirby_csms_rules_global 1",
+        "kirby_csms_rules_station 0",
+        "kirby_csms_event_streams 1",
+        "kirby_csms_calls_received_total{action=\"BootNotification\"} 1",
+        "# TYPE kirby_csms_calls_received_total counter",
+        "# TYPE kirby_csms_stations_connected gauge",
+    ] {
+        assert!(has(line), "{line}\n{body}");
+    }
+    // The 401 and the 404 above are counted by class.
+    let class = |name: &str| -> u64 {
+        body.lines()
+            .find_map(|line| {
+                line.strip_prefix(&format!(
+                    "kirby_csms_api_requests_total{{class=\"{name}\"}} "
+                ))
+            })
+            .unwrap()
+            .parse()
+            .unwrap()
+    };
+    assert!(class("4xx") >= 2, "{body}");
+    assert!(class("2xx") >= 3, "{body}");
+    assert_eq!(class("5xx"), 0);
+    assert!(body.contains("kirby_csms_uptime_seconds "));
+    assert!(body.contains("kirby_csms_build_info{version=\""));
+    // Station ids never become labels.
+    assert!(!body.contains("CP-1"), "{body}");
+    // Every sample line ends in a number.
+    for line in body.lines().filter(|line| !line.starts_with('#')) {
+        assert!(
+            line.rsplit(' ').next().unwrap().parse::<u64>().is_ok(),
+            "{line}"
+        );
+    }
 }

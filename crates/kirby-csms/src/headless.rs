@@ -135,8 +135,8 @@ pub fn announce(out: &Output, handle: &CsmsHandle) {
 }
 
 /// Prints the `api listening` line.
-pub fn announce_api(out: &Output, addr: std::net::SocketAddr) {
-    let url = format!("http://{addr}");
+pub fn announce_api(out: &Output, addr: std::net::SocketAddr, tls: bool) {
+    let url = format!("{}://{addr}", if tls { "https" } else { "http" });
     out.event(
         &json!({"type": "api_listening", "addr": addr.to_string(), "url": url}),
         &format!("api listening on {url}"),
@@ -180,7 +180,7 @@ fn active_transactions(state: &StationState) -> Value {
         .transactions
         .iter()
         .filter(|tx| tx.status == TransactionStatus::Active)
-        .map(|tx| json!({"id": tx.id, "connector": tx.connector}))
+        .map(|tx| json!({"id": tx.id, "connector": tx.connector, "evse": Value::Null}))
         .collect()
 }
 
