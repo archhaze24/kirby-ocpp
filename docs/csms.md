@@ -153,8 +153,8 @@ Commands (a line with `cmd` needs no `action`; `id` is echoed like for a CALL; a
 | `{"cmd":"rules","op":"set","action":"Authorize","payload":{...},"station":"CP-1","protocol":"ocpp1.6"}` | `{"type":"rule","action":..,"station":..,"protocol":..,"set":true}`; `station` and `protocol` are optional, `payload` must be an object, `action` must be a charge-point action of the protocol; a rule beyond the [caps](api.md#rules-and-faults) is an error |
 | `{"cmd":"rules","op":"clear","action":"Authorize","station":"CP-1"}` | `{"type":"rule",..,"cleared":true\|false}` |
 | `{"cmd":"faults"}` (or `"op":"list"`, optional `station`) | `{"type":"faults","remaining":N,"faults":[{"id","scope","station","protocol","action","kind","remaining"}]}` |
-| `{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"silence","times":2,"station":"CP-1","protocol":"ocpp1.6","payload":{...}}` | `{"type":"fault","injected":true,"id":"f1","remaining":2}`; `kind`, `times` (default 1) and `payload` follow the [fault rules](#response-rules-and-fault-injection) |
-| `{"cmd":"faults","op":"remove","id":"f1"}` | `{"type":"fault","id":"f1","removed":true\|false}` |
+| `{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"silence","times":2,"station":"CP-1","protocol":"ocpp1.6","payload":{...}}` | `{"type":"fault","injected":true,"fault_id":"f1","remaining":2}`; the optional request tag `id` is echoed as `id`; `kind`, `times` (default 1) and `payload` follow the [fault rules](#response-rules-and-fault-injection) |
+| `{"cmd":"faults","op":"remove","fault_id":"f1"}` | `{"type":"fault","fault_id":"f1","removed":true\|false}` |
 | `{"cmd":"faults","op":"clear"}` | `{"type":"faults","remaining":0,"faults":[]}`: drops every fault of every scope |
 
 Rules:

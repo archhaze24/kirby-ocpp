@@ -252,6 +252,14 @@ fn shown_url(url: &Url) -> String {
     if shown.password().is_some() {
         let _ = shown.set_password(Some("***"));
     }
+    // A query often carries a token: keep the names, hide the values.
+    if shown.query().is_some() {
+        let names: Vec<String> = shown
+            .query_pairs()
+            .map(|(name, _)| format!("{}=***", name.replace(['&', '#', '='], "")))
+            .collect();
+        shown.set_query(Some(&names.join("&")));
+    }
     clean(shown.as_str(), 300)
 }
 
@@ -312,9 +320,21 @@ async fn run_steps(o: &ProbeOptions, rec: &mut Recorder<'_>) -> String {
         }
         Host::Domain(name) => {
             let name = name.to_owned();
-            match timeout(rec.cap(), tokio::net::lookup_host((name.as_str(), port))).await {
-                Ok(Ok(found)) => {
-                    let mut addrs: Vec<SocketAddr> = found.collect();
+            // A detached thread, not `spawn_blocking`: a resolver that never answers must not hold
+            // up the runtime shutdown after the step has timed out.
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            let lookup_name = name.clone();
+            std::thread::spawn(move || {
+                let found = std::net::ToSocketAddrs::to_socket_addrs(&(lookup_name.as_str(), port))
+                    .map(Iterator::collect::<Vec<SocketAddr>>);
+                let _ = sender.send(found);
+            });
+            let lookup = timeout(rec.cap(), receiver).await.map(|received| {
+                received
+                    .unwrap_or_else(|_| Err(std::io::Error::other("the resolver thread failed")))
+            });
+            match lookup {
+                Ok(Ok(mut addrs)) => {
                     addrs.dedup();
                     if addrs.is_empty() {
                         rec.fail(
@@ -990,6 +1010,14 @@ mod tests {
         let shown = shown_url(&url);
         assert!(!shown.contains("s3cret"), "{shown}");
         assert!(shown.contains("CP-1:***@host"), "{shown}");
+    }
+
+    #[test]
+    fn the_shown_url_keeps_query_names_and_hides_values() {
+        let url = Url::parse("wss://host/ocpp/CP-1?token=s3cret&x=1").unwrap();
+        let shown = shown_url(&url);
+        assert!(!shown.contains("s3cret"), "{shown}");
+        assert!(shown.ends_with("?token=***&x=***"), "{shown}");
     }
 
     #[test]

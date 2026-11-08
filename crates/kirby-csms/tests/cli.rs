@@ -384,15 +384,28 @@ async fn stdin_history_rules_faults_and_forget() {
         (&injected["injected"], &injected["remaining"]),
         (&json!(true), &json!(2))
     );
-    let id = injected["id"].as_str().unwrap().to_owned();
+    let id = injected["fault_id"].as_str().unwrap().to_owned();
+    // The request tag `id` is echoed untouched and never replaces the fault id.
+    csms.send(r#"{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"close","id":"tag-1"}"#);
+    let tagged = csms.wait(|v| v["type"] == "fault" && v["id"] == "tag-1");
+    assert!(tagged["fault_id"].as_str().is_some_and(|f| f != id));
+    csms.send(r#"{"cmd":"faults","op":"clear"}"#);
+    csms.wait(|v| v["type"] == "faults");
+    csms.send(r#"{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"silence","times":2,"station":"CP-1"}"#);
+    let injected = csms.wait(|v| v["type"] == "fault");
+    let id = injected["fault_id"].as_str().unwrap().to_owned();
     csms.send(r#"{"cmd":"faults"}"#);
     let list = csms.wait(|v| v["type"] == "faults");
     assert_eq!(list["remaining"], 2);
     assert_eq!(list["faults"][0]["id"], id.as_str());
     assert_eq!(list["faults"][0]["scope"], "station");
-    csms.send(&json!({"cmd": "faults", "op": "remove", "id": id}).to_string());
-    assert_eq!(csms.wait(|v| v["type"] == "fault")["removed"], true);
-    csms.send(&json!({"cmd": "faults", "op": "remove", "id": id}).to_string());
+    csms.send(&json!({"cmd": "faults", "op": "remove", "fault_id": id, "id": 7}).to_string());
+    let removed = csms.wait(|v| v["type"] == "fault");
+    assert_eq!(
+        (&removed["removed"], &removed["id"]),
+        (&json!(true), &json!(7))
+    );
+    csms.send(&json!({"cmd": "faults", "op": "remove", "fault_id": id}).to_string());
     assert_eq!(csms.wait(|v| v["type"] == "fault")["removed"], false);
     for line in [
         r#"{"cmd":"faults","op":"inject","action":"Heartbeat","kind":"nope"}"#,

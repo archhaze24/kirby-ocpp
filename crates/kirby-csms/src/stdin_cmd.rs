@@ -320,13 +320,13 @@ fn faults(handle: &CsmsHandle, object: &Object) -> Value {
                     scope,
                 )?;
                 Ok(json!({
-                    "type": "fault", "injected": true, "id": id,
+                    "type": "fault", "injected": true, "fault_id": id,
                     "remaining": handle.faults_remaining(),
                 }))
             }
             "remove" => {
-                let id = req_text(object, "id")?;
-                Ok(json!({"type": "fault", "id": id, "removed": handle.remove_fault(id)}))
+                let id = req_text(object, "fault_id")?;
+                Ok(json!({"type": "fault", "fault_id": id, "removed": handle.remove_fault(id)}))
             }
             "clear" => {
                 handle.clear_faults();
