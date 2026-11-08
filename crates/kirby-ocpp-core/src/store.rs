@@ -218,6 +218,19 @@ pub enum LoadOutcome {
     },
 }
 
+/// Result of [`StationStore::inspect`]: like [`LoadOutcome`], but nothing is moved aside.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Inspection {
+    /// No file.
+    Missing,
+    Loaded(Box<PersistedStation>),
+    /// The file cannot be used (corrupt, or it belongs to another charge point).
+    Unusable {
+        reason: String,
+    },
+}
+
 /// Handle to the state file of one charge point.
 #[derive(Debug, Clone)]
 pub struct StationStore {
@@ -240,15 +253,30 @@ impl StationStore {
 
     /// Reads the state file. See the module docs for the recovery rules.
     pub fn load(&self) -> Result<LoadOutcome, StoreError> {
+        match self.read_state()? {
+            Inspection::Missing => Ok(LoadOutcome::Missing),
+            Inspection::Loaded(state) => Ok(LoadOutcome::Loaded(state)),
+            Inspection::Unusable { reason } => self.quarantine(reason),
+        }
+    }
+
+    /// Reads the state file without changing anything: a file that [`StationStore::load`]
+    /// would move aside is reported as [`Inspection::Unusable`] and stays where it is.
+    pub fn inspect(&self) -> Result<Inspection, StoreError> {
+        self.read_state()
+    }
+
+    fn read_state(&self) -> Result<Inspection, StoreError> {
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(LoadOutcome::Missing),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Inspection::Missing),
             Err(source) => return Err(self.io_error(source)),
         };
+        let unusable = |reason: String| Ok(Inspection::Unusable { reason });
 
         let value: Value = match serde_json::from_slice(&bytes) {
             Ok(value) => value,
-            Err(e) => return self.quarantine(format!("not valid JSON: {e}")),
+            Err(e) => return unusable(format!("not valid JSON: {e}")),
         };
         match value.get("version").and_then(Value::as_u64) {
             Some(found) if found > u64::from(STORE_VERSION) => {
@@ -259,19 +287,73 @@ impl StationStore {
                 });
             }
             Some(_) => {}
-            None => return self.quarantine("missing format version".to_owned()),
+            None => return unusable("missing format version".to_owned()),
         }
         let state: PersistedStation = match serde_json::from_value(value) {
             Ok(state) => state,
-            Err(e) => return self.quarantine(format!("unexpected structure: {e}")),
+            Err(e) => return unusable(format!("unexpected structure: {e}")),
         };
         if state.charge_point_id != self.charge_point_id {
-            return self.quarantine(format!(
+            return unusable(format!(
                 "belongs to charge point `{}`, expected `{}`",
                 state.charge_point_id, self.charge_point_id
             ));
         }
-        Ok(LoadOutcome::Loaded(Box::new(state)))
+        Ok(Inspection::Loaded(Box::new(state)))
+    }
+
+    /// Whether a secrets file exists next to the state file. Nothing is read.
+    #[must_use]
+    pub fn has_secrets(&self) -> bool {
+        self.secrets_path().is_file()
+    }
+
+    /// The files [`StationStore::remove`] deletes: the state file, the secrets file and their
+    /// `.bak` copies. All of them sit directly in the state directory.
+    #[must_use]
+    pub fn owned_files(&self) -> Vec<PathBuf> {
+        let state = self.path.clone();
+        let secrets = self.secrets_path();
+        let backup = |path: &Path| {
+            let mut name = path.as_os_str().to_owned();
+            name.push(".bak");
+            PathBuf::from(name)
+        };
+        vec![
+            state.clone(),
+            backup(&state),
+            secrets.clone(),
+            backup(&secrets),
+        ]
+    }
+
+    /// Deletes the persisted state of this charge point (see [`StationStore::owned_files`])
+    /// and returns the files that existed. Nothing is deleted when the state file or the
+    /// secrets file was written by a newer version ([`StoreError::UnsupportedVersion`]).
+    pub fn remove(&self) -> Result<Vec<PathBuf>, StoreError> {
+        let files = self.owned_files();
+        for path in [&files[0], &files[2]] {
+            let Ok(bytes) = fs::read(path) else { continue };
+            let found = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|value| value.get("version").and_then(Value::as_u64));
+            if let Some(found) = found.filter(|found| *found > u64::from(STORE_VERSION)) {
+                return Err(StoreError::UnsupportedVersion {
+                    path: path.clone(),
+                    found,
+                    supported: STORE_VERSION,
+                });
+            }
+        }
+        let mut removed = Vec::new();
+        for path in files {
+            match fs::remove_file(&path) {
+                Ok(()) => removed.push(path),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(source) => return Err(StoreError::Io { path, source }),
+            }
+        }
+        Ok(removed)
     }
 
     /// Path of the secrets file next to the state file.
@@ -739,6 +821,70 @@ mod tests {
             Err(StoreError::UnsupportedVersion { found, .. }) if found == u64::from(STORE_VERSION) + 1
         ));
         assert_eq!(fs::read_to_string(store.secrets_path()).unwrap(), text);
+    }
+
+    #[test]
+    fn inspect_never_moves_a_broken_file_aside() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        assert!(matches!(store.inspect().unwrap(), Inspection::Missing));
+        fs::write(store.path(), b"not json").unwrap();
+        assert!(matches!(
+            store.inspect().unwrap(),
+            Inspection::Unusable { .. }
+        ));
+        assert_eq!(fs::read(store.path()).unwrap(), b"not json");
+        store.save(&sample()).unwrap();
+        assert!(matches!(store.inspect().unwrap(), Inspection::Loaded(_)));
+    }
+
+    #[test]
+    fn remove_deletes_only_the_files_of_that_station() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        let other = StationStore::new(dir.path(), "CP-2");
+        store.save(&sample()).unwrap();
+        let secrets = StationSecrets {
+            authorization_key: Some("k".to_owned()),
+            ..StationSecrets::default()
+        };
+        store.save_secrets(&secrets).unwrap();
+        other.save(&PersistedStation::new("CP-2")).unwrap();
+        fs::write(dir.path().join("unrelated.txt"), b"x").unwrap();
+        assert!(store.has_secrets());
+
+        let removed = store.remove().unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(!store.path().exists());
+        assert!(!store.has_secrets());
+        assert!(other.path().exists());
+        assert!(dir.path().join("unrelated.txt").exists());
+        assert!(store.remove().unwrap().is_empty(), "nothing left to remove");
+    }
+
+    #[test]
+    fn remove_refuses_files_of_a_newer_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        store.save(&sample()).unwrap();
+        let text = format!(r#"{{"version": {}}}"#, u64::from(STORE_VERSION) + 1);
+        fs::write(store.secrets_path(), &text).unwrap();
+        assert!(matches!(
+            store.remove(),
+            Err(StoreError::UnsupportedVersion { .. })
+        ));
+        assert!(store.path().exists(), "the state file stays");
+        assert_eq!(fs::read_to_string(store.secrets_path()).unwrap(), text);
+    }
+
+    #[test]
+    fn owned_files_stay_inside_the_directory_for_hostile_ids() {
+        let dir = Path::new("/state");
+        for id in ["../../etc/passwd", "a/b", "..", "", "x\0y"] {
+            for path in StationStore::new(dir, id).owned_files() {
+                assert_eq!(path.parent(), Some(dir), "{id:?} -> {}", path.display());
+            }
+        }
     }
 
     #[cfg(unix)]

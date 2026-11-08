@@ -371,6 +371,11 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
 
     #[command(subcommand)]
     pub command: Option<Cmd>,
+
+    /// Whether the id came from `--id`, `OCPP_CHARGE_POINT_ID` or a configuration file
+    /// rather than the default (`state` needs to know).
+    #[arg(skip)]
+    pub id_explicit: bool,
 }
 
 /// `--print-config` formats.
@@ -400,6 +405,14 @@ pub enum Cmd {
     Run(RunArgs),
     /// Run several scenarios one after another, each on a fresh station; exit code 1 if any fails
     Suite(SuiteArgs),
+    /// Check the way to the Central System step by step (URL, DNS, TCP, TLS, WebSocket upgrade,
+    /// BootNotification); exit code 1 if a step fails
+    Check(CheckArgs),
+    /// Show, locate or delete the persisted state of a station
+    State {
+        #[command(subcommand)]
+        action: StateCmd,
+    },
     /// Built-in scenarios, and checking scenario files
     Scenarios {
         #[command(subcommand)]
@@ -412,6 +425,33 @@ pub enum Cmd {
         /// Shell to generate the script for
         #[arg(value_enum, value_name = "SHELL")]
         shell: clap_complete::Shell,
+    },
+}
+
+/// Arguments of `check`; the connection flags are the global ones.
+#[derive(Debug, Args)]
+pub struct CheckArgs {
+    /// Give up after this many seconds in total (one connection step is also limited to 10)
+    #[arg(
+        help_heading = "Check",
+        long, value_name = "SECONDS", default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..=3_600)
+    )]
+    pub timeout: u64,
+}
+
+/// What `state` does. The station is the global `--id`; the directory is `--state-dir`.
+#[derive(Debug, Subcommand)]
+pub enum StateCmd {
+    /// Print the state directory, or with --id the state file of that station; creates nothing
+    Path,
+    /// Print what the state of the station --id holds; secrets are not read or printed
+    Show,
+    /// Delete the persisted state of the station --id (state file, secrets file, backups)
+    Reset {
+        /// Delete without asking (required when stdin is not a terminal)
+        #[arg(help_heading = "State", short = 'y', long)]
+        yes: bool,
     },
 }
 
@@ -592,6 +632,7 @@ const OFFLINE_SUBCOMMANDS: &[(&str, &[&str])] = &[
     ("scenarios", &[]),
     ("completions", &[]),
     ("version", &["json"]),
+    ("state", &["id", "state_dir", "json"]),
 ];
 
 /// Redefines the global arguments `hidden` on `command` and its nested subcommands as
@@ -621,7 +662,7 @@ pub fn command() -> clap::Command {
         .filter(|arg| arg.is_global_set())
         .cloned()
         .collect();
-    for name in ["run", "suite"] {
+    for name in ["run", "suite", "check"] {
         command = command.mut_subcommand(name, |sub| sub.after_help(STATION_FLAGS_NOTE));
     }
     for (name, keep) in OFFLINE_SUBCOMMANDS {
@@ -641,8 +682,55 @@ pub fn command() -> clap::Command {
             .long_help("Print the version details as one JSON object");
         command = command.mut_subcommand("version", |sub| sub.arg(json));
     }
+    // The same for `state`: its flags `--id` and `--json` mean something else there.
+    let on_state = [(
+        "Charge point id of the station (needed by show and reset)",
+        "Print the result as one JSON object",
+    )];
+    for (id_help, json_help) in on_state {
+        let id = globals.iter().find(|arg| arg.get_id() == "id").cloned();
+        let json = globals.iter().find(|arg| arg.get_id() == "json").cloned();
+        if let (Some(id), Some(json)) = (id, json) {
+            let id = id.help(id_help).long_help(id_help).hide_default_value(true);
+            let json = json.help(json_help).long_help(json_help);
+            command = command.mut_subcommand("state", |state| state.arg(id).arg(json));
+        }
+    }
+    for (name, id_help, json_help) in STATE_HELP {
+        let id = globals.iter().find(|arg| arg.get_id() == "id").cloned();
+        let json = globals.iter().find(|arg| arg.get_id() == "json").cloned();
+        if let (Some(id), Some(json)) = (id, json) {
+            let id = id
+                .help(*id_help)
+                .long_help(*id_help)
+                .hide_default_value(true);
+            let json = json.help(*json_help).long_help(*json_help);
+            command = command.mut_subcommand("state", |state| {
+                state.mut_subcommand(*name, |sub| sub.arg(id).arg(json))
+            });
+        }
+    }
     command
 }
+
+/// Help texts of `--id` and `--json` under `state path`, `state show` and `state reset`.
+const STATE_HELP: &[(&str, &str, &str)] = &[
+    (
+        "path",
+        "Charge point id: print the state file of this station instead of the directory",
+        "Print the paths as one JSON object",
+    ),
+    (
+        "show",
+        "Charge point id of the station (required)",
+        "Print the state as one JSON object",
+    ),
+    (
+        "reset",
+        "Charge point id of the station (required)",
+        "Print the outcome as one JSON object",
+    ),
+];
 
 /// The command shell completion is generated from. `clap_complete` offers hidden flags and
 /// every global flag under every subcommand, so here the station flags are plain (non-global)
@@ -658,11 +746,21 @@ pub fn completion_command() -> clap::Command {
     for arg in &globals {
         command = command.mut_arg(arg.get_id().clone(), |arg| arg.global(false));
     }
-    for name in ["run", "suite"] {
+    for name in ["run", "suite", "check"] {
         command = command.mut_subcommand(name, |sub| {
             globals
                 .iter()
                 .fold(sub, |sub, arg| sub.arg(arg.clone().global(false)))
+        });
+    }
+    for (name, _, _) in STATE_HELP {
+        command = command.mut_subcommand("state", |state| {
+            state.mut_subcommand(*name, |sub| {
+                globals
+                    .iter()
+                    .filter(|arg| ["id", "state_dir", "json"].contains(&arg.get_id().as_str()))
+                    .fold(sub, |sub, arg| sub.arg(arg.clone().global(false)))
+            })
         });
     }
     if let Some(json) = globals.iter().find(|arg| arg.get_id() == "json") {
@@ -677,7 +775,13 @@ impl Cli {
     pub fn parse_args() -> Self {
         use clap::FromArgMatches;
         let mut matches = crate::settings::parse_matches(std::env::args_os().collect());
-        Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|error| error.exit())
+        let id_explicit = matches!(
+            matches.value_source("id"),
+            Some(clap::parser::ValueSource::CommandLine | clap::parser::ValueSource::EnvVariable)
+        );
+        let mut cli = Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|error| error.exit());
+        cli.id_explicit = id_explicit;
+        cli
     }
 
     /// The effective settings as a configuration file (`--print-config=toml`): every

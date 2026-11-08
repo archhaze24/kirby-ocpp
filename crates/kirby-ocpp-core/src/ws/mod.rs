@@ -36,6 +36,7 @@
 //! upgrade) is bounded by [`ConnectOptions::call_timeout`] as well.
 
 mod handshake;
+pub mod probe;
 mod task;
 mod tls;
 

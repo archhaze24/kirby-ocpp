@@ -27,11 +27,33 @@ const MAX_HEAD: usize = 16 * 1024;
 /// Bounds the 1002 close sent to a server that did not select the subprotocol.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// What the server answered to the upgrade request, kept for diagnostics.
+#[derive(Debug, Default, Clone)]
+pub(super) struct UpgradeInfo {
+    /// HTTP status of the answer.
+    pub status: Option<u16>,
+    /// The `Sec-WebSocket-Protocol` header of the answer, control characters removed.
+    pub protocol: Option<String>,
+}
+
 /// Performs the upgrade on `stream` (plain TCP or TLS) and returns the WebSocket.
 pub(super) async fn upgrade<S>(
+    stream: S,
+    url: &Url,
+    subprotocol: &str,
+) -> Result<WebSocketStream<S>, ConnectError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    upgrade_with_info(stream, url, subprotocol, &mut UpgradeInfo::default()).await
+}
+
+/// [`upgrade`] that also reports the server's answer in `info`, failures included.
+pub(super) async fn upgrade_with_info<S>(
     mut stream: S,
     url: &Url,
     subprotocol: &str,
+    info: &mut UpgradeInfo,
 ) -> Result<WebSocketStream<S>, ConnectError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
@@ -44,6 +66,14 @@ where
         .map_err(|e| handshake_error(format!("cannot send the upgrade request: {e}")))?;
 
     let head = parse_head(&read_head(&mut stream).await?)?;
+    info.status = Some(head.status);
+    info.protocol = head.header("sec-websocket-protocol").map(|value| {
+        value
+            .chars()
+            .filter(|c| !crate::text::is_unsafe_char(*c))
+            .take(100)
+            .collect()
+    });
     if head.status != 101 {
         return Err(ConnectError::HttpStatus {
             status: head.status,

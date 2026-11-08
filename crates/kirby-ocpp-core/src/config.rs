@@ -456,11 +456,16 @@ impl StationConfig {
     /// The state directory: `state_dir` if set, else `~/.kirby-ocpp/stations`
     /// (`%USERPROFILE%` on Windows). `None` if no home directory can be determined.
     pub fn state_dir_or_default(&self) -> Option<PathBuf> {
-        self.state_dir.clone().or_else(|| {
-            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-            Some(PathBuf::from(home).join(".kirby-ocpp").join("stations"))
-        })
+        self.state_dir.clone().or_else(default_state_dir)
     }
+}
+
+/// The per-user state directory: `~/.kirby-ocpp/stations` (`%USERPROFILE%` on Windows).
+/// `None` if no home directory can be determined.
+#[must_use]
+pub fn default_state_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".kirby-ocpp").join("stations"))
 }
 
 /// RFC 7230 token: non-empty, visible ASCII without separators.

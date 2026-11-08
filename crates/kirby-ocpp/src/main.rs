@@ -9,10 +9,12 @@ macro_rules! eprintln {
     };
 }
 
+mod check;
 mod cli;
 mod fleet;
 mod headless;
 mod settings;
+mod state;
 mod suite;
 mod suite_ci;
 
@@ -80,6 +82,15 @@ async fn real_main() -> ExitCode {
         Some(Cmd::Scenarios { action }) => return scenarios(action),
         Some(Cmd::Version) => return print_version(cli.json),
         Some(Cmd::Completions { shell }) => return print_completions(*shell),
+        Some(Cmd::State { action }) => {
+            let options = state::StateOptions {
+                id: cli.id.clone(),
+                id_given: cli.id_explicit,
+                dir: cli.state_dir.clone(),
+                json: cli.json,
+            };
+            return state::run(action, &options);
+        }
         _ => {}
     }
     let (print_config, no_tui, json) = (cli.print_config, cli.no_tui, cli.json);
@@ -168,7 +179,13 @@ async fn real_main() -> ExitCode {
         Some(Cmd::Suite(args)) => {
             suite::run(config, &args, connector, json, log_file.as_deref()).await
         }
-        Some(Cmd::Scenarios { .. } | Cmd::Version | Cmd::Completions { .. }) => {
+        Some(Cmd::Check(_)) if is_fleet => {
+            usage_error("`check` tests one station; fleet mode (--count > 1) is not supported")
+        }
+        Some(Cmd::Check(args)) => check::run(&config, &args, json).await,
+        Some(
+            Cmd::Scenarios { .. } | Cmd::Version | Cmd::Completions { .. } | Cmd::State { .. },
+        ) => {
             unreachable!("handled above")
         }
         None => {
