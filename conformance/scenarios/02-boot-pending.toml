@@ -59,3 +59,9 @@ name = "the registration is accepted"
 action = "wait_for"
 condition = { kind = "registration", status = "Accepted" }
 timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:boot-pending"

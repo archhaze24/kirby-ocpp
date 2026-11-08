@@ -52,3 +52,9 @@ action = "expect_call"
 call = "ClearChargingProfile"
 direction = "in"
 match = { id = 1 }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:charging-profile"

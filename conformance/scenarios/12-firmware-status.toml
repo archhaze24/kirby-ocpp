@@ -48,3 +48,9 @@ action = "expect_call"
 call = "FirmwareStatusNotification"
 direction = "out"
 match = { status = "Installed" }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:firmware-status"

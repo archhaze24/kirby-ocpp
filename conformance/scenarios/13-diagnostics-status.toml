@@ -34,3 +34,9 @@ action = "expect_call"
 call = "DiagnosticsStatusNotification"
 direction = "out"
 match = { status = "Uploaded" }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:diagnostics-status"

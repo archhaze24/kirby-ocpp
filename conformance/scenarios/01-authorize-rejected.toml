@@ -53,3 +53,9 @@ match = { transactionId = 9001, reason = "DeAuthorized" }
 name = "no transaction is left on the connector"
 action = "wait_for"
 condition = { kind = "tx_idle", connector = 1 }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:authorize-rejected"

@@ -50,3 +50,9 @@ match = { connectorId = 1, meterValue = [ { sampledValue = [ { context = "Sample
 action = "stop_tx"
 connector = 1
 reason = "Local"
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:meter-values"

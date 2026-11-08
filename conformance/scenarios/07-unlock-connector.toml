@@ -28,3 +28,9 @@ action = "expect_call"
 call = "UnlockConnector"
 direction = "in"
 match = { connectorId = 99 }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:unlock-connector"

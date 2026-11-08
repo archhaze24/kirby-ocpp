@@ -39,3 +39,9 @@ timeout_ms = 10000
 name = "the connection stayed up"
 action = "wait_for"
 condition = { kind = "connected" }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:reset-soft"

@@ -10,7 +10,9 @@ tags = ["conformance"]
 # Every scenario opens with a DataTransfer from vendor "kirby.conformance" whose
 # messageId is "ready:<topic>". The section of this script for that topic waits for it,
 # prepares what the scenario needs, and sends "go:<topic>" when the scenario must wait for
-# the preparation. The sections run in the order of the scenario file names; a run of a
+# the preparation. Every scenario ends with "done:<topic>" and the section ends by waiting
+# for it: the station has then answered every command of the section before it is torn down.
+# The sections run in the order of the scenario file names; a run of a
 # subset of the scenarios needs a script with only their sections.
 
 [vars]
@@ -53,6 +55,14 @@ station = "${station}"
 call = "DataTransfer"
 payload = { vendorId = "${vendor}", messageId = "go:authorize-rejected" }
 
+[[steps]]
+name = "authorize-rejected: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:authorize-rejected" }
+timeout_ms = 30000
+
 # ---------------------------------------------------------------------------------------
 # 02 conformance-boot-pending
 
@@ -80,6 +90,14 @@ station = "${station}"
 call = "DataTransfer"
 payload = { vendorId = "${vendor}", messageId = "go:boot-pending" }
 
+[[steps]]
+name = "boot-pending: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:boot-pending" }
+timeout_ms = 30000
+
 # ---------------------------------------------------------------------------------------
 # 03 conformance-boot-rejected
 
@@ -106,6 +124,14 @@ action = "call"
 station = "${station}"
 call = "DataTransfer"
 payload = { vendorId = "${vendor}", messageId = "go:boot-rejected" }
+
+[[steps]]
+name = "boot-rejected: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:boot-rejected" }
+timeout_ms = 30000
 
 # ---------------------------------------------------------------------------------------
 # 04 conformance-remote-start-stop
@@ -151,6 +177,14 @@ call = "RemoteStopTransaction"
 payload = { transactionId = 4242 }
 expect_status = "Accepted"
 
+[[steps]]
+name = "remote-stop: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:remote-start-stop" }
+timeout_ms = 30000
+
 # ---------------------------------------------------------------------------------------
 # 05 conformance-reset-soft
 
@@ -170,6 +204,14 @@ call = "Reset"
 payload = { type = "Soft" }
 expect_status = "Accepted"
 
+[[steps]]
+name = "reset-soft: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:reset-soft" }
+timeout_ms = 30000
+
 # ---------------------------------------------------------------------------------------
 # 06 conformance-reset-hard
 
@@ -188,6 +230,14 @@ station = "${station}"
 call = "Reset"
 payload = { type = "Hard" }
 expect_status = "Accepted"
+
+[[steps]]
+name = "reset-hard: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:reset-hard" }
+timeout_ms = 30000
 
 # ---------------------------------------------------------------------------------------
 # 07 conformance-unlock-connector
@@ -215,6 +265,14 @@ station = "${station}"
 call = "UnlockConnector"
 payload = { connectorId = 99 }
 expect_status = "NotSupported"
+
+[[steps]]
+name = "unlock-connector: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:unlock-connector" }
+timeout_ms = 30000
 
 # ---------------------------------------------------------------------------------------
 # 08 conformance-trigger-message
@@ -275,6 +333,14 @@ call = "TriggerMessage"
 payload = { requestedMessage = "BootNotification" }
 expect_status = "Accepted"
 
+[[steps]]
+name = "trigger-message: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:trigger-message" }
+timeout_ms = 30000
+
 # ---------------------------------------------------------------------------------------
 # 09 conformance-configuration
 
@@ -326,6 +392,14 @@ call = "GetConfiguration"
 payload = { key = ["KirbyNoSuchKey"] }
 expect_payload = { unknownKey = ["KirbyNoSuchKey"] }
 
+[[steps]]
+name = "configuration: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:configuration" }
+timeout_ms = 30000
+
 # ---------------------------------------------------------------------------------------
 # 10 conformance-reservation
 
@@ -360,6 +434,14 @@ station = "${station}"
 call = "CancelReservation"
 payload = { reservationId = 7 }
 expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:reservation" }
+timeout_ms = 30000
 
 # ---------------------------------------------------------------------------------------
 # 11 conformance-charging-profile
@@ -412,6 +494,14 @@ call = "ClearChargingProfile"
 payload = { id = 1 }
 expect_status = "Unknown"
 
+[[steps]]
+name = "charging-profile: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:charging-profile" }
+timeout_ms = 30000
+
 # ---------------------------------------------------------------------------------------
 # 12 conformance-firmware-status
 
@@ -430,6 +520,14 @@ station = "${station}"
 call = "UpdateFirmware"
 payload = { location = "https://example.com/firmware.bin", retrieveDate = "2020-01-01T00:00:00Z" }
 expect_payload = {}
+
+[[steps]]
+name = "firmware-status: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:firmware-status" }
+timeout_ms = 30000
 
 # ---------------------------------------------------------------------------------------
 # 13 conformance-diagnostics-status
@@ -450,6 +548,14 @@ call = "GetDiagnostics"
 payload = { location = "ftp://example.com/diagnostics" }
 expect_payload = {}
 
+[[steps]]
+name = "diagnostics-status: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:diagnostics-status" }
+timeout_ms = 30000
+
 # ---------------------------------------------------------------------------------------
 # 14 conformance-meter-values
 
@@ -468,6 +574,14 @@ station = "${station}"
 call = "ChangeConfiguration"
 payload = { key = "MeterValuesSampledData", value = "Energy.Active.Import.Register,Power.Active.Import" }
 expect_status = "Accepted"
+
+[[steps]]
+name = "meter-values: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:meter-values" }
+timeout_ms = 30000
 
 # ---------------------------------------------------------------------------------------
 # 15 conformance-scripted-replies
@@ -495,3 +609,19 @@ station = "${station}"
 call = "UnlockConnector"
 payload = { connectorId = 1 }
 expect_error = true
+
+[[steps]]
+name = "scripted-replies: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:scripted-replies" }
+timeout_ms = 30000
+
+# The script ends here and `kirby-csms` closes every connection. The station has to take the
+# answer to its last message before that close arrives; a station that sees the close first
+# reports the pending call as lost. A short pause lets it finish.
+[[steps]]
+name = "let the station take the last answer before the CSMS closes"
+action = "sleep"
+ms = 1000

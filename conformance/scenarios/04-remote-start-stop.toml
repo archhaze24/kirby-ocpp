@@ -60,3 +60,9 @@ match = { transactionId = 4242, reason = "Remote" }
 [[steps]]
 action = "wait_for"
 condition = { kind = "tx_idle", connector = 1 }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:remote-start-stop"

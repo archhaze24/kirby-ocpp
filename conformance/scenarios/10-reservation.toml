@@ -47,3 +47,9 @@ match = { reservationId = 7 }
 name = "the connector is Available again"
 action = "wait_for"
 condition = { kind = "connector_status", connector = 1, status = "Available" }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby.conformance"
+message_id = "done:reservation"
