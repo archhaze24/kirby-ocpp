@@ -41,7 +41,7 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 ### Binaries
 
 * `kirby-ocpp/src`: `cli.rs` (flags and env, CLI > env > default, strict booleans), `main.rs` (config, spawn, choose UI or headless, the `run` scenario runner, reports, exit codes), `headless.rs` (event printer, stdout and log-file helpers), `fleet.rs` (`--count`, fleet runs), `suite.rs` (`kirby-ocpp suite`: sources, fresh station per scenario, summary report).
-* `kirby-csms/src`: `cli.rs`, `main.rs`, `headless.rs` (event printer, stdout/log-file helper threads), `stdin_cmd.rs` (JSON-lines commands), `commands.rs` (call execution, result objects and the in-flight limit shared by stdin and the API), `api.rs` (HTTP control API on `axum`), `script.rs` (TOML scripts, report, JUnit).
+* `kirby-csms/src`: `cli.rs`, `main.rs`, `headless.rs` (event printer, stdout/log-file helper threads), `stdin_cmd.rs` (JSON-lines commands), `commands.rs` (call execution, result objects and the in-flight limit shared by stdin and the API), `api/` (HTTP control API on `axum`: `mod.rs` router and server start, `server.rs` connection layer, `limits.rs`, `auth.rs`, `meta.rs` route table, `error.rs`/`json.rs` helpers, `routes_stations.rs`, `routes_calls.rs`, `routes_rules.rs` for rules and faults, `sse.rs`), `script.rs` (TOML scripts, report, JUnit).
 
 ## Layer contracts
 
@@ -109,7 +109,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * State tracking (`state.rs`) is built from the actual reply payload of CALLs answered with `Reply::Result`. Stopped transactions are capped (`transaction_history_cap`), active ones at 256. Free text from stations (boot fields, connector `info`/vendor codes, security events) is cut to the schema maximum (255 characters at most).
 * Security profiles 0-3 (`auth.rs`, `tls.rs`): Basic Auth checked in the handshake callback (constant-time, user must equal the URL id), TLS, mTLS with client CN equal to the station id; refusals emit `CsmsEvent::AuthFailed`.
 * One global `std::sync::Mutex` guards engine state; events are emitted under the lock to keep ordering.
-* The `kirby-csms` binary can expose `CsmsHandle` over a local HTTP API (`api.rs`, `axum` with only the `http1` and `tokio` features). It only uses the handle and `commands.rs`, which the stdin handler shares, so result shapes and the 256-command in-flight limit are the same for both. The SSE stream (`/v1/events`, at most 16) uses the `--json` renderer of `headless.rs` (`Renderer`), and fault parsing/validation is shared with the script steps. See [api.md](api.md).
+* The `kirby-csms` binary can expose `CsmsHandle` over a local HTTP API (`api/`, `axum` with only the `http1` and `tokio` features). It only uses the handle and `commands.rs`, which the stdin handler shares, so result shapes and the 256-command in-flight limit are the same for both. The SSE stream (`/v1/events`, at most 16) uses the `--json` renderer of `headless.rs` (`Renderer`), and fault parsing/validation is shared with the script steps. See [api.md](api.md).
 * Limits: frame size 1 MiB, 100 000 stations, 1024 sockets in their TLS/WebSocket handshake at once (`max_pending_handshakes`; extra sockets are closed), per-action counters capped at 64 keys, write timeout 10 s.
 
 ## Data flow
@@ -152,7 +152,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 | CSMS engine, typed commands, faults, scoped rules, auth | `kirby-csms-core/src/` (`server.rs`, `typed.rs`, `fault.rs`, `rules.rs`, `auth.rs`, `tls.rs`, `state.rs`) |
 | Per-protocol action registry (names, forms, palette texts, rule targets) | `kirby-csms-core/src/registry/` (`mod.rs` types and lookups, `ocpp16.rs` table) |
 | CSMS script and stdin commands | `kirby-csms/src/script.rs`, `stdin_cmd.rs`, shared `commands.rs` |
-| CSMS HTTP control API (routes, auth, limits) | `kirby-csms/src/api.rs`, [api.md](api.md) |
+| CSMS HTTP control API (routes, auth, limits) | `kirby-csms/src/api/`, [api.md](api.md) |
 | TUI forms, keys, palette | `kirby-ocpp-tui/src/{forms,keys,palette}.rs`, `kirby-csms-tui/src/{form,keys,actions}.rs` |
 | Release plumbing | `RELEASING.md`, `.github/workflows/`, `.github/scripts/release-notes.sh`, `npm/` |
 
