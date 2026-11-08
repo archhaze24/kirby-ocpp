@@ -10,22 +10,7 @@ use crate::fault::Reply;
 ///
 /// Includes the four Security Whitepaper actions (`SignCertificate`, `LogStatusNotification`,
 /// `SecurityEventNotification`, `SignedFirmwareStatusNotification`).
-pub const CHARGE_POINT_ACTIONS: &[&str] = &[
-    "Authorize",
-    "BootNotification",
-    "DataTransfer",
-    "DiagnosticsStatusNotification",
-    "FirmwareStatusNotification",
-    "Heartbeat",
-    "LogStatusNotification",
-    "MeterValues",
-    "SecurityEventNotification",
-    "SignCertificate",
-    "SignedFirmwareStatusNotification",
-    "StartTransaction",
-    "StatusNotification",
-    "StopTransaction",
-];
+pub const CHARGE_POINT_ACTIONS: &[&str] = crate::registry::ocpp16::STATION_ACTIONS;
 
 /// The WebSocket subprotocol whose actions [`CHARGE_POINT_ACTIONS`] and
 /// [`is_charge_point_action`] describe.
@@ -33,7 +18,7 @@ pub const ACTIONS_PROTOCOL: &str = "ocpp1.6";
 
 /// Whether `action` is one a charge point may initiate in OCPP 1.6.
 pub fn is_charge_point_action(action: &str) -> bool {
-    CHARGE_POINT_ACTIONS.contains(&action)
+    crate::registry::is_station_action(ACTIONS_PROTOCOL, action)
 }
 
 /// The default answer for `action`, used when no fault or responder applies.

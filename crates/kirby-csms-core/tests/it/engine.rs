@@ -12,7 +12,7 @@ use std::time::Duration;
 use futures_util::{SinkExt, StreamExt};
 use kirby_csms_core::{
     CsmsConfig, CsmsError, CsmsEvent, CsmsHandle, CsmsServer, Direction, DisconnectReason,
-    ErrorCode, Fault, Frame, Reply,
+    ErrorCode, Fault, Frame, Reply, Scope,
 };
 use kirby_ocpp_core::config::ReconnectConfig;
 use kirby_ocpp_core::ocpp::types::RegistrationStatus;
@@ -461,6 +461,82 @@ async fn rules_can_be_listed_and_cleared() {
     assert!(!csms.clear_responder("Authorize"));
     assert_eq!(csms.faults_remaining(), 0);
     assert_eq!(csms.responder_actions(), ["Heartbeat"]);
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn scoped_faults_and_rules_resolve_station_before_global_and_match_the_protocol() {
+    let csms = start(|_| {}).await;
+    let payload = |time: &str| Reply::Result(json!({"currentTime": time}));
+    let time_of = |frame: Frame| result_payload(frame)["currentTime"].clone();
+
+    // Rules: the station's own rule, then a global rule with a protocol, then the responder.
+    csms.respond("Heartbeat", |_| {
+        Reply::Result(json!({"currentTime": "global"}))
+    });
+    csms.respond_scoped(
+        &Scope::global().protocol("ocpp1.6"),
+        "Heartbeat",
+        json!({"currentTime": "protocol"}),
+    )
+    .unwrap();
+    csms.respond_scoped(
+        &Scope::station("CP-1"),
+        "Heartbeat",
+        json!({"currentTime": "station"}),
+    )
+    .unwrap();
+    // A rule for another protocol never applies to an ocpp1.6 station.
+    csms.respond_scoped(
+        &Scope::station("CP-2").protocol("ocpp2.0.1"),
+        "Heartbeat",
+        json!({"currentTime": "wrong-protocol"}),
+    )
+    .unwrap();
+    let mut one = raw_connect(&csms, "/ocpp/CP-1").await;
+    let mut two = raw_connect(&csms, "/ocpp/CP-2").await;
+    raw_send(&mut one, r#"[2,"a","Heartbeat",{}]"#).await;
+    raw_send(&mut two, r#"[2,"a","Heartbeat",{}]"#).await;
+    assert_eq!(time_of(raw_recv(&mut one).await), "station");
+    assert_eq!(time_of(raw_recv(&mut two).await), "protocol");
+    assert!(csms.clear_scoped_rule(None, "Heartbeat"));
+    raw_send(&mut two, r#"[2,"b","Heartbeat",{}]"#).await;
+    assert_eq!(time_of(raw_recv(&mut two).await), "global");
+
+    // Faults beat rules; the station's fault goes first; a protocol mismatch is skipped.
+    let global_fault = csms
+        .try_inject_scoped(
+            Fault::reply("Heartbeat", payload("fault-global")),
+            Scope::global(),
+        )
+        .unwrap();
+    csms.try_inject_scoped(
+        Fault::reply("Heartbeat", payload("fault-wrong")),
+        Scope::station("CP-1").protocol("ocpp2.0.1"),
+    )
+    .unwrap();
+    let station_fault = csms
+        .try_inject_scoped(
+            Fault::reply("Heartbeat", payload("fault-station")).times(2),
+            Scope::station("CP-1"),
+        )
+        .unwrap();
+    assert_eq!(csms.faults_remaining(), 4);
+    let ids: Vec<String> = csms.faults().into_iter().map(|fault| fault.id).collect();
+    assert_eq!(ids.len(), 3);
+    assert!(ids.contains(&global_fault) && ids.contains(&station_fault));
+    raw_send(&mut one, r#"[2,"c","Heartbeat",{}]"#).await;
+    assert_eq!(time_of(raw_recv(&mut one).await), "fault-station");
+    raw_send(&mut two, r#"[2,"c","Heartbeat",{}]"#).await;
+    assert_eq!(time_of(raw_recv(&mut two).await), "fault-global");
+    assert!(csms.remove_fault(&station_fault));
+    assert!(!csms.remove_fault(&station_fault));
+    raw_send(&mut one, r#"[2,"d","Heartbeat",{}]"#).await;
+    assert_eq!(time_of(raw_recv(&mut one).await), "station");
+    assert_eq!(csms.faults().len(), 1);
+    csms.clear_faults();
+    csms.clear_scoped_rules();
+    assert_eq!(csms.scoped_rules(None).len(), 0);
     csms.shutdown().await;
 }
 

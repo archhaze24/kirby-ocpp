@@ -29,6 +29,7 @@ use crate::error::CsmsError;
 use crate::event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
 use crate::fault::{Fault, Reply, Responder};
 use crate::policy::TransactionIdAllocator;
+use crate::rules::{FaultInfo, RuleInfo, Scope, Scripted};
 use crate::state::StationState;
 use crate::typed::schemas;
 
@@ -54,21 +55,6 @@ const MAX_ACTION_KEY_CHARS: usize = 64;
 const MALFORMED_TEXT_CHARS: usize = 512;
 /// Close code for injected closes (internal error), as in the test mock.
 const CLOSE_CODE_ERROR: u16 = 1011;
-
-/// Most faults [`CsmsHandle::try_inject`] keeps.
-const MAX_FAULTS: usize = 1000;
-/// Most bytes of action and payload text [`CsmsHandle::try_inject`] keeps over all faults.
-const MAX_FAULT_BYTES: usize = 8 * 1024 * 1024;
-
-/// Approximate memory held by a fault: action plus reply text.
-fn fault_bytes(fault: &Fault) -> usize {
-    let reply = match &fault.reply {
-        Reply::Result(value) => value.to_string().len(),
-        Reply::Error(_, text) => text.len(),
-        _ => 0,
-    };
-    fault.action.len().saturating_add(reply)
-}
 
 /// Entry point: starts a multi-station OCPP 1.6J central system.
 ///
@@ -163,8 +149,7 @@ impl CsmsServer {
             secure: acceptor.is_some(),
             state: Mutex::new(State {
                 stations: BTreeMap::new(),
-                faults: Vec::new(),
-                fault_bytes: 0,
+                scripted: Scripted::default(),
                 responders: std::collections::HashMap::new(),
                 tx_ids: config.transaction_ids.allocator(),
                 next_session: 0,
@@ -407,43 +392,88 @@ impl CsmsHandle {
     /// Scripts a fault for the next occurrences of an action, across all stations. Faults
     /// are used in the order injected.
     pub fn inject(&self, fault: Fault) {
-        if fault.remaining > 0 {
-            let mut state = self.inner.lock();
-            state.fault_bytes = state.fault_bytes.saturating_add(fault_bytes(&fault));
-            state.faults.push(fault);
+        let _ = self.inject_scoped(fault, Scope::global());
+    }
+
+    /// Like [`CsmsHandle::inject`], but for one [`Scope`] (a station, a protocol or both).
+    /// Returns the id of the stored fault (`None` for a fault with no occurrences). Stores
+    /// any fault, without the caps of [`CsmsHandle::try_inject_scoped`].
+    pub fn inject_scoped(&self, fault: Fault, scope: Scope) -> Option<String> {
+        if fault.remaining == 0 {
+            return None;
         }
+        self.inner
+            .lock()
+            .scripted
+            .add_fault(fault, scope, false)
+            .ok()
     }
 
     /// Like [`CsmsHandle::inject`], but refuses a fault that would take the stored faults over
-    /// 1000 entries or 8 MiB of action and payload text. Only this method enforces the caps:
-    /// [`CsmsHandle::inject`] (used by the terminal UI) stores any fault.
+    /// 1000 entries or 8 MiB of action and payload text. Only the `try_` methods enforce the
+    /// caps: [`CsmsHandle::inject`] (used by the terminal UI) stores any fault.
     pub fn try_inject(&self, fault: Fault) -> Result<(), String> {
-        if fault.remaining == 0 {
-            return Ok(());
-        }
-        let added = fault_bytes(&fault);
-        let mut state = self.inner.lock();
-        if state.faults.len() >= MAX_FAULTS {
-            return Err(format!("too many faults stored (at most {MAX_FAULTS})"));
-        }
-        if state.fault_bytes.saturating_add(added) > MAX_FAULT_BYTES {
-            return Err(format!(
-                "stored faults would exceed {} MiB",
-                MAX_FAULT_BYTES / (1024 * 1024)
-            ));
-        }
-        state.fault_bytes = state.fault_bytes.saturating_add(added);
-        state.faults.push(fault);
-        Ok(())
+        self.try_inject_scoped(fault, Scope::global()).map(|_| ())
     }
 
-    /// Number of fault occurrences still waiting to be triggered.
+    /// Like [`CsmsHandle::try_inject`] for one [`Scope`]; also refuses more than 100 faults
+    /// for one station. Returns the id of the fault (an empty string for a fault with no
+    /// occurrences, which is not stored).
+    pub fn try_inject_scoped(&self, fault: Fault, scope: Scope) -> Result<String, String> {
+        if fault.remaining == 0 {
+            return Ok(String::new());
+        }
+        self.inner.lock().scripted.add_fault(fault, scope, true)
+    }
+
+    /// Number of fault occurrences still waiting to be triggered, over all scopes.
     pub fn faults_remaining(&self) -> usize {
-        self.inner
-            .lock()
-            .faults
-            .iter()
-            .fold(0usize, |sum, fault| sum.saturating_add(fault.remaining))
+        self.inner.lock().scripted.faults_remaining()
+    }
+
+    /// The stored faults in injection order.
+    pub fn faults(&self) -> Vec<FaultInfo> {
+        self.inner.lock().scripted.faults()
+    }
+
+    /// Removes one fault by id; returns whether it was still stored.
+    pub fn remove_fault(&self, id: &str) -> bool {
+        self.inner.lock().scripted.remove_fault(id)
+    }
+
+    /// Sets the fixed CALLRESULT payload for `action` in `scope`, replacing the rule of the
+    /// same station (or the same protocol-scoped global rule) and action. A scope with a
+    /// station or a protocol is stored as data; refuses a rule beyond 1000 rules, 64 for one
+    /// station or 8 MiB of text.
+    pub fn respond_scoped(
+        &self,
+        scope: &Scope,
+        action: &str,
+        payload: Value,
+    ) -> Result<(), String> {
+        self.inner.lock().scripted.set_rule(scope, action, payload)
+    }
+
+    /// Removes the scoped rule of `station` (`None`: the global rule with a protocol) for
+    /// `action`; returns whether there was one.
+    pub fn clear_scoped_rule(&self, station: Option<&str>, action: &str) -> bool {
+        self.inner.lock().scripted.clear_rule(station, action)
+    }
+
+    /// The scoped rule of one station for `action`.
+    pub fn scoped_rule(&self, station: &str, action: &str) -> Option<RuleInfo> {
+        self.inner.lock().scripted.rule(station, action)
+    }
+
+    /// The scoped rules of one station (`Some`) or of every station and the global rules with
+    /// a protocol (`None`), sorted by station then action.
+    pub fn scoped_rules(&self, station: Option<&str>) -> Vec<RuleInfo> {
+        self.inner.lock().scripted.rules(station)
+    }
+
+    /// Drops every scoped rule (not the global responders).
+    pub fn clear_scoped_rules(&self) {
+        self.inner.lock().scripted.clear_rules();
     }
 
     /// Actions that currently have a responder, sorted.
@@ -453,11 +483,9 @@ impl CsmsHandle {
         actions
     }
 
-    /// Drops every scripted fault that has not triggered yet.
+    /// Drops every scripted fault that has not triggered yet, in every scope.
     pub fn clear_faults(&self) {
-        let mut state = self.inner.lock();
-        state.faults.clear();
-        state.fault_bytes = 0;
+        self.inner.lock().scripted.clear_faults();
     }
 
     /// Stops accepting, closes every connection (close frame 1001) and waits for the
@@ -503,9 +531,9 @@ struct Inner {
 
 struct State {
     stations: BTreeMap<String, StationRec>,
-    faults: Vec<Fault>,
-    /// Sum of `fault_bytes` over `faults`, kept up to date on insert, consume and clear.
-    fault_bytes: usize,
+    /// Faults and scoped rules (per station and protocol), with their ids and caps.
+    scripted: Scripted,
+    /// Global rules without a protocol: one closure per action.
     responders: std::collections::HashMap<String, Responder>,
     tx_ids: TransactionIdAllocator,
     next_session: u64,
@@ -807,25 +835,20 @@ impl Inner {
         }
     }
 
-    /// Decides the reply to a CALL: fault, then schema validation (`validate_inbound`), then
-    /// responder, then default; known actions a charge point may not send get `NotSupported`,
-    /// unknown ones `NotImplemented`.
-    fn decide(&self, action: &str, payload: &Value) -> Reply {
+    /// Decides the reply to a CALL from `station`: fault (the station's own first, then
+    /// global ones), then schema validation (`validate_inbound`), then the station's rule, a
+    /// global rule with a protocol, a global responder, then the default; known actions a
+    /// charge point may not send get `NotSupported`, unknown ones `NotImplemented`.
+    fn decide(&self, station: &str, action: &str, payload: &Value) -> Reply {
         let mut state = self.lock();
-        if let Some(fault) = state
-            .faults
-            .iter_mut()
-            .find(|fault| fault.action == action && fault.remaining > 0)
+        let protocol = state
+            .stations
+            .get(station)
+            .and_then(|rec| rec.info.subprotocol.clone());
+        if let Some(reply) = state
+            .scripted
+            .take_fault(station, protocol.as_deref(), action)
         {
-            fault.remaining -= 1;
-            let reply = fault.reply.clone();
-            let freed = if fault.remaining == 0 {
-                fault_bytes(fault)
-            } else {
-                0
-            };
-            state.fault_bytes = state.fault_bytes.saturating_sub(freed);
-            state.faults.retain(|fault| fault.remaining > 0);
             return reply;
         }
         if self.config.validate_inbound
@@ -837,6 +860,12 @@ impl Inner {
                 violation.error_code(),
                 truncate_chars(&violation.errors.join("; "), MAX_ERROR_DESCRIPTION),
             );
+        }
+        if let Some(payload) = state
+            .scripted
+            .rule_payload(station, protocol.as_deref(), action)
+        {
+            return Reply::Result(payload);
         }
         if let Some(responder) = state.responders.get(action).cloned() {
             // Run outside the lock: the closure may call back into the handle.
@@ -1295,7 +1324,7 @@ where
                 action,
                 payload,
             } => {
-                let reply = self.inner.decide(&action, &payload);
+                let reply = self.inner.decide(&self.station, &action, &payload);
                 self.inner
                     .track(&self.station, self.link_id, &action, &payload, &reply);
                 match reply {
@@ -1416,7 +1445,7 @@ fn truncated_frame(frame: &Frame, original_bytes: usize) -> Frame {
 // ---- handshake helpers --------------------------------------------------------------
 
 /// Longest accepted station id, in bytes after percent-decoding.
-const MAX_STATION_ID_LEN: usize = 128;
+pub const MAX_STATION_ID_LEN: usize = 128;
 
 /// The station id of a URL path: the last non-empty segment, percent-decoded. `None` if
 /// there is none, it is not valid UTF-8 after decoding, it is longer than 128 bytes, it is `.`
