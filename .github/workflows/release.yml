@@ -55,9 +55,38 @@ jobs:
           echo "notes for $tag:"
           cat release-notes.md
 
+  # Man pages come from the clap definitions through the test that also checks that every
+  # flag is listed; one run serves every target.
+  man:
+    name: man pages
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+
+      - name: Generate
+        shell: bash
+        env:
+          KIRBY_OCPP_MAN_DIR: ${{ github.workspace }}/man/man1
+          KIRBY_CSMS_MAN_DIR: ${{ github.workspace }}/man/man1
+        run: |
+          cargo test --locked -p kirby-ocpp -p kirby-csms --bin kirby-ocpp --bin kirby-csms man_page
+          ls man/man1
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: man
+          path: man
+          if-no-files-found: error
+
   build:
     name: ${{ matrix.target }}
-    needs: version
+    needs: [version, man]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -86,6 +115,11 @@ jobs:
         if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: man
+          path: man
+
       - name: Build
         shell: bash
         env:
@@ -107,6 +141,7 @@ jobs:
           mkdir "$name"
           cp "target/${TARGET}/release/kirby-ocpp" "target/${TARGET}/release/kirby-csms" LICENSE crates/kirby-ocpp/THIRD_PARTY_NOTICES.md README.md "$name/"
           cp crates/kirby-csms/THIRD_PARTY_NOTICES.md "$name/THIRD_PARTY_NOTICES-kirby-csms.md"
+          cp -R man "$name/man"
           tar -czf "$name.tar.gz" "$name"
           if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"; else shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"; fi
           echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
@@ -122,6 +157,7 @@ jobs:
           New-Item -ItemType Directory $name | Out-Null
           Copy-Item "target/$($env:TARGET)/release/kirby-ocpp.exe", "target/$($env:TARGET)/release/kirby-csms.exe", LICENSE, crates/kirby-ocpp/THIRD_PARTY_NOTICES.md, README.md $name
           Copy-Item crates/kirby-csms/THIRD_PARTY_NOTICES.md "$name/THIRD_PARTY_NOTICES-kirby-csms.md"
+          Copy-Item man "$name/man" -Recurse
           Compress-Archive -Path $name -DestinationPath "$name.zip"
           $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
@@ -150,6 +186,8 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           path: dist
+          # The target artifacts only (their names contain a dash); `man` is inside the archives.
+          pattern: "*-*"
           merge-multiple: true
 
       - name: Create release

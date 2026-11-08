@@ -31,6 +31,7 @@ class KirbyOcpp < Formula
 
   def install
     bin.install "kirby-ocpp", "kirby-csms"
+    man1.install Dir["man/man1/*.1"]
   end
 
   test do
