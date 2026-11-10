@@ -205,6 +205,19 @@ Rules and faults can also be installed at start from `[[rule]]` blocks of a [con
 
 In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` steps (with optional `station` and `protocol`), plus `remove_fault`, `faults` and `rules`, see [scenarios.md](scenarios.md#steps). The emulator has the mirror feature for CSMS commands ([emulator.md](emulator.md)).
 
+## Scheduled commands and connection hooks
+
+Use `[[command]]` blocks in a configuration file to send a call after a delay (`after`),
+at fixed-delay intervals (`interval`), or once per observed live WebSocket connection
+(`on_connect`). Select stations by a whole-id glob and optionally by negotiated protocol.
+Each run shares command and payload limits with the HTTP API and stdin; a full budget
+rejects the run instead of queueing indefinitely. Hooks are bound to a connection, so a
+reconnect never receives a command intended for its predecessor. Shutdown cancels pending
+automation before closing stations. Summaries report counts without payloads or answers.
+See [configuration.md](configuration.md#scheduled-commands-and-connection-hooks) for the
+complete format, bounds, timing and examples. To send an immediate bulk call, use
+[`POST /v1/calls`](api.md#bulk-calls).
+
 ## Headless behavior
 
 - Events go to stdout (text or `--json`); `--log-file` also gets them.

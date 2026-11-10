@@ -520,6 +520,57 @@ heartbeat_interval = 5
 
 `kirby-csms --config lab.toml --profile ci` applies the profile; `--heartbeat-interval 10` on the command line wins over both.
 
+### Scheduled commands and connection hooks
+
+The CSMS configuration accepts up to 256 `[[command]]` blocks. Each has a unique `id`
+(1 to 64 printable ASCII characters without spaces), `trigger` (`after`, `interval` or `on_connect`),
+`station` (required glob), `action` (required), optional `protocol`, `payload` (a JSON object
+encoded as text, default `'{}'`) and `timeout_ms` (1 to 86400000, default `--call-timeout`).
+Station patterns and action names follow the [bulk call rules](api.md#bulk-calls).
+Unknown keys and invalid combinations are errors before a listener starts, including with
+`--check-config`. Payloads cannot contain an inline `AuthorizationKey` value. Validation
+errors never quote those values. `--print-config=toml` round-trips command blocks; a profile
+that defines `command` replaces the entire top-level array.
+
+| Trigger | Timing |
+| --- | --- |
+| `after` | Requires `delay_ms` (0 to 86400000); runs once after that delay from scheduler start; forbids `interval_ms` and `times` |
+| `interval` | Requires `interval_ms` (1 to 86400000); first attempt after that interval, subsequent attempts one interval after the previous attempt finishes; optional `times` (1 to 1000000); forbids `delay_ms` |
+| `on_connect` | Once for each observed live WebSocket connection; forbids `delay_ms`, `interval_ms` and `times` |
+
+```toml
+[[command]]
+id = "initial-config"
+trigger = "on_connect"
+station = "CP-*"
+protocol = "ocpp1.6"
+action = "GetConfiguration"
+payload = '{"key":["HeartbeatInterval"]}'
+timeout_ms = 5000
+
+[[command]]
+id = "poll"
+trigger = "interval"
+station = "CP-*"
+action = "GetConfiguration"
+interval_ms = 60000
+times = 10
+```
+
+Each timed attempt selects stations afresh and uses the shared command slots and payload
+budget. No matches is valid. More than 64 matches or insufficient capacity rejects that
+attempt without sending a CALL. `times` counts attempts, including empty selections and
+admission failures. Runs of one command never overlap or catch up in a burst.
+
+Hooks also consider stations connected before the scheduler starts. A hook is tied to the
+observed connection: a disconnected or replaced connection is skipped rather than sending
+its command to the replacement. A connection that ends before it is observed is skipped.
+After lost events, only currently live connections are recovered. Connection means the
+WebSocket handshake, not accepted BootNotification. Saturation rejects a hook with a
+diagnostic instead of growing an unbounded queue. Shutdown cancels scheduled calls before
+closing the station connections. Command summaries contain the id, trigger, count and status,
+without request payloads or answers.
+
 ## Exit codes
 
 This section is the single reference for exit codes; other pages link here. Code `2` always means a usage or configuration error found before the run starts (bad flag, bad value, invalid scenario or script file). Code `130` is SIGINT; SIGTERM ends a run with `1`.

@@ -9,6 +9,8 @@ tag as the GitHub release notes.
 
 ### Added
 
+- `POST /v1/calls` sends a CALL to up to 64 stations selected by a station-id glob and optional protocol. Admission reserves the shared command and payload budgets before sending; the response reports each station's outcome in a bounded, stable shape.
+- CSMS configuration `[[command]]` blocks run calls after a delay, at fixed-delay intervals or once per observed live connection. Connection hooks are tied to the original session; reconnects cannot receive a stale hook. Commands share the API and stdin limits, reject inline `AuthorizationKey` values and stop before station shutdown.
 - Manual pages for `kirby-ocpp`, its subcommands (`kirby-ocpp-run(1)`, `kirby-ocpp-suite(1)`, `kirby-ocpp-state-show(1)`, ...) and `kirby-csms`, generated from the `--help` definitions. They ship in `man/man1/` of every release archive and are installed by the Homebrew formula. A test fails when a flag is missing from a page. See [Release archives](docs/distribution.md#release-archives).
 - `kirby-ocpp --config FILE` (`KIRBY_OCPP_CONFIG`) reads settings from a TOML file and `--profile NAME` (`KIRBY_OCPP_PROFILE`) applies a `[profile.NAME]` variant. Every flag except the per-invocation ones has a key (the long flag name with `_`), grouped in tables that match the `--help` headings. Precedence: flag, environment variable, profile, file, default. Unknown keys and wrong types are errors that name the file and the key path (exit 2); relative paths resolve against the directory of the file; a password never goes into the file. See [Configuration file](docs/configuration.md#configuration-file).
 - `--print-config=toml` prints the effective configuration as a file that `--config` accepts (the same text comes back when it is printed again); secrets are never printed. `--print-config` alone still prints JSON.
@@ -42,6 +44,11 @@ tag as the GitHub release notes.
 - The `id:` of the HTTP event stream is now the number of the event in one shared log (the same on every stream, one more per event) and starts from the start time of the server in microseconds instead of 1, so that an id from an earlier run is never mistaken for a current one. `state` events are sent when the view of a station changed, for all streams together.
 - `kirby-ocpp state reset` refuses, and deletes nothing, when a `.bak` copy of the state or secrets file was written by a newer version, as it already did for the files themselves.
 - Terminal UI key hints match what the keys do: the emulator's footer lists the log letters (`y`, `f`, `s`, `p`) only on the Logs tab and no longer hints `Enter run` on the connector list, the `kirby-csms` footer hints `/` only on the station list (the log pane lists `s`), and both help popups document `W`, the `/` rule and the markers. Tests feed every footer hint to the key handler.
+
+### Fixed
+
+- The emulator preserves a received CALLRESULT or CALLERROR when the CSMS closes the connection immediately after replying. Conformance scripts no longer need a final pause before closing.
+- Recorded CALLRESULT payloads and CALLERROR details mask nested `AuthorizationKey` values, including `GetConfiguration` replies that echo the key. The wire response is unchanged, and `--show-secrets` still opts out of frame redaction.
 
 ## [0.5.0] - 2026-11-07
 

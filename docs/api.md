@@ -2,7 +2,7 @@
 
 Drive a running `kirby-csms` from any language or CI without stdin plumbing. JSON, plain HTTP or HTTPS, off by default.
 
-Contents: [Contract](#contract) · [Start](#start) · [Auth model](#auth-model) · [TLS](#tls) · [Endpoints](#endpoints) · [Event stream](#event-stream) · [History, export and metrics](#history-export-and-metrics) · [Rules and faults](#rules-and-faults) · [Errors and limits](#errors-and-limits) · [Related pages](#related-pages)
+Contents: [Contract](#contract) · [Start](#start) · [Auth model](#auth-model) · [TLS](#tls) · [Endpoints](#endpoints) · [Bulk calls](#bulk-calls) · [Event stream](#event-stream) · [History, export and metrics](#history-export-and-metrics) · [Rules and faults](#rules-and-faults) · [Errors and limits](#errors-and-limits) · [Related pages](#related-pages)
 
 ## Contract
 
@@ -82,6 +82,7 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `GET /v1/transactions` | `{"transactions":[...],"truncated":..}`: the transactions of every station, with the filters `station`, `state`, `since`, `limit` and `format` (`json`, `csv`) |
 | `GET /v1/metrics` | Counters and gauges in the Prometheus text format |
 | `POST /v1/stations/{id}/calls` | Sends a CALL; body `{"action":"Reset","payload":{...},"timeout_ms":5000}` (`payload` default `{}`, `timeout_ms` 1..=86400000, default `--call-timeout`). Answers with `outcome` (`"result"`, `"call_error"` or `"timeout"`), `ok` and `result` or `error` (plus `code`, `details` for a CALLERROR); no `type`, `station` or `action` (the request names them), see below |
+| `POST /v1/calls` | Sends one action to at most 64 stations selected by a glob and optional protocol; returns bounded per-station outcomes, sorted by station id. See [Bulk calls](#bulk-calls) |
 | `DELETE /v1/stations/{id}` | Forgets a disconnected station (`{"station":..,"forgotten":true}`); `409` `conflict` while it is connected (decided atomically with the removal), `404` `unknown_station` if never seen |
 | `GET /v1/events?station=ID` | Server-Sent Events, see [Event stream](#event-stream); resumes after the `Last-Event-ID` header or `last_event_id=ID` |
 | `GET /v1/rules` | `{"rules":["Heartbeat",...],"protocol_rules":[{"action","protocol"},...]}`: `rules` lists the actions that have a fixed reply for every station, sorted; `protocol_rules` lists the global rules limited to one protocol (set by stdin, scripts, `[[rule]]` blocks or `PUT ?protocol=`), sorted by action, `[]` when none |
@@ -133,6 +134,37 @@ $ curl -s -X POST http://127.0.0.1:9100/v1/stations/CP-1/calls \
 $ curl -s 'http://127.0.0.1:9100/v1/stations/CP-1/history?limit=5'
 $ curl -s -X DELETE http://127.0.0.1:9100/v1/stations/CP-1
 ```
+
+## Bulk calls
+
+`POST /v1/calls` sends one action to a snapshot of matching known stations. The body has
+`station` (required glob), `action` (required), `payload` (default `{}`), `protocol`
+(optional negotiated-subprotocol filter) and `timeout_ms` (the single-call timeout range).
+Unknown fields are refused. Station patterns match the whole id, case-sensitively:
+`*` matches any sequence of characters and `?` matches one character. There are no escapes
+or character classes. Patterns and action names are 1 to 128 UTF-8 bytes without control
+or bidirectional characters. A protocol must be supported by the action registry.
+
+The snapshot includes disconnected stations and is sorted by id. At most 64 stations may
+match; a larger selection is `400 bad_request` before any CALL is sent. No matches returns
+`200` with an empty `results` array. Slots for every selected station and the request size
+multiplied by the selection size are reserved before dispatch, against the shared
+256-command and 32 MiB budgets. Insufficient capacity returns `429 too_many_requests`
+without sending a CALL. There are no automatic retries.
+
+```json
+{"station":"CP-*","protocol":"ocpp1.6","action":"Reset","payload":{"type":"Soft"},"timeout_ms":5000}
+```
+
+The response is `200` with `action` and `results`. Every result has `station`, `protocol`,
+`outcome`, `ok`, `result`, `error`, `code` and `details`, with `null` for unused values.
+`outcome` is `result`, `call_error`, `timeout` or `error`. Transport and admission failures
+use the existing API error codes in `error: {"code","message"}`; CALLERROR diagnostics use
+the same object, with the protocol error code in `code` and its details in `details`.
+One station's failure does not discard other results. Result payloads and error details
+larger than 64 KiB become `{"truncated":true,"originalBytes":N}`. Diagnostic messages are
+limited to 1024 characters; protocol error codes are limited to 128 characters. Dropping a
+request abandons its unfinished calls and releases its budget.
 
 ## Event stream
 
