@@ -415,27 +415,48 @@ impl FrameError {
 /// Marker that replaces a secret value in recorded frames.
 pub const REDACTED: &str = "***";
 
-/// Returns `frame` with the value of an `AuthorizationKey` `ChangeConfiguration` CALL
-/// replaced by [`REDACTED`]. Everything else is returned unchanged. Used only for the
-/// recorded copy of a frame (logs, history, UI); the wire bytes are never touched.
+/// Returns `frame` with `AuthorizationKey` values in `ChangeConfiguration` CALLs and
+/// reply payloads replaced by [`REDACTED`]. Used only for the recorded copy of a frame
+/// (logs, history, UI); the wire bytes are never touched.
 ///
 /// The key is matched case-insensitively, like the station's configuration registry.
 pub fn redact_secrets(frame: &Frame) -> Frame {
     let mut copy = frame.clone();
-    if let Frame::Call {
-        action, payload, ..
-    } = &mut copy
-        && action == "ChangeConfiguration"
-        && let Some(object) = payload.as_object_mut()
-        && object
-            .get("key")
-            .and_then(Value::as_str)
-            .is_some_and(|key| key.eq_ignore_ascii_case("AuthorizationKey"))
-        && let Some(value) = object.get_mut("value")
-    {
-        *value = Value::from(REDACTED);
+    match &mut copy {
+        Frame::Call {
+            action, payload, ..
+        } if action == "ChangeConfiguration" => {
+            redact_payload(payload);
+        }
+        Frame::CallResult { payload, .. } => redact_payload(payload),
+        Frame::CallError { details, .. } => redact_payload(details),
+        Frame::Call { .. } => {}
     }
     copy
+}
+
+/// Replaces the `value` beside a case-insensitive `"key": "AuthorizationKey"` anywhere
+/// in a JSON payload with [`REDACTED`]. Other keys and values are preserved.
+pub fn redact_payload(payload: &mut Value) {
+    match payload {
+        Value::Object(fields) => {
+            if fields
+                .get("key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| key.eq_ignore_ascii_case("AuthorizationKey"))
+                && let Some(value) = fields.get_mut("value")
+            {
+                *value = Value::from(REDACTED);
+            }
+            for child in fields.values_mut() {
+                if child.is_object() || child.is_array() {
+                    redact_payload(child);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_payload),
+        _ => {}
+    }
 }
 
 /// Direction of a frame relative to this charge point.
@@ -514,7 +535,7 @@ mod tests {
                 "DataTransfer",
                 json!({"key": "AuthorizationKey", "value": "x"}),
             ),
-            Frame::call_result("6", json!({"key": "AuthorizationKey", "value": "x"})),
+            Frame::call_result("6", json!({"key": "HeartbeatInterval", "value": "60"})),
             Frame::call(
                 "7",
                 "ChangeConfiguration",
@@ -526,6 +547,36 @@ mod tests {
         for frame in others {
             assert_eq!(redact_secrets(&frame), frame);
         }
+    }
+
+    #[test]
+    fn redact_secrets_hides_configuration_result_values_without_changing_the_wire() {
+        let frame = Frame::call_result(
+            "configuration",
+            json!({"configurationKey": [
+                {"key": "authorizationkey", "readonly": false, "value": "test-private-value"},
+                {"key": "HeartbeatInterval", "readonly": false, "value": "60"}
+            ]}),
+        );
+        let recorded = redact_secrets(&frame).to_value();
+        assert_eq!(recorded[2]["configurationKey"][0]["value"], REDACTED);
+        assert_eq!(recorded[2]["configurationKey"][1]["value"], "60");
+        assert!(frame.to_json_string().contains("test-private-value"));
+    }
+
+    #[test]
+    fn redact_secrets_hides_nested_call_error_details() {
+        let frame = Frame::CallError {
+            id: "configuration".into(),
+            code: ErrorCode::InternalError,
+            description: "configuration failed".to_owned(),
+            details: json!({"request": {"key": "AUTHORIZATIONKEY", "value": "test-private-value"},
+                "retry": false}),
+        };
+        let recorded = redact_secrets(&frame).to_value();
+        assert_eq!(recorded[4]["request"]["value"], REDACTED);
+        assert_eq!(recorded[4]["retry"], false);
+        assert!(frame.to_json_string().contains("test-private-value"));
     }
 
     #[test]

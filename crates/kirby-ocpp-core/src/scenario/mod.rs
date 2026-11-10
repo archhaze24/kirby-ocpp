@@ -171,28 +171,7 @@ pub fn redact_params(params: &mut serde_json::Value) {
 /// Replaces the `value` next to `"key": "AuthorizationKey"` anywhere inside `payload` with the
 /// redaction marker. For failure evidence (expected and actual payloads), which is not tied to a
 /// call name.
-pub fn redact_payload(payload: &mut serde_json::Value) {
-    use serde_json::Value;
-    match payload {
-        Value::Object(fields) => {
-            if fields
-                .get("key")
-                .and_then(Value::as_str)
-                .is_some_and(|k| k.eq_ignore_ascii_case("AuthorizationKey"))
-                && let Some(value) = fields.get_mut("value")
-            {
-                *value = Value::from(crate::ocpp::REDACTED);
-            }
-            for child in fields.values_mut() {
-                if child.is_object() || child.is_array() {
-                    redact_payload(child);
-                }
-            }
-        }
-        Value::Array(items) => items.iter_mut().for_each(redact_payload),
-        _ => {}
-    }
-}
+pub use crate::ocpp::redact_payload;
 
 /// A copy of `payload` with [`redact_payload`] applied.
 #[must_use]

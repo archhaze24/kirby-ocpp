@@ -11,7 +11,8 @@ pub mod types;
 
 pub use action::{Action, InboundAction, OutboundAction};
 pub use frame::{
-    Direction, ErrorCode, Frame, FrameError, FrameRecord, MessageId, REDACTED, redact_secrets,
+    Direction, ErrorCode, Frame, FrameError, FrameRecord, MessageId, REDACTED, redact_payload,
+    redact_secrets,
 };
 pub use responder::{ReplyError, ReplyHandle, Responder};
 pub use schema::{PayloadKind, SchemaIssue, SchemaKeyword, SchemaRegistry, SchemaViolation};
