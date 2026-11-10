@@ -200,7 +200,7 @@ fn every_scenario_of_the_family_is_tagged_and_named_after_the_family() {
 }
 
 /// Runs one scenario on a fresh station and tears the station down completely.
-async fn run_one(csms: &mut Csms, addr: &str, scenario: &Scenario) {
+async fn run_one(csms: &mut Csms, addr: &str, scenario: &Scenario, last: bool) {
     let name = &scenario.name;
     let (connected_before, disconnected_before) = csms.connection_events();
     assert_eq!(
@@ -286,7 +286,20 @@ async fn run_one(csms: &mut Csms, addr: &str, scenario: &Scenario) {
         if connected == disconnected && connected > connected_before {
             break;
         }
-        csms.assert_running(&format!("{name} waited for the station to disconnect"));
+        // The final script may exit successfully before its stdout reader delivers the
+        // disconnect event. The station task has already ended; no next scenario needs it.
+        if last {
+            if let Some(status) = csms.exited() {
+                assert!(
+                    status.success(),
+                    "{name}: CSMS exited ({status})\n{}",
+                    csms.dump()
+                );
+                break;
+            }
+        } else {
+            csms.assert_running(&format!("{name} waited for the station to disconnect"));
+        }
         assert!(
             Instant::now() < deadline,
             "{name}: the CSMS never saw the station disconnect ({connected} connected, \
@@ -303,8 +316,9 @@ async fn the_family_passes_against_the_scripted_csms() {
     let report_path = dir.path().join("script-report.json");
     let (mut csms, addr) = Csms::start(&root().join("csms-script.toml"), &report_path);
 
-    for scenario in family() {
-        run_one(&mut csms, &addr, &scenario).await;
+    let mut scenarios = family().into_iter().peekable();
+    while let Some(scenario) = scenarios.next() {
+        run_one(&mut csms, &addr, &scenario, scenarios.peek().is_none()).await;
     }
 
     // The script checked every answer on the CSMS side; its verdict is the exit code.
