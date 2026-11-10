@@ -1299,6 +1299,7 @@ dependencies = [
  "futures-util",
  "hyper",
  "hyper-util",
+ "jsonschema",
  "kirby-csms-core",
  "kirby-csms-tui",
  "kirby-ocpp-core",

@@ -35,6 +35,7 @@ tokio-rustls.workspace = true
 
 [dev-dependencies]
 clap_mangen.workspace = true
+jsonschema.workspace = true
 kirby-ocpp-core.workspace = true
 rcgen.workspace = true
 serde_json.workspace = true

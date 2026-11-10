@@ -17,6 +17,15 @@ use tokio::net::TcpStream;
 
 const WAIT: Duration = Duration::from_secs(30);
 
+fn validate_openapi(name: &str, value: &Value) {
+    let document: Value =
+        serde_json::from_str(include_str!("../../../docs/kirby-csms-openapi.json")).unwrap();
+    let schema = json!({"$ref":format!("#/components/schemas/{name}"),
+        "components":document["components"]});
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(value), "{name} rejects {value}");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bulk_calls_validate_select_and_keep_per_station_outcomes() {
     let csms = Csms::start(&[]);
@@ -40,6 +49,7 @@ async fn bulk_calls_validate_select_and_keep_per_station_outcomes() {
     let (status, body) =
         post(json!({"station":"CP-?","action":"GetConfiguration", "protocol":"ocpp1.6"})).await;
     assert_eq!(status, 200, "{body}");
+    validate_openapi("BulkResponse", &body);
     let results = body["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
     assert_eq!(results[0]["station"], "CP-z");
@@ -59,6 +69,17 @@ async fn bulk_calls_validate_select_and_keep_per_station_outcomes() {
             ]
         );
     }
+    let request = json!({"action":"GetConfiguration","legacy_extension":true});
+    let (status, _) = http(
+        &csms.api_addr,
+        "POST",
+        "/v1/stations/CP-z/calls",
+        &[],
+        Some(&request.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200);
+    validate_openapi("CallRequest", &request);
     a.shutdown().await.unwrap();
     tokio::time::timeout(WAIT, async {
         while csms.get("/v1/stations/CP-%D1%8F").await.1["connected"] != false {
@@ -74,6 +95,7 @@ async fn bulk_calls_validate_select_and_keep_per_station_outcomes() {
     assert!(body["results"][0]["code"].is_string());
     assert_eq!(body["results"][1]["outcome"], "error");
     assert_eq!(body["results"][1]["error"]["code"], "station_not_connected");
+    validate_openapi("BulkResponse", &body);
     z.shutdown().await.unwrap();
 }
 
@@ -1680,6 +1702,8 @@ async fn connected_event_ids_and_string_transaction_ids() {
         "{list}"
     );
     let (_, detail) = csms.get("/v1/stations/CP-1").await;
+    validate_openapi("Station", &list["stations"][0]);
+    validate_openapi("Station", &detail);
     assert!(
         detail["active_transactions"][0]["id"].is_string(),
         "{detail}"

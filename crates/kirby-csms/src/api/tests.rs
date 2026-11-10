@@ -14,6 +14,32 @@ use super::meta::ROUTES;
 use super::server::StallIo;
 use super::{bind, spawn, spawn_with};
 
+fn check_openapi_refs(value: &serde_json::Value, root: &serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            if let Some(reference) = object.get("$ref").and_then(serde_json::Value::as_str) {
+                assert!(
+                    reference.starts_with("#/"),
+                    "external reference: {reference}"
+                );
+                let resolved = reference[2..]
+                    .split('/')
+                    .try_fold(root, |current, key| current.get(key));
+                assert!(resolved.is_some(), "unresolved reference: {reference}");
+            }
+            for child in object.values() {
+                check_openapi_refs(child, root);
+            }
+        }
+        serde_json::Value::Array(array) => {
+            for child in array {
+                check_openapi_refs(child, root);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The paths of `router()` are exactly the paths of `ROUTES`: the index lists every route
 /// and no phantom one.
 #[test]
@@ -33,6 +59,85 @@ fn routes_table_matches_the_router_definition() {
     paths.sort_unstable();
     table.sort_unstable();
     assert_eq!(paths, table);
+}
+
+/// The published OpenAPI document covers exactly the routes and methods served by the API.
+#[test]
+fn openapi_document_matches_the_route_table() {
+    let document: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../docs/kirby-csms-openapi.json")).unwrap();
+    assert_eq!(document["openapi"], "3.1.0");
+    let paths = document["paths"].as_object().unwrap();
+    let mut documented = Vec::new();
+    let mut operation_ids = Vec::new();
+    for (path, item) in paths {
+        let methods = item.as_object().unwrap();
+        let templated: Vec<&str> = path
+            .split('/')
+            .filter_map(|part| {
+                part.strip_prefix('{')
+                    .and_then(|name| name.strip_suffix('}'))
+            })
+            .collect();
+        for method in ["get", "post", "put", "delete", "patch", "options", "head"] {
+            let Some(operation) = methods.get(method) else {
+                continue;
+            };
+            operation_ids.push(operation["operationId"].as_str().unwrap());
+            documented.push((path.as_str(), method.to_ascii_uppercase()));
+            for name in &templated {
+                let declared = item["parameters"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(operation["parameters"].as_array().into_iter().flatten())
+                    .any(|parameter| {
+                        let parameter = parameter["$ref"]
+                            .as_str()
+                            .and_then(|reference| {
+                                reference.strip_prefix("#/components/").map(|tail| {
+                                    tail.split('/')
+                                        .fold(&document["components"], |current, key| {
+                                            current.get(key).unwrap_or(&serde_json::Value::Null)
+                                        })
+                                })
+                            })
+                            .unwrap_or(parameter);
+                        parameter["name"] == *name
+                            && parameter["in"] == "path"
+                            && parameter["required"] == true
+                    });
+                assert!(
+                    declared,
+                    "{method} {path} lacks required path parameter {name}"
+                );
+            }
+        }
+    }
+    let mut expected: Vec<(String, String)> = ROUTES
+        .iter()
+        .flat_map(|(path, methods)| {
+            methods
+                .iter()
+                .map(|method| ((*path).to_owned(), method.to_ascii_lowercase()))
+        })
+        .collect();
+    let mut actual: Vec<(String, String)> = documented
+        .into_iter()
+        .map(|(path, method)| (path.to_owned(), method.to_ascii_lowercase()))
+        .collect();
+    expected.sort();
+    actual.sort();
+    assert_eq!(actual, expected);
+    operation_ids.sort_unstable();
+    operation_ids.dedup();
+    assert_eq!(
+        operation_ids.len(),
+        expected.len(),
+        "operationId values must be unique"
+    );
+
+    check_openapi_refs(&document, &document);
 }
 
 /// No limit gets in the way.
