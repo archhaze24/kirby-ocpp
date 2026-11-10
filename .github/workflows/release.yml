@@ -84,6 +84,12 @@ jobs:
           path: man
           if-no-files-found: error
 
+      - uses: actions/upload-artifact@v7
+        with:
+          name: openapi
+          path: docs/kirby-csms-openapi.json
+          if-no-files-found: error
+
   build:
     name: ${{ matrix.target }}
     needs: [version, man]
@@ -120,6 +126,11 @@ jobs:
           name: man
           path: man
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: openapi
+          path: openapi
+
       - name: Build
         shell: bash
         env:
@@ -139,7 +150,7 @@ jobs:
           # Branch names may contain "/" (manual runs); tags cannot be affected.
           name="kirby-ocpp-${REF_NAME//\//-}-${TARGET}"
           mkdir "$name"
-          cp "target/${TARGET}/release/kirby-ocpp" "target/${TARGET}/release/kirby-csms" LICENSE crates/kirby-ocpp/THIRD_PARTY_NOTICES.md README.md "$name/"
+          cp "target/${TARGET}/release/kirby-ocpp" "target/${TARGET}/release/kirby-csms" LICENSE crates/kirby-ocpp/THIRD_PARTY_NOTICES.md README.md openapi/kirby-csms-openapi.json "$name/"
           cp crates/kirby-csms/THIRD_PARTY_NOTICES.md "$name/THIRD_PARTY_NOTICES-kirby-csms.md"
           cp -R man "$name/man"
           tar -czf "$name.tar.gz" "$name"
@@ -155,7 +166,7 @@ jobs:
         run: |
           $name = "kirby-ocpp-$($env:REF_NAME -replace '/', '-')-$($env:TARGET)"
           New-Item -ItemType Directory $name | Out-Null
-          Copy-Item "target/$($env:TARGET)/release/kirby-ocpp.exe", "target/$($env:TARGET)/release/kirby-csms.exe", LICENSE, crates/kirby-ocpp/THIRD_PARTY_NOTICES.md, README.md $name
+          Copy-Item "target/$($env:TARGET)/release/kirby-ocpp.exe", "target/$($env:TARGET)/release/kirby-csms.exe", LICENSE, crates/kirby-ocpp/THIRD_PARTY_NOTICES.md, README.md, openapi/kirby-csms-openapi.json $name
           Copy-Item crates/kirby-csms/THIRD_PARTY_NOTICES.md "$name/THIRD_PARTY_NOTICES-kirby-csms.md"
           Copy-Item man "$name/man" -Recurse
           Compress-Archive -Path $name -DestinationPath "$name.zip"
@@ -189,6 +200,9 @@ jobs:
           # The target artifacts only (their names contain a dash); `man` is inside the archives.
           pattern: "*-*"
           merge-multiple: true
+
+      - name: Add OpenAPI document to release assets
+        run: cp docs/kirby-csms-openapi.json dist/kirby-csms-openapi.json
 
       - name: Create release
         env:
