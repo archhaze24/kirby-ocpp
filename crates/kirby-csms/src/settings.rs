@@ -138,8 +138,31 @@ pub const SCHEMA: Schema = Schema {
             unique: None,
             check: Some(check_rule),
         },
+        BlockSpec {
+            name: "command",
+            keys: &[
+                KeySpec::new("id", Kind::Text),
+                KeySpec::new("trigger", Kind::Text),
+                KeySpec::new("station", Kind::Text),
+                KeySpec::checked("protocol", check_protocol),
+                KeySpec::new("action", Kind::Text),
+                KeySpec::new("payload", Kind::Text),
+                KeySpec::new("timeout_ms", Kind::Integer),
+                KeySpec::new("delay_ms", Kind::Integer),
+                KeySpec::new("interval_ms", Kind::Integer),
+                KeySpec::new("times", Kind::Integer),
+            ],
+            required: &["id", "trigger", "station", "action"],
+            reserved: &[],
+            unique: Some("id"),
+            check: Some(check_command),
+        },
     ],
 };
+
+fn check_command(block: &Block) -> Result<(), String> {
+    crate::automation::CommandSpec::from_block(block).map(|_| ())
+}
 
 fn check_protocol(value: &str) -> Result<(), String> {
     if value == SCHEMA.protocol {
@@ -299,10 +322,20 @@ pub struct Blocks {
     pub stations: Vec<StationBlock>,
     /// `[[rule]]` blocks in file order.
     pub rules: Vec<RuleBlock>,
+    /// Scheduled commands and connection hooks in file order.
+    pub commands: Vec<crate::automation::CommandSpec>,
 }
 
 impl Blocks {
-    fn from_settings(settings: &config_file::Settings) -> Self {
+    fn from_settings(settings: &config_file::Settings) -> Result<Self, String> {
+        if settings.blocks("command").len() > crate::automation::MAX_COMMANDS {
+            return Err("at most 256 `[[command]]` blocks are allowed".to_owned());
+        }
+        let commands = settings
+            .blocks("command")
+            .iter()
+            .map(crate::automation::CommandSpec::from_block)
+            .collect::<Result<Vec<_>, _>>()?;
         let stations = settings
             .blocks("station")
             .iter()
@@ -331,7 +364,11 @@ impl Blocks {
                 })
             })
             .collect();
-        Self { stations, rules }
+        Ok(Self {
+            stations,
+            rules,
+            commands,
+        })
     }
 
     /// The blocks as renderable elements.
@@ -371,7 +408,16 @@ impl Blocks {
                 values
             })
             .collect();
-        vec![("station", stations), ("rule", rules)]
+        let commands = self
+            .commands
+            .iter()
+            .map(crate::automation::CommandSpec::render_values)
+            .collect();
+        vec![
+            ("station", stations),
+            ("rule", rules),
+            ("command", commands),
+        ]
     }
 }
 
@@ -428,7 +474,7 @@ pub fn parse_matches(args: Vec<OsString>) -> (ArgMatches, Blocks) {
         Ok(settings) => settings,
         Err(error) => fail(&error.to_string()),
     };
-    let blocks = Blocks::from_settings(&settings);
+    let blocks = Blocks::from_settings(&settings).unwrap_or_else(|error| fail(&error));
     let (extra, synthesized) = synthesize(&first, &settings);
     if extra.is_empty() && strict {
         return (first, blocks);

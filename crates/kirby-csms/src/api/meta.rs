@@ -23,6 +23,7 @@ pub(super) const ROUTES: &[(&str, &[&str])] = &[
     ("/v1/stations/{id}/history", &["GET"]),
     ("/v1/transactions", &["GET"]),
     ("/v1/metrics", &["GET"]),
+    ("/v1/calls", &["POST"]),
     ("/v1/stations/{id}/calls", &["POST"]),
     ("/v1/stations/{id}/rules", &["GET"]),
     (

@@ -17,6 +17,100 @@ use tokio::net::TcpStream;
 
 const WAIT: Duration = Duration::from_secs(30);
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_calls_validate_select_and_keep_per_station_outcomes() {
+    let csms = Csms::start(&[]);
+    let z = station(&csms.station_addr, "CP-z").await;
+    let a = station(&csms.station_addr, "CP-я").await;
+    let post = |body: Value| {
+        let addr = csms.api_addr.clone();
+        async move { http(&addr, "POST", "/v1/calls", &[], Some(&body.to_string())).await }
+    };
+    for body in [
+        json!({"station":"*","action":"Reset","unexpected":"private"}),
+        json!({"station":"*","action":"Reset","timeout_ms":0}),
+        json!({"station":"*","action":"Reset","protocol":"ocpp2.1"}),
+        json!({"station":"*","action":"bad\nname"}),
+    ] {
+        assert_eq!(post(body).await.0, 400);
+    }
+    let (status, body) = post(json!({"station":"missing-*","action":"Reset"})).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, json!({"action":"Reset","results":[]}));
+    let (status, body) =
+        post(json!({"station":"CP-?","action":"GetConfiguration", "protocol":"ocpp1.6"})).await;
+    assert_eq!(status, 200, "{body}");
+    let results = body["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["station"], "CP-z");
+    assert_eq!(results[1]["station"], "CP-я");
+    for result in results {
+        assert_eq!(result["outcome"], "result");
+        let keys: Vec<_> = result
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            keys,
+            [
+                "code", "details", "error", "ok", "outcome", "protocol", "result", "station"
+            ]
+        );
+    }
+    a.shutdown().await.unwrap();
+    tokio::time::timeout(WAIT, async {
+        while csms.get("/v1/stations/CP-%D1%8F").await.1["connected"] != false {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let (status, body) = post(json!({"station":"CP-*","action":"NoSuchAction"})).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["results"][0]["outcome"], "call_error");
+    assert_eq!(body["results"][0]["error"]["code"], "call_error");
+    assert!(body["results"][0]["code"].is_string());
+    assert_eq!(body["results"][1]["outcome"], "error");
+    assert_eq!(body["results"][1]["error"]["code"], "station_not_connected");
+    z.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn bulk_calls_limit_selection_before_dispatch() {
+    let csms = Csms::start(&[]);
+    let mut stations = Vec::new();
+    for index in 0..64 {
+        stations.push(station(&csms.station_addr, &format!("CP-{index:02}")).await);
+    }
+    stations.push(station(&csms.station_addr, "EXTRA").await);
+    let body = json!({"station":"*","action":"ChangeConfiguration","payload":{"key":"HeartbeatInterval","value":"900"}});
+    let (status, _) = http(
+        &csms.api_addr,
+        "POST",
+        "/v1/calls",
+        &[],
+        Some(&body.to_string()),
+    )
+    .await;
+    assert_eq!(status, 400);
+    let body = json!({"station":"CP-*","action":"NoSuchAction"});
+    let (status, body) = http(
+        &csms.api_addr,
+        "POST",
+        "/v1/calls",
+        &[],
+        Some(&body.to_string()),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["results"].as_array().unwrap().len(), 64);
+    for station in stations {
+        station.shutdown().await.unwrap();
+    }
+}
+
 const ENV_VARS: &[&str] = &[
     "KIRBY_CSMS_LISTEN",
     "KIRBY_CSMS_API_LISTEN",

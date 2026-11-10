@@ -48,7 +48,7 @@ use self::event_log::{EventLog, spawn_pump};
 use self::limits::{Limits, MAX_CONNECTIONS, MAX_STREAMS};
 use self::meta::{finish_response, health, index, options};
 use self::metrics::{Metrics, metrics};
-use self::routes_calls::call;
+use self::routes_calls::{bulk, call};
 use self::routes_history::{history, transactions};
 use self::routes_rules::{
     clear_faults, delete_rule, delete_station_rule, faults_remaining, get_station_rule,
@@ -61,13 +61,11 @@ use self::sse::events;
 #[derive(Clone)]
 struct ApiState {
     handle: CsmsHandle,
-    slots: Arc<Semaphore>,
+    commands: crate::commands::CommandLimits,
     token: Option<Arc<str>>,
     streams: Arc<Semaphore>,
     /// The address the API listens on.
     bound: IpAddr,
-    /// Request-body bytes still available to in-flight calls, see [`limits::PAYLOAD_BUDGET`].
-    payload: Arc<Semaphore>,
     /// How long an event stream lasts.
     stream_max_age: Duration,
     /// The events of `GET /v1/events`, with their ids.
@@ -93,11 +91,11 @@ pub async fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
 pub fn spawn(
     listener: TcpListener,
     handle: CsmsHandle,
-    slots: Arc<Semaphore>,
+    commands: crate::commands::CommandLimits,
     token: Option<String>,
     tls: Option<Arc<TlsConfig>>,
 ) -> Api {
-    spawn_inner(listener, handle, slots, token, Limits::DEFAULT, tls)
+    spawn_inner(listener, handle, commands, token, Limits::DEFAULT, tls)
 }
 
 #[cfg(test)]
@@ -108,13 +106,17 @@ fn spawn_with(
     token: Option<String>,
     limits: Limits,
 ) -> Api {
-    spawn_inner(listener, handle, slots, token, limits, None)
+    let commands = crate::commands::CommandLimits {
+        slots,
+        payload: Arc::new(Semaphore::new(limits.payload_budget)),
+    };
+    spawn_inner(listener, handle, commands, token, limits, None)
 }
 
 fn spawn_inner(
     listener: TcpListener,
     handle: CsmsHandle,
-    slots: Arc<Semaphore>,
+    commands: crate::commands::CommandLimits,
     token: Option<String>,
     limits: Limits,
     tls: Option<Arc<TlsConfig>>,
@@ -130,11 +132,10 @@ fn spawn_inner(
         .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |addr| addr.ip());
     let state = ApiState {
         handle,
-        slots,
+        commands,
         token: token.map(Arc::from),
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
         bound,
-        payload: Arc::new(Semaphore::new(limits.payload_budget)),
         stream_max_age: limits.stream_max_age,
         log: EventLog::new(unix_micros()),
         metrics: Metrics::new(),
@@ -181,6 +182,7 @@ fn router(state: ApiState) -> Router {
         .route("/v1/stations/{id}/history", get(history))
         .route("/v1/transactions", get(transactions))
         .route("/v1/metrics", get(metrics))
+        .route("/v1/calls", post(bulk))
         .route("/v1/stations/{id}/calls", post(call))
         .route("/v1/events", get(events))
         .route("/v1/stations/{id}/rules", get(list_station_rules))

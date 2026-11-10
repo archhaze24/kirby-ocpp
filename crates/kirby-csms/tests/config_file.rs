@@ -2,6 +2,7 @@
 //! `kirby-csms`. Environment variables cannot be set in-process, so the real binary runs with
 //! a controlled environment.
 
+use std::fmt::Write as _;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -105,6 +106,90 @@ fn check(args: &[&str], env: &[(&str, &str)]) -> Output {
     let mut all = args.to_vec();
     all.push("--check-config");
     run(&all, env)
+}
+
+#[test]
+fn configured_commands_roundtrip_and_profiles_replace_the_array() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        dir.path(),
+        "commands.toml",
+        r#"
+[[command]]
+id = "periodic"
+trigger = "interval"
+station = "CP-*"
+protocol = "ocpp1.6"
+action = "Reset"
+payload = '{"type":"Soft"}'
+interval_ms = 20
+times = 2
+timeout_ms = 100
+
+[[profile.fast.command]]
+id = "hook"
+trigger = "on_connect"
+station = "?"
+action = "GetConfiguration"
+"#,
+    );
+    let plain = print(&["--config", &file], &[]);
+    assert!(plain.contains("periodic"), "{plain}");
+    let roundtrip = write(dir.path(), "roundtrip.toml", &plain);
+    assert_eq!(plain, print(&["--config", &roundtrip], &[]));
+    let profile = print(&["--config", &file, "--profile", "fast"], &[]);
+    assert!(profile.contains("hook"), "{profile}");
+    assert!(!profile.contains("periodic"), "{profile}");
+    assert!(check(&["--config", &file], &[]).status.success());
+}
+
+#[test]
+fn command_validation_rejects_invalid_shapes_and_secrets_without_echoing_values() {
+    let dir = tempfile::tempdir().unwrap();
+    for (fields, expected) in [
+        ("trigger='after'\n", "requires `delay_ms`"),
+        ("trigger='interval'\ninterval_ms=0\n", "interval_ms"),
+        ("trigger='on_connect'\ntimes=1\n", "timing"),
+        ("trigger='on_connect'\nunknown=1\n", "unknown"),
+        ("trigger='after'\ndelay_ms=-1\n", "delay_ms"),
+        (
+            "trigger='interval'\ninterval_ms=1\ntimes=1000001\n",
+            "times",
+        ),
+        ("trigger='on_connect'\ntimeout_ms=0\n", "timeout_ms"),
+        ("trigger='on_connect'\npayload='[]'\n", "JSON object"),
+        (
+            "trigger='on_connect'\npayload='{\"key\":\"AuthorizationKey\",\"value\":\"sample-private-value\"}'\n",
+            "AuthorizationKey",
+        ),
+        (
+            "trigger='on_connect'\npayload='{\"configurationKey\":[{\"key\":\"authorizationkey\",\"value\":\"***\"}]}'\n",
+            "AuthorizationKey",
+        ),
+    ] {
+        let file = write(
+            dir.path(),
+            "invalid-command.toml",
+            &format!("[[command]]\nid='example'\nstation='CP-*'\naction='Reset'\n{fields}"),
+        );
+        let error = rejected(&["--config", &file, "--check-config"], &[]);
+        assert!(error.contains(expected), "{error}");
+        assert!(!error.contains("sample-private-value"), "{error}");
+    }
+    let repeated =
+        "[[command]]\nid='duplicate'\ntrigger='on_connect'\nstation='*'\naction='Reset'\n";
+    let file = write(dir.path(), "duplicate.toml", &repeated.repeat(2));
+    assert!(rejected(&["--config", &file, "--check-config"], &[]).contains("duplicate"));
+    let mut commands = String::new();
+    for n in 0..257 {
+        writeln!(
+            &mut commands,
+            "[[command]]\nid='c{n}'\ntrigger='on_connect'\nstation='*'\naction='Reset'"
+        )
+        .unwrap();
+    }
+    let file = write(dir.path(), "too-many.toml", &commands);
+    assert!(rejected(&["--config", &file, "--check-config"], &[]).contains("256"));
 }
 
 #[test]
@@ -724,6 +809,78 @@ async fn station(addr: &str, id: &str, key: Option<&str>) -> StationHandle {
     }
     handle.connect().await.unwrap();
     handle
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_timers_and_connection_hooks_run_through_the_real_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        dir.path(),
+        "automation.toml",
+        r#"
+[listener]
+listen = "127.0.0.1:0"
+[[command]]
+id = "once"
+trigger = "after"
+delay_ms = 0
+station = "missing-*"
+action = "GetConfiguration"
+[[command]]
+id = "twice"
+trigger = "interval"
+interval_ms = 1
+times = 2
+station = "missing-*"
+action = "GetConfiguration"
+[[command]]
+id = "hook"
+trigger = "on_connect"
+station = "CP-*"
+protocol = "ocpp1.6"
+action = "GetConfiguration"
+payload = '{"key":["HeartbeatInterval"]}'
+"#,
+    );
+    let mut server = Server::start(&file, &[]);
+    for _ in 0..3 {
+        let event = tokio::task::block_in_place(|| {
+            server.wait(|v| v["type"] == "automation" && v["id"] != "hook")
+        });
+        assert_eq!(event["status"], "completed");
+        assert_eq!(event["selected"], 0);
+    }
+    let first = station(&server.addr, "CP-1", None).await;
+    booted(&first).await;
+    let event = tokio::task::block_in_place(|| {
+        server.wait(|v| v["type"] == "automation" && v["id"] == "hook")
+    });
+    assert_eq!(event["selected"], 1);
+    assert_eq!(event["succeeded"], 1);
+    first.disconnect().await.unwrap();
+    tokio::task::block_in_place(|| {
+        server.wait(|v| v["type"] == "disconnected" && v["station"] == "CP-1")
+    });
+    first.connect().await.unwrap();
+    let event = tokio::task::block_in_place(|| {
+        server.wait(|v| v["type"] == "automation" && v["id"] == "hook")
+    });
+    assert_eq!(event["succeeded"], 1);
+    let events: Vec<Value> = server
+        .seen
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    for (id, count) in [("once", 1), ("twice", 2), ("hook", 2)] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|v| v["type"] == "automation" && v["id"] == id)
+                .count(),
+            count
+        );
+    }
+    let _ = first.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

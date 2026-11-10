@@ -1,7 +1,5 @@
 //! `POST /v1/stations/{id}/calls`: run one OCPP call and answer with its outcome.
 
-use std::sync::Arc;
-
 use axum::body::Body;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, Request, State};
@@ -53,23 +51,11 @@ pub(super) async fn call(
         Err(message) => return error(StatusCode::BAD_REQUEST, "bad_request", message),
     };
     drop(object);
-    let Ok(_permit) = Arc::clone(&state.slots).try_acquire_owned() else {
-        return error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too_many_requests",
-            "too many commands in flight",
-        );
-    };
-    let Ok(_bytes) = u32::try_from(body_bytes).map_err(|_| ()).and_then(|bytes| {
-        Arc::clone(&state.payload)
-            .try_acquire_many_owned(bytes)
-            .map_err(|_| ())
-    }) else {
-        return error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "too_many_requests",
-            "too much request data held by commands in flight (at most 32 MiB)",
-        );
+    let _permit = match state.commands.try_reserve(1, body_bytes) {
+        Ok(permit) => permit,
+        Err(message) => {
+            return error(StatusCode::TOO_MANY_REQUESTS, "too_many_requests", message);
+        }
     };
     let answer = commands::call(&state.handle, &id, &action, payload, timeout).await;
     if let Some(body) = answer.api_body() {
@@ -100,4 +86,78 @@ pub(super) async fn call(
             "call outcome without a body",
         ),
     }
+}
+
+/// Sends a bounded batch after reserving capacity for the entire selection.
+pub(super) async fn bulk(State(state): State<ApiState>, request: Request<Body>) -> Response {
+    let (body, bytes) = match read_json(request).await {
+        Ok(body) => body,
+        Err(response) => return *response,
+    };
+    let parsed = parse_bulk(body);
+    let (pattern, protocol, action, payload, timeout) = match parsed {
+        Ok(parsed) => parsed,
+        Err(message) => return error(StatusCode::BAD_REQUEST, "bad_request", &message),
+    };
+    let stations = match commands::select_stations(&state.handle, &pattern, protocol.as_deref()) {
+        Ok(stations) => stations,
+        Err(message) => return error(StatusCode::BAD_REQUEST, "bad_request", &message),
+    };
+    let Some(bytes) = bytes.checked_mul(stations.len()) else {
+        return error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "request data exceeds the command budget",
+        );
+    };
+    let _permit = match state.commands.try_reserve(stations.len(), bytes) {
+        Ok(permit) => permit,
+        Err(message) => return error(StatusCode::TOO_MANY_REQUESTS, "too_many_requests", message),
+    };
+    let results = commands::call_many(&state.handle, &stations, &action, &payload, timeout).await;
+    reply(StatusCode::OK, &json!({"action":action,"results":results}))
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BulkRequest {
+    station: String,
+    action: String,
+    #[serde(default)]
+    protocol: Option<String>,
+    #[serde(default = "empty_payload")]
+    payload: Value,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+fn empty_payload() -> Value {
+    json!({})
+}
+
+type ParsedBulk = (
+    String,
+    Option<String>,
+    String,
+    Value,
+    Option<std::time::Duration>,
+);
+
+fn parse_bulk(body: Value) -> Result<ParsedBulk, String> {
+    let request: BulkRequest =
+        serde_json::from_value(body).map_err(|_| "invalid bulk call fields".to_owned())?;
+    commands::check_pattern(&request.station)?;
+    commands::check_call_action(&request.action)?;
+    if let Some(protocol) = &request.protocol {
+        commands::check_protocol(protocol)?;
+    }
+    let timeout = commands::parse_timeout(request.timeout_ms.map(Value::from).as_ref())
+        .map_err(str::to_owned)?;
+    Ok((
+        request.station,
+        request.protocol,
+        request.action,
+        request.payload,
+        timeout,
+    ))
 }

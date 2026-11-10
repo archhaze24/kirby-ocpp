@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use kirby_csms_core::CsmsHandle;
 use serde_json::{Value, json};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::mpsc;
 
 use crate::commands;
 use crate::headless::Output;
@@ -83,7 +83,7 @@ fn read_lines(mut reader: impl BufRead, limit: usize, mut send: impl FnMut(Input
 /// Starts reading stdin on a plain thread (a blocked tokio stdin read would hold up the
 /// runtime shutdown) and answers every line in its own task, so one slow command does not
 /// delay the others. End of input just ends the reader; the server keeps running.
-pub fn spawn(handle: CsmsHandle, out: Arc<Output>, slots: Arc<Semaphore>) {
+pub fn spawn(handle: CsmsHandle, out: Arc<Output>, limits: commands::CommandLimits) {
     let (tx, mut rx) = mpsc::channel::<Input>(QUEUE_LINES);
     std::thread::spawn(move || {
         read_lines(std::io::stdin().lock(), MAX_LINE_BYTES, |item| {
@@ -112,7 +112,13 @@ pub fn spawn(handle: CsmsHandle, out: Arc<Output>, slots: Arc<Semaphore>) {
                 continue;
             }
             // Backpressure: the reader stalls (and so does the pipe) while all slots are busy.
-            let Ok(permit) = Arc::clone(&slots).acquire_owned().await else {
+            let Ok(permit) = Arc::clone(&limits.slots).acquire_owned().await else {
+                return;
+            };
+            let Ok(bytes) = u32::try_from(line.len()) else {
+                return;
+            };
+            let Ok(payload) = Arc::clone(&limits.payload).acquire_many_owned(bytes).await else {
                 return;
             };
             let handle = handle.clone();
@@ -121,6 +127,7 @@ pub fn spawn(handle: CsmsHandle, out: Arc<Output>, slots: Arc<Semaphore>) {
                 let answer = handle_line(&handle, &line).await;
                 out.json_line(&answer);
                 drop(permit);
+                drop(payload);
             });
         }
     });

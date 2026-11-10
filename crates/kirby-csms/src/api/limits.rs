@@ -30,7 +30,8 @@ pub(super) const DRAIN_TIME: Duration = Duration::from_millis(100);
 pub(super) const DRAIN_BYTES: usize = 64 * 1024;
 /// Most request-body bytes held by `POST .../calls` requests at once (the body of each, as
 /// received, while its call runs); further requests get `429`.
-pub(super) const PAYLOAD_BUDGET: usize = 32 * 1024 * 1024;
+#[cfg(test)]
+pub(super) const PAYLOAD_BUDGET: usize = crate::commands::PAYLOAD_BUDGET;
 /// Time a client gets to send the whole request body.
 pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -48,6 +49,7 @@ pub(super) struct Limits {
     pub(super) write_stall: Duration,
     pub(super) response_deadline: Duration,
     pub(super) stream_max_age: Duration,
+    #[cfg(test)]
     pub(super) payload_budget: usize,
 }
 
@@ -56,6 +58,7 @@ impl Limits {
         write_stall: WRITE_STALL,
         response_deadline: RESPONSE_DEADLINE,
         stream_max_age: STREAM_MAX_AGE,
+        #[cfg(test)]
         payload_budget: PAYLOAD_BUDGET,
     };
 }

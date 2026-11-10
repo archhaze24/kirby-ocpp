@@ -43,6 +43,79 @@ const LONG: Limits = Limits {
     payload_budget: PAYLOAD_BUDGET,
 };
 
+#[tokio::test]
+async fn bulk_admission_is_shared_and_rejects_before_any_call() {
+    use kirby_ocpp_core::station::Snapshot;
+    use kirby_ocpp_core::{Station, StationConfig, SystemClock};
+
+    async fn post(addr: std::net::SocketAddr) -> String {
+        let body = r#"{"station":"CP-*","action":"GetConfiguration"}"#;
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST /v1/calls HTTP/1.1\r\nHost: {addr}\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            stream.read_to_string(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        response
+    }
+
+    let csms = CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let mut stations = Vec::new();
+    for id in ["CP-a", "CP-b"] {
+        let mut config = StationConfig::new(csms.url()).with_charge_point_id(id);
+        config.persist = false;
+        let (station, _) = Station::spawn(config, Arc::new(SystemClock));
+        station.connect().await.unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            station.watch_snapshot().wait_for(Snapshot::booted),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        stations.push(station);
+    }
+    let commands = crate::commands::CommandLimits {
+        slots: Arc::new(Semaphore::new(2)),
+        payload: Arc::new(Semaphore::new(1024 * 1024)),
+    };
+    let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let api = spawn(listener, csms.clone(), commands.clone(), None, None);
+    let held = commands.try_reserve(1, 0).unwrap();
+    assert!(post(addr).await.contains(" 429 "));
+    drop(held);
+    let held = commands.try_reserve(0, 1024 * 1024).unwrap();
+    assert!(post(addr).await.contains(" 429 "));
+    for id in ["CP-a", "CP-b"] {
+        assert!(!csms.history(id).unwrap().iter().any(|entry| matches!(&entry.frame, kirby_csms_core::Frame::Call { action, .. } if action == "GetConfiguration")));
+    }
+    drop(held);
+    assert!(post(addr).await.contains(" 200 "));
+    assert_eq!(commands.slots.available_permits(), 2);
+    assert_eq!(commands.payload.available_permits(), 1024 * 1024);
+    for station in stations {
+        station.shutdown().await.unwrap();
+    }
+    api.finish().await;
+    csms.shutdown().await;
+}
+
 /// A peer that takes one byte at a time, fast enough never to stall a write, cannot hold
 /// a response longer than the response deadline; a streaming connection is exempt.
 async fn slow_drain(streaming: bool) -> io::Result<()> {
@@ -287,7 +360,10 @@ async fn finish_closes_connections_that_are_still_open() {
     let api = spawn(
         listener,
         csms.clone(),
-        Arc::new(Semaphore::new(4)),
+        crate::commands::CommandLimits {
+            slots: Arc::new(Semaphore::new(4)),
+            payload: Arc::new(Semaphore::new(PAYLOAD_BUDGET)),
+        },
         None,
         None,
     );

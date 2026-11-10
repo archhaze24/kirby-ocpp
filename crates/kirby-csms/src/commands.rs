@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::SecondsFormat;
+use futures_util::{StreamExt, stream::FuturesUnordered};
 use kirby_csms_core::registry;
 use kirby_csms_core::{
     CsmsError, CsmsHandle, Direction, Fault, FaultInfo, Frame, FrameEntry, Reply, RuleInfo, Scope,
@@ -12,7 +13,7 @@ use kirby_csms_core::{
 use kirby_ocpp_core::text::is_unsafe_char;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::headless::{frame_json, station_summary};
 
@@ -25,6 +26,254 @@ pub const MAX_IN_FLIGHT: usize = 256;
 /// The in-flight slots shared by every command source.
 pub fn new_slots() -> Arc<Semaphore> {
     Arc::new(Semaphore::new(MAX_IN_FLIGHT))
+}
+
+/// Most stations selected by one command.
+pub const MAX_BULK_STATIONS: usize = 64;
+/// Payload bytes held by all command sources together.
+pub const PAYLOAD_BUDGET: usize = 32 * 1024 * 1024;
+
+/// Limits shared by HTTP, stdin and configured commands.
+#[derive(Debug, Clone)]
+pub struct CommandLimits {
+    pub slots: Arc<Semaphore>,
+    pub payload: Arc<Semaphore>,
+}
+
+pub fn new_limits() -> CommandLimits {
+    CommandLimits {
+        slots: new_slots(),
+        payload: Arc::new(Semaphore::new(PAYLOAD_BUDGET)),
+    }
+}
+
+/// Reservations last until the complete command finishes or is abandoned.
+#[derive(Debug)]
+pub struct CommandPermit {
+    _slots: OwnedSemaphorePermit,
+    _payload: OwnedSemaphorePermit,
+}
+
+impl CommandLimits {
+    pub fn try_reserve(&self, count: usize, bytes: usize) -> Result<CommandPermit, &'static str> {
+        let count = u32::try_from(count).map_err(|_| "too many commands in flight")?;
+        let slots = self
+            .slots
+            .clone()
+            .try_acquire_many_owned(count)
+            .map_err(|_| "too many commands in flight")?;
+        let bytes =
+            u32::try_from(bytes).map_err(|_| "too much request data held by commands in flight")?;
+        let payload = self
+            .payload
+            .clone()
+            .try_acquire_many_owned(bytes)
+            .map_err(|_| "too much request data held by commands in flight (at most 32 MiB)")?;
+        Ok(CommandPermit {
+            _slots: slots,
+            _payload: payload,
+        })
+    }
+}
+
+pub fn check_pattern(pattern: &str) -> Result<(), String> {
+    check_station_id(pattern)
+}
+
+pub fn check_call_action(action: &str) -> Result<(), String> {
+    if action.is_empty() || action.len() > 128 || action.chars().any(is_unsafe_char) {
+        return Err(
+            "`action` must be 1 to 128 bytes without control or bidirectional characters"
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
+/// Matches Unicode characters with only `*` and `?` as metacharacters.
+pub fn glob_matches(pattern: &str, text: &str) -> bool {
+    let text: Vec<char> = text.chars().collect();
+    let mut previous = vec![false; text.len() + 1];
+    previous[0] = true;
+    for part in pattern.chars() {
+        let mut current = vec![false; text.len() + 1];
+        current[0] = part == '*' && previous[0];
+        for (index, character) in text.iter().enumerate() {
+            current[index + 1] = match part {
+                '*' => previous[index + 1] || current[index],
+                '?' => previous[index],
+                literal => literal == *character && previous[index],
+            };
+        }
+        previous = current;
+    }
+    previous.last().copied().unwrap_or(false)
+}
+
+pub fn select_stations(
+    handle: &CsmsHandle,
+    pattern: &str,
+    protocol: Option<&str>,
+) -> Result<Vec<kirby_csms_core::StationInfo>, String> {
+    check_pattern(pattern)?;
+    if let Some(protocol) = protocol {
+        check_protocol(protocol)?;
+    }
+    let mut selected = Vec::new();
+    for station in handle.stations() {
+        if glob_matches(pattern, &station.id)
+            && protocol.is_none_or(|protocol| station.subprotocol.as_deref() == Some(protocol))
+        {
+            if selected.len() == MAX_BULK_STATIONS {
+                return Err("at most 64 stations may match one command".to_owned());
+            }
+            selected.push(station);
+        }
+    }
+    selected.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(selected)
+}
+
+/// Runs a bounded selection without detached tasks; dropping it abandons every call.
+pub async fn call_many(
+    handle: &CsmsHandle,
+    stations: &[kirby_csms_core::StationInfo],
+    action: &str,
+    payload: &Value,
+    timeout: Option<Duration>,
+) -> Vec<Value> {
+    let mut pending: FuturesUnordered<_> = stations
+        .iter()
+        .map(|station| async move {
+            let answer = call(handle, &station.id, action, payload.clone(), timeout).await;
+            (station.id.clone(), bulk_answer(station, answer))
+        })
+        .collect();
+    let mut answers = Vec::with_capacity(stations.len());
+    while let Some(answer) = pending.next().await {
+        answers.push(answer);
+    }
+    answers.sort_by(|left, right| left.0.cmp(&right.0));
+    answers.into_iter().map(|(_, value)| value).collect()
+}
+
+fn bounded_payload(value: Option<Value>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    let bytes = value.to_string().len();
+    if bytes > 64 * 1024 {
+        json!({"truncated":true,"originalBytes":bytes})
+    } else {
+        value
+    }
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+
+    #[test]
+    fn glob_matches_whole_unicode_ids_without_regex_features() {
+        for (pattern, text, matches) in [
+            ("CP-?", "CP-я", true),
+            ("CP-?", "CP-💡", true),
+            ("CP-?", "CP-aa", false),
+            ("*a*b", "aaab", true),
+            ("*a*b", "aaabc", false),
+            ("[ab]", "a", false),
+            ("CP-*", "cp-a", false),
+            ("*", "", true),
+            ("**?*", "x", true),
+            ("?", "", false),
+        ] {
+            assert_eq!(glob_matches(pattern, text), matches, "{pattern} {text}");
+        }
+    }
+
+    #[test]
+    fn batch_admission_rolls_back_slots_when_bytes_do_not_fit() {
+        let limits = CommandLimits {
+            slots: Arc::new(Semaphore::new(3)),
+            payload: Arc::new(Semaphore::new(10)),
+        };
+        let held = limits.try_reserve(1, 7).unwrap();
+        assert!(limits.try_reserve(2, 4).is_err());
+        assert_eq!(limits.slots.available_permits(), 2);
+        assert_eq!(limits.payload.available_permits(), 3);
+        assert!(limits.try_reserve(3, 0).is_err());
+        drop(held);
+        assert_eq!(limits.slots.available_permits(), 3);
+        assert_eq!(limits.payload.available_permits(), 10);
+    }
+
+    #[test]
+    fn large_payloads_are_bounded_and_small_payloads_are_preserved() {
+        let value = json!({"data":"x".repeat(70_000)});
+        let bytes = value.to_string().len();
+        assert_eq!(
+            bounded_payload(Some(value)),
+            json!({"truncated":true,"originalBytes":bytes})
+        );
+        assert_eq!(
+            bounded_payload(Some(json!({"status":"Accepted"}))),
+            json!({"status":"Accepted"})
+        );
+    }
+
+    #[test]
+    fn bulk_outcomes_bound_untrusted_error_codes() {
+        let station = kirby_csms_core::StationInfo {
+            id: "CP-1".to_owned(),
+            connected: true,
+            connected_at: None,
+            disconnected_at: None,
+            remote_addr: None,
+            subprotocol: Some("ocpp1.6".to_owned()),
+            received_calls: 0,
+            received_by_action: std::collections::BTreeMap::new(),
+        };
+        let answer = CallAnswer {
+            outcome: Outcome::CallError,
+            value: json!({"ok":false, "code":"x".repeat(80_000),
+                "error":"untrusted error", "details":{}}),
+        };
+        let result = bulk_answer(&station, answer);
+        assert_eq!(result["outcome"], "call_error");
+        assert!(result["code"].as_str().unwrap().len() <= 128);
+        assert!(result.to_string().len() < 1024);
+    }
+}
+
+fn bulk_answer(station: &kirby_csms_core::StationInfo, mut answer: CallAnswer) -> Value {
+    let (outcome, error_code) = match &answer.outcome {
+        Outcome::Result => ("result", None),
+        Outcome::CallError => ("call_error", Some("call_error")),
+        Outcome::Timeout => ("timeout", Some("timeout")),
+        Outcome::Failed(CsmsError::UnknownStation { .. }) => ("error", Some("unknown_station")),
+        Outcome::Failed(CsmsError::NotConnected { .. } | CsmsError::ConnectionClosed { .. }) => {
+            ("error", Some("station_not_connected"))
+        }
+        Outcome::Failed(CsmsError::QueueFull { .. }) => ("error", Some("too_many_requests")),
+        Outcome::Failed(_) => ("error", Some("internal")),
+    };
+    let message: String = answer
+        .value
+        .get("error")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .chars()
+        .take(1024)
+        .collect();
+    json!({
+        "station": station.id, "protocol": station.subprotocol,
+        "outcome": outcome, "ok": error_code.is_none(),
+        "result": bounded_payload(answer.value.get_mut("result").map(Value::take)),
+        "error": error_code.map(|code| json!({"code":code,"message":message})),
+        "code": answer.value.get("code").and_then(Value::as_str)
+            .map(|code| code.chars().take(128).collect::<String>()),
+        "details": bounded_payload(answer.value.get_mut("details").map(Value::take)),
+    })
 }
 
 /// Every known station as a JSON array of summaries (see [`station_summary`]).

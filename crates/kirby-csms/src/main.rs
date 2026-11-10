@@ -2,6 +2,7 @@
 //! load tests. A terminal UI on an interactive terminal, headless otherwise.
 
 mod api;
+mod automation;
 mod cli;
 mod commands;
 mod headless;
@@ -115,8 +116,9 @@ async fn main() -> ExitCode {
         headless::announce_api(&out, plan.addr, plan.tls.is_some());
     }
     startup_notes(&handle, cli.json, Some(&out));
-    let slots = commands::new_slots();
-    let api = api_plan.map(|plan| plan.spawn(&handle, &slots));
+    let limits = commands::new_limits();
+    let api = api_plan.map(|plan| plan.spawn(&handle, &limits));
+    let scheduler = start_automation(&handle, &cli, &limits, &out);
     let sink = (session.is_none() || cli.log_file.is_some())
         .then(|| Sink::spawn(&handle, sink_events, out.clone()));
 
@@ -124,7 +126,7 @@ async fn main() -> ExitCode {
     // is running. Never on a terminal by default (nobody types JSON lines unasked).
     let stdin = cli.stdin || (script.is_none() && !std::io::stdin().is_terminal());
     if stdin {
-        stdin_cmd::spawn(handle.clone(), out.clone(), slots);
+        stdin_cmd::spawn(handle.clone(), out.clone(), limits);
     }
 
     let code = if let Some(session) = session {
@@ -142,6 +144,7 @@ async fn main() -> ExitCode {
         ExitCode::SUCCESS
     };
     // The API stops last: event streams then still get the closing `disconnected` events.
+    scheduler.finish().await;
     handle.shutdown().await;
     if let Some(api) = api {
         api.finish().await;
@@ -151,6 +154,21 @@ async fn main() -> ExitCode {
     }
     out.finish();
     code
+}
+
+fn start_automation(
+    handle: &CsmsHandle,
+    cli: &Cli,
+    limits: &commands::CommandLimits,
+    out: &std::sync::Arc<Output>,
+) -> automation::Scheduler {
+    automation::Scheduler::spawn(
+        handle.clone(),
+        cli.blocks.commands.clone(),
+        limits.clone(),
+        out.clone(),
+        Duration::from_secs(cli.call_timeout),
+    )
 }
 
 /// Loads the `--script` file and applies the `--var` values.
@@ -280,15 +298,11 @@ struct ApiPlan {
 
 impl ApiPlan {
     /// Starts serving on the bound listener.
-    fn spawn(
-        self,
-        handle: &CsmsHandle,
-        slots: &std::sync::Arc<tokio::sync::Semaphore>,
-    ) -> api::Api {
+    fn spawn(self, handle: &CsmsHandle, limits: &commands::CommandLimits) -> api::Api {
         api::spawn(
             self.listener,
             handle.clone(),
-            slots.clone(),
+            limits.clone(),
             self.token,
             self.tls,
         )
