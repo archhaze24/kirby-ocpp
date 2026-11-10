@@ -64,7 +64,8 @@ pub use rules::{
     MAX_RULES_PER_STATION, MAX_SCOPED_RULES, RuleInfo, Scope, reply_kind,
 };
 pub use server::{
-    CsmsHandle, CsmsServer, HistoryPage, MAX_STATION_ID_LEN, event_frame, station_id_from_path,
+    ConnectedSession, CsmsHandle, CsmsServer, HistoryPage, MAX_STATION_ID_LEN, event_frame,
+    station_id_from_path,
 };
 pub use state::{
     BootInfo, CertificateRequest, ConnectorState, InstalledCertificates, LogReport,

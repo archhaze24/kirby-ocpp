@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -174,6 +174,53 @@ pub struct CsmsHandle {
     inner: Arc<Inner>,
 }
 
+/// An opaque reference to one connected session on one server.
+///
+/// A replacement connection gets a different token, even when its station id is unchanged.
+#[derive(Clone)]
+pub struct ConnectedSession {
+    station: String,
+    protocol: Option<String>,
+    generation: u64,
+    server: Weak<Inner>,
+}
+
+impl ConnectedSession {
+    /// The station id of this session.
+    pub fn station(&self) -> &str {
+        &self.station
+    }
+
+    /// The negotiated WebSocket subprotocol.
+    pub fn protocol(&self) -> Option<&str> {
+        self.protocol.as_deref()
+    }
+}
+
+impl fmt::Debug for ConnectedSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ConnectedSession")
+            .field("station", &self.station)
+            .field("protocol", &self.protocol)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ConnectedSession {
+    fn eq(&self, other: &Self) -> bool {
+        self.generation == other.generation && Weak::ptr_eq(&self.server, &other.server)
+    }
+}
+
+impl Eq for ConnectedSession {}
+
+impl std::hash::Hash for ConnectedSession {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.generation, state);
+        std::hash::Hash::hash(&self.server.as_ptr(), state);
+    }
+}
+
 impl fmt::Debug for CsmsHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CsmsHandle")
@@ -204,6 +251,32 @@ impl CsmsHandle {
     /// Subscribes to server events. See [`CsmsEvent`] for lag behaviour.
     pub fn subscribe(&self) -> broadcast::Receiver<CsmsEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// A token for the current connection of a station, or `None` when disconnected.
+    pub fn connected_session(&self, station: &str) -> Option<ConnectedSession> {
+        let state = self.inner.lock();
+        let rec = state.stations.get(station)?;
+        self.session_token(rec)
+    }
+
+    /// Tokens for every currently connected session.
+    pub fn connected_sessions(&self) -> Vec<ConnectedSession> {
+        self.inner
+            .lock()
+            .stations
+            .values()
+            .filter_map(|rec| self.session_token(rec))
+            .collect()
+    }
+
+    fn session_token(&self, rec: &StationRec) -> Option<ConnectedSession> {
+        Some(ConnectedSession {
+            station: rec.info.id.clone(),
+            protocol: rec.info.subprotocol.clone(),
+            generation: rec.session.as_ref()?.id,
+            server: Arc::downgrade(&self.inner),
+        })
     }
 
     /// Every station in the registry (connected or not), ordered by id.
@@ -388,6 +461,31 @@ impl CsmsHandle {
         payload: Value,
         timeout: Duration,
     ) -> Result<Frame, CsmsError> {
+        self.call_inner(station, action, payload, timeout, None)
+            .await
+    }
+
+    /// Sends only when `session` is still the station's current connection on this server.
+    /// The identity check and enqueue happen under the same registry lock.
+    pub async fn call_session_timeout(
+        &self,
+        session: &ConnectedSession,
+        action: &str,
+        payload: Value,
+        timeout: Duration,
+    ) -> Result<Frame, CsmsError> {
+        self.call_inner(session.station(), action, payload, timeout, Some(session))
+            .await
+    }
+
+    async fn call_inner(
+        &self,
+        station: &str,
+        action: &str,
+        payload: Value,
+        timeout: Duration,
+        expected: Option<&ConnectedSession>,
+    ) -> Result<Frame, CsmsError> {
         let timeout = timeout.min(MAX_CALL_TIMEOUT);
         let tracked_request = (action == "GetInstalledCertificateIds").then(|| payload.clone());
         let deadline = Instant::now()
@@ -406,6 +504,12 @@ impl CsmsHandle {
                 station: station.to_owned(),
             };
             let session = rec.session.as_ref().ok_or_else(not_connected)?;
+            if expected.is_some_and(|token| {
+                token.generation != session.id
+                    || !Weak::ptr_eq(&token.server, &Arc::downgrade(&self.inner))
+            }) {
+                return Err(not_connected());
+            }
             let Some(slot) = session.slots.reserve() else {
                 // Calls whose callers gave up may hold the slots: have the session drop them.
                 if !session.slots.prune.swap(true, Ordering::AcqRel) {
