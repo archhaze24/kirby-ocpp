@@ -27,6 +27,10 @@ Needs Rust 1.88 or newer.
 
 [GitHub releases](https://github.com/archhaze24/kirby-ocpp/releases) carry one archive per target, `kirby-ocpp-<tag>-<target>.tar.gz` (`.zip` on Windows) plus a `.sha256` file each. Targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`. The musl builds are fully static (Alpine, minimal containers). Each archive holds both binaries, the license, the third-party notices, the README and the manual pages in `man/man1/` (`kirby-ocpp.1`, `kirby-csms.1` and one page per `kirby-ocpp` subcommand, such as `kirby-ocpp-run.1`; the Windows zip carries them too). The pages are generated from the same definitions as `--help`. Read one in place with `man -l man/man1/kirby-ocpp.1`, or install them with `cp man/man1/*.1 /usr/local/share/man/man1/`.
 
+The archives also include `kirby-csms-openapi.json`, the machine-readable control API
+contract. The same file is available as a standalone release asset. Manual `Release` runs
+upload it as the workflow artifact `openapi` without creating a release.
+
 ## Docker
 
 Image: `ghcr.io/archhaze24/kirby-ocpp`, multi-arch (`linux/amd64`, `linux/arm64`), built from the static musl binaries on every version tag. Tags: `X.Y.Z`, plus `X.Y` and `latest` when the release is the highest final version so far (prereleases and re-tagged older versions only get `X.Y.Z`; `latest` never moves backwards). It runs as the non-root user `kirby` (uid 10001), has the system CA roots for `wss://`, keeps emulator state in the volume `/data` (`KIRBY_OCPP_STATE_DIR=/data`) and exposes port 9000.

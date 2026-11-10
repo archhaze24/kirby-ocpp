@@ -6,6 +6,13 @@ Contents: [Contract](#contract) · [Start](#start) · [Auth model](#auth-model) 
 
 ## Contract
 
+The machine-readable [OpenAPI document](kirby-csms-openapi.json) lists the routes, parameters,
+request bodies and response formats. It ships as `kirby-csms-openapi.json` in every release
+archive and as a separate release asset. A test checks its paths and methods against the
+server's route table. Protocol-defined payloads and station state remain protocol-dependent.
+The document describes explicit routes; `HEAD` for `GET` routes and `OPTIONS` follow the
+common behavior below.
+
 The shapes in this page are a public contract, versioned by the path prefix and by `api_version` (`GET /v1` and `GET /v1/health` return it; now `1`).
 - Stable within `/v1`: the paths and methods in the table below, the field names and types of every JSON body, the error `code` values, the SSE event types and their `id:` lines. Additive changes (new fields, new event types, new endpoints, new error codes) keep `/v1`: clients must ignore fields and event types they do not know. A change that removes or renames a field, changes a type, or changes the meaning of a status or code is breaking and ships as `/v2` (with `/v1` kept for a release where feasible).
 - Not part of the contract: the text of `message` fields and of `error` strings in call answers, the order of object keys, the order of stations in a list, and the `ts` precision.
