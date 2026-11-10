@@ -3,11 +3,10 @@
 //! Rules:
 //!
 //! * state is mutated **only** here, never behind a lock;
-//! * the loop `select!`s over four sources: the command queue, the current connection's
-//!   events, the actor's internal channel (call results, connect results, store-write
-//!   results, log lines from call tasks) and the [`TimerWheel`];
-//! * nothing in the loop awaits the network or the disk: connecting, CALLs and store
-//!   writes run as spawned tasks that report back through the internal channel (see
+//! * the loop `select!`s over the command queue, the current connection's events,
+//!   outbound CALL futures, the actor's internal channel and the [`TimerWheel`];
+//! * nothing in the loop blocks on the network or the disk: connecting and store writes
+//!   run as spawned tasks; CALL futures only poll reply channels and retry timers (see
 //!   [`super::calls`]); the only awaited work is the graceful shutdown;
 //! * the snapshot is published once per loop iteration, and only if it changed, which
 //!   coalesces bursts of mutations.
@@ -20,6 +19,9 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::StreamExt;
+use futures_util::future::BoxFuture;
+use futures_util::stream::FuturesUnordered;
 use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinHandle;
@@ -92,7 +94,7 @@ enum Wake {
     Timer(TimerKey),
 }
 
-/// Messages from spawned tasks to the actor loop.
+/// Completions and log messages delivered to the actor loop.
 pub(crate) enum Internal {
     /// A connection attempt finished.
     Connected {
@@ -107,7 +109,7 @@ pub(crate) enum Internal {
     },
     /// A state file write finished.
     Saved(Result<(), StoreError>),
-    /// A log line from a spawned task.
+    /// A log line from asynchronous work.
     Log(LogLevel, String),
 }
 
@@ -239,6 +241,7 @@ pub(crate) struct StationActor {
     internal_rx: mpsc::UnboundedReceiver<Internal>,
     pub(super) link: Link,
     pub(super) calls: HashMap<u64, PendingCall>,
+    pub(super) call_results: FuturesUnordered<BoxFuture<'static, Internal>>,
     pub(super) next_call_token: u64,
     /// Tokens of the timer-driven `MeterValues` in flight, oldest first (see `sampling.rs`).
     pub(super) sample_calls: std::collections::VecDeque<u64>,
@@ -354,6 +357,7 @@ impl StationActor {
             internal_rx,
             link: Link::default(),
             calls: HashMap::new(),
+            call_results: FuturesUnordered::new(),
             next_call_token: 0,
             sample_calls: std::collections::VecDeque::new(),
             sample_overflow_warned: false,
@@ -387,6 +391,7 @@ impl StationActor {
                 envelope = self.commands.recv() => Wake::Command(envelope),
                 event = next_link_event(&mut self.link.events) => Wake::Link(event),
                 Some(internal) = self.internal_rx.recv() => Wake::Internal(internal),
+                Some(result) = self.call_results.next() => Wake::Internal(result),
                 key = self.timers.next() => Wake::Timer(key),
             };
             // Before anything changes the state: energy of the time that just passed.

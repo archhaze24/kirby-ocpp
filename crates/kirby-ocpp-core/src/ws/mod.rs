@@ -216,6 +216,24 @@ impl PendingReply {
 }
 
 impl Connection {
+    /// A channel-backed connection for deterministic station handoff tests.
+    #[cfg(test)]
+    pub(crate) fn test_reply_channel() -> (
+        Self,
+        impl FnMut() -> oneshot::Sender<Result<Value, CallError>>,
+    ) {
+        let (commands, mut receiver) = mpsc::unbounded_channel();
+        let connection = Self {
+            commands,
+            open: Arc::new(AtomicBool::new(true)),
+            default_timeout: Duration::from_secs(10),
+        };
+        (connection, move || match receiver.try_recv().unwrap() {
+            task::Command::Call(call) => call.reply,
+            task::Command::Close => panic!("expected a queued CALL"),
+        })
+    }
+
     /// Opens a connection to `<url>/<charge_point_id>` requesting `subprotocol`.
     ///
     /// Returns the handle and the stream of events. The receiver is bounded; the

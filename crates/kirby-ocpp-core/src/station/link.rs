@@ -189,6 +189,7 @@ impl StationActor {
                 reason,
                 by_us,
             } => {
+                self.finish_answered_calls();
                 let shown = code.map_or_else(String::new, |c| format!(" ({c})"));
                 let why = if reason.is_empty() {
                     String::new()

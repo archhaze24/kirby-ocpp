@@ -1,11 +1,11 @@
 //! Outbound CALLs of the station actor.
 //!
-//! # Design: spawned future + continuation
+//! # Design: reply future + continuation
 //!
-//! The actor never awaits a CSMS round trip. [`StationActor::call_raw`] spawns a task
-//! that awaits `Connection::call` and reports `Internal::CallDone{token, ..}` back
-//! through the actor's internal channel. The actor keeps the *continuation* for that
-//! token in a map: a boxed `FnOnce(&mut StationActor, Result<Value, CallError>)`. When
+//! The actor never awaits a CSMS round trip. [`StationActor::call_raw`] stores a future
+//! that polls the connection's reply channel and returns `Internal::CallDone{token, ..}`.
+//! The actor polls those futures alongside its event sources and keeps the *continuation*
+//! for that token in a map: a boxed `FnOnce(&mut StationActor, Result<Value, CallError>)`. When
 //! `CallDone` arrives the actor looks the continuation up and runs it **inside the
 //! actor loop**, so it may mutate any state and answer a waiting command without locks.
 //! Continuations capture what they need (a command's `oneshot` reply, a connector id).
@@ -16,12 +16,12 @@
 //! * The connection serializes CALLs on the wire, so the continuations of two calls run
 //!   in the order the calls were sent.
 //! * **Retries** for `StartTransaction` / `StopTransaction` / `MeterValues`
-//!   ([`is_transaction_message`]): the spawned task loops
+//!   ([`is_transaction_message`]): the reply future loops
 //!   `TransactionMessageAttempts` times with `TransactionMessageRetryInterval` between
 //!   attempts (values read when the call is made). A retry is queued behind CALLs made
 //!   since the first attempt, so retries may reorder; only a `MeterValues` retry is dropped
 //!   once the `StopTransaction` of its transaction was queued ([`RetryGuard`]). CALLERROR, timeout and schema violations
-//!   are retried, a closed connection is not. The task is aborted when the connection
+//!   are retried, a closed connection is not. The future is aborted when the connection
 //!   goes away and the continuation then gets `Closed`, so retries never outlive a link.
 //! * **Gating** ([`Origin`]): until `BootNotification` was `Accepted` only `BootNotification`
 //!   may be sent. While `Pending`, messages the CSMS asked for with `TriggerMessage`
@@ -31,6 +31,8 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use futures_util::FutureExt;
+use futures_util::future::{AbortHandle, Abortable};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
 
@@ -63,14 +65,14 @@ pub enum Origin {
 pub(super) struct PendingCall {
     pub(super) action: String,
     pub(super) origin: Origin,
-    pub(super) task: tokio::task::JoinHandle<()>,
+    pub(super) task: AbortHandle,
     pub(super) continuation: Continuation,
     /// `MeterValues` with retries: set once the transaction's `StopTransaction` was queued.
     pub(super) retry_guard: Option<RetryGuard>,
 }
 
 /// Lets the actor stop the retries of a transaction's `MeterValues` once its stop is sent.
-/// The retry task holds the lock while it checks the flag and queues the retry, so a retry
+/// The retry future holds the lock while it checks the flag and queues the retry, so a retry
 /// is either queued before the `StopTransaction` or not at all.
 #[derive(Clone)]
 pub(super) struct RetryGuard {
@@ -244,11 +246,11 @@ impl StationActor {
                 })
             })
             .flatten();
-        // The first attempt is queued on the connection right here, in call order: spawned
-        // tasks are polled in scheduler order, which would reorder CALLs made back to back
-        // (offline samples followed by their StopTransaction).
+        // Queue the first attempt synchronously, in call order: the order in which reply
+        // futures are polled must not reorder offline samples and their StopTransaction.
         let first = connection.enqueue(&name, payload.clone(), Some(timeout), validate);
-        let task = tokio::spawn({
+        let (task, registration) = AbortHandle::new_pair();
+        self.call_results.push(Box::pin({
             let name = name.clone();
             let guard = retry_guard.clone();
             async move {
@@ -263,14 +265,16 @@ impl StationActor {
                     guard,
                     log: results.clone(),
                 };
-                let result = plan.run(first).await;
-                let _ = results.send(Internal::CallDone {
+                let result = Abortable::new(plan.run(first), registration)
+                    .await
+                    .unwrap_or(Err(CallError::Closed { code: None }));
+                Internal::CallDone {
                     token,
                     generation,
                     result,
-                });
+                }
             }
-        });
+        }));
         self.calls.insert(
             token,
             PendingCall {
@@ -322,7 +326,7 @@ impl StationActor {
         );
     }
 
-    /// `CallDone` arrived from a call task.
+    /// `CallDone` arrived from a reply future.
     pub(super) fn on_call_done(
         &mut self,
         token: u64,
@@ -384,7 +388,7 @@ impl StationActor {
         Ok(())
     }
 
-    /// Fails every call in flight (connection lost, disconnect, shutdown): the tasks (and
+    /// Fails every call in flight (connection lost, disconnect, shutdown): the futures (and
     /// their retry sleeps) are aborted and each continuation runs once with `error()`.
     pub(super) fn fail_pending_calls(&mut self, error: impl Fn() -> CallError) {
         let pending = std::mem::take(&mut self.calls);
@@ -395,11 +399,179 @@ impl StationActor {
             (call.continuation)(self, Err(error()));
         }
     }
+
+    /// The connection resolves all reply channels before emitting `Closed`. Poll them
+    /// locally before tearing down the link, including futures not polled previously.
+    /// Retry timers remain pending and are aborted by `fail_pending_calls`.
+    pub(super) fn finish_answered_calls(&mut self) {
+        let mut ready = Vec::new();
+        // Poll each future exactly once, bypassing both stream fairness and Tokio's
+        // cooperative budget: a ready reply must not be mistaken for a pending one.
+        for future in std::mem::take(&mut self.call_results) {
+            if let Some(Internal::CallDone {
+                token,
+                generation,
+                result,
+            }) = tokio::task::unconstrained(future).now_or_never()
+            {
+                ready.push((token, generation, result));
+            }
+        }
+        ready.sort_by_key(|(token, _, _)| *token);
+        for (token, generation, result) in ready {
+            self.on_call_done(token, generation, result);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use futures_util::StreamExt;
+
     use super::*;
+
+    fn actor() -> StationActor {
+        let (_, commands) = mpsc::channel(1);
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        StationActor::new(
+            crate::config::StationConfig::new("ws://localhost/ocpp").without_persistence(),
+            Arc::new(crate::clock::SystemClock),
+            commands,
+            events,
+        )
+        .0
+    }
+
+    fn close(actor: &mut StationActor) {
+        actor.on_connection_event(crate::ws::ConnectionEvent::Closed {
+            code: Some(1001),
+            reason: String::new(),
+            by_us: false,
+        });
+    }
+
+    fn queued_call(actor: &mut StationActor) -> oneshot::Receiver<Result<Value, CallError>> {
+        let (reply, result) = oneshot::channel();
+        actor.call_raw(
+            Origin::Raw,
+            "Heartbeat",
+            serde_json::json!({}),
+            false,
+            Box::new(move |_, outcome| {
+                let _ = reply.send(outcome);
+            }),
+        );
+        result
+    }
+
+    #[tokio::test]
+    async fn close_preserves_received_callresult_before_waiter_runs() {
+        let mut actor = actor();
+        let (connection, mut reply) = Connection::test_reply_channel();
+        actor.link.conn = Some(connection);
+        let mut outcome = queued_call(&mut actor);
+        let payload = serde_json::json!({"currentTime": "2026-11-10T00:00:00Z"});
+        reply().send(Ok(payload.clone())).unwrap();
+        close(&mut actor);
+        assert_eq!(outcome.try_recv().unwrap().unwrap(), payload);
+        assert!(actor.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_preserves_received_callerror_before_waiter_runs() {
+        let mut actor = actor();
+        let (connection, mut reply) = Connection::test_reply_channel();
+        actor.link.conn = Some(connection);
+        let mut outcome = queued_call(&mut actor);
+        reply()
+            .send(Err(CallError::Rpc {
+                action: "Heartbeat".to_owned(),
+                code: crate::ocpp::frame::ErrorCode::InternalError,
+                description: "test failure".to_owned(),
+                details: serde_json::json!({}),
+            }))
+            .unwrap();
+        close(&mut actor);
+        assert!(matches!(
+            outcome.try_recv().unwrap(),
+            Err(CallError::Rpc { .. })
+        ));
+        assert!(actor.calls.is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_fails_unanswered_call_once() {
+        let mut actor = actor();
+        let (connection, mut reply) = Connection::test_reply_channel();
+        actor.link.conn = Some(connection);
+        let mut outcome = queued_call(&mut actor);
+        let pending = reply();
+        close(&mut actor);
+        assert!(matches!(
+            outcome.try_recv().unwrap(),
+            Err(CallError::Closed { code: Some(1001) })
+        ));
+        assert!(actor.calls.is_empty());
+        drop(pending);
+    }
+
+    #[tokio::test]
+    async fn close_drains_more_replies_than_the_cooperative_budget() {
+        let mut actor = actor();
+        let (connection, mut reply) = Connection::test_reply_channel();
+        actor.link.conn = Some(connection);
+        let mut outcomes = Vec::new();
+        for number in 0..300 {
+            outcomes.push(queued_call(&mut actor));
+            reply().send(Ok(serde_json::json!(number))).unwrap();
+        }
+        close(&mut actor);
+        for (number, mut outcome) in outcomes.into_iter().enumerate() {
+            assert_eq!(
+                outcome.try_recv().unwrap().unwrap(),
+                serde_json::json!(number)
+            );
+        }
+        assert!(actor.calls.is_empty());
+        assert!(actor.call_results.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn close_cancels_a_pending_transaction_retry() {
+        let mut actor = actor();
+        let (connection, mut reply) = Connection::test_reply_channel();
+        actor.link.conn = Some(connection);
+        actor.state.registration = Some(RegistrationStatus::Accepted);
+        actor.registry.change("TransactionMessageAttempts", "3");
+        actor
+            .registry
+            .change("TransactionMessageRetryInterval", "60");
+        let (sender, mut outcome) = oneshot::channel();
+        actor.call_raw(
+            Origin::Station,
+            "MeterValues",
+            serde_json::json!({"transactionId": 7}),
+            false,
+            Box::new(move |_, result| {
+                let _ = sender.send(result);
+            }),
+        );
+        reply()
+            .send(Err(CallError::Timeout {
+                action: "MeterValues".to_owned(),
+                after: Duration::from_secs(1),
+            }))
+            .unwrap();
+        // Poll the ready failure into the retry timer without advancing time.
+        assert!(actor.call_results.next().now_or_never().is_none());
+        close(&mut actor);
+        assert!(matches!(
+            outcome.try_recv().unwrap(),
+            Err(CallError::Closed { code: Some(1001) })
+        ));
+        assert!(actor.calls.is_empty());
+        assert!(actor.call_results.is_empty());
+    }
 
     #[test]
     fn only_transaction_messages_are_retried() {

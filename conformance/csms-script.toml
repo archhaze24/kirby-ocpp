@@ -617,11 +617,3 @@ call = "DataTransfer"
 station = "${station}"
 payload_contains = { vendorId = "${vendor}", messageId = "done:scripted-replies" }
 timeout_ms = 30000
-
-# The script ends here and `kirby-csms` closes every connection. The station has to take the
-# answer to its last message before that close arrives; a station that sees the close first
-# reports the pending call as lost. A short pause lets it finish.
-[[steps]]
-name = "let the station take the last answer before the CSMS closes"
-action = "sleep"
-ms = 1000
