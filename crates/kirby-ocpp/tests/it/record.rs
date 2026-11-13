@@ -677,3 +677,163 @@ async fn replay_does_not_overwrite_the_recording_it_reads() {
     );
     assert!(Recording::read(&file).is_ok());
 }
+
+fn frames_file(dir: &Path, name: &str, gap_ms: u64, frames: &[(&str, Value)]) -> PathBuf {
+    let mut lines = vec![header("emulator", 1, "1.6")];
+    for (seq, (direction, frame)) in frames.iter().enumerate() {
+        lines.push(json!({
+            "type": "frame", "seq": seq, "elapsed_ms": seq as u64 * gap_ms, "session": 1,
+            "direction": direction, "frame": frame,
+        }));
+    }
+    write(dir, name, &lines)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_survives_a_start_the_csms_refused_in_the_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = frames_file(
+        dir.path(),
+        "refused.jsonl",
+        10,
+        &[
+            (
+                "out",
+                json!([2, "s1", "StartTransaction", {"connectorId": 1, "idTag": "T", "meterStart": 0, "timestamp": "2026-01-01T00:00:00Z"}]),
+            ),
+            ("in", json!([4, "s1", "InternalError", "no", {}])),
+            ("out", json!([2, "d1", "DataTransfer", {"vendorId": "v"}])),
+            ("in", json!([3, "d1", {"status": "Accepted"}])),
+        ],
+    );
+    let csms = mock(1).await;
+    csms.respond("StartTransaction", |_| {
+        kirby_ocpp_testkit::Reply::Error(
+            kirby_ocpp_testkit::ErrorCode::InternalError,
+            "no".to_owned(),
+        )
+    });
+    let output = run(strings(&[
+        "--url",
+        csms.url(),
+        "--id",
+        "REC-8",
+        "replay",
+        path(&file),
+        "--no-delay",
+    ]))
+    .await;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}{}",
+        text(&output.stdout),
+        stderr(&output)
+    );
+    let received = csms.received();
+    let count = |action: &str| received.iter().filter(|call| call.action == action).count();
+    assert_eq!(count("StartTransaction"), 1);
+    assert_eq!(count("DataTransfer"), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_recording_replays_at_default_pacing() {
+    let dir = tempfile::tempdir().unwrap();
+    // More than 5000 CALLs with a pause between each: over 10000 steps.
+    let mut frames = Vec::new();
+    for index in 0..5100 {
+        let id = format!("h{index}");
+        frames.push(("out", json!([2, id, "Heartbeat", {}])));
+        frames.push((
+            "in",
+            json!([3, id, {"currentTime": "2026-01-01T00:00:00Z"}]),
+        ));
+    }
+    let file = frames_file(dir.path(), "long.jsonl", 500, &frames);
+    let csms = mock(1).await;
+    let output = run(strings(&[
+        "--url",
+        csms.url(),
+        "--id",
+        "REC-9",
+        "replay",
+        path(&file),
+        "--speed",
+        "1000",
+        "--timeout",
+        "120",
+    ]))
+    .await;
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        stderr(&output).chars().take(2000).collect::<String>()
+    );
+    let beats = csms
+        .received()
+        .iter()
+        .filter(|call| call.action == "Heartbeat")
+        .count();
+    assert!(beats >= 5100, "{beats}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_start_keeps_the_recording_that_was_asked_to_be_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("keep.jsonl");
+    std::fs::write(&file, "precious\n").unwrap();
+    let missing_dir = dir.path().join("no-such-dir").join("log.txt");
+    let output = run(strings(&[
+        "--url",
+        "ws://127.0.0.1:9/ocpp",
+        "--record-overwrite",
+        "--record",
+        path(&file),
+        "--log-file",
+        path(&missing_dir),
+        "run",
+        "--scenario",
+        "heartbeat-and-status",
+    ]))
+    .await;
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "precious\n");
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["keep.jsonl"], "no temporary file is left behind");
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_recording_path_that_is_a_symlink_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.txt");
+    std::fs::write(&target, "precious\n").unwrap();
+    let link = dir.path().join("link.jsonl");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let csms = mock(1).await;
+    let output = run(strings(&[
+        "--url",
+        csms.url(),
+        "--record-overwrite",
+        "--record",
+        path(&link),
+        "run",
+        "--scenario",
+        "heartbeat-and-status",
+    ]))
+    .await;
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("not a regular file"));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious\n");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(csms.connections(), 0, "nothing ran");
+}

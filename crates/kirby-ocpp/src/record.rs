@@ -63,13 +63,13 @@ where
         };
     // The body ends the station (and with it every producer) before it returns.
     let code = body(Some(sink)).await;
-    let Ok(summary) = tokio::task::spawn_blocking(move || guard.finish()).await else {
+    // A run that recorded nothing leaves no file, and an existing one at the path is kept.
+    let Ok(summary) = tokio::task::spawn_blocking(move || guard.finish_unless_empty()).await else {
         eprintln!("error: the recording could not be finished");
         return ExitCode::FAILURE;
     };
     let shown = kirby_ocpp_tui::text::sanitize(&summary.path.display().to_string());
     if summary.frames == 0 && summary.commands == 0 && summary.incomplete.is_none() {
-        let _ = std::fs::remove_file(&summary.path);
         return code;
     }
     if let Some(reason) = &summary.incomplete {

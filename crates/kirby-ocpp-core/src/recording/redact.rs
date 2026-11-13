@@ -4,9 +4,6 @@ use serde_json::Value;
 
 use crate::ocpp::frame::{REDACTED, redact_payload};
 
-/// Longest string that is searched for URL credentials.
-const MAX_SCANNED: usize = 4096;
-
 /// Hides `AuthorizationKey` values (the `value` beside a `"key": "AuthorizationKey"`, anywhere)
 /// and the password of every `scheme://user:password@host` URL found in a string value.
 pub fn redact_value(value: &mut Value) {
@@ -28,47 +25,59 @@ fn redact_urls(value: &mut Value) {
 }
 
 /// `text` with URL passwords hidden, or `None` when it holds none.
+///
+/// Every `://` that follows a scheme character starts a URL whose authority ends at the first
+/// `/ ? #`, whitespace, quote or bracket. The rest of the text is kept byte for byte (nothing
+/// is re-serialized). One pass, linear in the length of the string.
 fn redact_text(text: &str) -> Option<String> {
-    if text.len() > MAX_SCANNED || !text.contains("://") || !text.contains('@') {
+    if !text.contains("://") || !text.contains('@') {
         return None;
     }
-    let mut changed = false;
-    let mut out = String::with_capacity(text.len());
-    for (index, token) in text.split(' ').enumerate() {
-        if index > 0 {
-            out.push(' ');
+    let mut out = String::new();
+    let mut copied = 0;
+    for (at, _) in text.match_indices("://") {
+        let start = at + 3;
+        if start < copied
+            || !text[..at]
+                .bytes()
+                .next_back()
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b))
+        {
+            continue;
         }
-        match redact_token(token) {
-            Some(clean) => {
-                changed = true;
-                out.push_str(&clean);
-            }
-            None => out.push_str(token),
+        let rest = &text[start..];
+        // An authority contains no slash, so scans for successive `://` cannot overlap
+        // beyond the next delimiter. Long credentials must be searched in full too.
+        let end = rest.find(ends_authority).unwrap_or(rest.len());
+        let authority = &rest[..end];
+        let Some(userinfo_end) = authority.rfind('@') else {
+            continue;
+        };
+        let Some(colon) = authority[..userinfo_end].find(':') else {
+            continue;
+        };
+        let password = colon + 1..userinfo_end;
+        if password.is_empty() || &authority[password.clone()] == REDACTED {
+            continue;
         }
+        out.push_str(&text[copied..start + password.start]);
+        out.push_str(REDACTED);
+        copied = start + password.end;
     }
-    changed.then_some(out)
+    if copied == 0 {
+        return None;
+    }
+    out.push_str(&text[copied..]);
+    Some(out)
 }
 
-/// Replaces the password of a URL-looking token by [`REDACTED`], keeping the rest of the text
-/// byte for byte (the URL is not re-serialized).
-fn redact_token(token: &str) -> Option<String> {
-    let (scheme, rest) = token.split_once("://")?;
-    if scheme.is_empty()
-        || !scheme
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"+-.".contains(&b))
-    {
-        return None;
-    }
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let authority = &rest[..end];
-    let at = authority.rfind('@')?;
-    let (user, _password) = authority[..at].split_once(':')?;
-    Some(format!(
-        "{scheme}://{user}:{REDACTED}@{}{}",
-        &authority[at + 1..],
-        &rest[end..]
-    ))
+/// Characters that end the authority of a URL inside free text.
+fn ends_authority(c: char) -> bool {
+    c.is_whitespace()
+        || matches!(
+            c,
+            '/' | '?' | '#' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | '<' | '>'
+        )
 }
 
 /// Whether a payload still holds a redaction marker: a value that cannot be sent as a

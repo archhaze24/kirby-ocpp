@@ -14,12 +14,16 @@ use serde_json::{Value, json};
 use super::read::{Entry, Recording};
 use super::redact::holds_redacted;
 use super::toml_out::{escape_placeholders, step, string};
-use super::{RecordError, Role, at_text, clean, frame_parts};
+use super::{MAX_ENTRIES, RecordError, Role, at_text, clean, frame_parts};
 use crate::ocpp::frame::Direction;
 use crate::scenario::Scenario;
 
 /// Longest single pause (the `sleep` step's limit).
 const MAX_PAUSE_MS: u64 = 86_400_000;
+/// Most steps of a replay plan. A scenario file is capped at 10000 expanded steps; a plan is
+/// generated, and a recording of [`MAX_ENTRIES`] lines holds at most half as many CALLs (each
+/// one has an answer) and so at most that many steps (a CALL and its pause).
+const MAX_PLAN_STEPS: u64 = MAX_ENTRIES as u64;
 /// Most warnings kept.
 const MAX_WARNINGS: usize = 100;
 
@@ -210,17 +214,19 @@ pub fn plan_replay(
             }
             previous_ms = Some(line.elapsed_ms);
         }
+        // Recorded text is data: `${` in an action name or id is not a placeholder.
         let mut fields = json!({
             "action": "send_raw",
-            "name": format!("{shown} {}", clean(id, 40)),
-            "call": action,
+            "name": format!("{shown} {}", clean(id, 40)).replace("${", "$${"),
+            "call": action.replace("${", "$${"),
             "payload": payload,
             "validate": false,
         });
         if is_error {
             fields["expect"] = json!({ "error": true });
         }
-        if action == "StartTransaction" {
+        // A refused start has no transaction id to capture.
+        if action == "StartTransaction" && !is_error {
             let var = format!("tx{next_tx}");
             next_tx += 1;
             let mut capture = serde_json::Map::new();
@@ -262,7 +268,7 @@ pub fn plan_replay(
     );
     text.push_str("ocpp_version = \"1.6\"\nschema = 1\n\n");
     text.push_str(&body);
-    let scenario = Scenario::from_toml(&text).map_err(|error| {
+    let scenario = Scenario::from_toml_capped(&text, MAX_PLAN_STEPS).map_err(|error| {
         RecordError::invalid(format!("the replay does not fit a scenario: {error}"))
     })?;
     Ok(ReplayPlan {

@@ -503,7 +503,13 @@ impl Scenario {
     /// [`ScenarioError::Invalid`] naming the offending step for unknown actions, missing or
     /// unknown fields and bad values.
     pub fn from_toml(text: &str) -> Result<Self, ScenarioError> {
-        Self::parse(text).map_err(|e| {
+        Self::from_toml_capped(text, MAX_EXPANDED_STEPS)
+    }
+
+    /// [`Scenario::from_toml`] with another limit on the expanded step count, for scenarios the
+    /// program generates itself (a replay plan is bounded by its recording instead).
+    pub(crate) fn from_toml_capped(text: &str, max_steps: u64) -> Result<Self, ScenarioError> {
+        Self::parse(text, max_steps).map_err(|e| {
             ScenarioError::Invalid(match e.offset {
                 Some(offset) => {
                     let (line, column) = super::line_col(text, offset);
@@ -514,7 +520,7 @@ impl Scenario {
         })
     }
 
-    fn parse(text: &str) -> Result<Self, Located> {
+    fn parse(text: &str, max_steps: u64) -> Result<Self, Located> {
         super::precheck_contract(text).map_err(Located::plain)?;
         let raw: RawScenario = toml::from_str(text).map_err(|e| Located {
             message: super::with_suggestion(e.message().to_owned()),
@@ -547,7 +553,7 @@ impl Scenario {
             tags: raw.tags,
             source: None,
         };
-        scenario.validate()?;
+        scenario.validate(max_steps)?;
         Ok(scenario)
     }
 
@@ -560,7 +566,7 @@ impl Scenario {
             path: path.to_path_buf(),
             source,
         })?;
-        match Self::parse(&text) {
+        match Self::parse(&text, MAX_EXPANDED_STEPS) {
             Ok(mut scenario) => {
                 scenario.source = Some(path.display().to_string());
                 Ok(scenario)
@@ -611,11 +617,11 @@ impl Scenario {
             .any(|step| serde_json::to_value(step).is_ok_and(|value| mentions(&value, &needle)))
     }
 
-    fn validate(&self) -> Result<(), ScenarioError> {
+    fn validate(&self, max_steps: u64) -> Result<(), ScenarioError> {
         let total = self.expanded_len();
-        if total > MAX_EXPANDED_STEPS {
+        if total > max_steps {
             return Err(ScenarioError::invalid(format!(
-                "scenario `{}` expands to {total} steps, the limit is {MAX_EXPANDED_STEPS}",
+                "scenario `{}` expands to {total} steps, the limit is {max_steps}",
                 self.name
             )));
         }

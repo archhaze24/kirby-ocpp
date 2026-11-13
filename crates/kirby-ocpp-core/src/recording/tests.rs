@@ -845,3 +845,211 @@ fn only_an_emulator_recording_can_be_replayed() {
     .unwrap_err();
     assert!(error.to_string().contains("no CALL"), "{error}");
 }
+
+fn overwriting() -> RecordOptions {
+    RecordOptions {
+        overwrite: true,
+        ..RecordOptions::default()
+    }
+}
+
+fn dir_entries(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_is_never_followed_or_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target.txt");
+    std::fs::write(&target, "precious\n").unwrap();
+    let link = dir.path().join("link.jsonl");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    for options in [overwriting(), RecordOptions::default()] {
+        let error = start(&link, "1.6", Role::Emulator, "CP-1", &options).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                RecordError::NotAFile { .. } | RecordError::Exists { .. }
+            ),
+            "{error}"
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious\n");
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+    assert_eq!(dir_entries(dir.path()), ["link.jsonl", "target.txt"]);
+}
+
+#[test]
+fn an_overwritten_recording_survives_until_the_new_one_is_finished() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rec.jsonl");
+    std::fs::write(&path, "precious\n").unwrap();
+    // Dropped without finish (a run that failed after the file was opened).
+    let (_sink, guard) = start(&path, "1.6", Role::Emulator, "CP-1", &overwriting()).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "precious\n");
+    drop(guard);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "precious\n");
+    // A run that recorded nothing leaves the old file as well.
+    let (_sink, guard) = start(&path, "1.6", Role::Emulator, "CP-1", &overwriting()).unwrap();
+    let summary = guard.finish_unless_empty();
+    assert_eq!((summary.frames, summary.commands), (0, 0));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "precious\n");
+    assert_eq!(dir_entries(dir.path()), ["rec.jsonl"]);
+    // A recording with content replaces it.
+    let (sink, guard) = start(&path, "1.6", Role::Emulator, "CP-9", &overwriting()).unwrap();
+    sink.command(1, &json!({"command": "heartbeat"}));
+    guard.finish_unless_empty();
+    assert_eq!(Recording::read(&path).unwrap().header.station, "CP-9");
+    assert_eq!(dir_entries(dir.path()), ["rec.jsonl"]);
+}
+
+#[test]
+fn an_empty_new_recording_is_not_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_sink, guard, path) = started(&dir, &RecordOptions::default());
+    guard.finish_unless_empty();
+    assert!(!path.exists());
+}
+
+fn redacted(value: Value) -> String {
+    let mut value = value;
+    redact_value(&mut value);
+    value.to_string()
+}
+
+#[test]
+fn url_passwords_are_hidden_wherever_the_url_sits_in_a_string() {
+    // A JSON string value that is only a URL, `key=value` text, several URLs in one string.
+    let text = redacted(json!({
+        "url": "ftp://alice:hunter2@files.example/fw.bin",
+        "line": "location=ftp://bob:hunter3@host/x",
+        "many": "a ws://u1:hunter4@h1/x, then wss://u2:hunter5@h2:8443/y?z=1#f; end",
+        "quoted": "{\"url\":\"ftp://carol:hunter6@h/x\"}",
+        "list": ["(https://dave:hunter7@h)"],
+    }));
+    assert!(!text.contains("hunter"), "{text}");
+    for kept in [
+        "ftp://alice:***@files.example/fw.bin",
+        "location=ftp://bob:***@host/x",
+        "ws://u1:***@h1/x, then wss://u2:***@h2:8443/y?z=1#f; end",
+        "ftp://carol:***@h/x",
+        "(https://dave:***@h)",
+    ] {
+        assert!(text.contains(kept), "{kept} in {text}");
+    }
+    // A string far longer than the old scan limit is searched as well.
+    let big = format!(
+        "{} ftp://eve:hunter8@h/x {}",
+        "x".repeat(100_000),
+        "y".repeat(100_000)
+    );
+    let text = redacted(json!([big]));
+    assert!(!text.contains("hunter8") && text.contains("ftp://eve:***@h/x"));
+}
+
+#[test]
+fn text_without_url_credentials_is_left_alone() {
+    for same in [
+        "see http://example.com/a@b:c now",
+        "ftp://host/path@x:y?q=1",
+        "http://user@host/",
+        "http://host/x?email=a:b@c",
+        "http://u:@host/",
+        "mailto:a:b@c and ://u:p@h",
+        "no scheme u:p@host/x",
+    ] {
+        assert_eq!(redacted(json!(same)), json!(same).to_string(), "{same}");
+    }
+}
+
+#[test]
+fn long_url_authorities_are_redacted() {
+    let password = "p".repeat(4096);
+    let text = redacted(json!(format!("ftp://user:{password}@host/file")));
+    assert_eq!(text, json!("ftp://user:***@host/file").to_string());
+}
+
+fn recording_with_failed_start() -> Recording {
+    lines(
+        "emulator",
+        "1.6",
+        &[
+            out(
+                json!([2, "s1", "StartTransaction", {"connectorId": 1, "idTag": "T", "meterStart": 0, "timestamp": "2026-01-01T00:00:00Z"}]),
+            ),
+            inn(json!([4, "s1", "InternalError", "no", {}])),
+            out(json!([2, "h1", "Heartbeat", {}])),
+            inn(json!([3, "h1", {}])),
+        ],
+    )
+}
+
+#[test]
+fn a_start_the_csms_refused_captures_nothing() {
+    let plan = plan_replay(
+        &recording_with_failed_start(),
+        &ReplayOptions {
+            no_delay: true,
+            ..ReplayOptions::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(plan.replayed, 2);
+    assert!(plan.scenario.steps[0].capture.is_empty());
+    assert!(plan.scenario.steps[0].expect.as_ref().unwrap().error);
+}
+
+#[test]
+fn a_long_recording_replays_at_default_pacing() {
+    let mut body = Vec::new();
+    for index in 0..6000 {
+        let id = format!("h{index}");
+        body.push(out(json!([2, id, "Heartbeat", {}])));
+        body.push(inn(json!([3, id, {}])));
+    }
+    let plan = plan_replay(&lines("emulator", "1.6", &body), &ReplayOptions::default()).unwrap();
+    assert_eq!(plan.replayed, 6000);
+    // One pause between every two CALLs: more steps than a hand-written scenario may have.
+    assert_eq!(plan.scenario.steps.len(), 6000 + 5999);
+    // The limit of a scenario file is 10000 steps.
+    assert!(plan.scenario.expanded_len() > 10_000);
+}
+
+#[test]
+fn recorded_action_names_are_never_placeholders() {
+    let recording = lines(
+        "emulator",
+        "1.6",
+        &[
+            out(json!([2, "x${nope}", "Evil${nope}", {}])),
+            inn(json!([3, "x${nope}", {}])),
+        ],
+    );
+    let plan = plan_replay(
+        &recording,
+        &ReplayOptions {
+            no_delay: true,
+            ..ReplayOptions::default()
+        },
+    )
+    .unwrap();
+    let Action::SendRaw { call, .. } = &plan.scenario.steps[0].action else {
+        panic!()
+    };
+    assert_eq!(call, "Evil$${nope}");
+    assert_eq!(
+        plan.scenario.steps[0].name.as_deref(),
+        Some("Evil$${nope} x$${nope}")
+    );
+}

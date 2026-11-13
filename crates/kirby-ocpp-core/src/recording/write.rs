@@ -3,8 +3,9 @@
 //! Recording must not lose frames silently, and it must not slow the station down. The
 //! producer therefore never blocks and never drops quietly: when the queue is full, a write
 //! fails or the size limit is reached, the recorder is marked incomplete with the reason,
-//! stops writing (a gap in the middle would mislead a replay) and the `end` line carries the
-//! reason. The caller reads it from [`RecordingGuard::finish`].
+//! stops accepting entries and the `end` line carries the reason. On queue overflow, entries
+//! already queued are still written as an unbroken prefix. The caller reads the result from
+//! [`RecordingGuard::finish`].
 //!
 //! This is deliberately not the lossy log pump of the terminal and headless outputs.
 
@@ -93,7 +94,10 @@ struct Shared {
     failure: Mutex<Option<String>>,
     /// The failure was already announced through [`RecordSink::take_failure`].
     announced: AtomicBool,
+    /// Producers stopped queueing (the failure is set); the writer may still be draining.
     halted: AtomicBool,
+    /// The queue overflowed: what is already queued is valid and is still written.
+    overflowed: AtomicBool,
     stop: AtomicBool,
 }
 
@@ -128,6 +132,9 @@ pub struct RecordSink {
 #[derive(Debug)]
 pub struct RecordingGuard {
     path: PathBuf,
+    /// With `overwrite`, the file being written; it replaces `path` when the recording is
+    /// finished, so an existing recording survives anything that ends before that.
+    temp: Option<PathBuf>,
     shared: Arc<Shared>,
     writer: Option<JoinHandle<Counts>>,
 }
@@ -149,42 +156,50 @@ pub fn start(
         path: path.to_path_buf(),
         source,
     };
-    let file = open(path, options.overwrite)?;
-    let mut out = BufWriter::new(file);
-    // Written by hand so the keys stay in reading order.
-    let text = |value: &str| Value::from(value).to_string();
-    let header = format!(
-        "{{\"type\":\"header\",\"schema\":{SCHEMA},\"ocpp_version\":{},\"tool_version\":{},\"role\":{},\"station\":{},\"started_at\":{}}}",
-        text(ocpp_version),
-        text(crate::VERSION),
-        serde_json::to_string(&role).unwrap_or_else(|_| "\"unknown\"".to_owned()),
-        text(station),
-        text(&chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
-    );
-    out.write_all(header.as_bytes()).map_err(io)?;
-    out.write_all(b"\n").map_err(io)?;
-    out.flush().map_err(io)?;
-    let bytes = header.len() as u64 + 1;
+    let (file, temp) = open(path, options.overwrite)?;
+    let written = temp.clone().unwrap_or_else(|| path.to_path_buf());
+    let started = (|| {
+        let mut out = BufWriter::new(file);
+        // Written by hand so the keys stay in reading order.
+        let text = |value: &str| Value::from(value).to_string();
+        let header = format!(
+            "{{\"type\":\"header\",\"schema\":{SCHEMA},\"ocpp_version\":{},\"tool_version\":{},\"role\":{},\"station\":{},\"started_at\":{}}}",
+            text(ocpp_version),
+            text(crate::VERSION),
+            serde_json::to_string(&role).unwrap_or_else(|_| "\"unknown\"".to_owned()),
+            text(station),
+            text(&chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+        );
+        out.write_all(header.as_bytes()).map_err(io)?;
+        out.write_all(b"\n").map_err(io)?;
+        out.flush().map_err(io)?;
+        let bytes = header.len() as u64 + 1;
 
-    let (shared, lines) = new_shared(options.queue_lines);
-    let writer = {
-        let shared = Arc::clone(&shared);
-        let limit = options.max_file_bytes;
-        std::thread::Builder::new()
-            .name("recording-writer".to_owned())
-            .spawn(move || write_loop(out, &lines, &shared, limit, bytes))
-            .map_err(io)?
-    };
-    Ok((
-        RecordSink {
-            shared: Arc::clone(&shared),
-        },
-        RecordingGuard {
-            path: path.to_path_buf(),
-            shared,
-            writer: Some(writer),
-        },
-    ))
+        let (shared, lines) = new_shared(options.queue_lines);
+        let writer = {
+            let shared = Arc::clone(&shared);
+            let limit = options.max_file_bytes;
+            std::thread::Builder::new()
+                .name("recording-writer".to_owned())
+                .spawn(move || write_loop(out, &lines, &shared, limit, bytes))
+                .map_err(io)?
+        };
+        Ok((
+            RecordSink {
+                shared: Arc::clone(&shared),
+            },
+            RecordingGuard {
+                path: path.to_path_buf(),
+                temp,
+                shared,
+                writer: Some(writer),
+            },
+        ))
+    })();
+    if started.is_err() {
+        let _ = std::fs::remove_file(&written);
+    }
+    started
 }
 
 fn new_shared(queue_lines: usize) -> (Arc<Shared>, Receiver<Line>) {
@@ -195,6 +210,7 @@ fn new_shared(queue_lines: usize) -> (Arc<Shared>, Receiver<Line>) {
         failure: Mutex::new(None),
         announced: AtomicBool::new(false),
         halted: AtomicBool::new(false),
+        overflowed: AtomicBool::new(false),
         stop: AtomicBool::new(false),
     });
     (shared, lines)
@@ -207,37 +223,42 @@ pub(super) fn detached(queue_lines: usize) -> (RecordSink, Receiver<Line>) {
     (RecordSink { shared }, lines)
 }
 
-fn open(path: &Path, overwrite: bool) -> Result<File, RecordError> {
+/// Creates the file to write: `path` itself, which must not exist, or with `overwrite` a new
+/// file beside it (returned as the second value) that replaces `path` when the recording is
+/// finished. A symlink is never followed or replaced. The file is private (`0600`) on unix.
+fn open(path: &Path, overwrite: bool) -> Result<(File, Option<PathBuf>), RecordError> {
     let io = |source| RecordError::Io {
         path: path.to_path_buf(),
         source,
     };
-    if overwrite {
-        match std::fs::metadata(path) {
-            Ok(meta) if !meta.is_file() => {
-                return Err(RecordError::NotAFile {
-                    path: path.to_path_buf(),
-                });
-            }
+    let not_a_file = || RecordError::NotAFile {
+        path: path.to_path_buf(),
+    };
+    let target = if overwrite {
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if !meta.is_file() => return Err(not_a_file()),
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(io(error)),
         }
-    }
-    let mut options = OpenOptions::new();
-    options.write(true);
-    if overwrite {
-        options.create(true).truncate(true);
+        let name = path.file_name().ok_or_else(not_a_file)?;
+        let mut temp_name = std::ffi::OsString::from(".");
+        temp_name.push(name);
+        temp_name.push(format!(".{}.tmp", std::process::id()));
+        path.with_file_name(temp_name)
     } else {
-        options.create_new(true);
-    }
+        path.to_path_buf()
+    };
+    // Never truncates: a name that exists (a file, a link, a dangling link) is refused.
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let file = options.open(path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
+    let file = options.open(&target).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists && !overwrite {
             RecordError::Exists {
                 path: path.to_path_buf(),
             }
@@ -245,13 +266,7 @@ fn open(path: &Path, overwrite: bool) -> Result<File, RecordError> {
             io(error)
         }
     })?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(std::fs::Permissions::from_mode(0o600))
-            .map_err(io)?;
-    }
-    Ok(file)
+    Ok((file, overwrite.then_some(target)))
 }
 
 fn write_loop(
@@ -266,17 +281,25 @@ fn write_loop(
         commands: 0,
         bytes,
     };
+    // The writer itself gave up (size limit, write error).
+    let mut stopped = false;
     loop {
         match lines.recv_timeout(IDLE_FLUSH) {
             Ok(line) => {
                 // After a failure the rest is discarded: a recording with a hole in the
-                // middle is worse than one that ends early.
-                if shared.halted.load(Ordering::SeqCst) {
+                // middle is worse than one that ends early. A queue overflow is different:
+                // the lines already queued form an unbroken prefix, so they are kept and the
+                // producers (halted at the first lost line) add nothing after them.
+                if stopped
+                    || (shared.halted.load(Ordering::SeqCst)
+                        && !shared.overflowed.load(Ordering::SeqCst))
+                {
                     continue;
                 }
                 let size = line.text.len() as u64 + 1;
                 if bytes + size > limit {
                     shared.fail(format!("the size limit of {limit} bytes was reached"));
+                    stopped = true;
                     continue;
                 }
                 let written = out
@@ -284,6 +307,7 @@ fn write_loop(
                     .and_then(|()| out.write_all(b"\n"));
                 if let Err(error) = written {
                     shared.fail(format!("writing failed: {}", error.kind()));
+                    stopped = true;
                     continue;
                 }
                 bytes += size;
@@ -293,10 +317,9 @@ fn write_loop(
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                if !shared.halted.load(Ordering::SeqCst)
-                    && let Err(error) = out.flush()
-                {
+                if !stopped && let Err(error) = out.flush() {
                     shared.fail(format!("writing failed: {}", error.kind()));
+                    stopped = true;
                 }
                 if shared.stop.load(Ordering::SeqCst) {
                     break;
@@ -422,6 +445,10 @@ impl RecordSink {
             .producer
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        // Another producer may have filled the queue while this one waited for the lock.
+        if self.shared.halted.load(Ordering::SeqCst) {
+            return;
+        }
         let line = Line {
             kind,
             text: build(producer.seq, self.shared.elapsed_ms()),
@@ -429,12 +456,11 @@ impl RecordSink {
         match producer.queue.try_send(line) {
             Ok(()) => producer.seq += 1,
             Err(TrySendError::Full(_)) => {
-                drop(producer);
+                self.shared.overflowed.store(true, Ordering::SeqCst);
                 self.shared
                     .fail("the recorder fell behind: its queue was full, frames were lost");
             }
             Err(TrySendError::Disconnected(_)) => {
-                drop(producer);
                 self.shared.fail("the recorder stopped");
             }
         }
@@ -449,7 +475,17 @@ impl RecordingGuard {
 
     /// Writes what is queued and the `end` line, closes the file and reports the result.
     /// Blocks briefly; call it after the producers have stopped.
-    pub fn finish(mut self) -> RecordingSummary {
+    pub fn finish(self) -> RecordingSummary {
+        self.close(true)
+    }
+
+    /// Like [`RecordingGuard::finish`], but a recording of nothing (no frame, no command, no
+    /// failure) is not kept, and an existing file at the path stays as it was.
+    pub fn finish_unless_empty(self) -> RecordingSummary {
+        self.close(false)
+    }
+
+    fn close(mut self, keep_empty: bool) -> RecordingSummary {
         self.shared.stop.store(true, Ordering::SeqCst);
         let counts = self.writer.take().and_then(|writer| writer.join().ok());
         if counts.is_none() {
@@ -460,6 +496,19 @@ impl RecordingGuard {
             commands: 0,
             bytes: 0,
         });
+        let empty = counts.frames == 0 && counts.commands == 0 && self.shared.failure().is_none();
+        let written = self.temp.take();
+        if empty && !keep_empty {
+            let _ = std::fs::remove_file(written.as_ref().unwrap_or(&self.path));
+        } else if let Some(temp) = written
+            && let Err(error) = std::fs::rename(&temp, &self.path)
+        {
+            let _ = std::fs::remove_file(&temp);
+            self.shared.fail(format!(
+                "moving the recording into place failed: {}",
+                error.kind()
+            ));
+        }
         RecordingSummary {
             path: self.path.clone(),
             frames: counts.frames,
@@ -474,5 +523,46 @@ impl Drop for RecordingGuard {
     fn drop(&mut self) {
         // Without `finish` the writer still ends (and writes its `end` line).
         self.shared.stop.store(true, Ordering::SeqCst);
+        // A replacement that was never finished is discarded; the old file stays.
+        if let Some(temp) = self.temp.take() {
+            if let Some(writer) = self.writer.take() {
+                let _ = writer.join();
+            }
+            let _ = std::fs::remove_file(temp);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_full_queue_still_writes_what_was_queued() {
+        let (shared, lines) = new_shared(4);
+        let sink = RecordSink {
+            shared: Arc::clone(&shared),
+        };
+        for n in 0..6 {
+            sink.command(1, &serde_json::json!({"command": "heartbeat", "n": n}));
+        }
+        let reason = shared.failure().expect("the fifth did not fit");
+        assert!(reason.contains("fell behind"), "{reason}");
+        shared.stop.store(true, Ordering::SeqCst);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("queued.jsonl");
+        let file = File::create(&path).unwrap();
+        let counts = write_loop(BufWriter::new(file), &lines, &shared, u64::MAX, 0);
+        assert_eq!(counts.commands, 4);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let written: Vec<&str> = text.lines().collect();
+        assert_eq!(written.len(), 5, "{text}");
+        assert!(written[3].contains("\"n\":3"), "{text}");
+        assert!(
+            written[4].contains("\"type\":\"end\"")
+                && written[4].contains("\"commands\":4")
+                && written[4].contains("fell behind"),
+            "{text}"
+        );
     }
 }
