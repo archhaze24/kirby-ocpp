@@ -54,6 +54,8 @@ tag as the GitHub release notes.
 
 ### Fixed
 
+- Session recordings mask URL passwords in free text and long strings, preserve queued entries on overflow, and keep existing files when a replacement run fails to start. Replay handles failed StartTransaction calls, literal `${` in action names and recordings above 10000 generated steps.
+- `kirby-csms ctl` bounds event-stream reconnect failures, reports reconnects without an event id, returns exit code 4 when a bulk pattern matches no station, escapes carriage returns in errors and protects export files and temporary files from unintended replacement.
 - The emulator preserves a received CALLRESULT or CALLERROR when the CSMS closes the connection immediately after replying. Conformance scripts no longer need a final pause before closing.
 - Recorded CALLRESULT payloads and CALLERROR details mask nested `AuthorizationKey` values, including `GetConfiguration` replies that echo the key. The wire response is unchanged, and `--show-secrets` still opts out of frame redaction.
 

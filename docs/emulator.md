@@ -234,7 +234,7 @@ suite: 1/3 scenarios passed, FAILED: my-auth, SKIPPED: last-one
 
 ## Recording and replay
 
-`--record FILE` writes the session to a JSON-lines recording, whichever way the station is driven: the terminal UI, headless mode, `run` or `replay`. It records one station, so `suite`, `check` and a fleet refuse it (exit 2). The file is created `0600` on unix; an existing file is never replaced unless `--record-overwrite` is given. Secrets never reach the file: `AuthorizationKey` values and URL passwords are replaced by `***`, with `--show-secrets` too. The flags are listed in [configuration.md](configuration.md#output); they are not configuration file keys.
+`--record FILE` writes the session to a JSON-lines recording, whichever way the station is driven: the terminal UI, headless mode, `run` or `replay`. It records one station, so `suite`, `check` and a fleet refuse it (exit 2). The file is created `0600` on unix; an existing file is never replaced unless `--record-overwrite` is given, a symlink is never followed or replaced (exit 2), and with `--record-overwrite` the new recording is written beside the old file and replaces it only when the run ends with something recorded, so a run that fails to start or records nothing keeps the old file. Secrets never reach the file: `AuthorizationKey` values and URL passwords are replaced by `***`, with `--show-secrets` too. The flags are listed in [configuration.md](configuration.md#output); they are not configuration file keys.
 
 ```bash
 kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001 --record session.jsonl      # drive the station, quit
@@ -256,7 +256,7 @@ One JSON object per line, each with a `type`:
 
 `seq` numbers frames and commands in one sequence, `elapsed_ms` is monotonic time since the recording started, and `session` counts the connections of the run (0 before the first one). Readers ignore unknown keys and unknown line types, new keys are only ever added, and a `schema` above 1 is refused. A last line that was cut off is ignored and reported; a bad line anywhere else is an error that names its line number.
 
-The recorder is not the lossy event log: frames go through their own bounded queue to a writer thread, and when the queue is full, a write fails or the file reaches 64 MiB the recording stops there, says why in its `end` line and on stderr, and the command exits 1. A reader refuses lines above 256 KiB and files above what a recorder writes.
+The recorder is not the lossy event log: frames go through their own bounded queue to a writer thread, and when the queue is full, a write fails or the file reaches 64 MiB the recording stops there, says why in its `end` line and on stderr, and the command exits 1. Lines already queued when the queue fills are still written, so the file ends with an unbroken prefix of the session. A reader refuses lines above 256 KiB and files above what a recorder writes.
 
 ### Converting a recording into a scenario
 
@@ -281,7 +281,7 @@ Scenario assertions (`expect_call`, `wait_for` and the like) are not commands an
 
 `kirby-ocpp replay FILE` sends the CALLs the emulator originated in the recording to the CSMS again and reports like `run` does, with exit code 1 when a CALL fails. It connects with the configured station (`--id` and the other station flags, not the recorded identity) and waits for the BootNotification before the first CALL, which is why the recorded BootNotification is not sent again.
 
-* The CALLs are sent in recorded order with new message ids, with the recorded pauses between them (`--speed FACTOR` scales them, `--no-delay` removes them). Each CALL is a `send_raw` step without schema validation, named `<Action> <recorded message id>`.
+* The CALLs are sent in recorded order with new message ids, with the recorded pauses between them (`--speed FACTOR` scales them, `--no-delay` removes them). Each CALL is a `send_raw` step without schema validation, named `<Action> <recorded message id>`. The 10000-step limit of scenario files does not apply to a replay (a CALL and its pause are two steps); the recorder's own limits bound it. A StartTransaction the CSMS answered with an error is replayed with the error expected and captures no transaction id.
 * The transaction id the CSMS gave a StartTransaction in the recording is replaced, in the later StopTransaction and MeterValues, by the id of the new StartTransaction answer (also when the CSMS reuses an id). An id that no StartTransaction of the recording gave is sent as recorded, with a warning.
 * A CALL is skipped with a warning when the recording has no answer to it, when it was too large to be recorded, or when it holds a redacted value: a masked `AuthorizationKey` (or URL password) is never sent as a credential.
 * A CALL the CSMS answered with a CALLERROR in the recording must get a CALLERROR again; any other CALL needs a CALLRESULT (the status inside is not compared).
