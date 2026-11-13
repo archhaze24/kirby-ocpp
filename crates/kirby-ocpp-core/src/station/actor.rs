@@ -38,6 +38,7 @@ use crate::clock::Clock;
 use crate::config::StationConfig;
 use crate::error::{CallError, StationError};
 use crate::ids::ConnectorId;
+use crate::recording::RecordSink;
 use crate::station::authorization::AuthorizationCache;
 use crate::station::certificates::CertificateStore;
 use crate::station::charging_profiles::ChargingProfileStore;
@@ -253,16 +254,20 @@ pub(crate) struct StationActor {
     pub(super) clock_offset: Option<chrono::Duration>,
     /// Log lines produced before `run` started (store loading).
     startup_logs: Vec<(LogLevel, String)>,
+    /// The session recording, when `--record` is on, and the connection count it stamps.
+    recording: Option<(RecordSink, u64)>,
 }
 
 impl StationActor {
     /// Builds the actor, restoring persisted state synchronously (one small file read), so
     /// that the very first snapshot is already the restored one.
+    #[allow(clippy::too_many_lines, reason = "one field list")]
     pub(crate) fn new(
         config: StationConfig,
         clock: Arc<dyn Clock>,
         commands: mpsc::Receiver<Envelope>,
         events: broadcast::Sender<Event>,
+        recording: Option<RecordSink>,
     ) -> (Self, watch::Receiver<Snapshot>) {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
         let clock_seed = clock.now_utc().timestamp_millis().max(1);
@@ -365,6 +370,7 @@ impl StationActor {
             persistence,
             clock_offset: None,
             startup_logs,
+            recording: recording.map(|sink| (sink, 0)),
         };
         (actor, snapshot_rx)
     }
@@ -406,7 +412,10 @@ impl StationActor {
                     let _ = reply.send(Ok(Outcome::Done));
                     break;
                 }
-                Wake::Command(Some(Envelope { command, reply })) => self.execute(command, reply),
+                Wake::Command(Some(Envelope { command, reply })) => {
+                    self.record_command(&command);
+                    self.execute(command, reply);
+                }
                 Wake::Command(None) => {
                     self.shutdown().await;
                     break;
@@ -489,7 +498,7 @@ impl StationActor {
                 })
                 .await;
                 for record in frames {
-                    self.emit(Event::Frame(record));
+                    self.emit_frame(record);
                 }
             }
         }
@@ -536,6 +545,48 @@ impl StationActor {
 
     pub(super) fn emit(&self, event: Event) {
         let _ = self.events.send(event);
+    }
+
+    /// Publishes a frame; the session recording (when on) gets it first, redacted and never
+    /// through the lossy event channel.
+    pub(super) fn emit_frame(&mut self, record: super::event::FrameRecord) {
+        let failure = self.recording.as_ref().and_then(|(sink, session)| {
+            sink.frame(*session, &record);
+            sink.take_failure()
+        });
+        self.emit(Event::Frame(record));
+        if let Some(reason) = failure {
+            self.log(
+                LogLevel::Error,
+                format!("recording stopped, the file is incomplete: {reason}"),
+            );
+        }
+    }
+
+    /// Counts a new connection for the recording.
+    pub(super) fn recording_new_session(&mut self) {
+        if let Some((_, session)) = &mut self.recording {
+            *session += 1;
+        }
+    }
+
+    /// Records a command given to the station (secrets redacted by the recorder).
+    fn record_command(&mut self, command: &Command) {
+        if matches!(command, Command::Shutdown) {
+            return;
+        }
+        let failure = self.recording.as_ref().and_then(|(sink, session)| {
+            if let Ok(value) = serde_json::to_value(command) {
+                sink.command(*session, &value);
+            }
+            sink.take_failure()
+        });
+        if let Some(reason) = failure {
+            self.log(
+                LogLevel::Error,
+                format!("recording stopped, the file is incomplete: {reason}"),
+            );
+        }
     }
 
     pub(super) fn log(&self, level: LogLevel, text: String) {

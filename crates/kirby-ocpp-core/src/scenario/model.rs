@@ -152,10 +152,14 @@ pub enum Action {
     Authorize {
         id_tag: IdTag,
     },
+    /// Also spelled `start_session` (the version-neutral alias).
+    #[serde(alias = "start_session")]
     StartTx {
         connector: ConnectorId,
         id_tag: IdTag,
     },
+    /// Also spelled `stop_session` (the version-neutral alias).
+    #[serde(alias = "stop_session")]
     StopTx {
         connector: ConnectorId,
         #[serde(default = "default_reason")]

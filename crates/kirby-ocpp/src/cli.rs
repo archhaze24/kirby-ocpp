@@ -33,6 +33,8 @@ use kirby_ocpp_core::station::ResponseRule;
   kirby-ocpp --url ws://localhost:9000/ocpp run --scenario charge-session\n  \
   kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n:03}' --count 10 --no-tui\n  \
   kirby-ocpp --url ws://localhost:9000/ocpp suite --all-builtins --junit junit.xml\n  \
+  kirby-ocpp --url ws://localhost:9000/ocpp --record session.jsonl\n  \
+  kirby-ocpp --url ws://localhost:9000/ocpp replay session.jsonl --no-delay\n  \
   kirby-ocpp scenarios list\n\n\
 Exit codes: 0 success, 1 failure (scenario step failed, runtime error), 2 usage or configuration error, 130 `run` or `suite` interrupted by SIGINT."
 )]
@@ -340,6 +342,14 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
     #[arg(help_heading = "Output", global = true, long, value_name = "PATH", value_parser = non_empty_path)]
     pub log_file: Option<PathBuf>,
 
+    /// Record the session (every frame and every command, secrets redacted) to this JSON-lines file; works with the terminal UI, headless mode, `run` and `replay`, not with `suite`, `check` or a fleet
+    #[arg(help_heading = "Output", global = true, long, value_name = "PATH", value_parser = non_empty_path)]
+    pub record: Option<PathBuf>,
+
+    /// Replace the --record file when it already exists (otherwise an existing file is an error)
+    #[arg(help_heading = "Output", global = true, long, requires = "record")]
+    pub record_overwrite: bool,
+
     /// Show the event and frame lines of `run` and `suite` too (plain headless mode always prints them)
     #[arg(
         help_heading = "Output",
@@ -439,6 +449,8 @@ pub enum ColorChoice {
 pub enum Cmd {
     /// Connect, run a scenario, print the report; exit code 1 if any step fails
     Run(RunArgs),
+    /// Send the CALLs of a recorded session to the Central System again; exit code 1 if one fails
+    Replay(ReplayArgs),
     /// Run several scenarios one after another, each on a fresh station; exit code 1 if any fails
     Suite(SuiteArgs),
     /// Check the way to the Central System step by step (URL, DNS, TCP, TLS, WebSocket upgrade,
@@ -530,6 +542,53 @@ pub struct RunArgs {
 
 /// A parsed `--var`: name, typed value and the value as written.
 pub type ScenarioVar = (String, serde_json::Value, String);
+
+/// Arguments of `replay`; the connection flags are the global ones.
+#[derive(Debug, Args)]
+pub struct ReplayArgs {
+    /// Recording written by `--record` (an emulator recording)
+    #[arg(required = true, value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+    pub recording: PathBuf,
+
+    /// Time scale of the recorded pauses between CALLs: 2 replays twice as fast, 0.5 half as fast (0.01 to 1000)
+    #[arg(
+        help_heading = "Replay", long, value_name = "FACTOR", default_value = "1",
+        value_parser = speed_factor, conflicts_with = "no_delay"
+    )]
+    pub speed: f64,
+
+    /// Send the CALLs back to back instead of keeping the recorded pauses
+    #[arg(help_heading = "Replay", long)]
+    pub no_delay: bool,
+
+    /// Write the report as JSON to this file
+    #[arg(help_heading = "Replay", long, value_name = "PATH", value_parser = non_empty_path)]
+    pub report: Option<PathBuf>,
+
+    /// Write a JUnit XML report to this file
+    #[arg(help_heading = "Replay", long, value_name = "PATH", value_parser = non_empty_path)]
+    pub junit: Option<PathBuf>,
+
+    /// Give up (and fail) after this many seconds, connecting and the recorded pauses included
+    #[arg(
+        help_heading = "Replay",
+        long, value_name = "SECONDS", default_value_t = 600,
+        value_parser = clap::value_parser!(u64).range(1..=86_400)
+    )]
+    pub timeout: u64,
+}
+
+/// Parses `--speed`.
+fn speed_factor(text: &str) -> Result<f64, String> {
+    let factor: f64 = text
+        .parse()
+        .map_err(|_| format!("`{text}` is not a number"))?;
+    if factor.is_finite() && (0.01..=1000.0).contains(&factor) {
+        Ok(factor)
+    } else {
+        Err("must be between 0.01 and 1000".to_owned())
+    }
+}
 
 #[derive(Debug, Args)]
 pub struct SuiteArgs {
@@ -655,6 +714,18 @@ pub enum ScenariosCmd {
         #[arg(required = true, value_name = "FILE|DIR|NAME", value_hint = clap::ValueHint::AnyPath)]
         paths: Vec<String>,
     },
+    /// Convert a recording made with `--record` into a scenario file; what has no scenario step is left out and listed
+    FromRecording {
+        /// Recording written by `--record` (an emulator recording)
+        #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
+        recording: PathBuf,
+        /// Write the scenario to this file instead of stdout (an existing file is an error without --overwrite)
+        #[arg(short, long, value_name = "PATH", value_parser = non_empty_path)]
+        output: Option<PathBuf>,
+        /// Replace the --output file when it already exists
+        #[arg(long, requires = "output")]
+        overwrite: bool,
+    },
 }
 
 /// Shown at the end of `run --help` and `suite --help`.
@@ -698,7 +769,7 @@ pub fn command() -> clap::Command {
         .filter(|arg| arg.is_global_set())
         .cloned()
         .collect();
-    for name in ["run", "suite", "check"] {
+    for name in ["run", "replay", "suite", "check"] {
         command = command.mut_subcommand(name, |sub| sub.after_help(STATION_FLAGS_NOTE));
     }
     for (name, keep) in OFFLINE_SUBCOMMANDS {
@@ -782,7 +853,7 @@ pub fn completion_command() -> clap::Command {
     for arg in &globals {
         command = command.mut_arg(arg.get_id().clone(), |arg| arg.global(false));
     }
-    for name in ["run", "suite", "check"] {
+    for name in ["run", "replay", "suite", "check"] {
         command = command.mut_subcommand(name, |sub| {
             globals
                 .iter()
@@ -1038,8 +1109,9 @@ mod man_tests {
                 }
             }
             for sub in cmd.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+                // The man page writes a hyphen as `\-`.
                 assert!(
-                    text.contains(sub.get_name()),
+                    text.contains(&sub.get_name().replace('-', "\\-")),
                     "{file} misses {}",
                     sub.get_name()
                 );

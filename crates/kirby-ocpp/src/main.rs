@@ -13,6 +13,8 @@ mod check;
 mod cli;
 mod fleet;
 mod headless;
+mod record;
+mod replay;
 mod settings;
 mod state;
 mod suite;
@@ -27,6 +29,7 @@ use std::time::Duration;
 
 use kirby_ocpp_core::fleet::Fleet;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
+use kirby_ocpp_core::recording::RecordSink;
 use kirby_ocpp_core::scenario::{
     CancelToken, JunitRun, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin,
     junit_xml_runs, run_scenario_subscribed,
@@ -38,6 +41,7 @@ use tokio::task::JoinHandle;
 
 use crate::cli::{Cli, Cmd, PrintFormat, RunArgs, ScenarioVar, ScenariosCmd, SuiteArgs};
 use crate::headless::{Level, LinkWatch, Sink};
+use crate::record::RecordTarget;
 
 /// Project license line and third-party notices (`--licenses`).
 const LICENSES: &str = concat!(
@@ -103,6 +107,10 @@ async fn real_main() -> ExitCode {
     let spec = cli.fleet_spec();
     let templated = cli.id_template.is_some();
     let log_file = cli.log_file.clone();
+    let record = cli.record.clone().map(|path| RecordTarget {
+        path,
+        overwrite: cli.record_overwrite,
+    });
     let state_dir_given = cli.state_dir.is_some();
     let connector = ConnectorId::new(cli.connector);
     let mut config = match cli.into_config() {
@@ -125,6 +133,10 @@ async fn real_main() -> ExitCode {
         if state_dir_given && config.persist {
             eprintln!("note: --state-dir is ignored by `run` unless --persist is given");
         }
+        config.persist = false;
+    }
+    // A replay is ephemeral too: it must not depend on, or change, a state file.
+    if matches!(command, Some(Cmd::Replay(_))) {
         config.persist = false;
     }
     config.normalize();
@@ -173,11 +185,33 @@ async fn real_main() -> ExitCode {
         return usage_error(&error.to_string());
     }
 
+    if record.is_some() && (is_fleet || matches!(command, Some(Cmd::Suite(_) | Cmd::Check(_)))) {
+        return usage_error(
+            "--record records one station: it is not supported with `suite`, `check` or a fleet (--count > 1)",
+        );
+    }
+
     match command {
         Some(Cmd::Run(args)) if is_fleet => {
             fleet::run(config, spec, &args, connector, json, log_file.as_deref()).await
         }
-        Some(Cmd::Run(args)) => run(config, &args, connector, json, log_file.as_deref()).await,
+        Some(Cmd::Run(args)) => {
+            run(
+                config,
+                &args,
+                connector,
+                json,
+                log_file.as_deref(),
+                record.as_ref(),
+            )
+            .await
+        }
+        Some(Cmd::Replay(_)) if is_fleet => {
+            usage_error("`replay` uses one station; fleet mode (--count > 1) is not supported")
+        }
+        Some(Cmd::Replay(args)) => {
+            replay::run(config, &args, json, log_file.as_deref(), record.as_ref()).await
+        }
         Some(Cmd::Suite(_)) if is_fleet => usage_error(
             "`suite` runs one station per scenario; fleet mode (--count > 1) is not supported",
         ),
@@ -199,7 +233,7 @@ async fn real_main() -> ExitCode {
             if is_fleet {
                 return fleet::interactive(config, spec, tui, json, log_file.as_deref()).await;
             }
-            interactive(config, tui, json, log_file.as_deref()).await
+            interactive(config, tui, json, log_file.as_deref(), record.as_ref()).await
         }
     }
 }
@@ -227,6 +261,11 @@ fn scenarios(action: &ScenariosCmd) -> ExitCode {
             )),
         },
         ScenariosCmd::Validate { paths } => validate_scenarios(paths),
+        ScenariosCmd::FromRecording {
+            recording,
+            output,
+            overwrite,
+        } => replay::from_recording(recording, output.as_deref(), *overwrite),
     }
 }
 
@@ -520,8 +559,28 @@ async fn interactive(
     tui: bool,
     json: bool,
     log_file: Option<&Path>,
+    record: Option<&RecordTarget>,
 ) -> ExitCode {
-    let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
+    if let Some(target) = record
+        && let Err(error) = target.check_against(&[("the --log-file", log_file)])
+    {
+        return usage_error(&error);
+    }
+    let station = config.charge_point_id.clone();
+    record::scope(record, &station, |sink| {
+        interactive_recorded(config, tui, json, log_file, sink)
+    })
+    .await
+}
+
+async fn interactive_recorded(
+    config: StationConfig,
+    tui: bool,
+    json: bool,
+    log_file: Option<&Path>,
+    sink: Option<RecordSink>,
+) -> ExitCode {
+    let (handle, join) = Station::spawn_recorded(config, Arc::new(SystemClock), sink);
     // Subscribed before anything connects (also before the terminal UI does), so a give-up that
     // happens early is not missed when the run falls back to headless.
     let mut link = LinkWatch::new(&handle);
@@ -608,6 +667,7 @@ async fn run(
     connector: ConnectorId,
     json: bool,
     log_file: Option<&Path>,
+    record: Option<&RecordTarget>,
 ) -> ExitCode {
     let scenario = match load_scenario(
         &args.scenario,
@@ -618,14 +678,65 @@ async fn run(
         Ok(scenario) => scenario,
         Err(error) => return usage_error(&error),
     };
-    if let Err(error) = check_output_paths(
-        args.report.as_deref(),
-        args.junit.as_deref(),
-        scenario.source.as_deref().as_slice(),
-    ) {
+    let outputs = RunOutputs {
+        report: args.report.as_deref(),
+        junit: args.junit.as_deref(),
+        timeout: args.timeout,
+        vars: &args.vars,
+    };
+    execute_scenario(config, scenario, &outputs, json, log_file, record).await
+}
+
+/// The per-run outputs and limits of a scenario run (`run` and `replay` share them).
+pub(crate) struct RunOutputs<'a> {
+    pub(crate) report: Option<&'a Path>,
+    pub(crate) junit: Option<&'a Path>,
+    pub(crate) timeout: u64,
+    pub(crate) vars: &'a [ScenarioVar],
+}
+
+/// Runs a loaded scenario on a fresh station and writes its report; the exit code of `run`.
+pub(crate) async fn execute_scenario(
+    config: StationConfig,
+    scenario: Scenario,
+    outputs: &RunOutputs<'_>,
+    json: bool,
+    log_file: Option<&Path>,
+    record: Option<&RecordTarget>,
+) -> ExitCode {
+    if let Some(target) = record
+        && let Err(error) = target.check_against(&[
+            (
+                "the scenario or recording that is run",
+                scenario.source.as_deref().map(Path::new),
+            ),
+            ("the --log-file", log_file),
+        ])
+    {
         return usage_error(&error);
     }
-    let (handle, join) = Station::spawn(config, Arc::new(SystemClock));
+    let mut protected: Vec<&str> = scenario.source.as_deref().into_iter().collect();
+    let record_path = record.map(|target| target.path.to_string_lossy().into_owned());
+    protected.extend(record_path.as_deref());
+    if let Err(error) = check_output_paths(outputs.report, outputs.junit, &protected) {
+        return usage_error(&error);
+    }
+    let station = config.charge_point_id.clone();
+    record::scope(record, &station, |sink| {
+        execute_recorded(config, scenario, outputs, json, log_file, sink)
+    })
+    .await
+}
+
+async fn execute_recorded(
+    config: StationConfig,
+    scenario: Scenario,
+    outputs: &RunOutputs<'_>,
+    json: bool,
+    log_file: Option<&Path>,
+    sink: Option<RecordSink>,
+) -> ExitCode {
+    let (handle, join) = Station::spawn_recorded(config, Arc::new(SystemClock), sink);
     let sink = match spawn_sink(&handle, json, log_file, headless::events_on_stdout(json)) {
         Ok(sink) => sink,
         Err(code) => {
@@ -635,7 +746,7 @@ async fn run(
     };
 
     let cancel = CancelToken::new();
-    let limit = Duration::from_secs(args.timeout);
+    let limit = Duration::from_secs(outputs.timeout);
     let timer = {
         let cancel = cancel.clone();
         tokio::spawn(async move {
@@ -644,7 +755,7 @@ async fn run(
         })
     };
 
-    let overrides = override_vars(&args.vars);
+    let overrides = override_vars(outputs.vars);
     let mut interrupted = false;
     let mut shutdown = Shutdown::new();
     let run_started = std::time::Instant::now();
@@ -670,13 +781,13 @@ async fn run(
     let mut write_failed = false;
     // Files first: a closed stdout must not cost the machine-readable reports.
     if let Some(report) = &report
-        && let Some(path) = &args.report
+        && let Some(path) = outputs.report
         && let Err(error) = write_report(path, report)
     {
         eprintln!("error: cannot write the report: {error}");
         write_failed = true;
     }
-    if !interrupted && let Some(path) = &args.junit {
+    if !interrupted && let Some(path) = outputs.junit {
         let suite = JunitRun {
             suite: JunitSuite {
                 station: None,
@@ -909,7 +1020,7 @@ pub(crate) fn check_output_paths(
 }
 
 /// Whether two paths name the same file, also when neither exists yet.
-fn same_file(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
     fn resolve(path: &Path) -> std::path::PathBuf {
         if let Ok(real) = std::fs::canonicalize(path) {
             return real;

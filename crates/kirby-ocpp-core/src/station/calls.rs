@@ -438,6 +438,7 @@ mod tests {
             Arc::new(crate::clock::SystemClock),
             commands,
             events,
+            None,
         )
         .0
     }

@@ -88,6 +88,7 @@ pub use crate::ws::ConnectionState;
 use self::actor::StationActor;
 use crate::clock::Clock;
 use crate::config::StationConfig;
+use crate::recording::RecordSink;
 
 /// Capacity of the command queue (back-pressure for senders).
 const COMMAND_QUEUE: usize = 64;
@@ -106,16 +107,29 @@ impl Station {
     /// here: call [`StationConfig::validate`] first (the CLI does). The actor
     /// ends on [`Command::Shutdown`] or when every handle has been dropped; await the
     /// `JoinHandle` after a shutdown to be sure it is gone.
-    pub fn spawn(
+    pub fn spawn(config: StationConfig, clock: Arc<dyn Clock>) -> (StationHandle, JoinHandle<()>) {
+        Self::spawn_recorded(config, clock, None)
+    }
+
+    /// [`Station::spawn`] with a session recording: every frame and every command goes to
+    /// `recording` (see [`crate::recording`]) before anyone else sees it. A recorder that
+    /// cannot keep up marks itself incomplete; the station is never slowed down by it.
+    pub fn spawn_recorded(
         mut config: StationConfig,
         clock: Arc<dyn Clock>,
+        recording: Option<RecordSink>,
     ) -> (StationHandle, JoinHandle<()>) {
         config.normalize();
         let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE);
         let (event_tx, _) = broadcast::channel(EVENT_BUFFER);
 
-        let (actor, snapshot_rx) =
-            StationActor::new(config.clone(), clock, command_rx, event_tx.clone());
+        let (actor, snapshot_rx) = StationActor::new(
+            config.clone(),
+            clock,
+            command_rx,
+            event_tx.clone(),
+            recording,
+        );
         let handle = StationHandle::new(Arc::new(config), command_tx, snapshot_rx, event_tx);
         (handle, tokio::spawn(actor.run()))
     }

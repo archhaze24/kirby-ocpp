@@ -13,6 +13,7 @@ pub mod error;
 pub mod fleet;
 pub mod ids;
 pub mod ocpp;
+pub mod recording;
 pub mod scenario;
 pub mod station;
 pub mod store;

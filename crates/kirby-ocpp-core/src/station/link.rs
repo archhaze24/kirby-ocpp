@@ -37,7 +37,7 @@ use super::actor::{Internal, StationActor, TimerKey};
 use super::calls::{Origin, Reply};
 use super::command::Outcome;
 use super::commands::call_failure;
-use super::event::{Event, LogLevel};
+use super::event::LogLevel;
 use crate::error::CallError;
 use crate::ocpp::messages::{
     BootNotification, BootNotificationRequest, BootNotificationResponse, Heartbeat,
@@ -145,6 +145,7 @@ impl StationActor {
             Ok((connection, events)) => {
                 self.link.conn = Some(connection);
                 self.link.events = Some(events);
+                self.recording_new_session();
                 self.state.connection = ConnectionState::Connected;
                 self.log(LogLevel::Success, "connected".to_owned());
                 if self.config.url.to_ascii_lowercase().starts_with("wss://")
@@ -179,7 +180,7 @@ impl StationActor {
 
     pub(super) fn on_connection_event(&mut self, event: ConnectionEvent) {
         match event {
-            ConnectionEvent::Frame(record) => self.emit(Event::Frame(record)),
+            ConnectionEvent::Frame(record) => self.emit_frame(record),
             ConnectionEvent::Call(call) => self.dispatch_incoming(call),
             ConnectionEvent::ProtocolWarning(text) => {
                 self.log(LogLevel::Warn, format!("protocol: {text}"));
