@@ -1480,7 +1480,10 @@ async fn head_timer_only_stops_for_a_real_request() {
         open_after(&mut stream, Duration::from_secs(13)).await
     };
     // A call that outlasts the head timeout is not cut either.
+    let (_, mut events) = Sse::open(addr, "/v1/events", &[]).await;
     let _silent = silent_station(&csms.station_addr, "CP-1").await;
+    events.read_until("\"station\":\"CP-1\"").await;
+    drop(events);
     let long_call = async {
         csms.post_call(
             "CP-1",
