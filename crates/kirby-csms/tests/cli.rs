@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use kirby_ocpp_core::ids::IdTag;
+use kirby_ocpp_core::ids::{ConnectorId, IdTag};
 use kirby_ocpp_core::station::{Command as StationCommand, Snapshot};
 use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
 use serde_json::{Value, json};
@@ -1834,4 +1834,473 @@ fn help_texts_match_the_behavior() {
     let output = command(&["--licenses"]).output().unwrap();
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("distributed under the MIT license"), "{text}");
+}
+
+// ---- --replay ------------------------------------------------------------------------
+
+/// A CSMS recording of one session per station: `(direction, station, elapsed_ms, frame)`.
+fn csms_recording(frames: &[(&str, &str, u64, Value)]) -> String {
+    let mut lines =
+        vec![json!({"type":"header","schema":1,"ocpp_version":"1.6","role":"csms"}).to_string()];
+    for (seq, (direction, station, elapsed, frame)) in frames.iter().enumerate() {
+        lines.push(
+            json!({"type":"frame","seq":seq,"elapsed_ms":elapsed,"session":1,"station":station,
+                "direction":direction,"frame":frame})
+            .to_string(),
+        );
+    }
+    let last = frames.last().map_or(0, |frame| frame.2);
+    lines.push(
+        json!({"type":"end","frames":frames.len(),"commands":0,"elapsed_ms":last}).to_string(),
+    );
+    lines.join("\n") + "\n"
+}
+
+const BOOT_CALL: &str =
+    r#"[2,"b","BootNotification",{"chargePointVendor":"V","chargePointModel":"M"}]"#;
+
+/// The recorded boot of `station`, which makes the replay wait for the live boot.
+fn boot_frames(station: &'static str) -> Vec<(&'static str, &'static str, u64, Value)> {
+    vec![
+        ("in", station, 0, serde_json::from_str(BOOT_CALL).unwrap()),
+        (
+            "out",
+            station,
+            1,
+            json!([3,"b",{"status":"Accepted","currentTime":"2026-01-01T00:00:00Z","interval":60}]),
+        ),
+    ]
+}
+
+/// Boot, a start with a transaction id the live server will not give, a stop of that
+/// transaction and a DataTransfer with a literal placeholder.
+fn stop_recording(station: &str, tag: &str) -> String {
+    let boot: Value = serde_json::from_str(BOOT_CALL).unwrap();
+    csms_recording(&[
+        ("in", station, 0, boot),
+        (
+            "out",
+            station,
+            1,
+            json!([3,"b",{"status":"Accepted","currentTime":"2026-01-01T00:00:00Z","interval":60}]),
+        ),
+        (
+            "in",
+            station,
+            2,
+            json!([2,"s","StartTransaction",{"connectorId":1,"idTag":tag,"meterStart":0,"timestamp":"2026-01-01T00:00:00Z"}]),
+        ),
+        (
+            "out",
+            station,
+            3,
+            json!([3,"s",{"transactionId":7000,"idTagInfo":{"status":"Accepted"}}]),
+        ),
+        (
+            "out",
+            station,
+            4,
+            json!([2,"x","RemoteStopTransaction",{"transactionId":7000}]),
+        ),
+        ("in", station, 5, json!([3,"x",{"status":"Accepted"}])),
+        (
+            "out",
+            station,
+            6,
+            json!([2,"d","DataTransfer",{"vendorId":"v","data":"${literal}"}]),
+        ),
+        ("in", station, 7, json!([3,"d",{"status":"Rejected"}])),
+    ])
+}
+
+async fn station_with_connectors(addr: &str, id: &str, connectors: u32) -> StationHandle {
+    let mut config = StationConfig::new(format!("ws://{addr}/ocpp"))
+        .with_charge_point_id(id)
+        .with_connectors(connectors);
+    config.persist = false;
+    let (handle, _join) = Station::spawn(config, Arc::new(SystemClock));
+    handle.connect().await.unwrap();
+    let mut snapshots = handle.watch_snapshot();
+    tokio::time::timeout(WAIT, snapshots.wait_for(Snapshot::booted))
+        .await
+        .expect("station did not boot")
+        .unwrap();
+    handle
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_maps_the_recorded_transaction_and_keeps_literal_payloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "session.jsonl", &stop_recording("CP-1", "TAGX"));
+    let mut csms = Csms::start(&["--replay", &path, "--timeout", "30", "--history-cap", "0"]);
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    station
+        .start_transaction(ConnectorId::new(1), IdTag::new("TAGX").unwrap())
+        .await
+        .unwrap();
+    let verdict = csms.wait(|v| v["type"] == "replay");
+    assert_eq!(verdict["status"], "passed", "{verdict}");
+    assert_eq!(verdict["sent"], 2);
+    // The verdict can print before the frame lines of the last CALLs: read everything.
+    let (code, seen, stderr) = csms.finish();
+    assert_eq!(code, 0, "{stderr}");
+    let calls: Vec<Value> = seen
+        .iter()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|v| v["type"] == "frame" && v["direction"] == "out" && v["kind"] == "call")
+        .collect();
+    let stop = calls
+        .iter()
+        .find(|v| v["action"] == "RemoteStopTransaction")
+        .unwrap();
+    assert_eq!(
+        stop["payload"]["transactionId"], 123,
+        "the live id, not 7000"
+    );
+    assert_ne!(stop["id"], "x", "a fresh message id");
+    let data = calls
+        .iter()
+        .find(|v| v["action"] == "DataTransfer")
+        .unwrap();
+    assert_eq!(data["payload"]["data"], "${literal}");
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_fails_when_the_live_start_differs_from_the_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "session.jsonl", &stop_recording("CP-1", "TAGX"));
+    let mut csms = Csms::start(&["--replay", &path, "--timeout", "30"]);
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    station
+        .start_transaction(ConnectorId::new(1), IdTag::new("OTHER").unwrap())
+        .await
+        .unwrap();
+    let verdict = csms.wait(|v| v["type"] == "replay");
+    assert_eq!(verdict["status"], "failed", "{verdict}");
+    assert!(
+        verdict["error"].as_str().unwrap().contains("differs"),
+        "{verdict}"
+    );
+    let (code, _, _) = csms.finish();
+    assert_eq!(code, 1);
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_fails_when_the_server_reuses_an_active_transaction_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let boot: Value = serde_json::from_str(BOOT_CALL).unwrap();
+    let start = |id: &str, connector: u32, tag: &str| json!([2,id,"StartTransaction",{"connectorId":connector,"idTag":tag,"meterStart":0,"timestamp":"2026-01-01T00:00:00Z"}]);
+    let text = csms_recording(&[
+        ("in", "CP-1", 0, boot),
+        (
+            "out",
+            "CP-1",
+            1,
+            json!([3,"b",{"status":"Accepted","currentTime":"2026-01-01T00:00:00Z","interval":60}]),
+        ),
+        ("in", "CP-1", 2, start("s1", 1, "A")),
+        (
+            "out",
+            "CP-1",
+            3,
+            json!([3,"s1",{"transactionId":1,"idTagInfo":{"status":"Accepted"}}]),
+        ),
+        ("in", "CP-1", 4, start("s2", 2, "B")),
+        (
+            "out",
+            "CP-1",
+            5,
+            json!([3,"s2",{"transactionId":2,"idTagInfo":{"status":"Accepted"}}]),
+        ),
+        (
+            "out",
+            "CP-1",
+            6,
+            json!([2,"x","RemoteStopTransaction",{"transactionId":2}]),
+        ),
+        ("in", "CP-1", 7, json!([3,"x",{"status":"Accepted"}])),
+    ]);
+    let path = write(dir.path(), "session.jsonl", &text);
+    // Every start gets 123 by default: the second one collides with the first.
+    let mut csms = Csms::start(&["--replay", &path, "--timeout", "30"]);
+    let station = station_with_connectors(&csms.addr.clone(), "CP-1", 2).await;
+    station
+        .start_transaction(ConnectorId::new(1), IdTag::new("A").unwrap())
+        .await
+        .unwrap();
+    station
+        .start_transaction(ConnectorId::new(2), IdTag::new("B").unwrap())
+        .await
+        .unwrap();
+    let verdict = csms.wait(|v| v["type"] == "replay");
+    assert_eq!(verdict["status"], "failed", "{verdict}");
+    assert!(
+        verdict["error"].as_str().unwrap().contains("still active"),
+        "{verdict}"
+    );
+    let (code, _, _) = csms.finish();
+    assert_eq!(code, 1);
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_fails_when_the_answer_kind_differs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut frames = boot_frames("CP-1");
+    frames.push((
+        "out",
+        "CP-1",
+        2,
+        json!([2,"d","DataTransfer",{"vendorId":"v"}]),
+    ));
+    frames.push(("in", "CP-1", 3, json!([4, "d", "NotSupported", "", {}])));
+    let text = csms_recording(&frames);
+    let path = write(dir.path(), "session.jsonl", &text);
+    let mut csms = Csms::start(&["--replay", &path, "--timeout", "30"]);
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    let verdict = csms.wait(|v| v["type"] == "replay");
+    assert_eq!(verdict["status"], "failed", "{verdict}");
+    assert!(
+        verdict["error"].as_str().unwrap().contains("CALLERROR"),
+        "{verdict}"
+    );
+    let (code, _, _) = csms.finish();
+    assert_eq!(code, 1);
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_fails_when_a_used_connection_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut frames = boot_frames("CP-1");
+    frames.push((
+        "out",
+        "CP-1",
+        2,
+        json!([2,"a","DataTransfer",{"vendorId":"v"}]),
+    ));
+    frames.push(("in", "CP-1", 3, json!([3,"a",{"status":"Rejected"}])));
+    frames.push((
+        "out",
+        "CP-1",
+        4000,
+        json!([2,"b","DataTransfer",{"vendorId":"v"}]),
+    ));
+    frames.push(("in", "CP-1", 4001, json!([3,"b",{"status":"Rejected"}])));
+    let text = csms_recording(&frames);
+    let path = write(dir.path(), "session.jsonl", &text);
+    let mut csms = Csms::start(&["--replay", &path, "--timeout", "30"]);
+    let first = station(&csms.addr.clone(), "CP-1", false).await;
+    csms.wait(|v| v["type"] == "frame" && v["direction"] == "in" && v["kind"] == "result");
+    // The run fails as soon as the replacement connects, so it never boots.
+    let mut config =
+        StationConfig::new(format!("ws://{}/ocpp", csms.addr)).with_charge_point_id("CP-1");
+    config.persist = false;
+    let (second, _join) = Station::spawn(config, Arc::new(SystemClock));
+    second.connect().await.unwrap();
+    let verdict = csms.wait(|v| v["type"] == "replay");
+    assert_eq!(verdict["status"], "failed", "{verdict}");
+    assert!(
+        verdict["error"]
+            .as_str()
+            .unwrap()
+            .contains("ended during the replay"),
+        "{verdict}"
+    );
+    let (code, _, _) = csms.finish();
+    assert_eq!(code, 1);
+    let _ = first.shutdown().await;
+    let _ = second.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_allows_a_station_without_calls_left_to_disconnect() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut frames = boot_frames("CP-1");
+    frames.push((
+        "out",
+        "CP-1",
+        2,
+        json!([2,"a","DataTransfer",{"vendorId":"v"}]),
+    ));
+    frames.push(("in", "CP-1", 3, json!([3,"a",{"status":"Rejected"}])));
+    frames.push((
+        "out",
+        "CP-2",
+        2000,
+        json!([2,"b","DataTransfer",{"vendorId":"v"}]),
+    ));
+    frames.push(("in", "CP-2", 2001, json!([3,"b",{"status":"Rejected"}])));
+    let path = write(dir.path(), "session.jsonl", &csms_recording(&frames));
+    let mut csms = Csms::start(&["--replay", &path, "--timeout", "30"]);
+    let first = station(&csms.addr.clone(), "CP-1", false).await;
+    let second = station(&csms.addr.clone(), "CP-2", false).await;
+    csms.wait(|v| v["type"] == "frame" && v["direction"] == "in" && v["kind"] == "result");
+    let _ = first.shutdown().await;
+    let verdict = csms.wait(|v| v["type"] == "replay");
+    assert_eq!(verdict["status"], "passed", "{verdict}");
+    assert_eq!(verdict["sent"], 2);
+    let (code, _, stderr) = csms.finish();
+    assert_eq!(code, 0, "{stderr}");
+    let _ = second.shutdown().await;
+}
+
+#[test]
+fn replay_times_out_while_a_station_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = csms_recording(&[
+        (
+            "out",
+            "CP-9",
+            0,
+            json!([2,"a","DataTransfer",{"vendorId":"v"}]),
+        ),
+        ("in", "CP-9", 1, json!([3,"a",{"status":"Rejected"}])),
+    ]);
+    let path = write(dir.path(), "session.jsonl", &text);
+    let (code, _, stderr) = run_to_end(&[
+        "--listen",
+        "127.0.0.1:0",
+        "--no-tui",
+        "--replay",
+        &path,
+        "--timeout",
+        "1",
+    ]);
+    assert_eq!(code, 1, "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn replay_exit_codes_follow_the_signal() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = csms_recording(&[
+        (
+            "out",
+            "CP-9",
+            0,
+            json!([2,"a","DataTransfer",{"vendorId":"v"}]),
+        ),
+        ("in", "CP-9", 1, json!([3,"a",{"status":"Rejected"}])),
+    ]);
+    let path = write(dir.path(), "session.jsonl", &text);
+    for (signal, expected) in [("-INT", 130), ("-TERM", 1)] {
+        let csms = Csms::start(&["--replay", &path, "--timeout", "60"]);
+        assert!(
+            Command::new("kill")
+                .args([signal, &csms.child.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let (code, _, stderr) = csms.finish();
+        assert_eq!(code, expected, "{stderr}");
+        assert!(stderr.contains("interrupted"), "{stderr}");
+    }
+}
+
+#[test]
+fn invalid_replay_input_exits_2_before_binding_or_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("out.jsonl");
+    let out_text = out.to_str().unwrap().to_owned();
+    let masked = csms_recording(&[
+        (
+            "out",
+            "CP-1",
+            0,
+            json!([2,"c","ChangeConfiguration",{"key":"AuthorizationKey","value":"***"}]),
+        ),
+        ("in", "CP-1", 1, json!([3,"c",{"status":"Accepted"}])),
+    ]);
+    let silent = csms_recording(&[("out", "CP-1", 0, json!([2,"c","Reset",{"type":"Soft"}]))]);
+    let cut = stop_recording("CP-1", "A").replace("\"end\"", "\"annotation\"");
+    let foreign = csms_recording(&[
+        (
+            "out",
+            "CP-1",
+            0,
+            json!([2,"p","SetChargingProfile",{"connectorId":1,"csChargingProfiles":{"transactionId":3}}]),
+        ),
+        ("in", "CP-1", 1, json!([3,"p",{"status":"Accepted"}])),
+    ]);
+    // Taken: a bound port would be a different error, and nothing may be written.
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = taken.local_addr().unwrap().to_string();
+    for (name, text) in [
+        ("masked", masked),
+        ("silent", silent),
+        ("cut", cut),
+        ("foreign", foreign),
+    ] {
+        let path = write(dir.path(), &format!("{name}.jsonl"), &text);
+        let (code, _, stderr) =
+            run_to_end(&["--listen", &addr, "--replay", &path, "--record", &out_text]);
+        assert_eq!(code, 2, "{name}: {stderr}");
+        assert!(
+            stderr.contains("cannot replay the recording"),
+            "{name}: {stderr}"
+        );
+        assert!(!out.exists(), "{name}");
+    }
+    let (code, _, stderr) = run_to_end(&[
+        "--replay",
+        dir.path().join("missing.jsonl").to_str().unwrap(),
+    ]);
+    assert_eq!(code, 2, "{stderr}");
+    // A span longer than the timeout is a usage error.
+    let long = csms_recording(&[
+        (
+            "out",
+            "CP-1",
+            0,
+            json!([2,"a","DataTransfer",{"vendorId":"v"}]),
+        ),
+        ("in", "CP-1", 1, json!([3,"a",{"status":"Rejected"}])),
+        (
+            "out",
+            "CP-1",
+            5000,
+            json!([2,"b","DataTransfer",{"vendorId":"v"}]),
+        ),
+        ("in", "CP-1", 5001, json!([3,"b",{"status":"Rejected"}])),
+    ]);
+    let path = write(dir.path(), "long.jsonl", &long);
+    let (code, _, stderr) = run_to_end(&["--replay", &path, "--timeout", "5"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("--timeout"), "{stderr}");
+}
+
+#[test]
+fn replay_conflicts_with_a_script_and_cannot_be_recorded_over_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "session.jsonl", &stop_recording("CP-1", "A"));
+    let (code, _, stderr) = run_to_end(&["--replay", &path, "--script", "s.toml"]);
+    assert_eq!(code, 2, "{stderr}");
+    let output = command(&["--replay", &path])
+        .env("KIRBY_CSMS_SCRIPT", "s.toml")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let config = write(dir.path(), "c.toml", "script = \"s.toml\"\n");
+    let (code, _, stderr) = run_to_end(&["--replay", &path, "--config", &config]);
+    assert_eq!(code, 2, "{stderr}");
+    let before = std::fs::read_to_string(&path).unwrap();
+    let (code, _, stderr) =
+        run_to_end(&["--replay", &path, "--record", &path, "--record-overwrite"]);
+    assert_eq!(code, 2, "{stderr}");
+    assert!(stderr.contains("the replay recording"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    // --timeout needs a script or a replay.
+    let (code, _, _) = run_to_end(&["--timeout", "5"]);
+    assert_eq!(code, 2);
+    // --check-config reads and validates the recording.
+    let (code, _, stderr) = run_to_end(&["--check-config", "--replay", &path]);
+    assert_eq!(code, 0, "{stderr}");
+    let bad = write(dir.path(), "bad.jsonl", "not a recording\n");
+    let (code, _, _) = run_to_end(&["--check-config", "--replay", &bad]);
+    assert_eq!(code, 2);
 }

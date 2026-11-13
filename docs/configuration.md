@@ -403,15 +403,16 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--log-file <PATH>` | `KIRBY_CSMS_LOG_FILE` | none | Append every event as a JSON line (new file `0600` on unix, an existing file keeps its mode) (helper thread; late lines are dropped and a `note` line counts them) |
 | `--record <PATH>` | | none | Record all station frames to one JSONL file. Secrets are always redacted. An existing file requires `--record-overwrite`; symlinks are refused. An incomplete recording exits 1. Not a configuration file key; see [CSMS recording](csms.md#recording) |
 | `--record-overwrite` | | off | Replace the recording when it exists; requires `--record`. An empty run preserves the existing file |
-| `--stdin` | `KIRBY_CSMS_STDIN` | auto | Read JSON-line commands from stdin even on a terminal (automatic when stdin is not a terminal and there is no `--script`) |
-| `--no-tui` | `KIRBY_CSMS_NO_TUI` | auto | Never open the UI, print events to stdout (automatic when stdout or stdin is not a terminal, and with `--json`, `--script` or `--stdin`) |
+| `--stdin` | `KIRBY_CSMS_STDIN` | auto | Read JSON-line commands from stdin even on a terminal (automatic when stdin is not a terminal and there is no `--script` or `--replay`) |
+| `--no-tui` | `KIRBY_CSMS_NO_TUI` | auto | Never open the UI, print events to stdout (automatic when stdout or stdin is not a terminal, and with `--json`, `--script`, `--replay` or `--stdin`) |
 | `--color <WHEN>` | `KIRBY_CSMS_COLOR` | `auto` | Color of the terminal UI: `auto` (color unless `NO_COLOR` is set and not empty), `always` (wins over `NO_COLOR`) or `never`. Without color the UI uses reverse video, bold and text markers instead. Headless output is never colored |
 | `--time <ZONE>` | `KIRBY_CSMS_TIME` | `utc` | Clock in front of log rows in the terminal UI and event lines in headless output: `utc` (`HH:MM:SS.mmm`), `local` (this machine's time zone) or `none` (no prefix). `--json` timestamps, log copy and export are unchanged |
 | `--script <FILE>` | `KIRBY_CSMS_SCRIPT` | none | Run a TOML script against connecting stations, print the report, exit |
+| `--replay <FILE>` | | none | Send the CALLs the CSMS originated in this recording (written by `--record`) to the connecting stations, in recorded order with fresh message ids, then exit; excludes `--script`. The whole file is checked before the server binds; stations are waited for up to `--timeout`. Never opens the UI and reads no stdin unless `--stdin` is given. Not a configuration file key. Contract and limits: [CSMS replay](csms.md#replay) |
 | `--report <PATH>` | | none | Script report as JSON; needs `--script` |
 | `--junit <PATH>` | | none | Script report as JUnit XML; needs `--script` |
 | `--var <NAME=VALUE>` | | none | Set a script variable (repeatable): `${NAME}` in the script becomes VALUE. Overrides `[vars]`; `true`/`false`/numbers keep their type; needs `--script` |
-| `--timeout <SECONDS>` | | `60` | Fail the script after this long, 1 to 86400; needs `--script` |
+| `--timeout <SECONDS>` | | `60` | Fail the script or the replay after this long, 1 to 86400; needs `--script` or `--replay`. A recording whose CALLs span more recorded time than this is refused (exit 2) |
 | `--licenses` | | | Print third-party license notices and exit |
 | `-V, --version`, `-h, --help` | | | |
 
@@ -747,6 +748,15 @@ With `--record`, exit code 1 also means the recording is incomplete (`error: the
 | 1 | A step failed or timed out (`--timeout`), the server could not start, or a report file could not be written. On SIGTERM the `--junit` file still gets one failed suite (`interrupted`) |
 | 2 | Usage, configuration or script error |
 | 130 | SIGINT, no report |
+
+### kirby-csms --replay
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every CALL was answered as recorded (CALLRESULT or CALLERROR; payloads are not compared) |
+| 1 | A CALL failed, timed out or was answered differently, a replayed station disconnected or was replaced while it still had CALLs to receive, a live `StartTransaction` differed or reused an active transaction id, the run exceeded `--timeout`, the server could not start, or the `--record` file is incomplete. SIGTERM exits 1 |
+| 2 | Usage error, or a recording that cannot be replayed (unreadable, incomplete, redacted CALL, several sessions of a station, a transaction id outside `RemoteStopTransaction`, a span longer than `--timeout`), or the `--record` file is the replayed file |
+| 130 | SIGINT |
 
 ### kirby-csms ctl (client)
 

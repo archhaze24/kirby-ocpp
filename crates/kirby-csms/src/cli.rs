@@ -21,14 +21,16 @@ use kirby_csms_core::{CsmsConfig, SecurityProfile, SubprotocolPolicy, Transactio
     name = "kirby-csms",
     version,
     about,
+    group(clap::ArgGroup::new("run_input").args(["script", "replay"])),
     after_help = "Examples:\n  \
   kirby-csms --listen 0.0.0.0:9000\n  \
   kirby-csms --listen 127.0.0.1:0 --json --subprotocol omit\n  \
   kirby-csms --tls-cert cert.pem --tls-key key.pem\n  \
   kirby-csms --script suite.toml --junit junit.xml --timeout 120\n  \
+  kirby-csms --replay session.jsonl --timeout 300\n  \
   echo '{\"station\":\"CP-1\",\"action\":\"Reset\",\"payload\":{\"type\":\"Soft\"}}' | kirby-csms\n  \
   kirby-csms ctl stations   (control a running server through its HTTP API)\n\n\
-Exit codes: 0 success or clean shutdown, 1 script failed or timed out (or runtime error), 2 usage or configuration error, 130 script interrupted by SIGINT."
+Exit codes: 0 success or clean shutdown, 1 script or replay failed or timed out (or runtime error), 2 usage or configuration error, 130 script or replay interrupted by SIGINT."
 )]
 #[allow(
     clippy::struct_excessive_bools,
@@ -276,6 +278,11 @@ pub struct Cli {
     #[arg(long, env = "KIRBY_CSMS_SCRIPT", value_name = "FILE", value_parser = non_empty_path)]
     pub script: Option<PathBuf>,
 
+    /// Send the CSMS CALLs of this recording (written by --record) to the connecting stations
+    /// in recorded order, then exit; excludes --script
+    #[arg(long, value_name = "FILE", value_parser = non_empty_path)]
+    pub replay: Option<PathBuf>,
+
     /// Write the script report as JSON to this file
     #[arg(long, value_name = "PATH", value_parser = non_empty_path, requires = "script")]
     pub report: Option<PathBuf>,
@@ -289,10 +296,10 @@ pub struct Cli {
     #[arg(long = "var", value_name = "NAME=VALUE", value_parser = script_var, requires = "script")]
     pub vars: Vec<(String, serde_json::Value)>,
 
-    /// Give up (and fail) the script after this many seconds
+    /// Give up (and fail) the script or replay after this many seconds
     #[arg(
         long, value_name = "SECONDS", default_value_t = 60,
-        value_parser = clap::value_parser!(u64).range(1..=86_400), requires = "script"
+        value_parser = clap::value_parser!(u64).range(1..=86_400), requires = "run_input"
     )]
     pub timeout: u64,
 
@@ -462,7 +469,10 @@ const HEADINGS: &[(&str, &[&str])] = &[
             "licenses",
         ],
     ),
-    ("Script", &["script", "report", "junit", "vars", "timeout"]),
+    (
+        "Script",
+        &["script", "replay", "report", "junit", "vars", "timeout"],
+    ),
     (
         "Configuration",
         &["config", "profile", "print_config", "check_config"],
@@ -615,6 +625,7 @@ impl Cli {
             && !self.json
             && !self.stdin
             && self.script.is_none()
+            && self.replay.is_none()
             && stdin_is_terminal
             && stdout_is_terminal
     }

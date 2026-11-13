@@ -18,6 +18,7 @@ pub fn target(cli: &Cli) -> Result<Option<Target>, String> {
     };
     let mut protected: Vec<_> = [
         ("the script", cli.script.as_deref()),
+        ("the replay recording", cli.replay.as_deref()),
         ("the report", cli.report.as_deref()),
         ("the JUnit report", cli.junit.as_deref()),
         ("the log file", cli.log_file.as_deref()),

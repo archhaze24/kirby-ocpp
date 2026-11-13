@@ -8,6 +8,7 @@ mod commands;
 mod ctl;
 mod headless;
 mod record;
+mod replay;
 mod script;
 mod settings;
 mod stdin_cmd;
@@ -64,6 +65,15 @@ async fn main() -> ExitCode {
         Ok(script) => script,
         Err(error) => return usage_error(&error),
     };
+    let replay = match cli
+        .replay
+        .as_deref()
+        .map(|path| replay::Replay::load(path, cli.timeout))
+        .transpose()
+    {
+        Ok(replay) => replay,
+        Err(error) => return usage_error(&error),
+    };
     let config = match build_config(&mut cli) {
         Ok(config) => config,
         Err(error) => return usage_error(&error),
@@ -75,12 +85,13 @@ async fn main() -> ExitCode {
         Ok(target) => target,
         Err(error) => return usage_error(&error),
     };
-    record::scope(target, |sink| run_server(cli, script, config, sink)).await
+    record::scope(target, |sink| run_server(cli, script, replay, config, sink)).await
 }
 
 async fn run_server(
     cli: Cli,
     script: Option<script::Script>,
+    replay: Option<replay::Replay>,
     config: kirby_csms_core::CsmsConfig,
     recording: Option<kirby_ocpp_core::recording::RecordSink>,
 ) -> ExitCode {
@@ -94,8 +105,8 @@ async fn run_server(
         Err(error) => return usage_error(&format!("cannot open the log file: {error}")),
     };
 
-    let handle = match start_server(config, recording).await {
-        Ok(handle) => handle,
+    let (handle, observer) = match start_server(config, recording, replay.is_some()).await {
+        Ok(started) => started,
         Err(code) => return code,
     };
     if let Err(error) = apply_rules(&handle, &cli.blocks.rules) {
@@ -148,7 +159,8 @@ async fn run_server(
 
     // Stdin commands: on request, or by default when stdin is a pipe or a file and no script
     // is running. Never on a terminal by default (nobody types JSON lines unasked).
-    let stdin = cli.stdin || (script.is_none() && !std::io::stdin().is_terminal());
+    let stdin =
+        cli.stdin || (script.is_none() && replay.is_none() && !std::io::stdin().is_terminal());
     if stdin {
         stdin_cmd::spawn(handle.clone(), out.clone(), limits);
     }
@@ -163,6 +175,16 @@ async fn run_server(
         }
     } else if let (Some(script), Some(events)) = (&script, script_events) {
         run_script(&cli, script, &handle, events, &out, shutdown.as_mut()).await
+    } else if let (Some(replay), Some(mut observer)) = (&replay, observer) {
+        run_replay(
+            &cli,
+            replay,
+            &handle,
+            &mut observer,
+            &out,
+            shutdown.as_mut(),
+        )
+        .await
     } else {
         let _ = wait_shutdown(shutdown.as_mut()).await;
         ExitCode::SUCCESS
@@ -447,15 +469,21 @@ fn stderr_line(line: &str) {
 async fn start_server(
     config: kirby_csms_core::CsmsConfig,
     recording: Option<kirby_ocpp_core::recording::RecordSink>,
-) -> Result<kirby_csms_core::CsmsHandle, ExitCode> {
+    observe: bool,
+) -> Result<
+    (
+        kirby_csms_core::CsmsHandle,
+        Option<kirby_csms_core::Observer>,
+    ),
+    ExitCode,
+> {
     let listen = config.listen;
-    let result = if let Some(sink) = recording {
-        CsmsServer::start_recorded(config, sink).await
-    } else {
-        CsmsServer::start(config).await
+    let options = kirby_csms_core::StartOptions {
+        recording,
+        observe: observe.then_some(replay::OBSERVER_CAPACITY),
     };
-    match result {
-        Ok(handle) => Ok(handle),
+    match CsmsServer::start_with(config, options).await {
+        Ok(started) => Ok(started),
         Err(kirby_csms_core::CsmsError::Bind(error)) => {
             eprintln!("error: failed to bind the CSMS listener {listen}: {error}");
             Err(ExitCode::FAILURE)
@@ -624,6 +652,55 @@ async fn run_script(
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Sends the recorded CALLs to the live stations and reports the verdict.
+async fn run_replay(
+    cli: &Cli,
+    replay: &replay::Replay,
+    handle: &CsmsHandle,
+    observer: &mut kirby_csms_core::Observer,
+    out: &Output,
+    shutdown: Option<&mut Shutdown>,
+) -> ExitCode {
+    let deadline = tokio::time::Instant::now()
+        .checked_add(Duration::from_secs(cli.timeout))
+        .unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86_400));
+    let call_timeout = Duration::from_secs(cli.call_timeout);
+    let (calls, stations) = replay.size();
+    let started = Instant::now();
+    let result = tokio::select! {
+        result = replay.run(handle, observer, call_timeout, deadline) => Some(result),
+        sigint = wait_shutdown(shutdown) => {
+            eprintln!("error: interrupted");
+            return ExitCode::from(if sigint { EXIT_INTERRUPTED } else { 1 });
+        }
+    };
+    let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    match result {
+        Some(Ok(sent)) => {
+            out.event(
+                &serde_json::json!({
+                    "type": "replay", "status": "passed", "calls": calls,
+                    "stations": stations, "sent": sent, "duration_ms": duration_ms,
+                }),
+                &format!("replay PASSED: {sent} CALLs to {stations} stations in {duration_ms} ms"),
+            );
+            ExitCode::SUCCESS
+        }
+        Some(Err((sent, reason))) => {
+            out.event(
+                &serde_json::json!({
+                    "type": "replay", "status": "failed", "calls": calls,
+                    "stations": stations, "sent": sent, "duration_ms": duration_ms,
+                    "error": reason,
+                }),
+                &format!("replay FAILED after {sent} of {calls} CALLs: {reason}"),
+            );
+            ExitCode::FAILURE
+        }
+        None => ExitCode::FAILURE,
     }
 }
 

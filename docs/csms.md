@@ -228,6 +228,23 @@ Frames from a replaced or forgotten connection retain their original session ide
 
 `--check-config` does not open a recording or check its path for collisions.
 
+## Replay
+
+`kirby-csms --replay session.jsonl` sends the CALLs a CSMS recording holds to the stations that connect, then exits with a verdict. Only the CALLs the CSMS originated are sent, in recorded order and with fresh message ids; what the stations sent is never replayed. Start stations as usual (for example with `kirby-ocpp`); the run waits for every recorded station to connect, for at most `--timeout` seconds (default 60, 1 to 86400). `--replay` excludes `--script`, never opens the terminal UI and reads no stdin commands unless `--stdin` is given. `--record` may record the replay; the recording cannot be the replayed file.
+
+The whole file is checked before the server binds or any output opens; a problem exits 2 with `cannot replay the recording: <reason>`. A recording is replayable when it:
+
+* is a complete OCPP 1.6 CSMS recording (an `end` line without `incomplete`, no unknown lines, continuous `seq`, no truncated or invalid frame);
+* has one session per station (a station that reconnected during the recording is refused; record one connection per station);
+* holds an answer for every CALL the CSMS sent, and for every `StartTransaction`;
+* holds no redacted value (`***` `AuthorizationKey`, URL password) in a replayed CALL; masked values elsewhere in the file are ignored because they are never sent;
+* names a transaction id only in `RemoteStopTransaction`, and only one that a recorded `StartTransaction` was answered with and that was not stopped before; any other CALL with a `transactionId` key at any depth is refused;
+* spans less recorded time between its first and last CALL than `--timeout`.
+
+Payloads are sent as recorded; text such as `${name}` stays literal. Recorded pauses between CALLs are kept (the first CALL is not delayed), one CALL at a time. A recorded transaction id is never sent: the `RemoteStopTransaction` carries the id of the live `StartTransaction`, which must come from the same station, connector and `idTag`, in the same order as the recorded starts. The run fails instead of guessing when a live start differs, was refused, got a transaction id that is still active, or has not happened within `--call-timeout`. A CALL waits for the live BootNotification (answer `Accepted`) when the recording booted the station before it.
+
+Exit codes: 0 when every CALL was answered as recorded (a CALLRESULT where the recording has one, a CALLERROR where it has one; the payload is not compared), 1 when a CALL fails, times out or is answered differently, a replayed station disconnects or is replaced while it still has CALLs to receive, the run exceeds `--timeout`, or the engine cannot follow the stations (the run stops at the first problem), 2 for usage or recording errors, 130 for SIGINT (SIGTERM exits 1). The verdict is one line (`replay PASSED` or `replay FAILED after n of m CALLs: <reason>`), or an object with `"type":"replay"` with `--json`.
+
 ## Headless behavior
 
 - Events go to stdout (text or `--json`); `--log-file` also gets them.
@@ -238,7 +255,7 @@ Frames from a replaced or forgotten connection retain their original session ide
 
 ## Exit codes
 
-`kirby-csms` exits 0 on success or a clean shutdown, 1 when a script fails or times out or the server cannot start, 2 on usage, configuration or script errors, and 130 when a script is interrupted by SIGINT. The full table is in [configuration.md](configuration.md#exit-codes).
+`kirby-csms` exits 0 on success or a clean shutdown, 1 when a script or replay fails or times out or the server cannot start, 2 on usage, configuration, script or recording errors, and 130 when a script or replay is interrupted by SIGINT. The full table is in [configuration.md](configuration.md#exit-codes).
 
 ## Use as a library
 
