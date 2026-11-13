@@ -26,7 +26,8 @@ use kirby_csms_core::{CsmsConfig, SecurityProfile, SubprotocolPolicy, Transactio
   kirby-csms --listen 127.0.0.1:0 --json --subprotocol omit\n  \
   kirby-csms --tls-cert cert.pem --tls-key key.pem\n  \
   kirby-csms --script suite.toml --junit junit.xml --timeout 120\n  \
-  echo '{\"station\":\"CP-1\",\"action\":\"Reset\",\"payload\":{\"type\":\"Soft\"}}' | kirby-csms\n\n\
+  echo '{\"station\":\"CP-1\",\"action\":\"Reset\",\"payload\":{\"type\":\"Soft\"}}' | kirby-csms\n  \
+  kirby-csms ctl stations   (control a running server through its HTTP API)\n\n\
 Exit codes: 0 success or clean shutdown, 1 script failed or timed out (or runtime error), 2 usage or configuration error, 130 script interrupted by SIGINT."
 )]
 #[allow(
@@ -387,7 +388,11 @@ impl TimeChoice {
 /// The command with the `--help` headings that name the tables of the configuration file.
 pub fn command() -> clap::Command {
     use clap::CommandFactory;
-    let mut command = Cli::command();
+    // `ctl` is parsed on its own (see `main`); it is registered here for `--help` and the man
+    // pages only.
+    let mut command = Cli::command()
+        .disable_help_subcommand(true)
+        .subcommand(crate::ctl::command());
     for (heading, ids) in HEADINGS {
         for id in *ids {
             command = command.mut_arg(*id, |arg| arg.help_heading(*heading));
@@ -454,6 +459,10 @@ impl Cli {
     pub fn parse_args() -> Self {
         use clap::FromArgMatches;
         let (mut matches, blocks) = crate::settings::parse_matches(std::env::args_os().collect());
+        if let Some(name) = matches.subcommand_name() {
+            eprintln!("error: `{name}` must be the first argument: kirby-csms {name} [OPTIONS]");
+            std::process::exit(2);
+        }
         let mut cli = Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|e| e.exit());
         cli.blocks = blocks;
         cli
@@ -968,8 +977,20 @@ mod tests {
         assert!(parse_transaction_ids("fixed:x").is_err());
     }
 
-    /// Writes the man page to `$KIRBY_CSMS_MAN_DIR` when it is set (the release workflow does
-    /// this) and checks that every visible flag appears in it.
+    /// Every non-hidden command with its man page file name, subcommands included.
+    fn pages(command: &clap::Command, out: &mut Vec<(String, clap::Command)>) {
+        out.push((
+            clap_mangen::Man::new(command.clone()).get_filename(),
+            command.clone(),
+        ));
+        for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+            pages(sub, out);
+        }
+    }
+
+    /// Writes the man pages to `$KIRBY_CSMS_MAN_DIR` when it is set (the release workflow does
+    /// this) and checks that every visible flag and subcommand (`ctl` and its commands
+    /// included) appears in its page.
     #[test]
     fn man_page_lists_every_flag() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -977,15 +998,31 @@ mod tests {
             .map_or_else(|| temp.path().to_path_buf(), PathBuf::from);
         std::fs::create_dir_all(&dir).expect("man dir");
         clap_mangen::generate_to(command(), &dir).expect("generate man page");
-        let text = std::fs::read_to_string(dir.join("kirby-csms.1")).expect("page exists");
-        let mut built = command();
-        built.build();
+        let mut root = command();
+        root.build();
+        let mut all = Vec::new();
+        pages(&root, &mut all);
+        assert!(
+            all.iter().any(|(file, _)| file == "kirby-csms-ctl-call.1"),
+            "ctl pages expected: {:?}",
+            all.iter().map(|(file, _)| file).collect::<Vec<_>>()
+        );
         let mut flags = 0;
-        for arg in built.get_arguments().filter(|arg| !arg.is_hide_set()) {
-            if let Some(long) = arg.get_long() {
-                let flag = format!("\\-\\-{}", long.replace('-', "\\-"));
-                assert!(text.contains(&flag), "kirby-csms.1 misses --{long}");
-                flags += 1;
+        for (file, cmd) in all {
+            let text = std::fs::read_to_string(dir.join(&file)).expect("page exists");
+            for arg in cmd.get_arguments().filter(|arg| !arg.is_hide_set()) {
+                if let Some(long) = arg.get_long() {
+                    let flag = format!("\\-\\-{}", long.replace('-', "\\-"));
+                    assert!(text.contains(&flag), "{file} misses --{long}");
+                    flags += 1;
+                }
+            }
+            for sub in cmd.get_subcommands().filter(|sub| !sub.is_hide_set()) {
+                assert!(
+                    text.contains(sub.get_name()),
+                    "{file} misses {}",
+                    sub.get_name()
+                );
             }
         }
         assert!(flags > 10, "flags expected");

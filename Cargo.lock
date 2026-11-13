@@ -1304,7 +1304,9 @@ dependencies = [
  "kirby-csms-tui",
  "kirby-ocpp-core",
  "kirby-ocpp-tui",
+ "percent-encoding",
  "rcgen",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "socket2",
@@ -1312,6 +1314,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "toml",
+ "url",
 ]
 
 [[package]]

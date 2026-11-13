@@ -5,6 +5,7 @@ mod api;
 mod automation;
 mod cli;
 mod commands;
+mod ctl;
 mod headless;
 mod script;
 mod settings;
@@ -39,7 +40,16 @@ const EXIT_USAGE: u8 = 2;
 const EXIT_INTERRUPTED: u8 = 130;
 
 #[tokio::main]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the startup sequence reads best in one place"
+)]
 async fn main() -> ExitCode {
+    // `ctl` is a client of a running server. It is dispatched before the server flags are
+    // parsed, so the server's environment variables and flag rules never apply to it.
+    if std::env::args_os().nth(1).is_some_and(|arg| arg == "ctl") {
+        return ctl::run().await;
+    }
     let mut cli = Cli::parse_args();
     if cli.licenses {
         print!("{LICENSES}");
