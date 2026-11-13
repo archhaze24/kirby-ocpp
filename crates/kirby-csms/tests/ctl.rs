@@ -339,8 +339,14 @@ async fn calls_report_the_outcome_in_the_exit_code() {
         .json();
     assert_eq!(bulk["results"].as_array().unwrap().len(), 1);
     assert_eq!(bulk["results"][0]["station"], "CP-1");
-    let none = csms.ctl(&["bulk", "other-*", "Reset"]).ok().json();
-    assert_eq!(none["results"], serde_json::json!([]));
+    // A pattern that matches no station is exit code 4, so a typo does not pass in CI.
+    let none = csms.ctl(&["bulk", "other-*", "Reset"]);
+    assert_eq!(none.code, 4, "{none:?}");
+    assert_eq!(none.json()["results"], serde_json::json!([]));
+    assert!(
+        none.stderr.contains("no station matched the pattern"),
+        "{none:?}"
+    );
     let mixed = csms.ctl(&["bulk", "CP-?", "NoSuchAction"]);
     assert_eq!(mixed.code, 4, "{mixed:?}");
 
@@ -542,6 +548,59 @@ async fn exports_go_to_stdout_or_a_private_file() {
     assert!(!refused.exists());
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_export_replaces_an_existing_file_with_a_private_one_and_refuses_a_symlink() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let csms = Csms::start(&[]);
+    let _station = station(&csms.station_addr, "CP-1").await;
+    let dir = tempfile::tempdir().unwrap();
+
+    let old = dir.path().join("old.csv");
+    std::fs::write(&old, "old").unwrap();
+    std::fs::set_permissions(&old, std::fs::Permissions::from_mode(0o644)).unwrap();
+    csms.ctl(&[
+        "export",
+        "history",
+        "CP-1",
+        "--as",
+        "csv",
+        "--output",
+        old.to_str().unwrap(),
+    ])
+    .ok();
+    assert!(
+        std::fs::read_to_string(&old)
+            .unwrap()
+            .starts_with("cursor,ts,")
+    );
+    let mode = std::fs::metadata(&old).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+    assert_eq!(leftovers.len(), 1, "no temp file stays behind");
+
+    let target = dir.path().join("target.txt");
+    std::fs::write(&target, "keep").unwrap();
+    let link = dir.path().join("link.csv");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let out = csms.ctl(&[
+        "export",
+        "history",
+        "CP-1",
+        "--output",
+        link.to_str().unwrap(),
+    ]);
+    assert_eq!(out.code, 3, "{out:?}");
+    assert!(out.stderr.contains("symbolic link"), "{out:?}");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
 // ---- the token ---------------------------------------------------------------------------------
 
 #[test]
@@ -728,6 +787,53 @@ fn text_from_the_api_cannot_reach_the_terminal_as_control_characters() {
     let out = run_ctl(&["--url", &url], &["health"], &[], None);
     assert_eq!(out.code, 1, "{out:?}");
     assert!(!out.stderr.contains('\u{202e}'), "{out:?}");
+    // A raw carriage return outside a string is JSON whitespace, but must not reach stderr
+    // (it would let the server overwrite the start of the line); same for a non-JSON body.
+    for body in ["{\"error\":{\"code\":\"x\"},\r\"a\":1}", "bad\rtext"] {
+        let answer = format!(
+            "HTTP/1.1 500 Oops\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let url = fake_api(answer.into_bytes());
+        let out = run_ctl(&["--url", &url], &["health"], &[], None);
+        assert_eq!(out.code, 1, "{out:?}");
+        assert!(!out.stderr.contains('\r'), "{out:?}");
+        assert!(
+            out.stderr.contains("500") || out.stderr.contains("\"code\""),
+            "{out:?}"
+        );
+    }
+}
+
+#[test]
+fn an_event_tail_without_an_event_id_says_that_events_may_be_missed() {
+    let body = "event: a\ndata: {}\n\n";
+    let answer = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+        body.len()
+    );
+    // The fake API serves one connection; the reconnects are refused until the budget ends.
+    let url = fake_api(answer.into_bytes());
+    let out = run_ctl(&["--url", &url], &["events"], &[], None);
+    assert_eq!(out.code, 3, "{out:?}");
+    assert_eq!(out.stdout.trim(), "{}");
+    assert!(
+        out.stderr.contains("reconnecting without an event id"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn an_event_tail_refuses_an_answer_that_is_no_event_stream() {
+    let body = "<html>hi</html>";
+    let answer = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    let url = fake_api(answer.into_bytes());
+    let out = run_ctl(&["--url", &url], &["events"], &[], None);
+    assert_eq!(out.code, 3, "{out:?}");
+    assert!(out.stderr.contains("event stream"), "{out:?}");
 }
 
 // ---- events ----------------------------------------------------------------------------------
@@ -945,16 +1051,12 @@ fn https_needs_a_trusted_ca_and_mutual_tls_a_client_certificate() {
     assert!(csms.api_url.starts_with("https://"));
     let ok = csms.ctl(&["--ca-file", &ca_file, "--token-file", &token, "health"]);
     assert_eq!(ok.code, 0, "{ok:?}");
-    // A CA that did not sign the certificate, or the default roots, refuse it.
-    for args in [
-        vec!["--ca-file", &other_ca, "--token-file", &token, "health"],
-        vec!["--token-file", &token, "health"],
-    ] {
-        let out = csms.ctl(&args);
-        assert_eq!(out.code, 3, "{out:?}");
-        assert!(out.stderr.contains("TLS"), "{out:?}");
-        assert!(!out.stderr.contains("tls-token"));
-    }
+    // A CA that did not sign the certificate refuses it. (The system roots are not used here:
+    // a host without any would fail earlier, with another message.)
+    let out = csms.ctl(&["--ca-file", &other_ca, "--token-file", &token, "health"]);
+    assert_eq!(out.code, 3, "{out:?}");
+    assert!(out.stderr.contains("TLS"), "{out:?}");
+    assert!(!out.stderr.contains("tls-token"));
     // A plain-HTTP client against the TLS port is a transport error.
     let plain = csms.api_url.replacen("https://", "http://", 1);
     let out = run_ctl(

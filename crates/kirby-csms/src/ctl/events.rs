@@ -148,19 +148,34 @@ pub async fn tail(client: &Client, args: &EventsArgs, emit: Emit<'_>) -> Result<
     let mut printed = 0_u64;
     let mut failures = 0_u32;
     let mut connected_once = false;
+    let mut noted = false;
     loop {
+        let before = printed;
         let attempt = attempt(client, &path, args, &mut last_id, &mut printed, &mut *emit).await;
         match attempt {
             Ok(End::Done) => return Ok(()),
             Ok(End::Lost(reason)) => {
                 connected_once = true;
-                failures = 0;
                 if args.once {
                     return if reason.is_empty() {
                         Ok(())
                     } else {
                         Err(super::Fail::Transport(reason))
                     };
+                }
+                // A stream that delivered nothing is no progress: a server that answers 200
+                // but never sends an event must not be retried forever.
+                if printed > before {
+                    failures = 0;
+                } else {
+                    failures += 1;
+                    if failures >= MAX_FAILURES {
+                        return Err(super::Fail::Transport(if reason.is_empty() {
+                            "the event stream ended without an event".to_owned()
+                        } else {
+                            reason
+                        }));
+                    }
                 }
             }
             Err(super::Fail::Transport(reason)) => {
@@ -169,7 +184,23 @@ pub async fn tail(client: &Client, args: &EventsArgs, emit: Emit<'_>) -> Result<
                     return Err(super::Fail::Transport(reason));
                 }
             }
+            // A proxy answering while the server restarts: retry within the budget. A refusal
+            // of the credentials or a wrong URL ends the tail at once.
+            Err(super::Fail::Api(status, body))
+                if connected_once && !args.once && !matches!(status, 401 | 403 | 404) =>
+            {
+                failures += 1;
+                if failures >= MAX_FAILURES {
+                    return Err(super::Fail::Api(status, body));
+                }
+            }
             Err(other) => return Err(other),
+        }
+        if last_id.is_none() && !noted {
+            noted = true;
+            eprintln!(
+                "note: reconnecting without an event id; events sent while the stream was down may be missed"
+            );
         }
         tokio::time::sleep(RETRY_PAUSE).await;
     }
@@ -212,6 +243,17 @@ async fn attempt(
             .await
             .map_err(super::Fail::Transport)?;
         return Err(super::Fail::Api(head.status, bytes));
+    }
+    let is_stream = head.header("content-type").is_some_and(|value| {
+        value
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("text/event-stream")
+    });
+    if !is_stream {
+        return Err(super::Fail::Transport(
+            "the answer is not an event stream; is --url the control API?".to_owned(),
+        ));
     }
     let mut parser = Parser::default();
     loop {
@@ -427,6 +469,140 @@ mod tests {
         let mut emit = |_: &str| Err(crate::ctl::out::BROKEN_PIPE.to_owned());
         let result = tail(&client, &args(None, false, false), &mut emit).await;
         assert!(matches!(result, Err(crate::ctl::Fail::Pipe)), "{result:?}");
+    }
+
+    /// A server that answers every connection with the same raw answer and counts them.
+    async fn raw_server(
+        answers: Vec<String>,
+    ) -> (Client, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let seen = count.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let index = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let answer = answers[index.min(answers.len() - 1)].clone();
+                tokio::spawn(async move {
+                    let mut head = Vec::new();
+                    let mut byte = [0_u8; 1];
+                    while !head.ends_with(b"\r\n\r\n") {
+                        if socket.read_exact(&mut byte).await.is_err() {
+                            return;
+                        }
+                        head.push(byte[0]);
+                    }
+                    let _ = socket.write_all(answer.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        let endpoint =
+            super::super::client::Endpoint::parse(&format!("http://127.0.0.1:{port}")).unwrap();
+        let client = Client::new(
+            endpoint,
+            None,
+            &super::super::client::TlsFiles::default(),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        (client, count)
+    }
+
+    fn stream(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{body}\r\n0\r\n\r\n",
+            body.len()
+        )
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_is_not_an_event_stream_ends_the_tail_at_once() {
+        let html = "<html>hello</html>";
+        let (client, count) = raw_server(vec![format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{html}",
+            html.len()
+        )])
+        .await;
+        let mut emit = |_: &str| Ok(());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tail(&client, &args(None, false, false), &mut emit),
+        )
+        .await
+        .expect("the tail must not loop");
+        match result {
+            Err(crate::ctl::Fail::Transport(message)) => {
+                assert!(message.contains("event stream"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn streams_that_end_without_an_event_count_as_failures() {
+        let (client, count) = raw_server(vec![stream(": hi\n\n")]).await;
+        let mut emit = |_: &str| Ok(());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tail(&client, &args(None, false, false), &mut emit),
+        )
+        .await
+        .expect("the tail must give up");
+        assert!(
+            matches!(result, Err(crate::ctl::Fail::Transport(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            MAX_FAILURES as usize
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_status_on_a_reconnect_counts_toward_the_budget() {
+        let bad = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n".to_owned();
+        let (client, count) = raw_server(vec![stream("id: 1\nevent: a\ndata: {}\n\n"), bad]).await;
+        let mut lines = 0;
+        let mut emit = |_: &str| {
+            lines += 1;
+            Ok(())
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tail(&client, &args(None, false, false), &mut emit),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(crate::ctl::Fail::Api(502, _))),
+            "{result:?}"
+        );
+        assert_eq!(
+            count.load(std::sync::atomic::Ordering::SeqCst),
+            1 + MAX_FAILURES as usize
+        );
+        // A refusal of the credentials ends the tail at once.
+        let denied = "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_owned();
+        let (client, count) =
+            raw_server(vec![stream("id: 1\nevent: a\ndata: {}\n\n"), denied]).await;
+        let mut emit = |_: &str| Ok(());
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            tail(&client, &args(None, false, false), &mut emit),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, Err(crate::ctl::Fail::Api(401, _))),
+            "{result:?}"
+        );
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[test]

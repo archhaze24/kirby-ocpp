@@ -13,7 +13,12 @@ const COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'~');
 
 fn enc(text: &str) -> String {
-    utf8_percent_encode(text, COMPONENT).to_string()
+    // A dot segment is unreserved, but a normalizing proxy would resolve it into another route.
+    match text {
+        "." => "%2E".to_owned(),
+        ".." => "%2E%2E".to_owned(),
+        _ => utf8_percent_encode(text, COMPONENT).to_string(),
+    }
 }
 
 /// How the answer is printed.
@@ -532,6 +537,10 @@ mod tests {
     #[test]
     fn path_segments_and_query_values_are_encoded() {
         assert_eq!(station("CP 1+я/x").path, "/v1/stations/CP%201%2B%D1%8F%2Fx");
+        // Dot segments would be resolved by a normalizing proxy into another route.
+        assert_eq!(station(".").path, "/v1/stations/%2E");
+        assert_eq!(rules_list(Some("..")).path, "/v1/stations/%2E%2E/rules");
+        assert_eq!(station("..a").path, "/v1/stations/..a");
         let spec = history("CP-1", &history_filter(), None);
         assert_eq!(
             spec.path,

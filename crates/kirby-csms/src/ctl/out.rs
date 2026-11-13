@@ -39,12 +39,19 @@ pub fn json_text(body: &[u8], pretty: bool) -> Result<String, String> {
     Ok(escape_json_text(&text))
 }
 
-/// Plain text for a terminal: line ends and tabs stay, other unsafe characters become
-/// `\u{XXXX}`.
+/// An error body that is JSON, re-serialized (compact) so that no raw control character
+/// outside a string survives, and escaped like every printed JSON text.
+pub fn error_json_text(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    Some(escape_json_text(&serde_json::to_string(&value).ok()?))
+}
+
+/// Plain text for a terminal: line feeds and tabs stay, other unsafe characters (a bare
+/// carriage return too) become `\u{XXXX}`.
 pub fn terminal_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
-        if is_unsafe_char(c) && !matches!(c, '\n' | '\r' | '\t') {
+        if is_unsafe_char(c) && !matches!(c, '\n' | '\t') {
             let _ = write!(out, "\\u{{{:04x}}}", u32::from(c));
         } else {
             out.push(c);
@@ -129,7 +136,16 @@ mod tests {
 
     #[test]
     fn terminal_text_keeps_line_ends() {
-        let text = terminal_text("a,b\r\n\x1b[31mred\u{202e}\n");
-        assert_eq!(text, "a,b\r\n\\u{001b}[31mred\\u{202e}\n");
+        let text = terminal_text("a,b\n\x1b[31mred\u{202e}\tz\n");
+        assert_eq!(text, "a,b\n\\u{001b}[31mred\\u{202e}\tz\n");
+        // A bare carriage return would move the cursor back over the line.
+        assert_eq!(terminal_text("a\rb\r\n"), "a\\u{000d}b\\u{000d}\n");
+    }
+
+    #[test]
+    fn error_text_has_no_raw_control_characters() {
+        let text = error_json_text(b"{\"a\":1,\r\"b\":\"x\"}").unwrap();
+        assert_eq!(text, "{\"a\":1,\"b\":\"x\"}");
+        assert!(error_json_text(b"not json").is_none());
     }
 }

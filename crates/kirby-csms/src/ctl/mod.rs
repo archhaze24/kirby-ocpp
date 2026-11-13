@@ -349,7 +349,7 @@ fn report(fail: Fail) -> ExitCode {
             ExitCode::from(EXIT_TRANSPORT)
         }
         Fail::Api(status, body) => {
-            if let Ok(text) = out::json_text(&body, false) {
+            if let Some(text) = out::error_json_text(&body) {
                 eprintln!("{text}");
             } else {
                 let text = String::from_utf8_lossy(&body);
@@ -453,6 +453,31 @@ async fn simple(client: &Client, printer: Printer, spec: Spec) -> Result<u8, Fai
     Ok(0)
 }
 
+/// Whether a bulk answer holds no result at all (the pattern matched no station).
+fn no_results(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("results")
+                .and_then(Value::as_array)
+                .map(Vec::is_empty)
+        })
+        == Some(true)
+}
+
+/// The exit code of a bulk answer: 4 when a result is not ok or no station matched.
+fn bulk_exit(body: &[u8]) -> u8 {
+    if no_results(body) {
+        eprintln!("no station matched the pattern");
+        EXIT_NOT_OK
+    } else if all_ok(body, true) {
+        0
+    } else {
+        EXIT_NOT_OK
+    }
+}
+
 /// Whether every answer of a call reached `ok: true`.
 fn all_ok(body: &[u8], bulk: bool) -> bool {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
@@ -473,15 +498,45 @@ fn all_ok(body: &[u8], bulk: bool) -> bool {
 fn private_options() -> std::fs::OpenOptions {
     use std::os::unix::fs::OpenOptionsExt as _;
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true).mode(0o600);
+    options.write(true).create_new(true).mode(0o600);
     options
 }
 
 #[cfg(not(unix))]
 fn private_options() -> std::fs::OpenOptions {
     let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     options
+}
+
+/// Writes `bytes` to `path` as a new file that only the user can read (0600 on Unix): a
+/// temporary file in the same directory is renamed over the target, so an existing file never
+/// keeps its old mode. A symbolic link at `path` is refused.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    if std::fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return Err("the path is a symbolic link; name the file itself".to_owned());
+    }
+    let name = path
+        .file_name()
+        .ok_or_else(|| "the path names no file".to_owned())?;
+    let mut temp_name = std::ffi::OsString::from(".");
+    temp_name.push(name);
+    temp_name.push(format!(".{}.tmp", std::process::id()));
+    let temp = path.with_file_name(temp_name);
+    let mut file = private_options()
+        .open(&temp)
+        .map_err(|error| error.to_string())?;
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map(|()| drop(file))
+        .and_then(|()| std::fs::rename(&temp, path));
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 /// Prints an export, or writes it to a file once the whole answer has arrived.
@@ -497,13 +552,9 @@ async fn export(
     }
     match output {
         Some(path) => {
-            use std::io::Write as _;
-            private_options()
-                .open(path)
-                .and_then(|mut file| file.write_all(&reply.body))
-                .map_err(|error| {
-                    Fail::Transport(format!("cannot write {}: {error}", path.display()))
-                })?;
+            write_private(path, &reply.body).map_err(|error| {
+                Fail::Transport(format!("cannot write {}: {error}", path.display()))
+            })?;
         }
         None => show(printer, spec.kind, &reply.body)?,
     }
@@ -571,11 +622,7 @@ async fn execute(cli: &CtlCli) -> Result<u8, Fail> {
             let deadline = call_deadline(client.timeout, *timeout_ms);
             let reply = fetch(&client, &spec, deadline).await?;
             show(printer, spec.kind, &reply.body)?;
-            Ok(if all_ok(&reply.body, true) {
-                0
-            } else {
-                EXIT_NOT_OK
-            })
+            Ok(bulk_exit(&reply.body))
         }
         Cmd::History { id, filter } => {
             simple(&client, printer, requests::history(id, filter, None)).await
@@ -669,4 +716,20 @@ async fn faults_command(client: &Client, printer: Printer, faults: &FaultsCmd) -
         FaultsCmd::Clear => requests::faults_clear(),
     };
     simple(client, printer, spec).await
+}
+
+#[cfg(test)]
+mod file_tests {
+    #[test]
+    fn an_existing_temporary_file_is_left_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("export.csv");
+        let temp = dir
+            .path()
+            .join(format!(".export.csv.{}.tmp", std::process::id()));
+        std::fs::write(&temp, "keep").unwrap();
+        assert!(super::write_private(&path, b"replacement").is_err());
+        assert_eq!(std::fs::read_to_string(&temp).unwrap(), "keep");
+        assert!(!path.exists());
+    }
 }
