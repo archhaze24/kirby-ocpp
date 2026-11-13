@@ -32,7 +32,7 @@ echo $?
 
 Each built-in runs on a fresh station, one after another. The output is one line per scenario and a summary such as `suite: 8/8 scenarios passed`. The exit code is 0 only if every scenario passed, so the command can gate a CI job. `junit.xml` has one test suite per scenario; `suite.json` has the machine-readable summary. `kirby-ocpp scenarios list` names the built-ins.
 
-Reference: [Suite runs](scenarios.md#suite-runs), [Built-in scenarios](scenarios.md#built-in-scenarios), [Run kirby in CI](ci.md).
+Reference: [Suite runs](scenarios.md#suite-runs), [Built-in scenarios](scenarios.md#built-in-scenarios), [Run kirby-ocpp and kirby-csms in CI](ci.md).
 
 ## Test a rejected tag
 
@@ -377,7 +377,7 @@ name = "loop-and-capture"
 
 [vars]
 vendor = "com.example"
-tag = "KIRBY-TAG"
+tag = "KIRBY-OCPP-TAG"
 
 [[steps]]
 action = "data_transfer"
@@ -451,4 +451,4 @@ The secrets file next to the state file is never read or shown; `state show` onl
 
 ## Related pages
 
-[Run kirby in CI](ci.md) · [Scenarios](scenarios.md) · [Emulator](emulator.md) · [CSMS](csms.md) · [Configuration](configuration.md) · [Docs index](README.md)
+[Run kirby-ocpp and kirby-csms in CI](ci.md) · [Scenarios](scenarios.md) · [Emulator](emulator.md) · [CSMS](csms.md) · [Configuration](configuration.md) · [Docs index](README.md)

@@ -9,7 +9,7 @@ tags = ["conformance"]
 [[steps]]
 name = "tell the CSMS the station is ready"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "ready:remote-start"
 
 [[steps]]
@@ -17,7 +17,7 @@ name = "start of the observation window"
 action = "expect_call"
 call = "DataTransfer"
 direction = "out"
-match = { vendorId = "kirby.conformance", messageId = "ready:remote-start" }
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:remote-start" }
 
 [[steps]]
 name = "RemoteStartTransaction arrives"
@@ -40,7 +40,7 @@ condition = { kind = "tx_active", connector = 1 }
 [[steps]]
 name = "tell the CSMS the transaction runs"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "ready:remote-stop"
 
 [[steps]]
@@ -64,5 +64,5 @@ condition = { kind = "tx_idle", connector = 1 }
 [[steps]]
 name = "tell the CSMS the scenario is over"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "done:remote-start-stop"

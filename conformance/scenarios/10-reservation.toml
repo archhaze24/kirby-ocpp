@@ -8,7 +8,7 @@ tags = ["conformance"]
 [[steps]]
 name = "tell the CSMS the station is ready"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "ready:reservation"
 
 [[steps]]
@@ -16,7 +16,7 @@ name = "start of the observation window"
 action = "expect_call"
 call = "DataTransfer"
 direction = "out"
-match = { vendorId = "kirby.conformance", messageId = "ready:reservation" }
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:reservation" }
 
 [[steps]]
 name = "ReserveNow arrives"
@@ -33,7 +33,7 @@ condition = { kind = "connector_status", connector = 1, status = "Reserved" }
 [[steps]]
 name = "tell the CSMS the connector is reserved"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "ready:reservation-cancel"
 
 [[steps]]
@@ -51,5 +51,5 @@ condition = { kind = "connector_status", connector = 1, status = "Available" }
 [[steps]]
 name = "tell the CSMS the scenario is over"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "done:reservation"

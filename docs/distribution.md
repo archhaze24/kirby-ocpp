@@ -33,7 +33,7 @@ upload it as the workflow artifact `openapi` without creating a release.
 
 ## Docker
 
-Image: `ghcr.io/archhaze24/kirby-ocpp`, multi-arch (`linux/amd64`, `linux/arm64`), built from the static musl binaries on every version tag. Tags: `X.Y.Z`, plus `X.Y` and `latest` when the release is the highest final version so far (prereleases and re-tagged older versions only get `X.Y.Z`; `latest` never moves backwards). It runs as the non-root user `kirby` (uid 10001), has the system CA roots for `wss://`, keeps emulator state in the volume `/data` (`KIRBY_OCPP_STATE_DIR=/data`) and exposes port 9000.
+Image: `ghcr.io/archhaze24/kirby-ocpp`, multi-arch (`linux/amd64`, `linux/arm64`), built from the static musl binaries on every version tag. Tags: `X.Y.Z`, plus `X.Y` and `latest` when the release is the highest final version so far (prereleases and re-tagged older versions only get `X.Y.Z`; `latest` never moves backwards). It runs as the non-root user `kirby-ocpp` (uid 10001), has the system CA roots for `wss://`, keeps emulator state in the volume `/data` (`KIRBY_OCPP_STATE_DIR=/data`) and exposes port 9000.
 
 The entrypoint starts the emulator by default; naming `kirby-csms` as the first argument starts the central system. `docker run --entrypoint kirby-csms ...` works too.
 
@@ -42,11 +42,11 @@ The entrypoint starts the emulator by default; naming `kirby-csms` as the first 
 docker run --rm -p 9000:9000 ghcr.io/archhaze24/kirby-ocpp kirby-csms --listen 0.0.0.0:9000
 
 # Emulator against it (state persists in the named volume)
-docker run --rm -v kirby-state:/data ghcr.io/archhaze24/kirby-ocpp \
+docker run --rm -v kirby-ocpp-state:/data ghcr.io/archhaze24/kirby-ocpp \
   --url ws://host.docker.internal:9000/ocpp --id CP-001 --no-tui
 
 # Interactive TUI needs a terminal
-docker run --rm -it -v kirby-state:/data ghcr.io/archhaze24/kirby-ocpp --url ws://host.docker.internal:9000/ocpp --id CP-001
+docker run --rm -it -v kirby-ocpp-state:/data ghcr.io/archhaze24/kirby-ocpp --url ws://host.docker.internal:9000/ocpp --id CP-001
 
 # Scenario run, exit code 0 on pass
 docker run --rm ghcr.io/archhaze24/kirby-ocpp --url ws://host.docker.internal:9000/ocpp run --scenario charge-session
@@ -62,7 +62,7 @@ Notes:
 * On Linux `host.docker.internal` needs `--add-host host.docker.internal:host-gateway`, or use `--network host` for the emulator.
 * The HTTP control API (`--api-listen`) needs a token and TLS for a non-loopback address, which includes `0.0.0.0` inside a container: mount the certificate (`-v "$PWD/certs:/certs:ro"`), pass `--api-listen 0.0.0.0:8080 --api-token-file /certs/api.token --api-tls-cert /certs/server.pem --api-tls-key /certs/server.key` and publish it with `-p 127.0.0.1:8080:8080`. See [api.md](api.md#tls).
 * In CI the central system can run from the image instead of npm. A GitHub `services:` container cannot take command arguments, so start it with `docker run -d --name csms -p 127.0.0.1:9000:9000 ghcr.io/archhaze24/kirby-ocpp kirby-csms --listen 0.0.0.0:9000`, wait for `listening on` in `docker logs csms`, and stop it with `docker rm -f csms`. The emulator can run from the same image; the container then needs a route to the CSMS (see above).
-* A named volume starts owned by `kirby`. For a bind mount (`-v "$PWD/state:/data"`) the host directory must be writable by uid 10001.
+* A named volume starts owned by `kirby-ocpp`. For a bind mount (`-v "$PWD/state:/data"`) the host directory must be writable by uid 10001.
 * `--state-dir` and `--no-persist` behave as in [configuration.md](configuration.md#state-directory-and-files).
 
 ## Homebrew

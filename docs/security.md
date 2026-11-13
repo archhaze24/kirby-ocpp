@@ -128,7 +128,7 @@ Notes:
 
 Charge point certificate (profile 3, or any time a CSMS wants a new one):
 
-1. The station creates an ECDSA P-256 key and a CSR (`CN` = charge point id, `O` = `CpoName` or `Kirby`) and sends `SignCertificate`. Triggers: the TUI action on the Station tab (`C`, "request certificate"), `Command::RequestCertificate`, or the CSMS command `ExtendedTriggerMessage` with `SignChargePointCertificate`.
+1. The station creates an ECDSA P-256 key and a CSR (`CN` = charge point id, `O` = `CpoName` or `kirby-ocpp`) and sends `SignCertificate`. Triggers: the TUI action on the Station tab (`C`, "request certificate"), `Command::RequestCertificate`, or the CSMS command `ExtendedTriggerMessage` with `SignChargePointCertificate`.
 2. The CSMS tool records the CSR and answers `Accepted`. Sign it externally, for example: `openssl x509 -req -in csr.pem -CA ca.pem -CAkey ca.key -CAcreateserial -days 30 -out cp1.pem`. Keep the CN equal to the station id if profile 3 will be used.
 3. Send `CertificateSigned` (`X` in the TUI, PEM chain). The station answers `Accepted` only if a request is pending, the chain parses, fits `CertificateSignedMaxChainSize` (default 10 000 bytes), is linked (each certificate signed by the next), every certificate is currently valid and the leaf carries the pending public key. Otherwise `Rejected` plus an `InvalidChargePointCertificate` security event. Chain trust and the leaf Common Name are not verified.
 4. After `Accepted` the station reconnects and, under profile 3, presents the new certificate.

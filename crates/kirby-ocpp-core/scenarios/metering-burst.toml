@@ -8,7 +8,7 @@ connector = 1
 [[steps]]
 action = "start_tx"
 connector = 1
-id_tag = "KIRBY-TAG"
+id_tag = "KIRBY-OCPP-TAG"
 
 [[steps]]
 action = "meter"

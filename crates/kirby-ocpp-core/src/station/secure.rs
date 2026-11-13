@@ -268,7 +268,7 @@ impl StationActor {
     /// the same wait without being counted.
     pub(super) fn request_certificate(&mut self, reply: Reply) {
         let organization = match self.registry.cpo_name() {
-            "" => "Kirby".to_owned(),
+            "" => "kirby-ocpp".to_owned(),
             name => name.to_owned(),
         };
         let (csr, key) = match generate_csr(&self.config.charge_point_id, &organization) {

@@ -63,7 +63,7 @@ done
 ```
 Publish the seven platform packages first (a new platform package name must be published once before the launchers list it, which the order guarantees) with `npm publish --access public` (scoped packages need it), then the launchers `kirby-ocpp` (plain `npm publish`) and `kirby-csms` (plain `npm publish`, both are unscoped). For a prerelease version (contains `-`) add `--tag next` to every `npm publish`, otherwise it becomes `latest`.
 
-`build.mjs` wipes its `--out` directory: it refuses the repo root, its ancestors, the home dir and `/`, and refuses a non-empty directory that lacks the `.kirby-npm-dist` marker it writes (delete an old `npm/dist` from before this check by hand once). The directory names in `npm/dist` have no scope (`kirby-ocpp-linux-x64` etc.). After 72 hours a version can no longer be unpublished; use `npm deprecate kirby-ocpp@X.Y.Z "reason"` instead.
+`build.mjs` wipes its `--out` directory: it refuses the repo root, its ancestors, the home dir and `/`, and refuses a non-empty directory that lacks the `.kirby-ocpp-npm-dist` marker it writes (delete an old `npm/dist` from before this check by hand once). The directory names in `npm/dist` have no scope (`kirby-ocpp-linux-x64` etc.). After 72 hours a version can no longer be unpublished; use `npm deprecate kirby-ocpp@X.Y.Z "reason"` instead.
 
 ## 5. Verify
 

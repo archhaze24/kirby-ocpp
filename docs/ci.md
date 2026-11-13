@@ -1,4 +1,4 @@
-# Run kirby in CI
+# Run kirby-ocpp and kirby-csms in CI
 
 Use `kirby-ocpp` and `kirby-csms` as test runners: the exit code gates the job, JUnit XML feeds the test report, and the JSON report keeps the evidence. This page has ready workflows for GitHub Actions and GitLab CI, the exit-code and timeout rules, and a guide to reading failures.
 
@@ -35,7 +35,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Install kirby
+      - name: Install kirby-ocpp and kirby-csms
         run: npm install -g kirby-ocpp kirby-csms
 
       - name: Start the central system
@@ -121,7 +121,7 @@ The scenarios of the [conformance family](scenarios.md#conformance-family) run a
         with:
           node-version: 22
 
-      - name: Install kirby
+      - name: Install kirby-ocpp and kirby-csms
         run: npm install -g kirby-ocpp kirby-csms
 
       - name: Run the family

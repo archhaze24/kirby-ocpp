@@ -22,7 +22,7 @@ must_fire = true
 [[steps]]
 name = "tell the CSMS the station is ready"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "ready:scripted-replies"
 
 [[steps]]
@@ -30,7 +30,7 @@ name = "start of the observation window"
 action = "expect_call"
 call = "DataTransfer"
 direction = "out"
-match = { vendorId = "kirby.conformance", messageId = "ready:scripted-replies" }
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:scripted-replies" }
 
 [[steps]]
 name = "Reset arrives"
@@ -54,5 +54,5 @@ condition = { kind = "registration", status = "Accepted" }
 [[steps]]
 name = "tell the CSMS the scenario is over"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "done:scripted-replies"

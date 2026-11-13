@@ -254,14 +254,14 @@ async fn data_browser_edits_reach_the_station_and_come_back_in_the_snapshot() {
 
     // Local list: add an entry.
     d.key(KeyCode::Tab).await;
-    d.keys("aKIRBY").await;
+    d.keys("aKIRBY-OCPP").await;
     d.key(KeyCode::Enter).await;
     d.until("entry in the snapshot", |a| {
         a.snapshot
             .local_list
             .entries
             .iter()
-            .any(|e| e.id_tag == "KIRBY")
+            .any(|e| e.id_tag == "KIRBY-OCPP")
     })
     .await;
     assert_eq!(d.app.snapshot.local_list.version, 1);

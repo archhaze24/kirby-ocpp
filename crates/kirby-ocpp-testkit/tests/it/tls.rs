@@ -106,7 +106,7 @@ async fn mtls_accepts_a_client_with_a_ca_issued_certificate() {
             &mut cp,
             "boot",
             "BootNotification",
-            json!({"chargePointVendor": "Kirby", "chargePointModel": "TUI-16"}),
+            json!({"chargePointVendor": "kirby-ocpp", "chargePointModel": "TUI-16"}),
         )
         .await,
     );

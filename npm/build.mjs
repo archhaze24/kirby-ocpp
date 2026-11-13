@@ -33,7 +33,7 @@ const PLATFORMS = [
   { pkg: "@archhaze24/kirby-ocpp-win32-x64", target: "x86_64-pc-windows-msvc", os: "win32", cpu: "x64", ext: "zip", win: true },
 ];
 
-const MARKER = ".kirby-npm-dist";
+const MARKER = ".kirby-ocpp-npm-dist";
 
 // The output directory is wiped on every build, so refuse anything that is not clearly a
 // scratch dist: the repo root or its ancestors, the home dir, the filesystem root, and any

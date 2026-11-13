@@ -559,7 +559,7 @@ mod tests {
         registry
             .validate_request(
                 "BootNotification",
-                &json!({"chargePointVendor": "Kirby", "chargePointModel": "TUI-16"}),
+                &json!({"chargePointVendor": "kirby-ocpp", "chargePointModel": "TUI-16"}),
             )
             .unwrap();
         registry

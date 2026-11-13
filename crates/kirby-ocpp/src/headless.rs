@@ -29,7 +29,7 @@ static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
 
 /// A queue entry that is not printed: the writer thread reports it as reached, which tells
 /// [`drain_stdout`] that every line queued before it was written.
-const BARRIER_MARK: &str = "\u{0}kirby-barrier:";
+const BARRIER_MARK: &str = "\u{0}kirby-ocpp-barrier:";
 static BARRIER_NEXT: AtomicU64 = AtomicU64::new(0);
 static BARRIER_SEEN: Mutex<u64> = Mutex::new(0);
 static BARRIER_REACHED: Condvar = Condvar::new();

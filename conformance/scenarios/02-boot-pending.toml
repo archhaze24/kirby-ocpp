@@ -9,7 +9,7 @@ tags = ["conformance"]
 [[steps]]
 name = "tell the CSMS the station is ready"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "ready:boot-pending"
 
 [[steps]]
@@ -17,14 +17,14 @@ name = "start of the observation window"
 action = "expect_call"
 call = "DataTransfer"
 direction = "out"
-match = { vendorId = "kirby.conformance", messageId = "ready:boot-pending" }
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:boot-pending" }
 
 [[steps]]
 name = "the CSMS has prepared its answers"
 action = "expect_call"
 call = "DataTransfer"
 direction = "in"
-match = { vendorId = "kirby.conformance", messageId = "go:boot-pending" }
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:boot-pending" }
 
 [[steps]]
 action = "boot"
@@ -63,5 +63,5 @@ timeout_ms = 5000
 [[steps]]
 name = "tell the CSMS the scenario is over"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "done:boot-pending"

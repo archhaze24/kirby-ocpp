@@ -2,7 +2,7 @@ name = "data-transfer"
 description = "Send a DataTransfer with a vendor id (variable vendor_id, override with --var) and check the CALL went out. Any DataTransfer status is accepted, UnknownVendorId included."
 
 [vars]
-vendor_id = "kirby"
+vendor_id = "kirby-ocpp"
 
 [[steps]]
 action = "data_transfer"

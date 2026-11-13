@@ -9,7 +9,7 @@ Contents: [Start here](#start-here) · [Pages](#pages)
 | You are | Read in this order |
 | --- | --- |
 | New to the tools | [README](../README.md) quick start, then the [Cookbook](cookbook.md) |
-| Running kirby in CI | [Run kirby in CI](ci.md), [Scenarios](scenarios.md#suite-runs), [Exit codes](configuration.md#exit-codes) |
+| Running kirby-ocpp and kirby-csms in CI | [Run kirby-ocpp and kirby-csms in CI](ci.md), [Scenarios](scenarios.md#suite-runs), [Exit codes](configuration.md#exit-codes) |
 | A user of the emulator (`kirby-ocpp`) | [Emulator](emulator.md), [Scenarios](scenarios.md), [Configuration](configuration.md) |
 | A user of the CSMS (`kirby-csms`) | [README](../README.md), [CSMS](csms.md), [HTTP API](api.md), [Scenarios](scenarios.md) (scripts), [Security](security.md), [Configuration](configuration.md) |
 | Testing TLS, Basic Auth or certificates | [Security](security.md), then [Configuration](configuration.md) |

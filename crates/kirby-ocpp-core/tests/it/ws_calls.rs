@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio_tungstenite::tungstenite::Message;
 
 fn boot_payload() -> Value {
-    json!({"chargePointVendor": "Kirby", "chargePointModel": "TUI-16"})
+    json!({"chargePointVendor": "kirby-ocpp", "chargePointModel": "TUI-16"})
 }
 
 fn heartbeat_result(time: &str) -> Value {

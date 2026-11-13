@@ -4,7 +4,7 @@ description = "Send a SecurityEventNotification (StartupOfTheDevice) and check t
 [[steps]]
 action = "security_event"
 event_type = "StartupOfTheDevice"
-tech_info = "kirby scenario"
+tech_info = "kirby-ocpp scenario"
 
 [[steps]]
 action = "expect_call"

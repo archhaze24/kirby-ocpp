@@ -44,7 +44,7 @@ async fn boot_and_heartbeat_roundtrip() {
             &mut cp,
             "boot-1",
             "BootNotification",
-            json!({"chargePointVendor": "Kirby", "chargePointModel": "TUI-16"}),
+            json!({"chargePointVendor": "kirby-ocpp", "chargePointModel": "TUI-16"}),
         )
         .await,
     );
@@ -62,7 +62,7 @@ async fn boot_and_heartbeat_roundtrip() {
         .wait_for_call("BootNotification", STEP)
         .await
         .expect("boot recorded");
-    assert_eq!(payload["chargePointVendor"], "Kirby");
+    assert_eq!(payload["chargePointVendor"], "kirby-ocpp");
 
     let received = csms.received();
     assert_eq!(received.len(), 2);
@@ -195,7 +195,7 @@ async fn default_answers_for_remaining_actions() {
             &mut cp,
             "dt",
             "DataTransfer",
-            json!({"vendorId": "Kirby", "data": "ping"}),
+            json!({"vendorId": "kirby-ocpp", "data": "ping"}),
         )
         .await,
     );
@@ -291,7 +291,7 @@ async fn responder_overrides_default_but_faults_take_precedence() {
     let csms = start().await;
     let mut cp = connect_cp(&csms, "CP-001").await;
     csms.respond("DataTransfer", |payload| {
-        if payload["vendorId"] == "Kirby" {
+        if payload["vendorId"] == "kirby-ocpp" {
             Reply::Result(json!({"status": "Rejected"}))
         } else {
             Reply::Error(ErrorCode::NotSupported, "unknown vendor".to_owned())
@@ -304,7 +304,7 @@ async fn responder_overrides_default_but_faults_take_precedence() {
         &mut cp,
         "dt-1",
         "DataTransfer",
-        json!({"vendorId": "Kirby"}),
+        json!({"vendorId": "kirby-ocpp"}),
     )
     .await;
     assert!(matches!(first, Frame::CallError { .. }), "{first:?}");
@@ -314,7 +314,7 @@ async fn responder_overrides_default_but_faults_take_precedence() {
             &mut cp,
             "dt-2",
             "DataTransfer",
-            json!({"vendorId": "Kirby"}),
+            json!({"vendorId": "kirby-ocpp"}),
         )
         .await,
     );

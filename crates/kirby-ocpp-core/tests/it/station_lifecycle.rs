@@ -39,7 +39,7 @@ async fn boot_accepted_sets_state_and_sends_all_statuses() {
         .await
         .unwrap();
     assert_eq!(boot["chargePointVendor"], "archhaze24");
-    assert_eq!(boot["chargePointModel"], "KIRBY");
+    assert_eq!(boot["chargePointModel"], "kirby-ocpp");
     assert_eq!(boot["chargePointSerialNumber"], "SN-42");
     assert_eq!(boot["firmwareVersion"], "1.2.3");
 

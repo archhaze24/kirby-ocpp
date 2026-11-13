@@ -16,13 +16,13 @@ FROM alpine:3.24
 LABEL org.opencontainers.image.source="https://github.com/archhaze24/kirby-ocpp" \
       org.opencontainers.image.licenses="MIT"
 RUN apk add --no-cache ca-certificates \
- && adduser -D -u 10001 kirby \
+ && adduser -D -u 10001 kirby-ocpp \
  && mkdir /data \
- && chown kirby:kirby /data
+ && chown kirby-ocpp:kirby-ocpp /data
 COPY --from=build /out/kirby-ocpp /out/kirby-csms /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 ENV KIRBY_OCPP_STATE_DIR=/data
-USER kirby
+USER kirby-ocpp
 WORKDIR /data
 VOLUME /data
 EXPOSE 9000

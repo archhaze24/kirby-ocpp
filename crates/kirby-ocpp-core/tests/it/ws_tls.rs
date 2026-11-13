@@ -87,7 +87,7 @@ async fn skip_verify_still_completes_a_full_exchange() {
     let answer = connection
         .call(
             "BootNotification",
-            serde_json::json!({"chargePointVendor": "Kirby", "chargePointModel": "TUI-16"}),
+            serde_json::json!({"chargePointVendor": "kirby-ocpp", "chargePointModel": "TUI-16"}),
             None,
         )
         .await

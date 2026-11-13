@@ -7,7 +7,7 @@ tags = ["conformance"]
 #   kirby-csms --listen 127.0.0.1:9000 --no-tui --script conformance/csms-script.toml --timeout 180 &
 #   kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-CONF suite conformance/scenarios --tag conformance
 #
-# Every scenario opens with a DataTransfer from vendor "kirby.conformance" whose
+# Every scenario opens with a DataTransfer from vendor "kirby-ocpp.conformance" whose
 # messageId is "ready:<topic>". The section of this script for that topic waits for it,
 # prepares what the scenario needs, and sends "go:<topic>" when the scenario must wait for
 # the preparation. Every scenario ends with "done:<topic>" and the section ends by waiting
@@ -17,7 +17,7 @@ tags = ["conformance"]
 
 [vars]
 station = "CP-CONF"
-vendor = "kirby.conformance"
+vendor = "kirby-ocpp.conformance"
 
 # ---------------------------------------------------------------------------------------
 # 01 conformance-authorize-rejected
@@ -381,7 +381,7 @@ name = "configuration: an unknown key is NotSupported"
 action = "call"
 station = "${station}"
 call = "ChangeConfiguration"
-payload = { key = "KirbyNoSuchKey", value = "1" }
+payload = { key = "KirbyOcppNoSuchKey", value = "1" }
 expect_status = "NotSupported"
 
 [[steps]]
@@ -389,8 +389,8 @@ name = "configuration: GetConfiguration lists the unknown key"
 action = "call"
 station = "${station}"
 call = "GetConfiguration"
-payload = { key = ["KirbyNoSuchKey"] }
-expect_payload = { unknownKey = ["KirbyNoSuchKey"] }
+payload = { key = ["KirbyOcppNoSuchKey"] }
+expect_payload = { unknownKey = ["KirbyOcppNoSuchKey"] }
 
 [[steps]]
 name = "configuration: scenario over"

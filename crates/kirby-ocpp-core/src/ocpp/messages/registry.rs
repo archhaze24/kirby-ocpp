@@ -264,7 +264,7 @@ mod tests {
         );
         c.out::<BootNotification>(
             &BootNotificationRequest {
-                charge_point_vendor: "Kirby".into(),
+                charge_point_vendor: "kirby-ocpp".into(),
                 charge_point_model: "TUI-16".into(),
                 charge_point_serial_number: Some("CP-1".into()),
                 charge_box_serial_number: Some("CB-1".into()),

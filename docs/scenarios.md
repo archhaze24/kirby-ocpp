@@ -44,7 +44,7 @@ connector = 1
 [[steps]]
 action = "start_tx"
 connector = 1
-id_tag = "KIRBY-TAG"              # implicitly expects status Accepted
+id_tag = "KIRBY-OCPP-TAG"              # implicitly expects status Accepted
 
 [[steps]]
 action = "wait_for"
@@ -95,7 +95,7 @@ An optional `[vars]` table at the top of the file declares variables (strings, n
 name = "tagged-session"
 
 [vars]
-tag = "KIRBY-A"
+tag = "KIRBY-OCPP-A"
 wh = 500
 
 [[steps]]
@@ -290,7 +290,7 @@ Semantics:
 | `fault-recovery` | Inject a fault on connector 1, then clear it |
 | `heartbeat-and-status` | Heartbeat, connector 1 Unavailable and back to Available, plug and unplug; asserts each StatusNotification |
 | `metering-burst` | Plug in, start a transaction, three MeterValues (each asserted), stop, unplug |
-| `data-transfer` | DataTransfer with the variable `vendor_id` (default `kirby`, override with `--var vendor_id=...`); any DataTransfer status passes |
+| `data-transfer` | DataTransfer with the variable `vendor_id` (default `kirby-ocpp`, override with `--var vendor_id=...`); any DataTransfer status passes |
 | `security-event` | SecurityEventNotification `StartupOfTheDevice`, asserts the CALL went out |
 | `reconnect` | Disconnect, wait until down, connect, wait for an accepted registration, Heartbeat |
 
@@ -431,7 +431,7 @@ Why not built-ins: every scenario needs a peer that sends CALLs and prepares ans
 
 ### How the two sides are driven
 
-A scenario runs on an emulated station; a [CSMS script](#csms-scripts) runs in `kirby-csms`. They meet through DataTransfer messages of vendor `kirby.conformance`:
+A scenario runs on an emulated station; a [CSMS script](#csms-scripts) runs in `kirby-csms`. They meet through DataTransfer messages of vendor `kirby-ocpp.conformance`:
 
 1. The scenario opens with a DataTransfer whose `messageId` is `ready:<topic>`. The script section for that topic waits for it (`wait_call`).
 2. The script prepares what the scenario needs (`inject_fault` with kind `invalid_payload` answers the next CALLs of an action with a given payload and uses itself up, so nothing leaks into the next scenario), and sends the CSMS commands. Where the scenario must not act before the preparation is done, the script sends `go:<topic>` and the scenario waits for it with `expect_call` of direction `in`.
@@ -769,7 +769,7 @@ These are public contracts and follow Semantic Versioning:
 * The JSON report. Fields are added in minor releases and never renamed or removed within one `schema`. Consumers must ignore fields they do not know. A breaking change increments `schema`.
 * The JUnit layout (suite and case names, properties) is part of the report contract. Test case names are stable labels so that CI history can follow a test across runs.
 * The `reply` step: its keys (`call`, `result`, `error`, `times`, `delay_ms`, `must_fire`) and the rules above. Version-neutral by design: an OCPP 2.x build keeps the keys and takes the action names and payloads of its protocol.
-* The conformance family: scenario names (`conformance-<topic>`), the tag `conformance`, the `kirby.conformance` handshake and the station id `CP-CONF`. Scenarios and script sections are added in minor releases; a scenario is not renamed within a major version.
+* The conformance family: scenario names (`conformance-<topic>`), the tag `conformance`, the `kirby-ocpp.conformance` handshake and the station id `CP-CONF`. Scenarios and script sections are added in minor releases; a scenario is not renamed within a major version.
 * Flag names. A flag is not renamed within a major version. `--ocpp-version`, `--protocol` and `--format` are reserved for future use; `suite` therefore selects GitHub output with the plain switch `--github-annotations`.
 
 ## Related pages

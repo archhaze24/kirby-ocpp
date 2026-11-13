@@ -131,7 +131,7 @@ Protocol ids are strings in the API, so that OCPP 2.x transaction ids (strings) 
 
 ```text
 $ curl -s http://127.0.0.1:9100/v1/stations
-{"stations":[{"active_transactions":[],"connected":true,"connectors":{"1":"Available"},"id":"CP-1","model":"Emu","protocol":"ocpp1.6","received_calls":3,"remote_addr":"127.0.0.1:4242","security_events":0,"vendor":"Kirby"}]}
+{"stations":[{"active_transactions":[],"connected":true,"connectors":{"1":"Available"},"id":"CP-1","model":"Emu","protocol":"ocpp1.6","received_calls":3,"remote_addr":"127.0.0.1:4242","security_events":0,"vendor":"kirby-ocpp"}]}
 
 $ curl -s -X POST http://127.0.0.1:9100/v1/stations/CP-1/calls \
     -H 'Authorization: Bearer '"$TOKEN" \
@@ -242,7 +242,7 @@ Every value is percent-decoded like `station=`. An unknown parameter, a repeated
 
 ```text
 $ curl -s 'http://127.0.0.1:9100/v1/stations/CP-1/history?since=c0&limit=2&kind=call'
-{"frames":[{"action":"BootNotification","cursor":"c1794161964005842","direction":"in","id":"4039ce3d-f072-421f-af29-e654b802a973","kind":"call","payload":{"chargePointModel":"KIRBY","chargePointVendor":"archhaze24"},"station":"CP-1","ts":"2026-11-08T18:19:25.023Z","type":"frame"},{"action":"StatusNotification","cursor":"c1794161964005844",...}],"gap":false,"next_cursor":"c1794161964005844","station":"CP-1"}
+{"frames":[{"action":"BootNotification","cursor":"c1794161964005842","direction":"in","id":"4039ce3d-f072-421f-af29-e654b802a973","kind":"call","payload":{"chargePointModel":"kirby-ocpp","chargePointVendor":"archhaze24"},"station":"CP-1","ts":"2026-11-08T18:19:25.023Z","type":"frame"},{"action":"StatusNotification","cursor":"c1794161964005844",...}],"gap":false,"next_cursor":"c1794161964005844","station":"CP-1"}
 ```
 
 - Each frame has a `cursor` besides the keys of an event frame. A cursor is an opaque string that stays valid while the server runs: it names a position, not a count, so it survives the eviction of older frames. Cursors increase with recording order across all stations, and a cursor from an earlier run of the server is simply older than every frame of this run. Do not parse it.

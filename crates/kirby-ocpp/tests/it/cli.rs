@@ -90,7 +90,7 @@ fn defaults_match_the_ts_cli() {
     assert_eq!(c["url"], "ws://localhost:9000/ocpp");
     assert_eq!(c["charge_point_id"], "CP-001");
     assert_eq!(c["vendor"], "archhaze24");
-    assert_eq!(c["model"], "KIRBY");
+    assert_eq!(c["model"], "kirby-ocpp");
     assert_eq!(c["connector_count"], 1);
     assert_eq!(c["heartbeat_interval_secs"], 30);
     assert_eq!(c["ws_subprotocol"], "ocpp1.6");
@@ -150,7 +150,7 @@ fn env_vars_are_used_when_no_flag_is_given() {
             ("OCPP_RECONNECT_MAX_ATTEMPTS", "3"),
             ("OCPP_CALL_TIMEOUT_MS", "500"),
             ("OCPP_TLS_SERVER_NAME", "sni.example.com"),
-            ("KIRBY_OCPP_STATE_DIR", "/tmp/kirby-state"),
+            ("KIRBY_OCPP_STATE_DIR", "/tmp/kirby-ocpp-state"),
         ],
     );
     assert_eq!(c["url"], "wss://csms.example.com/ocpp");
@@ -162,7 +162,7 @@ fn env_vars_are_used_when_no_flag_is_given() {
     assert_eq!(c["reconnect"]["max_attempts"], 3);
     assert_eq!(c["call_timeout_ms"], 500);
     assert_eq!(c["tls"]["server_name"], "sni.example.com");
-    assert_eq!(c["state_dir"], "/tmp/kirby-state");
+    assert_eq!(c["state_dir"], "/tmp/kirby-ocpp-state");
 }
 
 #[test]

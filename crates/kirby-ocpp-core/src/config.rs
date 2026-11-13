@@ -31,7 +31,7 @@ pub const MAX_CALL_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 pub mod defaults {
     pub const CHARGE_POINT_ID: &str = "CP-001";
     pub const VENDOR: &str = "archhaze24";
-    pub const MODEL: &str = "KIRBY";
+    pub const MODEL: &str = "kirby-ocpp";
     pub const HEARTBEAT_INTERVAL_SECS: u32 = 30;
     pub const WS_SUBPROTOCOL: &str = "ocpp1.6";
     pub const WS_PING_INTERVAL_SECS: u32 = 30;
@@ -530,7 +530,7 @@ mod tests {
         let c = StationConfig::default();
         assert_eq!(c.charge_point_id, "CP-001");
         assert_eq!(c.vendor, "archhaze24");
-        assert_eq!(c.model, "KIRBY");
+        assert_eq!(c.model, "kirby-ocpp");
         assert_eq!(c.connector_count, 1);
         assert_eq!(c.heartbeat_interval(), Duration::from_secs(30));
         assert_eq!(c.ws_subprotocol, "ocpp1.6");

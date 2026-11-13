@@ -20,15 +20,15 @@ LABEL org.opencontainers.image.title="kirby-ocpp" \
 
 # wss:// uses the system root store.
 RUN apk add --no-cache ca-certificates \
- && adduser -D -u 10001 kirby \
+ && adduser -D -u 10001 kirby-ocpp \
  && mkdir /data \
- && chown kirby:kirby /data
+ && chown kirby-ocpp:kirby-ocpp /data
 
 COPY dist/linux-${TARGETARCH}/kirby-ocpp dist/linux-${TARGETARCH}/kirby-csms /usr/local/bin/
 COPY docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 ENV KIRBY_OCPP_STATE_DIR=/data
-USER kirby
+USER kirby-ocpp
 WORKDIR /data
 VOLUME /data
 EXPOSE 9000

@@ -9,7 +9,7 @@ tags = ["conformance"]
 [[steps]]
 name = "tell the CSMS the station is ready"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "ready:configuration"
 
 [[steps]]
@@ -17,7 +17,7 @@ name = "start of the observation window"
 action = "expect_call"
 call = "DataTransfer"
 direction = "out"
-match = { vendorId = "kirby.conformance", messageId = "ready:configuration" }
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:configuration" }
 
 [[steps]]
 name = "ChangeConfiguration HeartbeatInterval"
@@ -45,17 +45,17 @@ name = "ChangeConfiguration of an unknown key"
 action = "expect_call"
 call = "ChangeConfiguration"
 direction = "in"
-match = { key = "KirbyNoSuchKey" }
+match = { key = "KirbyOcppNoSuchKey" }
 
 [[steps]]
 name = "GetConfiguration of an unknown key"
 action = "expect_call"
 call = "GetConfiguration"
 direction = "in"
-match = { key = ["KirbyNoSuchKey"] }
+match = { key = ["KirbyOcppNoSuchKey"] }
 
 [[steps]]
 name = "tell the CSMS the scenario is over"
 action = "data_transfer"
-vendor_id = "kirby.conformance"
+vendor_id = "kirby-ocpp.conformance"
 message_id = "done:configuration"
