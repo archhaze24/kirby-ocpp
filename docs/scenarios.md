@@ -174,8 +174,8 @@ Every step has `action` plus the fields of that action, and may add `name` (show
 | `heartbeat` | none | Send Heartbeat |
 | `plug`, `unplug` | `connector` (1 or more) | EV plugs in or out |
 | `authorize` | `id_tag` | Send Authorize; implicitly expects `Accepted` |
-| `start_tx` | `connector`, `id_tag` | Send StartTransaction; implicitly expects `Accepted` |
-| `stop_tx` | `connector`, `reason` (default `Local`), optional `id_tag` | Send StopTransaction |
+| `start_tx` (alias `start_session`) | `connector`, `id_tag` | Send StartTransaction; implicitly expects `Accepted` |
+| `stop_tx` (alias `stop_session`) | `connector`, `reason` (default `Local`), optional `id_tag` | Send StopTransaction |
 | `meter` | `connector`, `wh_delta` (default 1000) | Advance the meter and send MeterValues |
 | `status` | `connector`, `status` | Set the connector status |
 | `fault` | `connector`, `error_code`, optional `info` | Inject a fault (connector goes `Faulted`) |
@@ -277,6 +277,10 @@ Semantics:
 | `error` | The step must fail with a station error (for example a CALLERROR or a timeout). If it succeeds the step fails. Combined with `status` or `payload` it is a load error (`error = true` excludes them) |
 
 `authorize` and `start_tx` imply `status = "Accepted"` unless the step sets another status, so a rejected tag stops the scenario; set `expect = { status = "Blocked" }` to test rejection. `expect` on `sleep`, `wait_for` and `expect_call` is accepted but has no effect.
+
+### From a recording
+
+`kirby-ocpp scenarios from-recording FILE -o session.toml` writes the commands of a session recorded with `--record` as a scenario. The file uses the version-neutral step names `start_session` and `stop_session` (the aliases of `start_tx` and `stop_tx`; reports label them `start_tx` and `stop_tx`), loads like any other scenario and passes `scenarios validate`. What converts, what is skipped and why: [Emulator](emulator.md#converting-a-recording-into-a-scenario).
 
 ### Built-in scenarios
 

@@ -33,6 +33,7 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 | `ws/` | One connection task per link: handshake (`handshake.rs`, subprotocol, Basic Auth), rustls TLS incl. mTLS (`tls.rs`), serialized CALL queue, ping watchdog (`task.rs`); the connection doctor behind `kirby-ocpp check` (`probe.rs`: the same TLS and upgrade code, step by step, one BootNotification) |
 | `station/` | The single `StationActor` plus `handle.rs` (public handle), `command.rs`, `snapshot.rs`, `event.rs`; `handlers/` has one file per group of CSMS-originated CALLs; pure logic modules: `smart_charging.rs`, `charging_profiles.rs`, `power.rs`, `sampling.rs`, `config_registry.rs`, `local_auth_list.rs`, `reservation.rs`, `authorization.rs`, `certificates.rs`, `security.rs`, `secure.rs`, `maintenance.rs`, `response_rules.rs`, `status.rs` |
 | `scenario/` | TOML scenario model (`model.rs`), runner (`runner.rs`), variables and capture (`vars.rs`, shared with the `kirby-csms` scripts), JUnit renderer (`junit.rs`), nine built-ins (`builtin.rs`, TOML in `crates/kirby-ocpp-core/scenarios/`) |
+| `recording/` | Session recordings, shared by the emulator and the CSMS: the JSON-lines format and its bounded reader (`read.rs`), the fail-on-lag recorder (`write.rs`: a bounded queue and a writer thread; it marks the recording incomplete instead of dropping frames), redaction of `AuthorizationKey` values and URL passwords (`redact.rs`), the conversion of an emulator recording into a scenario (`scenario.rs`) and the replay plan (`replay.rs`) |
 | `fleet.rs` | `Fleet`: N independent stations, id templates, merged event stream |
 | `store.rs` | `StationStore`: atomic versioned JSON state; `inspect` (read-only load) and `remove` back `kirby-ocpp state show` and `state reset` |
 | `config_file.rs` | Generic TOML configuration file loader: schema of tables and keys, unknown-key rejection, profiles, relative path resolution, secret-key refusal, rendering (no clap; the binaries supply their schema) |
@@ -40,7 +41,7 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 
 ### Binaries
 
-* `kirby-ocpp/src`: `cli.rs` (flags and env, CLI > env > default, strict booleans), `main.rs` (config, spawn, choose UI or headless, the `run` scenario runner, reports, exit codes), `headless.rs` (event printer, stdout and log-file helpers), `fleet.rs` (`--count`, fleet runs), `suite.rs` (`kirby-ocpp suite`: sources, fresh station per scenario, summary report).
+* `kirby-ocpp/src`: `cli.rs` (flags and env, CLI > env > default, strict booleans), `main.rs` (config, spawn, choose UI or headless, the `run` scenario runner, reports, exit codes), `headless.rs` (event printer, stdout and log-file helpers), `fleet.rs` (`--count`, fleet runs), `suite.rs` (`kirby-ocpp suite`: sources, fresh station per scenario, summary report), `record.rs` (`--record`: opens the recording around a run, reports an incomplete one) and `replay.rs` (`replay` and `scenarios from-recording`).
 * `kirby-csms/src`: `cli.rs`, `main.rs`, `headless.rs` (event printer, stdout/log-file helper threads), `stdin_cmd.rs` (JSON-lines commands), `commands.rs` (call execution, result objects and the in-flight limit shared by stdin and the API), `api/` (HTTP control API on `axum`: `mod.rs` router and server start, `server.rs` connection layer, `limits.rs`, `auth.rs`, `meta.rs` route table, `error.rs`/`json.rs` helpers, `routes_stations.rs`, `routes_calls.rs`, `routes_rules.rs` for rules and faults, `sse.rs`), `script.rs` (TOML scripts, report, JUnit).
 
 ## Layer contracts
@@ -55,6 +56,8 @@ UIs and runners never touch internals; they use these surfaces only.
 | `snapshot()` / `watch_snapshot()` | Immutable serde read model; latest value wins. |
 | `subscribe()` | Lossy `broadcast` of `Event::{Frame, Log, StateChanged}`. `Frame` carries a `FrameRecord{ts, direction, msg_id, action, frame}` (JSONL export is trivial). `StateChanged` is only a nudge; the data is in the snapshot. |
 | `config()` | Static launch config (URL, vendor/model, initial connector); not in the snapshot. |
+
+`Station::spawn_recorded(config, clock, Some(sink))` is `spawn` plus a session recording: the actor hands every frame and every command to the `RecordSink` before the event broadcast. The sink never blocks and never drops silently; see [Recording and replay](emulator.md#recording-and-replay).
 
 The station does not connect by itself: the caller sends `Command::Connect`.
 
@@ -111,7 +114,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * Security profiles 0-3 (`auth.rs`, `tls.rs`): Basic Auth checked in the handshake callback (constant-time, user must equal the URL id), TLS, mTLS with client CN equal to the station id; refusals emit `CsmsEvent::AuthFailed`.
 * One global `std::sync::Mutex` guards engine state; events are emitted under the lock to keep ordering.
 * Configured calls (`kirby-csms/src/automation.rs`) share the command-slot and payload budgets with stdin and the HTTP API. A scheduler owns bounded runs, fixed-delay timers and connection hooks. Hook session tokens are checked under the registry lock when a CALL is enqueued; shutdown cancels automation before the server closes connections.
-* The `kirby-csms` binary can expose `CsmsHandle` over a local HTTP API (`api/`, `axum` with only the `http1` and `tokio` features). It only uses the handle and `commands.rs`, which the stdin handler shares, so result shapes and the 256-command in-flight limit are the same for both. The SSE stream (`/v1/events`, at most 16) uses the `--json` renderer of `headless.rs` (`Renderer`), and fault parsing/validation is shared with the script steps. See [api.md](api.md).
+* The `kirby-csms` binary can expose `CsmsHandle` over a local HTTP API (`api/`, `axum` with only the `http1` and `tokio` features). It only uses the handle and `commands.rs`, which the stdin handler shares, so result shapes and the 256-command in-flight limit are the same for both. The SSE stream (`/v1/events`, at most 16) uses the `--json` renderer of `headless.rs` (`Renderer`), and fault parsing/validation is shared with the script steps. See [api.md](api.md). `kirby-csms ctl` (`ctl/`) is the matching client: a small HTTP/1.1 client over `tokio` and `tokio-rustls` (no HTTP client crate), its requests checked against `docs/kirby-csms-openapi.json` by tests. `main.rs` dispatches it before the server flags are parsed.
 * Limits: frame size 1 MiB, 100 000 stations, 1024 sockets in their TLS/WebSocket handshake at once (`max_pending_handshakes`; extra sockets are closed), per-action counters capped at 64 keys, write timeout 10 s.
 
 ## Data flow
@@ -127,7 +130,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * **Outbound CALLs are serialized**: the next CALL goes out only after the current one resolved (result, error or timeout). `ConnectOptions::serialize_calls = false` exists for negative tests. A dropped `call()` future withdraws a not yet written CALL.
 * **Schema validation both ways** with the embedded OCPP 1.6J schemas; violations map to `OccurenceConstraintViolation` / `TypeConstraintViolation` / `PropertyConstraintViolation` / `FormationViolation`.
 * **State file format changes only with a `STORE_VERSION` bump** (now 9, `store.rs`). Older files load with serde defaults; newer ones are refused. No compatibility with the old TypeScript state files.
-* **Redaction:** `AuthorizationKey` values are replaced by `***` in recorded frames, logs and the config log (`ocpp::frame::redact_secrets`) unless `--show-secrets`. Secrets never go into the main state file. Station ids and payloads are attacker-controlled: sanitize before printing (control characters become `·`).
+* **Redaction:** `AuthorizationKey` values are replaced by `***` in recorded frames, logs and the config log (`ocpp::frame::redact_secrets`) unless `--show-secrets`. Session recordings (`--record`) are redacted by the recorder itself, always, and URL passwords too. Secrets never go into the main state file. Station ids and payloads are attacker-controlled: sanitize before printing (control characters become `·`).
 * **No `unsafe`; no `unwrap`/`expect`/indexing on external data** (clippy pedantic is on).
 * **Bounded memory** everywhere external input grows: log buffers, frame history, scenario CALL backlog (10 000 / ~16 MiB), stdin lines (1 MiB), stdout/log-file helper threads drop lines instead of blocking. The one known exception: CSMS station records are never evicted (`forget()` only), bounded per station and by `max_stations` (see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md)).
 * **Spec wins over TS parity.** Intentional deviations are listed in [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md).

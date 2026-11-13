@@ -115,7 +115,7 @@ An action the central system sends (for example another 1.6 command) touches the
 
 ## Keeping docs in step with code
 
-* Flag and environment tables in [Configuration](configuration.md) and the README must match `--help` exactly (flag, env name, default, range). After changing a `cli.rs`, build the binaries and diff `kirby-ocpp --help`, `kirby-ocpp run --help`, `kirby-ocpp scenarios --help` and `kirby-csms --help` against the tables.
+* Flag and environment tables in [Configuration](configuration.md) and the README must match `--help` exactly (flag, env name, default, range). After changing a `cli.rs`, build the binaries and diff `kirby-ocpp --help`, `kirby-ocpp run --help`, `kirby-ocpp scenarios --help` and `kirby-csms --help` against the tables, and for `kirby-csms ctl` its `--help` and the help of every command (`ctl call --help`, `ctl rules set --help`, ...) against the [ctl tables](configuration.md#kirby-csms-ctl).
 * Counts in docs (messages, built-in scenarios, tabs, keys) change with the code: grep for the old number.
 * Behavior changes go into [CHANGELOG.md](../CHANGELOG.md) and, if they are deviations from the spec, [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md).
 * Structural changes (new crate, new module, moved contract) update [Architecture](architecture.md) in the same commit.

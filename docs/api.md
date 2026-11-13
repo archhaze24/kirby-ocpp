@@ -2,7 +2,7 @@
 
 Drive a running `kirby-csms` from any language or CI without stdin plumbing. JSON, plain HTTP or HTTPS, off by default.
 
-Contents: [Contract](#contract) · [Start](#start) · [Auth model](#auth-model) · [TLS](#tls) · [Endpoints](#endpoints) · [Bulk calls](#bulk-calls) · [Event stream](#event-stream) · [History, export and metrics](#history-export-and-metrics) · [Rules and faults](#rules-and-faults) · [Errors and limits](#errors-and-limits) · [Related pages](#related-pages)
+Contents: [Contract](#contract) · [Start](#start) · [Auth model](#auth-model) · [TLS](#tls) · [Endpoints](#endpoints) · [Bulk calls](#bulk-calls) · [Event stream](#event-stream) · [History, export and metrics](#history-export-and-metrics) · [Rules and faults](#rules-and-faults) · [Command-line client](#command-line-client) · [Errors and limits](#errors-and-limits) · [Related pages](#related-pages)
 
 ## Contract
 
@@ -389,6 +389,51 @@ $ curl -s -X DELETE http://127.0.0.1:9100/v1/faults/f2
 
 - `PUT /v1/rules/{action}`: `{action}` must be an action a charge point can send in the protocol of the engine's action table, today `ocpp1.6`, or in the `?protocol=` given (otherwise `400` `unsupported_action`; an unknown `protocol` is `400` `bad_request`; a request beyond the caps is `409`); the body must be a JSON object (the whole CALLRESULT payload, not checked against the schema).
 - `POST /v1/faults` body: `{"action","kind","payload"?,"times"?}` with `kind` one of `call_error`, `silence`, `close`, `invalid_payload` (needs `payload`, sent as the CALLRESULT as given); `action` is 1 to 128 bytes without control characters (any other name is accepted, so faults can target actions the server does not know; `400` otherwise); `times` defaults to 1 and must be 1 to 1000000 (`400` otherwise); the caps listed above apply (`409` with a JSON error beyond that; `DELETE /v1/faults` frees them). Scripts apply the same checks and caps (an `inject_fault` step fails the script when the store is full); the terminal UI form is bounded by the same `times` limit. Faults are used in the order injected and take precedence over rules. Unknown fields are `400`.
+
+## Command-line client
+
+`kirby-csms ctl` calls the API from a shell script or a CI job. It sends the requests of the [OpenAPI document](kirby-csms-openapi.json), prints the JSON the API returns and reports the result in its exit code. It needs no server flags and starts no server. Every flag, environment variable and exit code: [configuration.md](configuration.md#kirby-csms-ctl).
+
+```sh
+export KIRBY_CSMS_API_URL=https://csms.example:9100   # default http://127.0.0.1:9100
+export KIRBY_CSMS_API_TOKEN_FILE=api.token            # or KIRBY_CSMS_API_TOKEN; none for an open API
+export KIRBY_CSMS_API_CA_FILE=ca.pem                  # when the API certificate has a private CA
+```
+
+The examples show the output as written to a pipe or a file; on a terminal the JSON is indented.
+
+```text
+$ kirby-csms ctl stations
+{"stations":[{"active_transactions":[],"connected":true,"connectors":{"0":"Available","1":"Available"},"id":"CP-1","model":"kirby-ocpp","protocol":"ocpp1.6","received_calls":4,"remote_addr":"127.0.0.1:36514","security_events":1,"vendor":"archhaze24"}]}
+
+$ kirby-csms ctl call CP-1 ChangeConfiguration --payload '{"key":"HeartbeatInterval","value":"60"}'
+{"ok":true,"outcome":"result","result":{"status":"Accepted"}}
+
+$ kirby-csms ctl call CP-1 NoSuchAction; echo "exit $?"
+{"code":"NotImplemented","details":{},"error":"CALLERROR NotImplemented: NoSuchAction is not an OCPP 1.6J action","ok":false,"outcome":"call_error"}
+exit 4
+
+$ kirby-csms ctl bulk 'CP-*' Reset --payload '{"type":"Soft"}'
+{"action":"Reset","results":[{"code":null,"details":null,"error":null,"ok":true,"outcome":"result","protocol":"ocpp1.6","result":{"status":"Accepted"},"station":"CP-1"}]}
+
+$ kirby-csms ctl station nobody; echo "exit $?"
+{"error":{"code":"unknown_station","message":"unknown station"}}
+exit 1
+
+$ kirby-csms ctl export history CP-1 --as csv --kind call --output history.csv
+$ kirby-csms ctl faults add Heartbeat --kind call_error --times 2
+{"id":"f1","injected":true,"remaining":2}
+$ kirby-csms ctl events --station CP-1 --with-id --count 2
+{"id":"1794579973220481","event":"frame","data":{"action":"Heartbeat","direction":"in",...}}
+```
+
+Commands: `health`, `index`, `stations`, `station`, `forget`, `call`, `bulk`, `history`, `transactions`, `rules list|show|set|clear`, `faults list|add|remove|clear`, `metrics`, `events` and `export history|transactions`; each is one request of the [endpoint table](#endpoints) (the route of every command is in the [command table](configuration.md#ctl-commands)).
+
+- **Exit codes.** `0` success, `1` the API answered with an error status (the error body is on stderr), `2` usage error, `3` the API could not be reached or its answer is unusable, `4` a `call` or `bulk` reached the API but a station answered with a CALLERROR or not at all (`"ok":false`). A script can tell a refused request from a failed call from a missing server.
+- **Token.** It comes from `KIRBY_CSMS_API_TOKEN` or a token file; there is no token flag, since flag values are visible in `ps`. It is never printed, not even in error messages. `--payload` is visible in `ps` as well: use `--payload-file` (`-` reads stdin) for a payload that holds a secret.
+- **Output.** JSON is printed on one line as the API sent it (indented with `--pretty` and on a terminal). Text that came from stations is untrusted: characters that could drive a terminal are written as escapes, in JSON as `\uXXXX`, so the output stays valid JSON. Station ids and filter values are percent-encoded in the request.
+- **Following events.** `events` prints one JSON line per event and reconnects with `Last-Event-ID` when the stream ends, so the lines of a long-running tail have no gaps and no repeats (see [Resume](#resume) for what the server holds). To continue in a later run, print the ids with `--with-id` and pass the last one as `--last-event-id`. `--count N` ends the run after N events, `--once` disables reconnecting.
+- **Limits.** One request per connection, like the server's own limit. An answer larger than 64 MiB is refused. Request bodies follow the limits of the [call endpoints](#endpoints).
 
 ## Errors and limits
 

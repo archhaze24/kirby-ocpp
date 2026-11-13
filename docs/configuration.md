@@ -2,7 +2,7 @@
 
 Every command-line flag and environment variable of `kirby-ocpp` and `kirby-csms`, with defaults, ranges, exit codes and the files they touch. The tables follow `--help` of the same version; if they ever disagree, `--help` and `cli.rs` are right and this page is a bug (see [Development](development.md#keeping-docs-in-step-with-code)).
 
-Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#kirby-ocpp) · [Subcommands](#kirby-ocpp-subcommands) · [Configuration file](#configuration-file) · [kirby-csms configuration file](#kirby-csms-configuration-file) · [Id templates](#id-templates) · [Response rules](#response-rules---rule) · [State directory](#state-directory-and-files) · [kirby-csms](#kirby-csms) · [Exit codes](#exit-codes) · [Related pages](#related-pages)
+Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#kirby-ocpp) · [Subcommands](#kirby-ocpp-subcommands) · [Configuration file](#configuration-file) · [kirby-csms configuration file](#kirby-csms-configuration-file) · [kirby-csms ctl](#kirby-csms-ctl) · [Id templates](#id-templates) · [Response rules](#response-rules---rule) · [State directory](#state-directory-and-files) · [kirby-csms](#kirby-csms) · [Exit codes](#exit-codes) · [Related pages](#related-pages)
 
 ## Precedence and booleans
 
@@ -13,7 +13,7 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 
 ## kirby-ocpp
 
-`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help`, `suite --help` and `check --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), `version --help` shows only `--json`, and `state --help` shows only `--id`, `--state-dir` and `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Configuration, Output and Scenarios; the tables below use a similar grouping (the headings differ in places).
+`kirby-ocpp [OPTIONS] [COMMAND]`. Station options are also accepted after the subcommand. `run --help`, `replay --help`, `suite --help` and `check --help` list them and point here; the help of `version`, `completions` and `scenarios` omits them (they are still accepted there and ignored), `version --help` shows only `--json`, and `state --help` shows only `--id`, `--state-dir` and `--json`. `--url` (or `OCPP_URL`) is the only required value for a real connection; without it the error shows an example and names `kirby-csms --listen 127.0.0.1:9000` as a local peer. `kirby-ocpp --help` groups the flags under the headings Connection, Identity, Station, TLS, Reconnect, Fleet, Faults, Configuration, Output and Scenarios; the tables below use a similar grouping (the headings differ in places).
 
 ### Station and connection
 
@@ -89,6 +89,8 @@ Profiles and certificates are explained in [Security](security.md).
 | `--color <WHEN>` | | `auto` | Colorize PASS (green), FAIL (red), SKIP and warnings (yellow) in human output: `auto` (only when stdout is a terminal and `NO_COLOR` is unset or empty), `always`, `never`. Explicit `always` or `never` wins over `NO_COLOR`. The terminal UI follows the same choice without a terminal check: `never` (or a non-empty `NO_COLOR`) draws it without color, with reverse video, bold and text markers instead |
 | `--time <ZONE>` | `KIRBY_OCPP_TIME` | `utc` | Clock in front of event and frame lines in the terminal UI log and in human output: `utc` (`HH:MM:SS.mmm`), `local` (this machine's time zone) or `none` (no prefix). `--json` timestamps, log copy and export are unchanged |
 | `--log-file <PATH>` | | none | Also append the event log to this file, with the UI too. A new file is created `0600` on unix (frames hold idTags); an existing file keeps its mode. A helper thread writes it; lines that cannot be written in time are dropped and a `note` line reports the count |
+| `--record <PATH>` | | none | Record the session to this JSON-lines file: every frame and every command given to the station, with `AuthorizationKey` values and URL passwords replaced by `***` (also with `--show-secrets`). Works in the terminal UI, in headless mode, with `run` and with `replay`; `suite`, `check` and a fleet (`--count` above 1) exit 2. A new file is created `0600` on unix and an existing file is an error (exit 2) unless `--record-overwrite` is given. The file may not be the `--log-file`, the scenario or recording that is run, or a `--report`/`--junit` file. A recording that lost data (writer queue full, write error, 64 MiB size limit) ends with an `incomplete` reason and the command exits 1; a run that recorded nothing leaves no file. Not a configuration file key. Format and use: [Emulator](emulator.md#recording-and-replay) |
+| `--record-overwrite` | | off | Replace the `--record` file when it exists; needs `--record` |
 | `--licenses` | | | Print third-party license notices and exit |
 | `-V, --version`, `-h, --help` | | | `--version` prints one line; `kirby-ocpp version` prints the build details |
 
@@ -126,6 +128,19 @@ Plain headless mode (no subcommand) prints every event at any level. `--log-file
 | `--timeout <SECONDS>` | | `60` | Give up and fail after this long, connecting included; 1 to 86400. In fleet mode it covers the whole fleet, stagger included |
 | `--id-tag <IDTAG>` | | none | Replace the `idTag` of the scenario's `authorize`, `start_tx`, `stop_tx` steps (non-empty) |
 | `--var <NAME=VALUE>` | | none | Set a scenario variable (repeatable); overrides `[vars]`; `true`/`false`/numbers keep their type; `station_id` and `index` are built in and cannot be set. See [Scenarios](scenarios.md#variables) |
+
+`kirby-ocpp replay <FILE>` sends the CALLs a recorded session originated to the Central System again, as a `run` of a generated scenario: it connects, waits for an accepted BootNotification and prints the same report (`schema`, `status`, steps; `source` is the recording). It accepts every station option above; the station id is `--id`, not the recorded one, and the station is ephemeral like in `run`. Only the CALLs the emulator sent are replayed, in recorded order and with fresh message ids; the recorded BootNotification is not (the replaying station boots itself with its own identity). The CSMS's transaction ids of the recording are replaced by the ids of the new StartTransaction answers. A CALL is skipped, with a warning, when it has no answer in the recording, was larger than the recorder keeps, or holds a redacted value (a `***` `AuthorizationKey` or URL password is never sent). A CALL that the CSMS answered with a CALLERROR in the recording must be answered with a CALLERROR again. Plus:
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `<FILE>` | | required | Recording written by `--record`, role `emulator`, OCPP 1.6 |
+| `--speed <FACTOR>` | | `1` | Time scale of the recorded pauses between CALLs: 2 is twice as fast, 0.5 half as fast; 0.01 to 1000; a single pause is at most 24 hours. Excludes `--no-delay` |
+| `--no-delay` | | off | Send the CALLs back to back |
+| `--report <PATH>` | | none | Write the report as JSON, see [Report files](#report-files) |
+| `--junit <PATH>` | | none | Write a JUnit XML report |
+| `--timeout <SECONDS>` | | `600` | Give up and fail after this long, connecting and the recorded pauses included; 1 to 86400 (a longer default than `run`'s 60) |
+
+None of the `replay` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-replay). Details: [Emulator](emulator.md#recording-and-replay).
 
 `kirby-ocpp suite [SOURCE]...` runs several scenarios one after another, each on a fresh station with persistence off (`--state-dir` and `--no-persist` are ignored). It accepts every station option above except a fleet (`--count` above 1 exits 2) plus:
 
@@ -184,17 +199,25 @@ New keys may be added to these objects; none is renamed or removed. None of the 
 
 `kirby-ocpp scenarios validate <FILE|DIR|NAME>...` parses scenarios without connecting (no `--url` needed). It prints `ok PATH (N steps)` per scenario (built-ins as `ok built-in NAME (N steps)`) and `error: PATH: reason` per failure, scanning directories like `suite` does (every `*.toml` directly inside, sorted). Exit 0 when all are valid, 2 when any is not.
 
+`kirby-ocpp scenarios from-recording <FILE> [-o <PATH>] [--overwrite]` converts a recording made with `--record` into a scenario file, without connecting (no `--url` needed). The steps follow the commands given to the station; the scenario connects and boots by itself, so the first recorded connect is not a step. Commands without a scenario step, and details a step cannot carry (the vendor error code of a fault, the measurands of a meter reading), are left out and listed as warnings on stderr and as comments in the file; CSMS commands seen in the recording are listed in a comment too. The result is checked to load as a scenario before it is written. See [Emulator](emulator.md#recording-and-replay) for what converts.
+
+| Flag | Meaning |
+| --- | --- |
+| `<FILE>` | Recording written by `--record` (role `emulator`, OCPP 1.6) |
+| `-o, --output <PATH>` | Write the scenario to this file instead of stdout. An existing file is an error (exit 2) unless `--overwrite` is given; the recording itself is never replaced |
+| `--overwrite` | Replace the `--output` file when it exists; needs `--output` |
+
 `kirby-ocpp version` prints the tool version, the git commit, the build date, the target triple and the supported protocols (`OCPP 1.6J`); with `--json` one JSON object with the keys `name`, `version`, `commit`, `build_date`, `target`, `protocols` (display names such as `OCPP 1.6J`) and `protocol_tokens` (the WebSocket subprotocol tokens such as `ocpp1.6`, in the same order). The commit is `unknown` in a build without git. `kirby-ocpp --version` stays a single line.
 
 `kirby-ocpp completions <bash|zsh|fish|powershell|elvish>` prints a shell completion script to stdout; installation hints are in [emulator.md](emulator.md#shell-completions).
 
 ### Report files
 
-`run`, `suite` and a fleet `run` check `--report` and `--junit` before anything connects, and exit 2 with a one-line message naming the flag when:
+`run`, `replay`, `suite` and a fleet `run` check `--report` and `--junit` before anything connects, and exit 2 with a one-line message naming the flag when:
 
 * the directory of the path does not exist or does not accept a new file, or the path is a directory;
 * `--report` and `--junit` name the same file;
-* a path is one of the scenario files being run (it would be overwritten).
+* a path is one of the scenario files being run, the recording being replayed or the `--record` file (it would be overwritten).
 
 Each file is written to a temporary file in the same directory and renamed over the target, so a reader never sees a half-written report. An existing file keeps its permissions. A write that fails after the run (a full disk) still exits 1 with `cannot write the report`.
 
@@ -214,7 +237,7 @@ For every setting: command-line flag, then environment variable, then the select
 * The key of a setting is the long flag name with `-` replaced by `_`: `--tls-ca` is `tls_ca`, `--reconnect-max-ms` is `reconnect_max_ms`. The key keeps its table even when the table name repeats a prefix (`[tls]` holds `tls_ca`). Values have the type of the flag: text, integer, boolean (`true` or `false`), or an array of text for `rule`. Text values are not trimmed or parsed any differently from the same flag; a value that the flag would refuse (out of range, empty, wrong form) is refused with the same message.
 * Unknown tables and unknown keys are errors, never ignored. A key in the wrong table is an unknown key.
 * Settings that exist for one OCPP version only belong to a version table below the section, such as `[station.v16]`. No setting needs one today; the table name is reserved and holds no keys yet.
-* Not file keys: `--config`, `--profile`, `--print-config`, `--licenses` and the arguments of `run`, `suite`, `check`, `state` and `scenarios` (`--scenario`, `--report`, `--junit`, `--var`, `--yes`, ...). They describe one invocation, not a station.
+* Not file keys: `--config`, `--profile`, `--print-config`, `--licenses`, `--record`, `--record-overwrite` and the arguments of `run`, `replay`, `suite`, `check`, `state` and `scenarios` (`--scenario`, `--report`, `--junit`, `--var`, `--yes`, ...). They describe one invocation, not a station.
 * Relative paths in the file (`tls_ca`, `tls_cert`, `tls_key`, `state_dir`, `log_file`) resolve against the directory of the configuration file, not against the working directory. Paths given by flag or variable keep resolving against the working directory.
 
 | Table | Keys |
@@ -571,6 +594,64 @@ diagnostic instead of growing an unbounded queue. Shutdown cancels scheduled cal
 closing the station connections. Command summaries contain the id, trigger, count and status,
 without request payloads or answers.
 
+## kirby-csms ctl
+
+`kirby-csms ctl [OPTIONS] <COMMAND>` is a command-line client of the [HTTP control API](api.md#command-line-client) of a running `kirby-csms`. It does not start a server, reads none of the server flags and no configuration file, and must be the first argument (`kirby-csms --json ctl ...` is a usage error). Examples and the route behind each command: [api.md](api.md#command-line-client).
+
+### ctl options
+
+The options apply to every `ctl` command and may stand before or after it.
+
+| Flag | Env | Default | Meaning |
+| --- | --- | --- | --- |
+| `--url <URL>` | `KIRBY_CSMS_API_URL` | `http://127.0.0.1:9100` | Base URL of the API, `http://` or `https://`. Credentials, a query and a fragment are refused; a path prefix (a reverse proxy) is kept |
+| `--token-file <FILE>` | `KIRBY_CSMS_API_TOKEN_FILE` | none | File holding the bearer token (trailing line end dropped, must not be empty, at most 64 KiB; a warning on unix when group/world readable) |
+| | `KIRBY_CSMS_API_TOKEN` | none | The bearer token itself. There is no token flag, since flag values are visible in `ps`. The variable and `--token-file` together are a usage error. A token is visible ASCII without spaces. With a token on a plain `http://` URL to a non-loopback host a warning says that it travels in clear text. `KIRBY_CSMS_API_TOKEN` and `KIRBY_CSMS_API_TOKEN_FILE` are also the variables the server reads for `--api-token` and `--api-token-file`; a shell that exports them and starts `kirby-csms` without `--api-listen` gets the server's usage error (exit 2), so start the server with `--api-listen` or unset them first |
+| `--ca-file <FILE>` | `KIRBY_CSMS_API_CA_FILE` | system roots | PEM file with the CA certificate(s) that sign the API certificate; replaces the system roots. Ignored for `http://` |
+| `--client-cert <FILE>` | `KIRBY_CSMS_API_CLIENT_CERT` | none | Client certificate chain (PEM) for an API started with `--api-tls-client-ca`; needs `--client-key` |
+| `--client-key <FILE>` | `KIRBY_CSMS_API_CLIENT_KEY` | none | Private key (PEM) of the client certificate; needs `--client-cert` |
+| `--timeout <SECONDS>` | `KIRBY_CSMS_API_TIMEOUT` | `60` | How long a request may take, connect included, 1 to 86400. For `call` and `bulk` the limit is at least `--timeout-ms` plus 10 s. For `events` it covers the connect and the answer head only |
+| `--pretty` | | off | Indent the JSON output (always on when stdout is a terminal) |
+| `-h, --help` | | | |
+
+### ctl commands
+
+| Command | Flags | Route |
+| --- | --- | --- |
+| `health` | | `GET /v1/health` |
+| `index` | | `GET /v1` |
+| `stations` | | `GET /v1/stations` |
+| `station <ID>` | | `GET /v1/stations/{id}` |
+| `forget <ID>` | | `DELETE /v1/stations/{id}` |
+| `call <ID> <ACTION>` | `--payload <JSON>` or `--payload-file <FILE>` (`-` is stdin); `--timeout-ms <MS>` (1 to 86400000) | `POST /v1/stations/{id}/calls` |
+| `bulk <PATTERN> <ACTION>` | `--payload`, `--payload-file`, `--timeout-ms` as for `call`; `--only-protocol <NAME>` | `POST /v1/calls` |
+| `history <ID>` | `--limit <COUNT>`, `--since <CURSOR>`, `--action <ACTION>`, `--kind <call\|result\|error>`, `--direction <in\|out>` | `GET /v1/stations/{id}/history` |
+| `transactions` | `--station <ID>`, `--state <active\|stopped>`, `--since <TIME>` (RFC 3339), `--limit <COUNT>` (0 to 10000) | `GET /v1/transactions` |
+| `rules list` | `--station <ID>` | `GET /v1/rules`, `GET /v1/stations/{id}/rules` |
+| `rules show <ACTION>` | `--station <ID>` (required) | `GET /v1/stations/{id}/rules/{action}` |
+| `rules set <ACTION>` | `--payload` or `--payload-file` (required); `--station <ID>`; `--only-protocol <NAME>` | `PUT /v1/rules/{action}`, `PUT /v1/stations/{id}/rules/{action}` |
+| `rules clear <ACTION>` | `--station <ID>`; `--only-protocol <NAME>` (global rules only, excludes `--station`) | `DELETE /v1/rules/{action}`, `DELETE /v1/stations/{id}/rules/{action}` |
+| `faults list` | | `GET /v1/faults` |
+| `faults add <ACTION>` | `--kind <call_error\|silence\|close\|invalid_payload>` (required); `--times <COUNT>` (1 to 1000000); `--station <ID>`; `--only-protocol <NAME>`; `--payload` or `--payload-file` (required for `invalid_payload`) | `POST /v1/faults` |
+| `faults remove <ID>` | | `DELETE /v1/faults/{id}` |
+| `faults clear` | | `DELETE /v1/faults` |
+| `metrics` | | `GET /v1/metrics` |
+| `events` | `--station <ID>`, `--last-event-id <ID>`, `--count <COUNT>`, `--once`, `--with-id` | `GET /v1/events` |
+| `export history <ID>` | the filters of `history`; `--as <ndjson\|csv>` (default `ndjson`); `--output <FILE>` | `GET /v1/stations/{id}/history?format=` |
+| `export transactions` | the filters of `transactions`; `--as <csv\|json>` (default `csv`); `--output <FILE>` | `GET /v1/transactions?format=` |
+
+- A body field is sent only when its flag is given, so the server's defaults apply otherwise. `--payload` is visible in `ps`; pass a payload that holds a secret through `--payload-file`.
+- `--only-protocol` limits a bulk call, a rule or a fault to stations that negotiated a subprotocol. It sets the `protocol` field of the API. The reserved flag names of the emulator are not used by `ctl`.
+- `events` prints one JSON line per event: the event object as the stream sends it, or with `--with-id` the line `{"id":"...","event":"...","data":{...}}`. `--last-event-id` resumes after an id. When the stream ends or breaks, `events` reconnects after one second with the id of the last event it printed, so no event is missed or repeated; a `resync` event (an id the server no longer holds, or a restarted server) is printed like any other. It gives up with exit code 3 when the first connection fails or five reconnects in a row fail, and ends at once with `--once`. `--count N` stops with exit code 0 after N events. A stream with no data for 60 s counts as broken.
+- `export` writes the answer unchanged. With `--output` the file is created with mode `0600` on unix and replaced if it exists, and it is written only after the whole answer has arrived: a failed request leaves no file. A CSV transaction list that the `--limit` cut prints a warning on stderr.
+- Answers are limited to 64 MiB; a larger one is a transport error (exit code 3).
+
+### ctl output
+
+- JSON is printed as the API sent it, on one line, or indented with `--pretty` and on a terminal. Characters that could drive a terminal (controls, bidirectional and invisible characters) are written as `\uXXXX` escapes, so the output stays valid JSON.
+- CSV, NDJSON and metrics go to a pipe or file unchanged; on a terminal the same characters are written as `\u{XXXX}`.
+- An error answer of the API goes to stderr: its JSON body on one line, or `error: the API answered HTTP 400` when the body is not JSON. Messages never contain the token.
+
 ## Exit codes
 
 This section is the single reference for exit codes; other pages link here. Code `2` always means a usage or configuration error found before the run starts (bad flag, bad value, invalid scenario or script file). Code `130` is SIGINT; SIGTERM ends a run with `1`.
@@ -583,7 +664,9 @@ No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no termi
 | --- | --- |
 | 0 | Normal shutdown (quit in the UI, SIGINT or SIGTERM in headless mode). `--print-config` (either format), `--licenses`, `version`, `completions` and `scenarios list|show` also exit 0 |
 | 1 | Headless only: the connection was lost for good (`--no-reconnect`, or `--reconnect-max-attempts` used up). The process prints `reconnect stopped (...)` with the last connect error and a hint. A fleet exits 1 when every station gave up. `run` and `suite` also exit 1 with `connection lost: ...` when that happens while a scenario is running. The UI keeps running instead |
-| 2 | Usage or configuration error, including a configuration file that cannot be read or breaks a rule (the message names the file and the key), an unknown `--profile` and `--profile` without `--config` |
+| 2 | Usage or configuration error, including a configuration file that cannot be read or breaks a rule (the message names the file and the key), an unknown `--profile` and `--profile` without `--config`, and a `--record` file that exists (without `--record-overwrite`), cannot be created or is another file of the command |
+
+With `--record`, exit code 1 also means the recording is incomplete (`error: the recording ... is incomplete: <reason>`); this replaces 0 and 130 as well. The same holds for `run` and `replay`.
 
 ### kirby-ocpp run
 
@@ -595,6 +678,15 @@ No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no termi
 | 1 | A step failed, the run timed out (`--timeout`), the station could not connect or boot, the connection was lost for good, or a report file could not be written (fleet: any station failed) |
 | 2 | Usage or configuration error, including an invalid scenario file or an unknown `--var` |
 | 130 | SIGINT. No JUnit file is written (fleet: no report files). SIGTERM exits 1 and still writes the single-station JUnit file |
+
+### kirby-ocpp replay
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Every replayed CALL passed |
+| 1 | A CALL failed (a timeout, a CALLERROR where the recording had a CALLRESULT, or the other way round), the run timed out (`--timeout`), the station could not connect or boot, the connection was lost for good, a report file could not be written, or the `--record` file is incomplete |
+| 2 | Usage error: the recording cannot be read, is not an emulator recording of OCPP 1.6, has a `schema` newer than this build reads, holds no CALL that can be replayed, or is the `--record` file; a bad `--speed`; `--count` above 1 |
+| 130 | SIGINT. No JUnit file is written |
 
 ### kirby-ocpp suite
 
@@ -628,6 +720,13 @@ No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no termi
 | 0 | Every file is valid |
 | 2 | At least one file is not |
 
+### kirby-ocpp scenarios from-recording
+
+| Code | Meaning |
+| --- | --- |
+| 0 | The scenario was written (warnings do not change the code) |
+| 2 | The recording cannot be read, is not an emulator recording of OCPP 1.6, has a newer `schema`, holds no command that maps to a step, or is the `--output` file; the `--output` file exists without `--overwrite` or cannot be written |
+
 ### kirby-csms, plain server
 
 | Code | Meaning |
@@ -646,6 +745,16 @@ No subcommand: the terminal UI, or headless mode (`--no-tui`, `--json`, no termi
 | 1 | A step failed or timed out (`--timeout`), the server could not start, or a report file could not be written. On SIGTERM the `--junit` file still gets one failed suite (`interrupted`) |
 | 2 | Usage, configuration or script error |
 | 130 | SIGINT, no report |
+
+### kirby-csms ctl (client)
+
+| Code | Meaning |
+| --- | --- |
+| 0 | The request succeeded. For `call` and `bulk`: every station answered the CALL with a CALLRESULT (the status inside the payload, such as `Rejected`, is not judged). `events` stopped at `--count`, at `--once`, or when the reader of its output went away |
+| 1 | The API answered with an error status (`401`, `404`, `409`, `429`, ...). The error body is on stderr, nothing is printed to stdout |
+| 2 | Usage error: an unknown command, a bad flag value, a bad or unreadable payload, token or TLS file, credentials in `--url`, both token sources set |
+| 3 | The API could not be reached or its answer is unusable: connection refused, TLS failure, no answer within `--timeout`, an answer that is not HTTP or not JSON, an answer over 64 MiB, a failed write of `--output` or of stdout, and `events` giving up |
+| 4 | `call`: the station answered with a CALLERROR or did not answer in time (`"ok":false`). `bulk`: at least one result has `"ok":false` (a CALLERROR, a timeout or a station that is not connected). The answer is printed to stdout as usual |
 
 ## Related pages
 

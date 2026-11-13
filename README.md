@@ -110,6 +110,11 @@ kirby-ocpp --url ws://localhost:9000/ocpp suite --all-builtins --junit junit.xml
 # Fleet of 50 stations
 kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n:03}' --count 50 --no-tui
 
+# Record a session, then repeat it as a scenario or replay its CALLs
+kirby-ocpp --url ws://localhost:9000/ocpp --record session.jsonl
+kirby-ocpp scenarios from-recording session.jsonl -o session.toml
+kirby-ocpp --url ws://localhost:9000/ocpp replay session.jsonl --no-delay
+
 # Scripted CSMS test
 kirby-csms --script suite.toml --junit junit.xml --timeout 120
 ```

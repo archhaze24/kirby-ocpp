@@ -125,6 +125,28 @@ kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-1 --no-tui run --scenario refu
 
 The scenario waits for a `Reset` from the central system, answers it `Rejected` and passes; the station does not restart. [reply](scenarios.md#reply) has `error`, `times` and `delay_ms`. The [conformance family](scenarios.md#conformance-family) uses the same step with a script that sends the commands.
 
+## Record a session, turn it into a scenario, replay it
+
+Goal: drive a station by hand once, then repeat the session against another CSMS, as a scenario or as the same CALLs.
+
+```bash
+# 1. Drive the station in the terminal UI and quit with q; --record keeps every frame and command.
+#    (Here `run` stands in for the hands: the recorded commands are the scenario's steps.)
+kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-001 --record session.jsonl run --scenario charge-session
+
+# 2. The session as a scenario, then check and run it elsewhere.
+kirby-ocpp scenarios from-recording session.jsonl -o session.toml
+kirby-ocpp scenarios validate session.toml
+kirby-ocpp --url ws://127.0.0.1:9100/ocpp --id CP-001 run --scenario session.toml
+
+# 3. Or send the recorded CALLs themselves again, without the pauses.
+kirby-ocpp --url ws://127.0.0.1:9100/ocpp --id CP-001 replay session.jsonl --no-delay --report replay.json
+```
+
+Expected: step 1 prints `note: recorded 18 frames and 5 commands to session.jsonl` (the numbers vary), step 2 writes `session.toml` with `plug`, `authorize`, `start_session` and `meter` steps and passes, step 3 prints one `PASS` line per CALL and `PASSED`, exit 0. The recording never holds an `AuthorizationKey` or a URL password. `from-recording` lists what it could not convert as warnings and comments; the replay maps the transaction id of the new StartTransaction answer into the later StopTransaction and MeterValues, so it works against a CSMS that hands out other ids.
+
+Reference: [Recording and replay](emulator.md#recording-and-replay), [`replay` and `from-recording` flags](configuration.md#kirby-ocpp-subcommands).
+
 ## Lost connection and reconnect
 
 Goal: check what your CSMS does when a station drops, and that the station comes back.

@@ -2,7 +2,7 @@
 
 `kirby-ocpp` is a terminal OCPP 1.6J charge point (station). It connects to a central system (CSMS), answers its commands, and lets you drive the station by hand (terminal UI), log it (headless) or script it ([scenarios](scenarios.md)). The Security Whitepaper messages are supported too.
 
-Contents: [Quick start](#quick-start) · [Modes](#modes) · [Terminal UI](#terminal-ui) · [Headless mode and exit codes](#headless-mode-and-exit-codes) · [Connection errors](#connection-errors) · [Output levels and color](#output-levels-and-color) · [Version, completions and validation](#version-completions-and-validation) · [Suite mode](#suite-mode) · [Fleet mode](#fleet-mode) · [Response rules](#response-rules) · [State persistence](#state-persistence) · [TLS](#tls) · [Related pages](#related-pages)
+Contents: [Quick start](#quick-start) · [Modes](#modes) · [Terminal UI](#terminal-ui) · [Headless mode and exit codes](#headless-mode-and-exit-codes) · [Connection errors](#connection-errors) · [Output levels and color](#output-levels-and-color) · [Version, completions and validation](#version-completions-and-validation) · [Suite mode](#suite-mode) · [Recording and replay](#recording-and-replay) · [Fleet mode](#fleet-mode) · [Response rules](#response-rules) · [State persistence](#state-persistence) · [TLS](#tls) · [Related pages](#related-pages)
 
 ## Quick start
 
@@ -24,7 +24,9 @@ The station connects at startup in every mode (`--print-config`, `version`, `com
 | no subcommand, `--no-tui`, `--json`, or stdout is not a terminal | [Headless](#headless-mode-and-exit-codes): connect, print events until SIGINT/SIGTERM |
 | `run --scenario NAME_OR_FILE` | Connect, run one [scenario](scenarios.md), print the report, exit with its verdict. Ephemeral: no state file unless `--persist` |
 | `suite SOURCE...` | Run several scenarios, each on a fresh station, see [Suite mode](#suite-mode) |
-| `scenarios list` / `show NAME` / `validate FILE\|DIR\|NAME...` | Built-in scenarios and scenario checks, no network |
+| `replay FILE` | Send the CALLs of a recorded session again, see [Recording and replay](#recording-and-replay) |
+| `--record FILE` | Write the session to a recording, with the UI, headless, `run` or `replay` |
+| `scenarios list` / `show NAME` / `validate FILE\|DIR\|NAME...` / `from-recording FILE` | Built-in scenarios, scenario checks and the conversion of a recording into a scenario, no network |
 | `version`, `completions SHELL` | Build details and shell completion scripts, no network |
 | `--count N` (above 1) | [Fleet](#fleet-mode) of N stations, with any of the above |
 
@@ -229,6 +231,63 @@ suite: 1/3 scenarios passed, FAILED: my-auth, SKIPPED: last-one
 ```
 
 `--fail-fast` skips the rest after the first failure. `--count` above 1 is a usage error (exit 2). Options, JSON and JUnit shapes: [scenarios.md](scenarios.md#suite-runs); exit codes: [configuration.md](configuration.md#kirby-ocpp-suite).
+
+## Recording and replay
+
+`--record FILE` writes the session to a JSON-lines recording, whichever way the station is driven: the terminal UI, headless mode, `run` or `replay`. It records one station, so `suite`, `check` and a fleet refuse it (exit 2). The file is created `0600` on unix; an existing file is never replaced unless `--record-overwrite` is given. Secrets never reach the file: `AuthorizationKey` values and URL passwords are replaced by `***`, with `--show-secrets` too. The flags are listed in [configuration.md](configuration.md#output); they are not configuration file keys.
+
+```bash
+kirby-ocpp --url ws://localhost:9000/ocpp --id CP-001 --record session.jsonl      # drive the station, quit
+kirby-ocpp scenarios from-recording session.jsonl -o session.toml                  # the session as a scenario
+kirby-ocpp --url ws://staging:9000/ocpp run --scenario session.toml                # run it elsewhere
+kirby-ocpp --url ws://staging:9000/ocpp replay session.jsonl --no-delay           # or send the same CALLs again
+```
+
+### The recording file
+
+One JSON object per line, each with a `type`:
+
+| `type` | Keys | Meaning |
+| --- | --- | --- |
+| `header` | `schema` (1), `ocpp_version`, `tool_version`, `role` (`emulator`; the CSMS writes `csms`), `station`, `started_at` | First line |
+| `frame` | `seq`, `elapsed_ms`, `session`, `direction`, `msg_id`, `action`, `frame` | A frame on the wire. `direction` is `out` (the station sent it) or `in`; `frame` is the OCPP-J array (`[2, id, action, payload]`, `[3, id, payload]`, `[4, id, code, description, details]`) as JSON. `action` is also set on a CALLRESULT or CALLERROR, taken from the CALL it answers. A frame above 64 KiB has `"frame": null` and `truncated_bytes`; text that is not an OCPP-J frame has `"frame": null` and `invalid_bytes` and is not stored |
+| `command` | `seq`, `elapsed_ms`, `session`, `command` | A command given to the station by a key press, a scenario step or `replay`: the station's own command object (`{"command": "plug_in", "connector": 1}`). Emulator recordings only |
+| `end` | `frames`, `commands`, `elapsed_ms`, `incomplete` | Last line of a finished file; `incomplete` (text) is present only when the recorder lost data. A file without an `end` line was cut off |
+
+`seq` numbers frames and commands in one sequence, `elapsed_ms` is monotonic time since the recording started, and `session` counts the connections of the run (0 before the first one). Readers ignore unknown keys and unknown line types, new keys are only ever added, and a `schema` above 1 is refused. A last line that was cut off is ignored and reported; a bad line anywhere else is an error that names its line number.
+
+The recorder is not the lossy event log: frames go through their own bounded queue to a writer thread, and when the queue is full, a write fails or the file reaches 64 MiB the recording stops there, says why in its `end` line and on stderr, and the command exits 1. A reader refuses lines above 256 KiB and files above what a recorder writes.
+
+### Converting a recording into a scenario
+
+`kirby-ocpp scenarios from-recording FILE [-o PATH]` turns the commands of the session into scenario steps (see [Scenarios](scenarios.md)); the frames are used only to see how the CSMS answered an Authorize or a StartTransaction, so a rejection becomes `expect = { status = "..." }`.
+
+| Command in the recording | Step |
+| --- | --- |
+| `connect` (not the first one, which the run does itself), `reconnect` | `connect`/`reconnect` followed by `wait_for` registration `Accepted` |
+| `disconnect` | `disconnect` followed by `wait_for` `disconnected` |
+| `boot`, `heartbeat`, `request_certificate` | the same name |
+| `plug_in`, `unplug`, `clear_fault` | `plug`, `unplug`, `clear_fault` |
+| `set_connector_status`, `fault` | `status`, `fault` |
+| `authorize` | `authorize` |
+| `start_transaction`, `stop_transaction` | `start_session`, `stop_session` (aliases of `start_tx` and `stop_tx`) |
+| `meter_values` | `meter` |
+| `data_transfer`, `send_security_event`, `send_raw` | `data_transfer`, `security_event`, `send_raw` |
+| `set_response_rule`, `clear_response_rules` | `set_rule`, `clear_rules` |
+
+Scenario assertions (`expect_call`, `wait_for` and the like) are not commands and do not come back, so converting the recording of a `run` gives its actions without its checks. Limits, all reported as warnings and as comments in the file, never guessed: other commands (local list and charging profile edits, status cycling, outcomes of simulated uploads, scripted replies, ...) have no step and are skipped; the vendor error code of a fault and the measurands of a meter reading are dropped; the CSMS commands of the session (RemoteStartTransaction, Reset, ...) cannot be made to happen by a scenario and are only listed; pauses between steps are not kept; a recording with no command (frames only) converts to nothing. A `${` in recorded text is written escaped, so it stays literal. Only emulator recordings of OCPP 1.6 convert.
+
+### Replaying a recording
+
+`kirby-ocpp replay FILE` sends the CALLs the emulator originated in the recording to the CSMS again and reports like `run` does, with exit code 1 when a CALL fails. It connects with the configured station (`--id` and the other station flags, not the recorded identity) and waits for the BootNotification before the first CALL, which is why the recorded BootNotification is not sent again.
+
+* The CALLs are sent in recorded order with new message ids, with the recorded pauses between them (`--speed FACTOR` scales them, `--no-delay` removes them). Each CALL is a `send_raw` step without schema validation, named `<Action> <recorded message id>`.
+* The transaction id the CSMS gave a StartTransaction in the recording is replaced, in the later StopTransaction and MeterValues, by the id of the new StartTransaction answer (also when the CSMS reuses an id). An id that no StartTransaction of the recording gave is sent as recorded, with a warning.
+* A CALL is skipped with a warning when the recording has no answer to it, when it was too large to be recorded, or when it holds a redacted value: a masked `AuthorizationKey` (or URL password) is never sent as a credential.
+* A CALL the CSMS answered with a CALLERROR in the recording must get a CALLERROR again; any other CALL needs a CALLRESULT (the status inside is not compared).
+* The replay is ephemeral like `run`: no state file is read or written.
+
+Only emulator recordings of OCPP 1.6 replay. The recording of a CSMS (`role` `csms`) is refused.
 
 ## Fleet mode
 
