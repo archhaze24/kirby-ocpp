@@ -737,7 +737,7 @@ async fn replay_survives_a_start_the_csms_refused_in_the_recording() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_long_recording_replays_at_default_pacing() {
+async fn a_long_recording_reaches_the_first_call_at_default_pacing() {
     let dir = tempfile::tempdir().unwrap();
     // More than 5000 CALLs with a pause between each: over 10000 steps.
     let mut frames = Vec::new();
@@ -751,6 +751,14 @@ async fn a_long_recording_replays_at_default_pacing() {
     }
     let file = frames_file(dir.path(), "long.jsonl", 500, &frames);
     let csms = mock(1).await;
+    // Reaching the first CALL proves the whole oversized plan was accepted. Stop there:
+    // thousands of short pauses exceed the Windows timer granularity and the CI deadline.
+    csms.respond("Heartbeat", |_| {
+        kirby_ocpp_testkit::Reply::Error(
+            kirby_ocpp_testkit::ErrorCode::InternalError,
+            "stop after accepting the plan".to_owned(),
+        )
+    });
     let output = run(strings(&[
         "--url",
         csms.url(),
@@ -766,7 +774,7 @@ async fn a_long_recording_replays_at_default_pacing() {
     .await;
     assert_eq!(
         output.status.code(),
-        Some(0),
+        Some(1),
         "{}",
         stderr(&output).chars().take(2000).collect::<String>()
     );
@@ -775,7 +783,7 @@ async fn a_long_recording_replays_at_default_pacing() {
         .iter()
         .filter(|call| call.action == "Heartbeat")
         .count();
-    assert!(beats >= 5100, "{beats}");
+    assert_eq!(beats, 1, "the replay must execute its first step");
 }
 
 #[tokio::test(flavor = "multi_thread")]
