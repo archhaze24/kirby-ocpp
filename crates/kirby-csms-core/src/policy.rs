@@ -2,6 +2,7 @@
 
 /// How the central system answers the WebSocket subprotocol negotiation.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SubprotocolPolicy {
     /// Select `name` if the client offered it; refuse the upgrade (HTTP 400) otherwise.
     /// The default is `Require("ocpp1.6")`.

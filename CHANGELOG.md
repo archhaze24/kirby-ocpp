@@ -47,6 +47,8 @@ tag as the GitHub release notes.
 
 ### Changed
 
+- Library API: `Frame`, `CsmsEvent`, `DisconnectReason`, `SubprotocolPolicy`, `ActionGroup` and `FieldType` are `#[non_exhaustive]`, so later protocol versions can add variants without a breaking release. A `match` on them from another crate needs a wildcard arm.
+- `error:CODE` in response rules and faults, and `error.code` in scenario `reply` steps, also accept `FormatViolation`, `OccurrenceConstraintViolation`, `MessageTypeNotSupported` and `RpcFrameworkError`; they are sent as spelled (`ErrorCode::from_name`, `ErrorCode::ACCEPTED_EXTRA`).
 - Default names use the project name: the BootNotification model is `kirby-ocpp` (was `KIRBY`), the certificate request organization without `CpoName` is `kirby-ocpp` (was `Kirby`), the `data-transfer` scenario vendor is `kirby-ocpp`, the conformance handshake vendor is `kirby-ocpp.conformance` (was `kirby.conformance`), the built-in scenario id tag is `KIRBY-OCPP-TAG` (was `KIRBY-TAG`), the Docker image user is `kirby-ocpp` and the `build.mjs` marker file is `.kirby-ocpp-npm-dist`. Scripts that match the old vendor or model need the new values.
 - A non-loopback `--api-listen` now needs `--api-tls-cert` and `--api-tls-key` besides a token: a token over plain HTTP on a non-loopback address is refused at startup (exit 2). Loopback is unchanged.
 - `GET /v1/rules` gains `protocol_rules` (`[{"action","protocol"}]`, `[]` when none) so global rules limited to one protocol are visible; `PUT` and `DELETE /v1/rules/{action}` accept `?protocol=` like the per-station routes. Without it both behave as before. The rule caps are documented as covering per-station rules and global rules with a protocol.

@@ -334,7 +334,7 @@ Makes the station misbehave on purpose when the CSMS sends a command. Form: `ACT
 | --- | --- |
 | `reject` | The action's own rejection status, otherwise CALLERROR `NotSupported` (for actions without a rejection status such as `GetConfiguration`) |
 | `delay:MS` | Handle normally, reply `MS` ms later (0 to 3600000) |
-| `error:CODE[:TEXT]` | CALLERROR with an OCPP-J error code, optional description text |
+| `error:CODE[:TEXT]` | CALLERROR with an OCPP-J error code (a 1.6 code, `FormatViolation`, `OccurrenceConstraintViolation`, `MessageTypeNotSupported` or `RpcFrameworkError`; case-insensitive), optional description text |
 | `drop` | Close the connection without replying; the reconnect lifecycle follows (off with `--no-reconnect`) |
 | `ignore` | Never reply, so the CSMS call timeout fires |
 

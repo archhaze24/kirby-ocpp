@@ -1761,6 +1761,8 @@ where
                 // Anything else answers a CALL that already timed out, or was never sent.
                 None
             }
+            // A frame kind added later is not a reply either.
+            _ => None,
         }
     }
 
@@ -1827,6 +1829,7 @@ fn is_truncated_marker(frame: &Frame) -> bool {
     let payload = match frame {
         Frame::Call { payload, .. } | Frame::CallResult { payload, .. } => payload,
         Frame::CallError { details, .. } => details,
+        _ => return false,
     };
     payload["truncated"] == true
 }
@@ -1849,6 +1852,7 @@ fn truncated_frame(frame: &Frame, original_bytes: usize) -> Frame {
             description: truncate_chars(description, 128),
             details: marker,
         },
+        other => other.clone(),
     }
 }
 

@@ -230,6 +230,7 @@ impl Shared {
                 self.resolve_pending(connection, frame);
                 None
             }
+            Ok(_) => None,
             // A malformed CALL with a readable id gets a FormationViolation; anything else is ignored.
             Err(error) => error
                 .reply()

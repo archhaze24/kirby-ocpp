@@ -249,7 +249,7 @@ Keys:
 | --- | --- |
 | `call` | The action of the CSMS command to answer: one of the 26 commands the station handles (the list of [response rules](emulator.md#response-rules)), case-insensitive. Required. |
 | `result` | The CALLRESULT payload, a table sent as given. It is checked against the OCPP response schema of `call` when the file loads (unless it holds a `${...}` placeholder, then when the step runs); the station never sends an answer that breaks the schema. |
-| `error` | A CALLERROR: `code` (one of the ten OCPP 1.6 error codes, case-insensitive; required), `description` (default empty) and `details` (a table, default `{}`). |
+| `error` | A CALLERROR: `code` (one of the ten OCPP 1.6 error codes, or `FormatViolation`, `OccurrenceConstraintViolation`, `MessageTypeNotSupported` or `RpcFrameworkError`; case-insensitive; required), `description` (default empty) and `details` (a table, default `{}`). |
 | `times` | How many CALLs the reply answers, 1 to 1000 (default 1). |
 | `delay_ms` | Milliseconds to hold each answer back, 0 to 3600000 (default 0). The station keeps working meanwhile. |
 | `must_fire` | When `true`, the `reply` step is reported as failed if the reply was not used up (all `times` answered) by the end of the scenario. Default `false`. |

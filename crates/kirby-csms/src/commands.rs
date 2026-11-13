@@ -380,7 +380,7 @@ pub async fn call(
             }),
             Outcome::CallError,
         ),
-        Ok(Frame::Call { .. }) => (
+        Ok(_) => (
             failure(Some(station), Some(action), "unexpected CALL as an answer"),
             Outcome::Failed(CsmsError::InvalidResponse {
                 station: station.to_owned(),

@@ -23,6 +23,7 @@ pub struct FrameEntry {
 
 /// Why a station's connection ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DisconnectReason {
     /// The peer closed the socket, or it failed.
     Closed,
@@ -42,6 +43,7 @@ pub enum DisconnectReason {
 /// subscriber that is too slow gets `RecvError::Lagged(n)` and misses `n` events; resync
 /// with [`crate::CsmsHandle::stations`] and [`crate::CsmsHandle::history`] if that matters.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum CsmsEvent {
     /// A station connected (also emitted when it replaces an older connection).
     Connected { station: String },

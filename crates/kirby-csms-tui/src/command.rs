@@ -387,17 +387,16 @@ pub async fn run(handle: &CsmsHandle, station: &str, command: &Command) -> CmdOu
         Command::SendLocalList(req) => {
             finish(handle.send_local_list(station, (**req).clone()).await)
         }
-        Command::Raw { action, payload } => match handle
-            .call(station, action, payload.clone())
-            .await
-        {
-            Ok(Frame::CallResult { payload, .. }) => Ok(payload),
-            Ok(Frame::CallError {
-                code, description, ..
-            }) => Err(CmdError(format!("CALLERROR {code}: {description}"))),
-            Ok(Frame::Call { .. }) => Err(CmdError("the station answered with a CALL".to_owned())),
-            Err(e) => Err(describe(&e)),
-        },
+        Command::Raw { action, payload } => {
+            match handle.call(station, action, payload.clone()).await {
+                Ok(Frame::CallResult { payload, .. }) => Ok(payload),
+                Ok(Frame::CallError {
+                    code, description, ..
+                }) => Err(CmdError(format!("CALLERROR {code}: {description}"))),
+                Ok(_) => Err(CmdError("the station answered with a CALL".to_owned())),
+                Err(e) => Err(describe(&e)),
+            }
+        }
     };
     CmdOutcome { result }
 }

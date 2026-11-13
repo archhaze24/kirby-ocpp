@@ -348,7 +348,7 @@ Response rules make the station misbehave on purpose, to test how a CSMS reacts.
 | --- | --- |
 | `reject` | The action's own rejection: `Rejected`; `NotSupported` for `SendLocalList` and `UnlockConnector`; `Failed` for `DeleteCertificate`; `NotFound` for `GetInstalledCertificateIds`. `GetConfiguration`, `GetLocalListVersion`, `ClearChargingProfile`, `GetDiagnostics` and `UpdateFirmware` have no rejection status, so they get CALLERROR `NotSupported` |
 | `delay:MS` | The command is handled normally; only the reply is sent `MS` ms later (0 to 3600000). The station keeps working meanwhile |
-| `error:CODE[:TEXT]` | CALLERROR with an OCPP-J error code (for example `NotImplemented`, `NotSupported`, `InternalError`, `ProtocolError`, `SecurityError`, `FormationViolation`, `PropertyConstraintViolation`, `OccurenceConstraintViolation`, `TypeConstraintViolation`, `GenericError`) |
+| `error:CODE[:TEXT]` | CALLERROR with an OCPP-J error code (for example `NotImplemented`, `NotSupported`, `InternalError`, `ProtocolError`, `SecurityError`, `FormationViolation`, `PropertyConstraintViolation`, `OccurenceConstraintViolation`, `TypeConstraintViolation`, `GenericError`), case-insensitive. `FormatViolation`, `OccurrenceConstraintViolation`, `MessageTypeNotSupported` and `RpcFrameworkError` (codes of later OCPP-J versions) are also accepted and sent as spelled |
 | `drop` | Close the WebSocket without replying; the normal reconnect lifecycle follows (disabled by `--no-reconnect`) |
 | `ignore` | Never reply, so the CSMS call timeout fires |
 

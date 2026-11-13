@@ -803,6 +803,7 @@ fn reason_text(reason: DisconnectReason) -> &'static str {
         DisconnectReason::Injected => "closed by an injected fault",
         DisconnectReason::Forgotten => "forgotten",
         DisconnectReason::PingTimeout => "ping timeout",
+        _ => "disconnected",
     }
 }
 
@@ -1010,6 +1011,8 @@ fn on_event(app: &mut App, event: CsmsEvent, fx: &mut Vec<Effect>) {
                 );
             }
         }
+        // An event kind added to the engine later has no row yet.
+        _ => {}
     }
 }
 

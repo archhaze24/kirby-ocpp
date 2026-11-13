@@ -368,6 +368,8 @@ impl Renderer {
                     ),
                 );
             }
+            // An event kind added to the engine later is not printed yet.
+            _ => {}
         }
     }
 
@@ -422,6 +424,7 @@ fn reason_name(reason: DisconnectReason) -> &'static str {
         DisconnectReason::Injected => "injected",
         DisconnectReason::Forgotten => "forgotten",
         DisconnectReason::PingTimeout => "ping_timeout",
+        _ => "unknown",
     }
 }
 
@@ -445,6 +448,7 @@ pub fn frame_json(frame: &Frame) -> Value {
             "kind": "error", "id": id.clone(), "code": code.as_str(),
             "description": description, "details": details
         }),
+        other => json!({"kind": "unknown", "id": other.id()}),
     }
 }
 

@@ -1297,7 +1297,7 @@ fn check_answer(
                 ))
             }
         }
-        Ok(Frame::Call { .. }) => Err(format!("{call}: unexpected CALL as an answer")),
+        Ok(_) => Err(format!("{call}: unexpected CALL as an answer")),
         Err(error) => Err(error.to_string()),
     }
 }

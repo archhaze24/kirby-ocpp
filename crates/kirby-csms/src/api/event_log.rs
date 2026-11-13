@@ -236,6 +236,7 @@ pub(super) fn event_station(event: &CsmsEvent) -> Option<&str> {
         | CsmsEvent::Forgotten { station }
         | CsmsEvent::StateChanged { station } => Some(station),
         CsmsEvent::AuthFailed { station, .. } => station.as_deref(),
+        _ => None,
     }
 }
 

@@ -120,7 +120,9 @@ pub enum RuleError {
     UnknownBehavior(String),
     #[error("delay must be a number of milliseconds between 0 and {MAX_DELAY_MS}")]
     BadDelay,
-    #[error("unknown error code `{0}` (expected one of the ten OCPP 1.6 CALLERROR codes)")]
+    #[error(
+        "unknown error code `{0}` (expected one of the ten OCPP 1.6 CALLERROR codes, FormatViolation, OccurrenceConstraintViolation, MessageTypeNotSupported or RpcFrameworkError)"
+    )]
     UnknownErrorCode(String),
     #[error("count must be a positive integer")]
     BadCount,
@@ -185,10 +187,7 @@ fn parse_behavior(text: &str) -> Result<Behavior, RuleError> {
                 Some((code, text)) => (code.trim(), Some(text.trim())),
                 None => (arg.trim(), None),
             };
-            let code = ErrorCode::STANDARD
-                .iter()
-                .find(|known| known.as_str().eq_ignore_ascii_case(code))
-                .cloned()
+            let code = ErrorCode::from_name(code)
                 .ok_or_else(|| RuleError::UnknownErrorCode(code.to_owned()))?;
             Ok(Behavior::Error {
                 code,
@@ -336,6 +335,16 @@ mod tests {
                 description: None
             }
         );
+        for code in ErrorCode::ACCEPTED_EXTRA {
+            let parsed = rule(&format!("Reset=error:{}:x", code.to_ascii_lowercase()));
+            assert_eq!(
+                parsed.behavior,
+                Behavior::Error {
+                    code: ErrorCode::Other(code.to_owned()),
+                    description: Some("x".into())
+                }
+            );
+        }
         assert_eq!(
             rule("Reset=error:genericerror:it is: broken*3"),
             ResponseRule {

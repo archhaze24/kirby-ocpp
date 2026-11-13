@@ -586,6 +586,7 @@ fn subprotocol_text(policy: &SubprotocolPolicy) -> String {
         SubprotocolPolicy::Select(name) => format!("select:{name}"),
         SubprotocolPolicy::Omit => "omit".to_owned(),
         SubprotocolPolicy::Reject => "reject".to_owned(),
+        _ => "custom".to_owned(),
     }
 }
 

@@ -70,6 +70,32 @@ impl ErrorCode {
         Self::GenericError,
     ];
 
+    /// Codes of later OCPP-J versions that rules, faults and scenarios may also send. They
+    /// are not part of 1.6 and travel as [`ErrorCode::Other`].
+    pub const ACCEPTED_EXTRA: [&'static str; 4] = [
+        "FormatViolation",
+        "OccurrenceConstraintViolation",
+        "MessageTypeNotSupported",
+        "RpcFrameworkError",
+    ];
+
+    /// The code a user names (case-insensitive): one of the ten 1.6 codes or one of
+    /// [`Self::ACCEPTED_EXTRA`].
+    #[must_use]
+    pub fn from_name(text: &str) -> Option<Self> {
+        let text = text.trim();
+        Self::STANDARD
+            .iter()
+            .find(|known| known.as_str().eq_ignore_ascii_case(text))
+            .cloned()
+            .or_else(|| {
+                Self::ACCEPTED_EXTRA
+                    .iter()
+                    .find(|known| known.eq_ignore_ascii_case(text))
+                    .map(|known| Self::Other((*known).to_owned()))
+            })
+    }
+
     /// The wire string.
     pub fn as_str(&self) -> &str {
         match self {
@@ -122,6 +148,7 @@ impl<'de> Deserialize<'de> for ErrorCode {
 
 /// A decoded OCPP-J frame.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Frame {
     Call {
         id: MessageId,
@@ -626,6 +653,26 @@ mod tests {
             ErrorCode::OccurenceConstraintViolation.as_str(),
             "OccurenceConstraintViolation"
         );
+    }
+
+    #[test]
+    fn names_accept_the_standard_and_the_extra_codes_case_insensitively() {
+        assert_eq!(
+            ErrorCode::from_name(" notsupported "),
+            Some(ErrorCode::NotSupported)
+        );
+        assert_eq!(
+            ErrorCode::from_name("occurenceconstraintviolation"),
+            Some(ErrorCode::OccurenceConstraintViolation)
+        );
+        for wire in ErrorCode::ACCEPTED_EXTRA {
+            let code = ErrorCode::from_name(&wire.to_ascii_uppercase()).unwrap();
+            assert_eq!(code.as_str(), wire);
+            assert!(!code.is_standard());
+            roundtrip(&Frame::call_error("1", code, "d"));
+        }
+        assert_eq!(ErrorCode::from_name("Oops"), None);
+        assert_eq!(ErrorCode::from_name(""), None);
     }
 
     #[test]

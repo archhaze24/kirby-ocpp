@@ -318,7 +318,7 @@ pub(super) async fn run(
                     sanitize(&format!("{code:?}"))
                 ));
             }
-            Ok(Frame::Call { .. }) => {
+            Ok(_) => {
                 return Err(format!(
                     "CALL {} ({name} to {station}): unexpected answer",
                     number + 1

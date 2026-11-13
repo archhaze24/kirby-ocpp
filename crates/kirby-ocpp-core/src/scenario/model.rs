@@ -71,12 +71,9 @@ pub struct ReplyError {
     pub details: Value,
 }
 
-/// The CALLERROR code spelled `text` (case-insensitive), if it is one of the standard ones.
+/// The CALLERROR code spelled `text` (case-insensitive), if it is a known one.
 pub(super) fn standard_error_code(text: &str) -> Option<crate::ocpp::frame::ErrorCode> {
-    crate::ocpp::frame::ErrorCode::STANDARD
-        .iter()
-        .find(|code| code.as_str().eq_ignore_ascii_case(text.trim()))
-        .cloned()
+    crate::ocpp::frame::ErrorCode::from_name(text)
 }
 
 fn default_payload() -> Value {
@@ -814,7 +811,7 @@ fn validate_reply(
                 && standard_error_code(&text).is_none()
             {
                 return Err(format!(
-                    "unknown error code `{text}` (expected one of the ten OCPP 1.6 CALLERROR codes)"
+                    "unknown error code `{text}` (expected one of the ten OCPP 1.6 CALLERROR codes, FormatViolation, OccurrenceConstraintViolation, MessageTypeNotSupported or RpcFrameworkError)"
                 ));
             }
             if !error.details.is_object() {
@@ -1746,6 +1743,13 @@ ms = 5
         };
         assert_eq!(error.as_ref().unwrap().code, "GenericError");
         assert_eq!(*times, 3);
+        for code in crate::ocpp::frame::ErrorCode::ACCEPTED_EXTRA {
+            Scenario::from_toml(&reply_step(&format!(
+                "call = \"Reset\"\nerror = {{ code = \"{}\" }}\n",
+                code.to_ascii_lowercase()
+            )))
+            .unwrap_or_else(|error| panic!("{code}: {error}"));
+        }
     }
 
     #[test]

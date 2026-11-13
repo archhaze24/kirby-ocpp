@@ -90,7 +90,7 @@ impl CsmsHandle {
                 code,
                 description,
             }),
-            Frame::Call { .. } => Err(invalid_response("not a reply".to_owned())),
+            _ => Err(invalid_response("not a reply".to_owned())),
         }
     }
 

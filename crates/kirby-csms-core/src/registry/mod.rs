@@ -19,6 +19,7 @@ pub mod ocpp16;
 
 /// Where an action comes from, for grouping in menus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ActionGroup {
     /// Part of the base specification of the protocol.
     Core,
@@ -38,6 +39,7 @@ impl ActionGroup {
 
 /// How a form field is edited and checked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FieldType {
     /// Free text.
     Text,
