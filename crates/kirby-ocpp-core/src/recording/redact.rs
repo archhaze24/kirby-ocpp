@@ -81,8 +81,9 @@ fn ends_authority(c: char) -> bool {
 }
 
 /// Whether a payload still holds a redaction marker: a value that cannot be sent as a
-/// credential. Used by the replay planner.
-pub(crate) fn holds_redacted(value: &Value) -> bool {
+/// credential. Used by the replay planners.
+#[must_use]
+pub fn holds_redacted(value: &Value) -> bool {
     match value {
         Value::String(text) => {
             text == REDACTED || text.contains(&format!(":{REDACTED}@")) && text.contains("://")

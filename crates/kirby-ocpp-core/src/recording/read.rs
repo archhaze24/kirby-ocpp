@@ -203,6 +203,11 @@ impl Recording {
                 header = Some(parse_header(value, number)?);
                 continue;
             }
+            if end.is_some() && matches!(kind, "frame" | "command" | "end") {
+                return Err(RecordError::invalid(format!(
+                    "line {number}: `{kind}` after the `end` line"
+                )));
+            }
             match kind {
                 "frame" => {
                     entries.push(Entry::Frame(parse_line(value, number, "frame")?));

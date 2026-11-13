@@ -3,6 +3,7 @@
 
 mod automation_sessions;
 mod engine;
+mod observe;
 mod redaction;
 mod security;
 mod state;

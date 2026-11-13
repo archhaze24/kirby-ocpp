@@ -40,7 +40,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 pub use self::read::{CommandLine, End, Entry, FrameLine, Header, Recording};
-pub use self::redact::redact_value;
+pub use self::redact::{holds_redacted, redact_value};
 pub use self::replay::{ReplayOptions, ReplayPlan, plan_replay};
 pub use self::scenario::{ScenarioConversion, to_scenario};
 pub use self::write::{RecordOptions, RecordSink, RecordingGuard, RecordingSummary, start};

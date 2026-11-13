@@ -30,6 +30,7 @@ use crate::defaults::{default_reply, is_charge_point_action};
 use crate::error::CsmsError;
 use crate::event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
 use crate::fault::{Fault, Reply, Responder};
+use crate::observe::{self, MAX_OBSERVED_ID_TAG, Observation, ObserveSender, Observer, SessionId};
 use crate::policy::TransactionIdAllocator;
 use crate::rules::{FaultInfo, RuleInfo, Scope, Scripted};
 use crate::state::StationState;
@@ -123,7 +124,9 @@ impl CsmsServer {
     /// [`CsmsError::Config`] if the security profile needs TLS (2 and 3) and
     /// [`CsmsConfig::tls`] is not set; [`CsmsError::Bind`] if the address is unavailable.
     pub async fn start(config: CsmsConfig) -> Result<CsmsHandle, CsmsError> {
-        Self::start_inner(config, None).await
+        Self::start_inner(config, None, None)
+            .await
+            .map(|(handle, _)| handle)
     }
 
     /// Starts the server with a recorder attached before connections are accepted.
@@ -134,13 +137,29 @@ impl CsmsServer {
         config: CsmsConfig,
         sink: RecordSink,
     ) -> Result<CsmsHandle, CsmsError> {
-        Self::start_inner(config, Some(sink)).await
+        Self::start_inner(config, Some(sink), None)
+            .await
+            .map(|(handle, _)| handle)
+    }
+
+    /// Starts the server with the optional extras of [`StartOptions`], all attached before
+    /// connections are accepted. The [`Observer`] is returned when
+    /// [`StartOptions::observe`] asked for one.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::start`].
+    pub async fn start_with(
+        config: CsmsConfig,
+        options: StartOptions,
+    ) -> Result<(CsmsHandle, Option<Observer>), CsmsError> {
+        Self::start_inner(config, options.recording, options.observe).await
     }
 
     async fn start_inner(
         config: CsmsConfig,
         recording: Option<RecordSink>,
-    ) -> Result<CsmsHandle, CsmsError> {
+        observe: Option<usize>,
+    ) -> Result<(CsmsHandle, Option<Observer>), CsmsError> {
         if config.tls.is_none()
             && matches!(
                 config.security.profile,
@@ -164,6 +183,10 @@ impl CsmsServer {
         let acceptor = config.tls.clone().map(TlsAcceptor::from);
         let (events, _) = broadcast::channel(config.event_buffer.max(1));
         let (shutdown, _) = watch::channel(false);
+        let (observer_tx, observer) = match observe.map(observe::channel) {
+            Some((tx, rx)) => (Some(tx), Some(rx)),
+            None => (None, None),
+        };
         let inner = Arc::new(Inner {
             local_addr,
             secure: acceptor.is_some(),
@@ -178,6 +201,7 @@ impl CsmsServer {
             }),
             config,
             recording,
+            observer: observer_tx,
             events,
             shutdown,
             next_message: AtomicU64::new(0),
@@ -185,8 +209,19 @@ impl CsmsServer {
         });
         let task = tokio::spawn(accept_loop(listener, acceptor, Arc::clone(&inner)));
         *inner.accept.lock().unwrap_or_else(PoisonError::into_inner) = Some(task);
-        Ok(CsmsHandle { inner })
+        Ok((CsmsHandle { inner }, observer))
     }
+}
+
+/// Extras that must be attached before the server accepts its first connection; see
+/// [`CsmsServer::start_with`].
+#[derive(Debug, Default)]
+pub struct StartOptions {
+    /// Record every frame of every station.
+    pub recording: Option<RecordSink>,
+    /// Feed an [`Observer`] with this many pending observations at most. `None` observes
+    /// nothing and costs nothing.
+    pub observe: Option<usize>,
 }
 
 /// Cheap-to-clone handle to a running server. See [`CsmsServer`].
@@ -215,6 +250,11 @@ impl ConnectedSession {
     /// The negotiated WebSocket subprotocol.
     pub fn protocol(&self) -> Option<&str> {
         self.protocol.as_deref()
+    }
+
+    /// The identity of this connection in [`Observation`]s.
+    pub fn id(&self) -> SessionId {
+        SessionId(self.generation)
     }
 }
 
@@ -450,6 +490,10 @@ impl CsmsHandle {
             let _ = session.tx.send(SessionCmd::Close {
                 code: 1000,
                 reason: "station forgotten",
+            });
+            self.inner.observe(|| Observation::Ended {
+                station: id.to_owned(),
+                session: SessionId(session.id),
             });
             self.inner.emit(CsmsEvent::Disconnected {
                 station: id.to_owned(),
@@ -705,7 +749,11 @@ impl CsmsHandle {
         // Sessions that were aborted could not report their end themselves.
         let mut state = self.inner.lock();
         for (id, rec) in &mut state.stations {
-            if rec.session.take().is_some() {
+            if let Some(session) = rec.session.take() {
+                self.inner.observe(|| Observation::Ended {
+                    station: id.clone(),
+                    session: SessionId(session.id),
+                });
                 rec.info.connected = false;
                 rec.info.disconnected_at = Some(Utc::now());
                 self.inner.emit(CsmsEvent::Disconnected {
@@ -722,6 +770,7 @@ impl CsmsHandle {
 struct Inner {
     config: CsmsConfig,
     recording: Option<RecordSink>,
+    observer: Option<ObserveSender>,
     local_addr: SocketAddr,
     secure: bool,
     state: Mutex<State>,
@@ -856,6 +905,80 @@ impl Inner {
         let _ = self.events.send(event);
     }
 
+    /// Feeds the observer, if there is one; the closure is not run otherwise. Callers hold
+    /// the state lock so that the order matches the registry.
+    fn observe(&self, make: impl FnOnce() -> Observation) {
+        if let Some(observer) = &self.observer {
+            observer.send(make());
+        }
+    }
+
+    /// Reports an answered `BootNotification`, `StartTransaction` or `StopTransaction` of the
+    /// session, unless the session was replaced or forgotten meanwhile.
+    fn observe_inbound(
+        &self,
+        station: &str,
+        session_id: u64,
+        action: &str,
+        request: &Value,
+        reply: &Reply,
+    ) {
+        if self.observer.is_none()
+            || !matches!(
+                action,
+                "BootNotification" | "StartTransaction" | "StopTransaction"
+            )
+        {
+            return;
+        }
+        let state = self.lock();
+        if state
+            .stations
+            .get(station)
+            .and_then(|rec| rec.session.as_ref())
+            .map(|s| s.id)
+            != Some(session_id)
+        {
+            return;
+        }
+        let station = station.to_owned();
+        let session = SessionId(session_id);
+        let int = |value: Option<&Value>| {
+            value
+                .and_then(Value::as_i64)
+                .and_then(|n| i32::try_from(n).ok())
+        };
+        self.observe(|| match action {
+            "BootNotification" => Observation::Boot {
+                station,
+                session,
+                accepted: matches!(reply, Reply::Result(r) if r.get("status").and_then(Value::as_str) == Some("Accepted")),
+            },
+            "StartTransaction" => Observation::Start {
+                station,
+                session,
+                connector: request
+                    .get("connectorId")
+                    .and_then(Value::as_u64)
+                    .and_then(|n| u32::try_from(n).ok()),
+                id_tag: request
+                    .get("idTag")
+                    .and_then(Value::as_str)
+                    .filter(|tag| tag.len() <= MAX_OBSERVED_ID_TAG)
+                    .map(str::to_owned),
+                transaction_id: match reply {
+                    Reply::Result(r) => int(r.get("transactionId")),
+                    _ => None,
+                },
+            },
+            _ => Observation::Stop {
+                station,
+                session,
+                transaction_id: int(request.get("transactionId")),
+            },
+        });
+    }
+
     /// Whether a connection for `id` would exceed [`CsmsConfig::max_stations`].
     fn station_limit_reached(&self, id: &str) -> bool {
         let state = self.lock();
@@ -872,7 +995,7 @@ impl Inner {
     /// Registers a new connection, replacing an older one with the same id. Refused if the
     /// server is shutting down or the station limit was reached in the meantime.
     fn register(
-        &self,
+        self: &Arc<Self>,
         id: &str,
         peer: SocketAddr,
         subprotocol: Option<String>,
@@ -915,6 +1038,10 @@ impl Inner {
                 code: 1000,
                 reason: "replaced by a new connection",
             });
+            self.observe(|| Observation::Ended {
+                station: id.to_owned(),
+                session: SessionId(old.id),
+            });
             self.emit(CsmsEvent::Disconnected {
                 station: id.to_owned(),
                 reason: DisconnectReason::Replaced,
@@ -930,6 +1057,14 @@ impl Inner {
         rec.info.disconnected_at = None;
         rec.info.remote_addr = Some(peer);
         rec.info.subprotocol = subprotocol;
+        self.observe(|| {
+            Observation::Connected(ConnectedSession {
+                station: id.to_owned(),
+                protocol: rec.info.subprotocol.clone(),
+                generation: session_id,
+                server: Arc::downgrade(self),
+            })
+        });
         self.emit(CsmsEvent::Connected {
             station: id.to_owned(),
         });
@@ -948,6 +1083,10 @@ impl Inner {
         rec.session = None;
         rec.info.connected = false;
         rec.info.disconnected_at = Some(Utc::now());
+        self.observe(|| Observation::Ended {
+            station: station.to_owned(),
+            session: SessionId(session_id),
+        });
         self.emit(CsmsEvent::Disconnected {
             station: station.to_owned(),
             reason,
@@ -1596,6 +1735,8 @@ where
                 let reply = self.inner.decide(&self.station, &action, &payload);
                 self.inner
                     .track(&self.station, self.link_id, &action, &payload, &reply);
+                self.inner
+                    .observe_inbound(&self.station, self.link_id, &action, &payload, &reply);
                 match reply {
                     Reply::Result(payload) => self.send(&Frame::call_result(id, payload)).await,
                     Reply::Error(code, description) => {

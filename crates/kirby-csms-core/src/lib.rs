@@ -44,6 +44,7 @@ mod defaults;
 mod error;
 mod event;
 mod fault;
+mod observe;
 mod policy;
 pub mod registry;
 mod rules;
@@ -58,14 +59,15 @@ pub use error::CsmsError;
 pub use event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
 pub use fault::{Fault, Reply, Responder};
 pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
+pub use observe::{MAX_OBSERVED_ID_TAG, Observation, ObserveError, Observer, SessionId};
 pub use policy::{SubprotocolPolicy, TransactionIdAllocator, TransactionIds};
 pub use rules::{
     FaultInfo, MAX_FAULT_BYTES, MAX_FAULTS, MAX_FAULTS_PER_STATION, MAX_RULE_BYTES,
     MAX_RULES_PER_STATION, MAX_SCOPED_RULES, RuleInfo, Scope, reply_kind,
 };
 pub use server::{
-    ConnectedSession, CsmsHandle, CsmsServer, HistoryPage, MAX_STATION_ID_LEN, event_frame,
-    station_id_from_path,
+    ConnectedSession, CsmsHandle, CsmsServer, HistoryPage, MAX_STATION_ID_LEN, StartOptions,
+    event_frame, station_id_from_path,
 };
 pub use state::{
     BootInfo, CertificateRequest, ConnectorState, InstalledCertificates, LogReport,

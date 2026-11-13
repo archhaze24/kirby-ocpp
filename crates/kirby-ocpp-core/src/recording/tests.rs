@@ -317,6 +317,21 @@ fn unknown_keys_line_types_and_roles_are_ignored() {
 }
 
 #[test]
+fn a_second_end_line_or_entries_after_it_are_refused() {
+    let frame = r#"{"type":"frame","seq":0,"elapsed_ms":1,"session":1,"direction":"out","frame":[2,"a","Heartbeat",{}]}"#;
+    let end = r#"{"type":"end","frames":1,"commands":0,"elapsed_ms":2}"#;
+    assert!(parse(&format!("{HEADER}\n{frame}\n{end}\n")).is_ok());
+    assert!(parse(&format!("{HEADER}\n{frame}\n")).is_ok());
+    assert!(parse(&format!("{HEADER}\n{frame}\n{end}\n{{\"type\":\"end\"")).is_ok());
+    for extra in [end, frame] {
+        let error = parse(&format!("{HEADER}\n{frame}\n{end}\n{extra}\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("after the `end` line"), "{error}");
+    }
+}
+
+#[test]
 fn a_newer_or_missing_schema_is_refused() {
     let newer = HEADER.replace("\"schema\":1", "\"schema\":2");
     let error = parse(&format!("{newer}\n")).unwrap_err().to_string();
