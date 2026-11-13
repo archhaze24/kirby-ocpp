@@ -250,7 +250,7 @@ One JSON object per line, each with a `type`:
 | `type` | Keys | Meaning |
 | --- | --- | --- |
 | `header` | `schema` (1), `ocpp_version`, `tool_version`, `role` (`emulator`; the CSMS writes `csms`), `station`, `started_at` | First line |
-| `frame` | `seq`, `elapsed_ms`, `session`, `direction`, `msg_id`, `action`, `frame` | A frame on the wire. `direction` is `out` (the station sent it) or `in`; `frame` is the OCPP-J array (`[2, id, action, payload]`, `[3, id, payload]`, `[4, id, code, description, details]`) as JSON. `action` is also set on a CALLRESULT or CALLERROR, taken from the CALL it answers. A frame above 64 KiB has `"frame": null` and `truncated_bytes`; text that is not an OCPP-J frame has `"frame": null` and `invalid_bytes` and is not stored |
+| `frame` | `seq`, `elapsed_ms`, `session`, `direction`, `msg_id`, `action`, `frame`, optional `station` | A frame on the wire. Direction is relative to the producer. CSMS frames include `station`; the CSMS header has an empty station. `frame` is the OCPP-J array. Emulator replies carry the action of the CALL they answer when known. An emulator frame above 64 KiB has `"frame": null` and `truncated_bytes`; a CSMS recording stops incomplete instead. Invalid text has `"frame": null` and `invalid_bytes` |
 | `command` | `seq`, `elapsed_ms`, `session`, `command` | A command given to the station by a key press, a scenario step or `replay`: the station's own command object (`{"command": "plug_in", "connector": 1}`). Emulator recordings only |
 | `end` | `frames`, `commands`, `elapsed_ms`, `incomplete` | Last line of a finished file; `incomplete` (text) is present only when the recorder lost data. A file without an `end` line was cut off |
 

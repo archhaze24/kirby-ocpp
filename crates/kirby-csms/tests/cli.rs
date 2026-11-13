@@ -197,6 +197,186 @@ fn run_to_end(args: &[&str]) -> (i32, String, String) {
     )
 }
 
+#[test]
+fn recording_check_config_and_input_collisions_preserve_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "key.txt", "keep me");
+    let (code, _, stderr) =
+        run_to_end(&["--check-config", "--record", &path, "--record-overwrite"]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+    let config = write(
+        dir.path(),
+        "settings.toml",
+        &format!(
+            "[security]\nsecurity_profile = 1\n[[station]]\nid = \"CP-1\"\nauth_key_file = {}\n",
+            serde_json::to_string(&path).unwrap()
+        ),
+    );
+    let (code, _, stderr) =
+        run_to_end(&["--config", &config, "--record", &path, "--record-overwrite"]);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("station authentication key file"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+    let (code, _, stderr) = run_to_end(&[
+        "--record",
+        &path,
+        "--record-overwrite",
+        "--api-listen",
+        "127.0.0.1:0",
+        "--api-token-file",
+        &path,
+    ]);
+    assert_ne!(code, 0);
+    assert!(stderr.contains("--record would overwrite"), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+    #[cfg(unix)]
+    {
+        let alias = dir.path().join("alias");
+        std::fs::hard_link(&path, &alias).unwrap();
+        let (code, _, _) = run_to_end(&[
+            "--record",
+            alias.to_str().unwrap(),
+            "--record-overwrite",
+            "--log-file",
+            &path,
+        ]);
+        assert_ne!(code, 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+    }
+}
+
+#[test]
+fn recording_startup_failure_preserves_existing_and_removes_empty_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let existing = write(dir.path(), "existing.jsonl", "preserve");
+    let (code, _, _) = run_to_end(&[
+        "--listen",
+        &addr,
+        "--record",
+        &existing,
+        "--record-overwrite",
+    ]);
+    assert_ne!(code, 0);
+    assert_eq!(std::fs::read_to_string(&existing).unwrap(), "preserve");
+    let new = dir.path().join("new.jsonl");
+    let (code, _, _) = run_to_end(&["--listen", &addr, "--record", new.to_str().unwrap()]);
+    assert_ne!(code, 0);
+    assert!(!new.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recording_captures_multiple_sessions_before_history_truncation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("frames.jsonl");
+    let mut csms = Csms::start(&[
+        "--record",
+        path.to_str().unwrap(),
+        "--history-cap",
+        "0",
+        "--show-secrets",
+    ]);
+    let first = station(&csms.addr.clone(), "CP-1", false).await;
+    let second = station(&csms.addr.clone(), "CP-2", false).await;
+    csms.send(&json!({"station":"CP-1", "action":"ChangeConfiguration", "id":"secret", "payload":{"key":"AuthorizationKey", "value":"hidden-value"}}).to_string());
+    csms.wait(|v| v["type"] == "result" && v["id"] == "secret");
+    second
+        .send(StationCommand::DataTransfer {
+            vendor_id: "test".to_owned(),
+            message_id: None,
+            data: Some("https://user:password@example.test/".to_owned()),
+        })
+        .await
+        .unwrap();
+    csms.wait(|v| v["type"] == "frame" && v["station"] == "CP-2" && v["action"] == "DataTransfer");
+    first.shutdown().await.unwrap();
+    let replacement = station(&csms.addr.clone(), "CP-1", false).await;
+    let pid = csms.child.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (code, _, stderr) = csms.finish();
+    assert_eq!(code, 0, "{stderr}");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("hidden-value"), "{text}");
+    assert!(!text.contains("password"), "{text}");
+    let lines: Vec<Value> = text
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let frames: Vec<&Value> = lines
+        .iter()
+        .filter(|line| line["type"] == "frame")
+        .collect();
+    for id in ["CP-1", "CP-2"] {
+        assert!(frames.iter().any(|f| f["station"] == id
+            && f["direction"] == "in"
+            && f["action"] == "BootNotification"));
+        assert!(
+            frames
+                .iter()
+                .any(|f| f["station"] == id && f["direction"] == "out" && f["frame"][0] == 3)
+        );
+    }
+    let sessions: std::collections::HashSet<_> = frames
+        .iter()
+        .filter(|f| f["station"] == "CP-1" && f["action"] == "BootNotification")
+        .map(|f| f["session"].as_u64().unwrap())
+        .collect();
+    assert_eq!(sessions.len(), 2, "{text}");
+    assert!(frames.iter().any(|f| f["action"] == "ChangeConfiguration"
+        && f["direction"] == "out"
+        && f["frame"][3]["value"] == "***"));
+    assert_eq!(lines.last().unwrap()["type"], "end");
+    let _ = second.shutdown().await;
+    let _ = replacement.shutdown().await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn recording_oversized_frame_fails_on_shutdown() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("frames.jsonl");
+    let mut csms = Csms::start(&["--record", path.to_str().unwrap()]);
+    let client = station(&csms.addr.clone(), "CP-1", false).await;
+    client
+        .send(StationCommand::DataTransfer {
+            vendor_id: "large".to_owned(),
+            message_id: None,
+            data: Some("x".repeat(70 * 1024)),
+        })
+        .await
+        .unwrap();
+    csms.wait(|v| v["type"] == "frame" && v["action"] == "DataTransfer");
+    let pid = csms.child.id().to_string();
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (code, _, stderr) = csms.finish();
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("recording is incomplete"), "{stderr}");
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(
+        text.contains("frame exceeded the recording size limit"),
+        "{text}"
+    );
+    let _ = client.shutdown().await;
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn logs_a_station_and_stops_cleanly_on_sigterm() {

@@ -356,6 +356,15 @@ impl RecordSink {
     /// Records a frame as it crossed the wire, `session` being the connection it belongs to.
     /// Secrets are redacted here, whatever the frame record holds.
     pub fn frame(&self, session: u64, record: &FrameRecord) {
+        self.write_frame(None, session, record);
+    }
+
+    /// Records a CSMS frame with its station and connection identity.
+    pub fn frame_for_station(&self, station: &str, session: u64, record: &FrameRecord) {
+        self.write_frame(Some(station), session, record);
+    }
+
+    fn write_frame(&self, station: Option<&str>, session: u64, record: &FrameRecord) {
         let direction = match record.direction {
             Direction::In => "in",
             Direction::Out => "out",
@@ -368,6 +377,20 @@ impl RecordSink {
                 redact_value(&mut value);
                 let text = value.to_string();
                 if text.len() > MAX_FRAME_BYTES {
+                    if station.is_some() {
+                        let _producer = self
+                            .shared
+                            .producer
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        if self.shared.halted.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        self.shared.overflowed.store(true, Ordering::SeqCst);
+                        self.shared
+                            .fail("a frame exceeded the recording size limit");
+                        return;
+                    }
                     ("null".to_owned(), Some(("truncated_bytes", text.len())))
                 } else {
                     (text, None)
@@ -380,11 +403,19 @@ impl RecordSink {
             ),
         };
         let msg_id = msg_id.or_else(|| frame_parts(&record.frame).map(|(_, id, _)| id.to_owned()));
-        let action = record.action.clone();
+        let action = record.action.clone().or_else(|| {
+            station.and_then(|_| {
+                frame_parts(&record.frame).and_then(|(_, _, action)| action.map(str::to_owned))
+            })
+        });
         self.submit(Kind::Frame, |seq, elapsed_ms| {
             let mut line = format!(
                 "{{\"type\":\"frame\",\"seq\":{seq},\"elapsed_ms\":{elapsed_ms},\"session\":{session},\"direction\":\"{direction}\""
             );
+            if let Some(station) = station {
+                line.push_str(",\"station\":");
+                line.push_str(&Value::from(station).to_string());
+            }
             if let Some(id) = &msg_id {
                 line.push_str(",\"msg_id\":");
                 line.push_str(&Value::from(id.as_str()).to_string());
@@ -468,6 +499,11 @@ impl RecordSink {
 }
 
 impl RecordingGuard {
+    /// The file currently being written, which may be a temporary sibling of the destination.
+    pub fn writing_path(&self) -> &Path {
+        self.temp.as_deref().unwrap_or(&self.path)
+    }
+
     /// The reason the recording is incomplete so far, if it is.
     pub fn incomplete(&self) -> Option<String> {
         self.shared.failure()

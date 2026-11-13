@@ -228,6 +228,14 @@ pub struct Cli {
     #[arg(long, env = "KIRBY_CSMS_LOG_FILE", value_name = "PATH", value_parser = non_empty_path)]
     pub log_file: Option<PathBuf>,
 
+    /// Record station frames to a JSONL file
+    #[arg(long, value_name = "PATH", value_parser = non_empty_path)]
+    pub record: Option<PathBuf>,
+
+    /// Replace an existing recording
+    #[arg(long, requires = "record")]
+    pub record_overwrite: bool,
+
     /// Read JSON-line commands from stdin even on a terminal (automatic when stdin is not a
     /// terminal and there is no --script)
     #[arg(
@@ -443,7 +451,15 @@ const HEADINGS: &[(&str, &[&str])] = &[
     (
         "Output",
         &[
-            "json", "log_file", "stdin", "no_tui", "color", "time", "licenses",
+            "json",
+            "log_file",
+            "record",
+            "record_overwrite",
+            "stdin",
+            "no_tui",
+            "color",
+            "time",
+            "licenses",
         ],
     ),
     ("Script", &["script", "report", "junit", "vars", "timeout"]),

@@ -80,6 +80,41 @@ fn round_trip_keeps_order_counts_and_header() {
     );
 }
 
+#[test]
+fn csms_frames_include_station_and_stop_at_oversized_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("csms.jsonl");
+    let (sink, guard) = start(&path, "1.6", Role::Csms, "", &RecordOptions::default()).unwrap();
+    sink.frame_for_station(
+        "CP-1",
+        1,
+        &record(Direction::In, json!([2, "1", "Heartbeat", {}])),
+    );
+    sink.frame_for_station("CP-2", 2, &record(Direction::Out, json!([3, "1", {}])));
+    sink.frame_for_station(
+        "CP-1",
+        1,
+        &record(
+            Direction::In,
+            json!([2, "2", "DataTransfer", {"data": "x".repeat(MAX_FRAME_BYTES)}]),
+        ),
+    );
+    let summary = guard.finish();
+    assert_eq!(summary.frames, 2);
+    assert!(summary.incomplete.is_some());
+    let recording = Recording::read(&path).unwrap();
+    assert_eq!(recording.header.role, Role::Csms);
+    let stations: Vec<_> = recording
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Frame(frame) => Some((frame.station.as_deref(), frame.session)),
+            Entry::Command(_) => None,
+        })
+        .collect();
+    assert_eq!(stations, [(Some("CP-1"), 1), (Some("CP-2"), 2)]);
+}
+
 #[cfg(unix)]
 #[test]
 fn the_file_is_private() {

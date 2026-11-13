@@ -9,6 +9,7 @@ tag as the GitHub release notes.
 
 ### Added
 
+- `kirby-csms --record` writes frames from all stations to one redacted JSONL recording.
 - OpenAPI document `kirby-csms-openapi.json` for the control API, included in each release archive and as a standalone release asset. A test checks route and method coverage, required path parameters and local schema references.
 - `POST /v1/calls` sends a CALL to up to 64 stations selected by a station-id glob and optional protocol. Admission reserves the shared command and payload budgets before sending; the response reports each station's outcome in a bounded, stable shape.
 - CSMS configuration `[[command]]` blocks run calls after a delay, at fixed-delay intervals or once per observed live connection. Connection hooks are tied to the original session; reconnects cannot receive a stale hook. Commands share the API and stdin limits, reject inline `AuthorizationKey` values and stop before station shutdown.

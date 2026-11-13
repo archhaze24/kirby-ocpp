@@ -7,6 +7,7 @@ mod cli;
 mod commands;
 mod ctl;
 mod headless;
+mod record;
 mod script;
 mod settings;
 mod stdin_cmd;
@@ -70,6 +71,19 @@ async fn main() -> ExitCode {
     if cli.check_config {
         return check_config(&cli);
     }
+    let target = match record::target(&cli) {
+        Ok(target) => target,
+        Err(error) => return usage_error(&error),
+    };
+    record::scope(target, |sink| run_server(cli, script, config, sink)).await
+}
+
+async fn run_server(
+    cli: Cli,
+    script: Option<script::Script>,
+    config: kirby_csms_core::CsmsConfig,
+    recording: Option<kirby_ocpp_core::recording::RecordSink>,
+) -> ExitCode {
     let api_plan = match prepare_api(&cli).await {
         Ok(plan) => plan,
         Err(code) => return code,
@@ -80,7 +94,7 @@ async fn main() -> ExitCode {
         Err(error) => return usage_error(&format!("cannot open the log file: {error}")),
     };
 
-    let handle = match start_server(config).await {
+    let handle = match start_server(config, recording).await {
         Ok(handle) => handle,
         Err(code) => return code,
     };
@@ -432,9 +446,15 @@ fn stderr_line(line: &str) {
 /// Starts the server; a bind error names the address that could not be bound.
 async fn start_server(
     config: kirby_csms_core::CsmsConfig,
+    recording: Option<kirby_ocpp_core::recording::RecordSink>,
 ) -> Result<kirby_csms_core::CsmsHandle, ExitCode> {
     let listen = config.listen;
-    match CsmsServer::start(config).await {
+    let result = if let Some(sink) = recording {
+        CsmsServer::start_recorded(config, sink).await
+    } else {
+        CsmsServer::start(config).await
+    };
+    match result {
         Ok(handle) => Ok(handle),
         Err(kirby_csms_core::CsmsError::Bind(error)) => {
             eprintln!("error: failed to bind the CSMS listener {listen}: {error}");

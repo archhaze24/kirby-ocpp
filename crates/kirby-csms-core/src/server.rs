@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use kirby_ocpp_core::ocpp::frame::{Direction as RecordDirection, FrameRecord};
 use kirby_ocpp_core::ocpp::{ErrorCode, Frame, redact_secrets};
+use kirby_ocpp_core::recording::RecordSink;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
@@ -121,6 +123,24 @@ impl CsmsServer {
     /// [`CsmsError::Config`] if the security profile needs TLS (2 and 3) and
     /// [`CsmsConfig::tls`] is not set; [`CsmsError::Bind`] if the address is unavailable.
     pub async fn start(config: CsmsConfig) -> Result<CsmsHandle, CsmsError> {
+        Self::start_inner(config, None).await
+    }
+
+    /// Starts the server with a recorder attached before connections are accepted.
+    ///
+    /// # Errors
+    /// Returns the same errors as [`Self::start`].
+    pub async fn start_recorded(
+        config: CsmsConfig,
+        sink: RecordSink,
+    ) -> Result<CsmsHandle, CsmsError> {
+        Self::start_inner(config, Some(sink)).await
+    }
+
+    async fn start_inner(
+        config: CsmsConfig,
+        recording: Option<RecordSink>,
+    ) -> Result<CsmsHandle, CsmsError> {
         if config.tls.is_none()
             && matches!(
                 config.security.profile,
@@ -157,6 +177,7 @@ impl CsmsServer {
                 history_dropped: 0,
             }),
             config,
+            recording,
             events,
             shutdown,
             next_message: AtomicU64::new(0),
@@ -700,6 +721,7 @@ impl CsmsHandle {
 
 struct Inner {
     config: CsmsConfig,
+    recording: Option<RecordSink>,
     local_addr: SocketAddr,
     secure: bool,
     state: Mutex<State>,
@@ -935,6 +957,22 @@ impl Inner {
     fn record_frame(&self, station: &str, session_id: u64, direction: Direction, frame: &Frame) {
         let mut guard = self.lock();
         let state = &mut *guard;
+        if let Some(sink) = &self.recording {
+            sink.frame_for_station(
+                station,
+                session_id,
+                &FrameRecord {
+                    ts: Utc::now(),
+                    direction: match direction {
+                        Direction::In => RecordDirection::In,
+                        Direction::Out => RecordDirection::Out,
+                    },
+                    msg_id: None,
+                    action: None,
+                    frame: frame.to_value(),
+                },
+            );
+        }
         let Some(rec) = state.stations.get_mut(station) else {
             return;
         };
@@ -1522,6 +1560,20 @@ where
         let frame = match Frame::parse(text) {
             Ok(frame) => frame,
             Err(error) => {
+                if let Some(sink) = &self.inner.recording {
+                    let _state = self.inner.lock();
+                    sink.frame_for_station(
+                        &self.station,
+                        self.link_id,
+                        &FrameRecord {
+                            ts: Utc::now(),
+                            direction: RecordDirection::In,
+                            msg_id: None,
+                            action: None,
+                            frame: Value::String(text.to_owned()),
+                        },
+                    );
+                }
                 self.inner.emit(CsmsEvent::Malformed {
                     station: self.station.clone(),
                     text: malformed_text(text, self.inner.config.show_secrets),

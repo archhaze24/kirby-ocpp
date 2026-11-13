@@ -1130,7 +1130,15 @@ async fn refused_station_ids_are_reported() {
 
 #[tokio::test]
 async fn malformed_events_do_not_carry_the_authorization_key() {
-    let csms = start(|_| {}).await;
+    use kirby_ocpp_core::recording::{self, Entry, RecordOptions, Recording, Role};
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("malformed.jsonl");
+    let (sink, guard) =
+        recording::start(&path, "1.6", Role::Csms, "", &RecordOptions::default()).unwrap();
+    let csms = CsmsServer::start_recorded(CsmsConfig::new("127.0.0.1:0".parse().unwrap()), sink)
+        .await
+        .unwrap();
     let mut events = csms.subscribe();
     let mut raw = raw_connect(&csms, "/CP-MAL").await;
     // One element too many: the frame does not parse, so the redaction of parsed frames
@@ -1149,6 +1157,15 @@ async fn malformed_events_do_not_carry_the_authorization_key() {
         }
     }
     csms.shutdown().await;
+    assert!(guard.finish().incomplete.is_none());
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains("TOPSECRETVALUE"));
+    let recording = Recording::read(&path).unwrap();
+    assert!(recording.entries.iter().any(|entry| matches!(
+        entry,
+        Entry::Frame(frame) if frame.invalid_bytes == Some(text.len() as u64)
+            && frame.frame.is_none()
+    )));
 }
 
 #[tokio::test]
@@ -1234,7 +1251,15 @@ async fn stalled_reader_is_dropped_after_the_write_timeout() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replaced_session_cannot_write_into_the_record() {
-    let csms = start(|_| {}).await;
+    use kirby_ocpp_core::recording::{self, Entry, RecordOptions, Recording, Role};
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("sessions.jsonl");
+    let (sink, guard) =
+        recording::start(&path, "1.6", Role::Csms, "", &RecordOptions::default()).unwrap();
+    let csms = CsmsServer::start_recorded(CsmsConfig::new("127.0.0.1:0".parse().unwrap()), sink)
+        .await
+        .unwrap();
     let entered = Arc::new(tokio::sync::Notify::new());
     let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let release_rx = std::sync::Mutex::new(release_rx);
@@ -1277,6 +1302,19 @@ async fn replaced_session_cannot_write_into_the_record() {
         "stale session wrote an outbound frame"
     );
     csms.shutdown().await;
+    assert!(guard.finish().incomplete.is_none());
+    let recording = Recording::read(&path).unwrap();
+    let frames: Vec<_> = recording
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Frame(frame) => Some(frame),
+            Entry::Command(_) => None,
+        })
+        .collect();
+    assert_eq!(frames.len(), 2, "the recording must retain the old reply");
+    assert_eq!(frames[0].session, frames[1].session);
+    assert_eq!(frames[1].frame.as_ref().unwrap()[0], 3);
 }
 
 // ---- inbound validation, ping watchdog, installed certificates -------------------------

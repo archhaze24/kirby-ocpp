@@ -401,6 +401,8 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | --- | --- | --- | --- |
 | `--json` | `KIRBY_CSMS_JSON` | off | One JSON object per line |
 | `--log-file <PATH>` | `KIRBY_CSMS_LOG_FILE` | none | Append every event as a JSON line (new file `0600` on unix, an existing file keeps its mode) (helper thread; late lines are dropped and a `note` line counts them) |
+| `--record <PATH>` | | none | Record all station frames to one JSONL file. Secrets are always redacted. An existing file requires `--record-overwrite`; symlinks are refused. An incomplete recording exits 1. Not a configuration file key; see [CSMS recording](csms.md#recording) |
+| `--record-overwrite` | | off | Replace the recording when it exists; requires `--record`. An empty run preserves the existing file |
 | `--stdin` | `KIRBY_CSMS_STDIN` | auto | Read JSON-line commands from stdin even on a terminal (automatic when stdin is not a terminal and there is no `--script`) |
 | `--no-tui` | `KIRBY_CSMS_NO_TUI` | auto | Never open the UI, print events to stdout (automatic when stdout or stdin is not a terminal, and with `--json`, `--script` or `--stdin`) |
 | `--color <WHEN>` | `KIRBY_CSMS_COLOR` | `auto` | Color of the terminal UI: `auto` (color unless `NO_COLOR` is set and not empty), `always` (wins over `NO_COLOR`) or `never`. Without color the UI uses reverse video, bold and text markers instead. Headless output is never colored |

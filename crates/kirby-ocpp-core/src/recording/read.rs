@@ -30,6 +30,9 @@ pub struct FrameLine {
     pub seq: u64,
     pub elapsed_ms: u64,
     pub session: u64,
+    /// Station identity for a multi-station CSMS recording.
+    #[serde(default)]
+    pub station: Option<String>,
     /// Relative to the producer of the file.
     pub direction: Direction,
     #[serde(default)]

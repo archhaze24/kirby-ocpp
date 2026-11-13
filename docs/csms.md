@@ -218,6 +218,16 @@ See [configuration.md](configuration.md#scheduled-commands-and-connection-hooks)
 complete format, bounds, timing and examples. To send an immediate bulk call, use
 [`POST /v1/calls`](api.md#bulk-calls).
 
+## Recording
+
+Use `--record session.jsonl` to record frames from all stations in one file, in arrival order. Each frame includes its station and session; direction is relative to the CSMS. Initial frames are included even when history is disabled. `AuthorizationKey` values and URL passwords are always redacted, including with `--show-secrets`.
+
+The recorder stops and marks the file incomplete if its queue fills, a frame exceeds 64 KiB, or writing fails. An incomplete recording exits 1. New files are private on Unix; existing files require `--record-overwrite`, and symlinks are refused. An empty run leaves no new file and preserves an existing one. The recording cannot share a path with an input file, log or report. CALL frames include an action; replies are identified by message ID. See [the format](emulator.md#recording-and-replay).
+
+Frames from a replaced or forgotten connection retain their original session identity. Malformed text is represented by its byte count, without the original content.
+
+`--check-config` does not open a recording or check its path for collisions.
+
 ## Headless behavior
 
 - Events go to stdout (text or `--json`); `--log-file` also gets them.
