@@ -8,7 +8,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use kirby_csms_core::{
     CsmsConfig, CsmsError, CsmsEvent, CsmsHandle, CsmsServer, SecurityProfile, StationState,
-    server_config_from_pem, server_config_with_client_ca,
+    SubprotocolPolicy, server_config_from_pem, server_config_with_client_ca,
 };
 use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig};
 use kirby_ocpp_core::ocpp::messages::{
@@ -231,11 +231,23 @@ async fn raw_handshake(
     id: &str,
     authorization: Option<&str>,
 ) -> Result<(), (u16, Option<String>)> {
+    raw_handshake_offering(csms, id, authorization, Some("ocpp1.6")).await
+}
+
+/// Like [`raw_handshake`], offering `protocol` (`None` offers nothing).
+async fn raw_handshake_offering(
+    csms: &CsmsHandle,
+    id: &str,
+    authorization: Option<&str>,
+    protocol: Option<&str>,
+) -> Result<(), (u16, Option<String>)> {
     let mut request = format!("{}/ocpp/{id}", csms.url())
         .into_client_request()
         .unwrap();
     let headers = request.headers_mut();
-    headers.insert("Sec-WebSocket-Protocol", "ocpp1.6".parse().unwrap());
+    if let Some(protocol) = protocol {
+        headers.insert("Sec-WebSocket-Protocol", protocol.parse().unwrap());
+    }
     if let Some(value) = authorization {
         headers.insert("Authorization", value.parse().unwrap());
     }
@@ -257,6 +269,16 @@ fn basic(user: &str, password: &str) -> String {
     format!(
         "Basic {}",
         base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"))
+    )
+}
+
+/// A Basic header for a user and raw password bytes.
+fn basic_bytes(user: &str, password: &[u8]) -> String {
+    let mut raw = format!("{user}:").into_bytes();
+    raw.extend_from_slice(password);
+    format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(raw)
     )
 }
 
@@ -388,6 +410,249 @@ async fn profile_one_accepts_the_right_key_and_refuses_the_rest() {
             .is_ok()
     );
     assert!(csms.station("CP-N").is_none());
+    csms.shutdown().await;
+}
+
+/// Specification example: 20 bytes ending in a run of `0xFF`, which no UTF-8 text can hold.
+const SPEC_BYTES: [u8; 20] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+];
+const SPEC_HEX_UPPER: &str = "0001020304050607FFFFFFFFFFFFFFFFFFFFFFFF";
+
+/// The decoded form of a hex key is accepted next to the literal one for OCPP 1.6 only.
+#[tokio::test]
+async fn profile_one_accepts_decoded_hex_keys_on_ocpp_16() {
+    let csms = start(|c| {
+        c.security.profile = SecurityProfile::BasicAuth;
+        for (id, key) in [
+            ("AL1000", SPEC_HEX_UPPER.to_owned()),
+            ("AL1001", SPEC_HEX_UPPER.to_lowercase()),
+            (
+                "AL1002",
+                "0001020304050607fFfFfFfFfFfFfFfFfFfFfFfF".to_owned(),
+            ),
+            ("CP-COLON", "00013a0405".to_owned()),
+            ("CP-TEXT", "6162".to_owned()),
+            ("CP-SHORT", "ab".to_owned()),
+            ("CP-ODD", "abc".to_owned()),
+            ("CP-NONHEX", "zz11".to_owned()),
+        ] {
+            c.security.keys.insert(id.to_owned(), key);
+        }
+    })
+    .await;
+    let mut events = csms.subscribe();
+    let mut wrong_last = SPEC_BYTES;
+    wrong_last[19] = 254;
+    let mut extra = SPEC_BYTES.to_vec();
+    extra.push(0);
+
+    let accepted: [(&str, Vec<u8>); 13] = [
+        ("AL1000", SPEC_BYTES.to_vec()),
+        ("AL1000", SPEC_HEX_UPPER.as_bytes().to_vec()),
+        ("AL1001", SPEC_BYTES.to_vec()),
+        ("AL1001", SPEC_HEX_UPPER.to_lowercase().into_bytes()),
+        ("AL1002", SPEC_BYTES.to_vec()),
+        ("CP-COLON", vec![0, 1, b':', 4, 5]),
+        ("CP-TEXT", b"ab".to_vec()),
+        ("CP-TEXT", b"6162".to_vec()),
+        ("CP-SHORT", vec![0xab]),
+        ("CP-SHORT", b"ab".to_vec()),
+        ("CP-ODD", b"abc".to_vec()),
+        ("CP-NONHEX", b"zz11".to_vec()),
+        // The literal key is matched byte for byte, in its own case.
+        (
+            "AL1002",
+            b"0001020304050607fFfFfFfFfFfFfFfFfFfFfFfF".to_vec(),
+        ),
+    ];
+    for (id, password) in accepted {
+        let header = basic_bytes(id, &password);
+        assert!(
+            raw_handshake(&csms, id, Some(&header)).await.is_ok(),
+            "{id} {password:02x?}"
+        );
+    }
+
+    let refused: [(&str, Vec<u8>); 10] = [
+        ("AL1000", wrong_last.to_vec()),
+        ("AL1000", extra),
+        ("AL1000", SPEC_BYTES[..19].to_vec()),
+        ("AL1000", Vec::new()),
+        // Only the literal key may differ in case, and only as written.
+        ("AL1001", SPEC_HEX_UPPER.as_bytes().to_vec()),
+        ("AL1002", SPEC_HEX_UPPER.as_bytes().to_vec()),
+        // An odd-length or non-hex key has no decoded form.
+        ("CP-ODD", vec![0xab, 0x0c]),
+        ("CP-NONHEX", vec![b'z', b'z', 0x11]),
+        ("CP-COLON", vec![0, 1]),
+        ("CP-SHORT", vec![0xab, 0xab]),
+    ];
+    for (id, password) in refused {
+        let header = basic_bytes(id, &password);
+        let (status, challenge) = raw_handshake(&csms, id, Some(&header)).await.unwrap_err();
+        assert_eq!(status, 401, "{id} {password:02x?}");
+        // A binary key is allowed here, so the challenge does not promise UTF-8.
+        assert_eq!(challenge.as_deref(), Some("Basic realm=\"kirby-csms\""));
+        let (_, reason) = wait_refused(&mut events, Some(id)).await;
+        assert_eq!(reason, "invalid credentials");
+    }
+
+    csms.shutdown().await;
+}
+
+/// User, malformed-header and missing-key refusals next to a binary key.
+#[tokio::test]
+async fn binary_keys_keep_the_other_refusal_reasons() {
+    let csms = start(|c| {
+        c.security.profile = SecurityProfile::BasicAuth;
+        c.security
+            .keys
+            .insert("AL1000".to_owned(), SPEC_HEX_UPPER.to_owned());
+    })
+    .await;
+    let mut events = csms.subscribe();
+    // The user is compared as bytes: a right password with a wrong or non-UTF-8 user fails.
+    let mut bad_user = b"AL1000".to_vec();
+    bad_user.push(0xff);
+    bad_user.push(b':');
+    bad_user.extend_from_slice(&SPEC_BYTES);
+    for raw in [[b"CP-X:".as_slice(), &SPEC_BYTES].concat(), bad_user] {
+        let header = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(raw)
+        );
+        assert_eq!(
+            raw_handshake(&csms, "AL1000", Some(&header))
+                .await
+                .unwrap_err()
+                .0,
+            401
+        );
+        let (_, reason) = wait_refused(&mut events, Some("AL1000")).await;
+        assert_eq!(reason, "invalid credentials");
+    }
+
+    // Malformed headers keep their reason, whatever the key looks like.
+    let nocolon = format!(
+        "Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(b"AL1000")
+    );
+    for header in ["Basic !!!", "Bearer abc", nocolon.as_str()] {
+        assert_eq!(
+            raw_handshake(&csms, "AL1000", Some(header))
+                .await
+                .unwrap_err()
+                .0,
+            401
+        );
+        let (_, reason) = wait_refused(&mut events, Some("AL1000")).await;
+        assert_eq!(reason, "missing or malformed credentials");
+    }
+    // A station without a key keeps its own reason.
+    let header = basic_bytes("CP-N", &SPEC_BYTES);
+    assert_eq!(
+        raw_handshake(&csms, "CP-N", Some(&header))
+            .await
+            .unwrap_err()
+            .0,
+        401
+    );
+    let (_, reason) = wait_refused(&mut events, Some("CP-N")).await;
+    assert_eq!(reason, "no key configured for the station");
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn decoded_hex_keys_are_limited_to_ocpp_16_sessions() {
+    let csms = start(|c| {
+        c.security.profile = SecurityProfile::BasicAuth;
+        c.security
+            .keys
+            .insert("AL1000".to_owned(), SPEC_HEX_UPPER.to_owned());
+        c.subprotocol = SubprotocolPolicy::RequireAny(vec![
+            "ocpp1.6".to_owned(),
+            "ocpp2.0.1".to_owned(),
+            "ocpp2.1".to_owned(),
+        ]);
+    })
+    .await;
+    let decoded = basic_bytes("AL1000", &SPEC_BYTES);
+    let literal = basic_bytes("AL1000", SPEC_HEX_UPPER.as_bytes());
+    for (offer, decoded_ok) in [
+        ("ocpp1.6", true),
+        ("ocpp2.0.1", false),
+        ("ocpp2.1", false),
+        // The client's first listed supported name is selected.
+        ("ocpp2.0.1, ocpp1.6", false),
+        ("ocpp1.6, ocpp2.0.1", true),
+    ] {
+        let result = raw_handshake_offering(&csms, "AL1000", Some(&decoded), Some(offer)).await;
+        if decoded_ok {
+            assert!(result.is_ok(), "{offer}");
+        } else {
+            let (status, challenge) = result.unwrap_err();
+            assert_eq!(status, 401, "{offer}");
+            // UTF-8 is the only form there, so the challenge says so.
+            assert_eq!(
+                challenge.as_deref(),
+                Some("Basic realm=\"kirby-csms\", charset=\"UTF-8\""),
+                "{offer}"
+            );
+        }
+        // The literal key works on every protocol.
+        assert!(
+            raw_handshake_offering(&csms, "AL1000", Some(&literal), Some(offer))
+                .await
+                .is_ok(),
+            "{offer}"
+        );
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn authentication_is_judged_before_the_protocol_refusal() {
+    let csms = start(|c| {
+        basic_auth(c, SecurityProfile::BasicAuth);
+        c.security
+            .keys
+            .insert("AL1000".to_owned(), SPEC_HEX_UPPER.to_owned());
+    })
+    .await;
+    // Only 1.6 is served and the client offers only 2.0.1.
+    let offer = Some("ocpp2.0.1");
+    let cases = [
+        // Wrong credentials stay a 401 whatever the protocol.
+        (basic("AL1000", "nope"), 401),
+        // Right literal credentials pass, then the protocol is refused.
+        (basic("AL1000", SPEC_HEX_UPPER), 400),
+        // A failed selection never opens the decoded form.
+        (basic_bytes("AL1000", &SPEC_BYTES), 401),
+    ];
+    for (header, status) in cases {
+        let result = raw_handshake_offering(&csms, "AL1000", Some(&header), offer).await;
+        assert_eq!(result.unwrap_err().0, status, "{header}");
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_session_without_a_selected_subprotocol_is_treated_as_ocpp_16() {
+    let csms = start(|c| {
+        c.security.profile = SecurityProfile::BasicAuth;
+        c.security
+            .keys
+            .insert("AL1000".to_owned(), SPEC_HEX_UPPER.to_owned());
+        c.subprotocol = SubprotocolPolicy::Omit;
+    })
+    .await;
+    let decoded = basic_bytes("AL1000", &SPEC_BYTES);
+    assert!(
+        raw_handshake_offering(&csms, "AL1000", Some(&decoded), None)
+            .await
+            .is_ok()
+    );
     csms.shutdown().await;
 }
 

@@ -40,18 +40,32 @@ pub(crate) struct Denied {
     pub reason: &'static str,
     /// Basic Auth problem (401 with a challenge) rather than a certificate problem (403).
     pub basic: bool,
+    /// The challenge came with a binary key allowed, so it must not promise UTF-8.
+    pub binary_key: bool,
 }
 
 impl Denied {
+    fn tls(reason: &'static str) -> Self {
+        Self {
+            reason,
+            basic: false,
+            binary_key: false,
+        }
+    }
+
     /// The HTTP refusal. The body never says why.
     pub(crate) fn response(self) -> ErrorResponse {
         let mut response = ErrorResponse::new(Some("unauthorized".to_owned()));
         if self.basic {
             *response.status_mut() = StatusCode::UNAUTHORIZED;
-            response.headers_mut().insert(
-                WWW_AUTHENTICATE,
-                HeaderValue::from_static("Basic realm=\"kirby-csms\", charset=\"UTF-8\""),
-            );
+            let challenge = if self.binary_key {
+                "Basic realm=\"kirby-csms\""
+            } else {
+                "Basic realm=\"kirby-csms\", charset=\"UTF-8\""
+            };
+            response
+                .headers_mut()
+                .insert(WWW_AUTHENTICATE, HeaderValue::from_static(challenge));
         } else {
             *response.status_mut() = StatusCode::FORBIDDEN;
         }
@@ -59,79 +73,99 @@ impl Denied {
     }
 }
 
-/// Checks a handshake request for station `id` against `policy`.
+/// Checks a handshake request for station `id` against `policy`. `binary_key` allows the
+/// decoded-hex form of the Basic Auth key; only a session that ends up as OCPP 1.6 may use it.
 pub(crate) fn check(
     policy: &SecurityPolicy,
     request: &Request,
     id: &str,
     peer: &PeerIdentity,
+    binary_key: bool,
 ) -> Result<(), Denied> {
     match policy.profile {
         SecurityProfile::None => Ok(()),
         SecurityProfile::BasicAuth | SecurityProfile::BasicAuthTls => {
             if policy.profile == SecurityProfile::BasicAuthTls && *peer == PeerIdentity::Plain {
-                return Err(Denied {
-                    reason: "TLS required",
-                    basic: false,
-                });
+                return Err(Denied::tls("TLS required"));
             }
-            check_basic(policy, request, id)
+            check_basic(policy, request, id, binary_key)
         }
         SecurityProfile::MutualTls => match peer {
-            PeerIdentity::Plain => Err(Denied {
-                reason: "TLS required",
-                basic: false,
-            }),
-            PeerIdentity::NoCertificate => Err(Denied {
-                reason: "client certificate required",
-                basic: false,
-            }),
+            PeerIdentity::Plain => Err(Denied::tls("TLS required")),
+            PeerIdentity::NoCertificate => Err(Denied::tls("client certificate required")),
             PeerIdentity::Certificate { common_name } => {
                 if common_name.as_deref() == Some(id) {
                     Ok(())
                 } else {
-                    Err(Denied {
-                        reason: "client certificate does not match the station id",
-                        basic: false,
-                    })
+                    Err(Denied::tls(
+                        "client certificate does not match the station id",
+                    ))
                 }
             }
         },
     }
 }
 
-fn check_basic(policy: &SecurityPolicy, request: &Request, id: &str) -> Result<(), Denied> {
+fn check_basic(
+    policy: &SecurityPolicy,
+    request: &Request,
+    id: &str,
+    binary_key: bool,
+) -> Result<(), Denied> {
     let denied = |reason| Denied {
         reason,
         basic: true,
+        binary_key,
     };
     let Some((user, password)) = credentials(request) else {
         return Err(denied("missing or malformed credentials"));
     };
     let key = policy.key_for(id);
-    // Both comparisons always run, so timing does not tell which part was wrong.
-    let user_ok = constant_time_eq(user.as_bytes(), id.as_bytes());
-    let key_ok = constant_time_eq(password.as_bytes(), key.unwrap_or_default().as_bytes());
+    // All comparisons always run, so timing does not tell which part was wrong.
+    let user_ok = constant_time_eq(&user, id.as_bytes());
+    let literal_ok = constant_time_eq(&password, key.unwrap_or_default().as_bytes());
+    // OCPP-J 1.6 sends a key of 40 hex digits as its 20 decoded bytes.
+    let decoded = key.filter(|_| binary_key).and_then(decode_hex);
+    let decoded_ok =
+        constant_time_eq(&password, decoded.as_deref().unwrap_or_default()) & decoded.is_some();
     if key.is_none() {
         Err(denied("no key configured for the station"))
-    } else if user_ok & key_ok {
+    } else if user_ok && (literal_ok | decoded_ok) {
         Ok(())
     } else {
         Err(denied("invalid credentials"))
     }
 }
 
-/// The user and password of a `Authorization: Basic` header.
-fn credentials(request: &Request) -> Option<(String, String)> {
+/// The bytes of a nonempty, even-length hex string (either case).
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    let digits = text.as_bytes();
+    if digits.is_empty() || !digits.len().is_multiple_of(2) {
+        return None;
+    }
+    digits
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| {
+            let high = char::from(pair[0]).to_digit(16)?;
+            let low = char::from(pair[1]).to_digit(16)?;
+            u8::try_from(high << 4 | low).ok()
+        })
+        .collect()
+}
+
+/// The user and password bytes of a `Authorization: Basic` header, split at the first colon.
+/// The password is not required to be UTF-8 (OCPP-J 1.6 sends a binary key).
+fn credentials(request: &Request) -> Option<(Vec<u8>, Vec<u8>)> {
     let value = request.headers().get(AUTHORIZATION)?.to_str().ok()?;
     let (scheme, encoded) = value.split_once(' ')?;
     if !scheme.eq_ignore_ascii_case("basic") {
         return None;
     }
     let decoded = STANDARD.decode(encoded.trim()).ok()?;
-    let text = String::from_utf8(decoded).ok()?;
-    let (user, password) = text.split_once(':')?;
-    Some((user.to_owned(), password.to_owned()))
+    let colon = decoded.iter().position(|&byte| byte == b':')?;
+    Some((decoded[..colon].to_vec(), decoded[colon + 1..].to_vec()))
 }
 
 /// Compares without stopping at the first difference (the length is compared too).

@@ -1513,7 +1513,15 @@ async fn run_session<S>(
             });
             return Err(refusal("no valid charge point id in the URL path"));
         };
-        if let Err(denied) = auth::check(&inner.config.security, request, &id, &identity) {
+        // Selected first so authentication knows the session protocol, but a failed selection is
+        // reported only after the credentials passed (bad credentials stay a 401).
+        let selection = inner.config.subprotocol.select(&offered_protocols(request));
+        let binary_key = selection
+            .as_ref()
+            .is_ok_and(|chosen| session_protocol(chosen.as_deref()) == Protocol::V16);
+        if let Err(denied) =
+            auth::check(&inner.config.security, request, &id, &identity, binary_key)
+        {
             inner.emit(CsmsEvent::AuthFailed {
                 station: Some(id),
                 remote_addr: peer,
@@ -1521,11 +1529,7 @@ async fn run_session<S>(
             });
             return Err(denied.response());
         }
-        let chosen = inner
-            .config
-            .subprotocol
-            .select(&offered_protocols(request))
-            .map_err(refusal)?;
+        let chosen = selection.map_err(refusal)?;
         if inner.station_limit_reached(&id) {
             return Err(unavailable("too many stations"));
         }
