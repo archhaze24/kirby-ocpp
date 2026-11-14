@@ -6,7 +6,9 @@
 pub mod builtin;
 mod junit;
 mod model;
+mod model2;
 mod runner;
+mod target2;
 pub mod vars;
 
 use std::path::PathBuf;
@@ -21,6 +23,7 @@ pub use self::junit::{
 pub use self::model::{
     Action, Condition, DEFAULT_TIMEOUT_MS, Expect, Scenario, Step, read_scenario_file,
 };
+pub use self::model2::{Action2, ComponentRef, Condition2, VariableRef};
 pub use self::runner::{
     RunStatus, ScenarioProgress, ScenarioReport, ScenarioRunner, StepDetail, StepReport,
     StepStatus, run_scenario, run_scenario_subscribed, run_scenario_with_events,
@@ -71,7 +74,42 @@ pub const OCPP_VERSION: &str = crate::ocpp::Protocol::V16.ocpp_version();
 /// Version of this crate (and, by workspace versioning, of the tools built on it).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Checks the optional `ocpp_version` and `schema` keys of a scenario or script file.
+/// The OCPP versions a scenario file may declare, for messages.
+const SCENARIO_VERSIONS: &str = "1.6 and 2.0.1";
+
+/// Reads the optional `ocpp_version` key of a scenario file: `None` when absent, the protocol
+/// otherwise. Scenario files may declare `"1.6"` or `"2.0.1"`.
+///
+/// # Errors
+/// A message for any other value.
+pub fn parse_contract_version(
+    ocpp_version: Option<&str>,
+) -> Result<Option<crate::ocpp::Protocol>, String> {
+    use crate::ocpp::Protocol;
+    match ocpp_version {
+        None => Ok(None),
+        Some(text) if text == Protocol::V16.ocpp_version() => Ok(Some(Protocol::V16)),
+        Some(text) if text == Protocol::V201.ocpp_version() => Ok(Some(Protocol::V201)),
+        Some(version) => Err(format!(
+            "`ocpp_version = {version:?}`: this build supports OCPP {SCENARIO_VERSIONS} only"
+        )),
+    }
+}
+
+fn check_schema_key(schema: Option<i64>) -> Result<(), String> {
+    if let Some(schema) = schema
+        && schema != i64::from(SCHEMA_VERSION)
+    {
+        return Err(format!(
+            "unsupported schema {schema} (this build reads schema {SCHEMA_VERSION})"
+        ));
+    }
+    Ok(())
+}
+
+/// Checks the optional `ocpp_version` and `schema` keys of a CSMS script file. Scripts speak
+/// OCPP 1.6 only for now, so this accepts `"1.6"` / `1` and nothing else; scenario files use
+/// [`parse_contract_version`].
 ///
 /// # Errors
 /// A message for any value other than `"1.6"` / `1`.
@@ -83,23 +121,40 @@ pub fn check_contract_keys(ocpp_version: Option<&str>, schema: Option<i64>) -> R
             "`ocpp_version = {version:?}`: this build supports OCPP {OCPP_VERSION} only"
         ));
     }
-    if let Some(schema) = schema
-        && schema != i64::from(SCHEMA_VERSION)
-    {
-        return Err(format!(
-            "unsupported schema {schema} (this build reads schema {SCHEMA_VERSION})"
-        ));
-    }
-    Ok(())
+    check_schema_key(schema)
 }
 
-/// Checks the version keys of a scenario or script file before the file is parsed in full, so a
-/// file written for a later version reports the version problem and not "unknown field".
-/// Text that is not valid TOML is left to the real parser.
+/// [`check_contract_keys`] for scenario files: the declared protocol, if any.
+pub(crate) fn check_scenario_contract(
+    ocpp_version: Option<&str>,
+    schema: Option<i64>,
+) -> Result<Option<crate::ocpp::Protocol>, String> {
+    let protocol = parse_contract_version(ocpp_version)?;
+    check_schema_key(schema)?;
+    Ok(protocol)
+}
+
+/// Checks the version keys of a CSMS script file before the file is parsed in full, so a file
+/// written for a later version reports the version problem and not "unknown field". Text that
+/// is not valid TOML is left to the real parser.
 ///
 /// # Errors
 /// A wrong value type, an unsupported `schema` or an unsupported `ocpp_version`.
 pub fn precheck_contract(text: &str) -> Result<(), String> {
+    precheck_with(text, check_contract_keys)
+}
+
+/// [`precheck_contract`] for scenario files (`"2.0.1"` is a valid version there).
+pub(crate) fn precheck_scenario_contract(text: &str) -> Result<(), String> {
+    precheck_with(text, |version, schema| {
+        check_scenario_contract(version, schema).map(drop)
+    })
+}
+
+fn precheck_with(
+    text: &str,
+    check: impl FnOnce(Option<&str>, Option<i64>) -> Result<(), String>,
+) -> Result<(), String> {
     let Ok(table) = text.parse::<toml::Table>() else {
         return Ok(());
     };
@@ -120,7 +175,7 @@ pub fn precheck_contract(text: &str) -> Result<(), String> {
     {
         return Err("`tags` must be an array of strings".to_owned());
     }
-    check_contract_keys(ocpp_version, schema)
+    check(ocpp_version, schema)
 }
 
 /// Step keys reserved for OCPP 2.x steps.

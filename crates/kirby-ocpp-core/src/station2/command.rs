@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::ocpp::v2::types::{ChargingState, Component, IdTokenType, StopReason, Variable};
+use crate::station::scripted_reply::ScriptedReply;
 
 /// Everything a UI, a headless runner or a scenario can ask the station to do.
 ///
@@ -81,6 +82,16 @@ pub enum Command2 {
         #[serde(rename = "attributeValue")]
         value: String,
     },
+    /// Take one meter sample on an EVSE as the periodic timer would: inside a transaction an
+    /// `Updated` event with trigger reason `MeterValuePeriodic`, outside one a `MeterValues`.
+    SampleMeter { evse: u32 },
+    /// Arm an answer for the next inbound CALLs of one action (a scenario `reply` step). See
+    /// [`crate::station::scripted_reply`]; the action name is checked against the 2.0.1
+    /// registry.
+    ArmScriptedReply { reply: ScriptedReply },
+    /// Remove every armed scripted reply. The outcome is a `Response` whose payload lists the
+    /// ones that were not fully used: `{"unused":[{"tag":..,"action":..,"remaining":..}]}`.
+    ClearScriptedReplies,
     /// Stop the station: close the connection gracefully, flush state, end the actor.
     Shutdown,
 }
@@ -108,6 +119,9 @@ impl Command2 {
             Self::DataTransfer { .. } => "data_transfer",
             Self::SendRaw { .. } => "send_raw",
             Self::SetVariable { .. } => "set_variable",
+            Self::SampleMeter { .. } => "sample_meter",
+            Self::ArmScriptedReply { .. } => "arm_scripted_reply",
+            Self::ClearScriptedReplies => "clear_scripted_replies",
             Self::Shutdown => "shutdown",
         }
     }

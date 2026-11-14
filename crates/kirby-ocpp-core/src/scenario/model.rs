@@ -7,8 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::ScenarioError;
+use super::model2::Action2;
 use super::vars::{self, Vars};
 use crate::ids::{ConnectorId, IdTag};
+use crate::ocpp::Protocol;
 use crate::ocpp::types::{ChargePointErrorCode, ConnectorStatus, RegistrationStatus, StopReason};
 use crate::station::response_rules::canonical_action;
 use crate::station::security::canonical_event_type;
@@ -28,13 +30,13 @@ pub const MAX_REPEAT_DEPTH: usize = 3;
 pub const MAX_EXPANDED_STEPS: u64 = 10_000;
 
 /// Longest accepted wait or sleep: one day.
-const MAX_WAIT_MS: u64 = 86_400_000;
+pub(super) const MAX_WAIT_MS: u64 = 86_400_000;
 
-fn default_timeout_ms() -> u64 {
+pub(super) fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
 
-fn default_wh_delta() -> u64 {
+pub(super) fn default_wh_delta() -> u64 {
     1_000
 }
 
@@ -96,6 +98,10 @@ pub struct Scenario {
     /// with [`Scenario::from_toml`].
     #[serde(skip)]
     pub source: Option<String>,
+    /// The `ocpp_version` the file declares (`None` when it has none, which means 1.6; see
+    /// [`Scenario::protocol`]). Not part of the serialized form.
+    #[serde(skip)]
+    pub ocpp_version: Option<Protocol>,
 }
 
 /// One step: an [`Action`] plus an optional display name and outcome assertion.
@@ -269,6 +275,11 @@ pub enum Action {
         var: Option<String>,
         steps: Vec<Step>,
     },
+    /// A step whose parameters are typed for OCPP 2.0.1. Built by the 2.0.1 parser only (never
+    /// deserialised or serialised through serde; use [`Action::to_json`] and
+    /// [`Action::from_json`]).
+    #[serde(skip_deserializing, skip_serializing)]
+    V201(Box<Action2>),
 }
 
 /// One executed step of a scenario after its loops are expanded.
@@ -332,9 +343,73 @@ impl Condition {
 }
 
 impl Action {
+    /// The action as a JSON object with its `action` tag: the serde form for 1.6 steps, the
+    /// [`Action2`] form for 2.0.1 steps, and a `repeat` with its nested steps in either form.
+    ///
+    /// # Errors
+    /// A serialization failure (a value serde cannot represent).
+    pub(crate) fn to_json(&self) -> Result<Value, serde_json::Error> {
+        match self {
+            Self::V201(action) => serde_json::to_value(action),
+            Self::Repeat { count, var, steps } => {
+                let mut fields = serde_json::Map::new();
+                fields.insert("action".to_owned(), Value::String("repeat".to_owned()));
+                fields.insert("count".to_owned(), Value::from(*count));
+                if let Some(var) = var {
+                    fields.insert("var".to_owned(), Value::String(var.clone()));
+                }
+                let steps = steps
+                    .iter()
+                    .map(Step::to_json)
+                    .collect::<Result<Vec<_>, _>>()?;
+                fields.insert("steps".to_owned(), Value::Array(steps));
+                Ok(Value::Object(fields))
+            }
+            other => serde_json::to_value(other),
+        }
+    }
+
+    /// The inverse of [`Action::to_json`] for one step: reads a JSON object with an `action`
+    /// tag in the grammar of `mode` (`Protocol::V16` or `Protocol::V201`). `repeat` is built by
+    /// the loaders only.
+    ///
+    /// # Errors
+    /// A deserialization failure, or `mode` is not a protocol with scenarios.
+    pub(crate) fn from_json(value: Value, mode: Protocol) -> Result<Self, serde_json::Error> {
+        match mode {
+            Protocol::V16 => serde_json::from_value(value),
+            Protocol::V201 => {
+                serde_json::from_value::<Action2>(value).map(|a| Self::V201(Box::new(a)))
+            }
+            _ => Err(serde::de::Error::custom(format!(
+                "no scenario steps for {}",
+                mode.token()
+            ))),
+        }
+    }
+
+    /// The grammar this action belongs to: 2.0.1-typed steps are `V201`, everything else
+    /// (including the protocol-neutral steps) reads and writes as a 1.6 [`Action`].
+    pub(crate) fn grammar(&self) -> Protocol {
+        match self {
+            Self::V201(_) => Protocol::V201,
+            _ => Protocol::V16,
+        }
+    }
+
+    /// Is this a `wait_for` step of either grammar?
+    pub(crate) fn is_wait_for(&self) -> bool {
+        match self {
+            Self::WaitFor { .. } => true,
+            Self::V201(action) => matches!(**action, Action2::WaitFor { .. }),
+            _ => false,
+        }
+    }
+
     /// Stable snake_case name (the serde tag).
     pub fn name(&self) -> &'static str {
         match self {
+            Self::V201(action) => action.name(),
             Self::Connect {} => "connect",
             Self::Disconnect {} => "disconnect",
             Self::Reconnect {} => "reconnect",
@@ -377,14 +452,37 @@ impl Step {
         self.name.as_deref().filter(|name| !name.trim().is_empty())
     }
 
+    /// The whole step as JSON (`name`, `expect`, `capture` and the action's own keys), for
+    /// 1.6 and 2.0.1 steps alike. Unlike `serde_json::to_value(step)` it also handles
+    /// [`Action::V201`], including inside `repeat`.
+    ///
+    /// # Errors
+    /// A serialization failure.
+    pub(crate) fn to_json(&self) -> Result<Value, serde_json::Error> {
+        let mut value = self.action.to_json()?;
+        if let Value::Object(fields) = &mut value {
+            if let Some(name) = &self.name {
+                fields.insert("name".to_owned(), Value::String(name.clone()));
+            }
+            if let Some(expect) = &self.expect {
+                fields.insert("expect".to_owned(), serde_json::to_value(expect)?);
+            }
+            if !self.capture.is_empty() {
+                fields.insert("capture".to_owned(), serde_json::to_value(&self.capture)?);
+            }
+        }
+        Ok(value)
+    }
+
     /// The stable label used in machine-readable reports: the explicit `name`, else the action
     /// name plus its main parameters, for example `expect_call Heartbeat out`,
-    /// `wait_for tx_active c1` or `start_tx c1 TAG`. Never just a position.
+    /// `wait_for tx_active c1` or `start_tx c1 TAG` (`e1` for the EVSE of a 2.0.1 step). Never
+    /// just a position.
     pub fn stable_label(&self) -> String {
         if let Some(name) = self.explicit_name() {
             return name.to_owned();
         }
-        let Ok(Value::Object(fields)) = serde_json::to_value(&self.action) else {
+        let Ok(Value::Object(fields)) = self.action.to_json() else {
             return self.action.name().to_owned();
         };
         let mut parts = vec![self.action.name().to_owned()];
@@ -395,18 +493,23 @@ impl Step {
         };
         if let Some(Value::Object(condition)) = fields.get("condition") {
             text(condition.get("kind"));
-            if let Some(connector) = condition.get("connector").and_then(Value::as_u64) {
-                text(Some(&Value::String(format!("c{connector}"))));
+            for (key, prefix) in [("evse", 'e'), ("connector", 'c')] {
+                if let Some(number) = condition.get(key).and_then(Value::as_u64) {
+                    text(Some(&Value::String(format!("{prefix}{number}"))));
+                }
             }
             text(condition.get("status"));
+            text(condition.get("state"));
         }
         for key in ["call", "event_type", "vendor_id", "rule"] {
             text(fields.get(key));
         }
-        if let Some(connector) = fields.get("connector").and_then(Value::as_u64) {
-            text(Some(&Value::String(format!("c{connector}"))));
+        for (key, prefix) in [("evse", 'e'), ("connector", 'c')] {
+            if let Some(number) = fields.get(key).and_then(Value::as_u64) {
+                text(Some(&Value::String(format!("{prefix}{number}"))));
+            }
         }
-        for key in ["direction", "id_tag", "status", "error_code"] {
+        for key in ["direction", "id_tag", "id_token", "status", "error_code"] {
             text(fields.get(key));
         }
         if let Some(ms) = fields.get("ms").and_then(Value::as_u64) {
@@ -518,13 +621,16 @@ impl Scenario {
     }
 
     fn parse(text: &str, max_steps: u64) -> Result<Self, Located> {
-        super::precheck_contract(text).map_err(Located::plain)?;
+        super::precheck_scenario_contract(text).map_err(Located::plain)?;
         let raw: RawScenario = toml::from_str(text).map_err(|e| Located {
             message: super::with_suggestion(e.message().to_owned()),
             offset: e.span().map(|span| span.start),
         })?;
-        super::check_contract_keys(raw.ocpp_version.as_deref(), raw.schema)
+        let declared = super::check_scenario_contract(raw.ocpp_version.as_deref(), raw.schema)
             .map_err(Located::plain)?;
+        // The grammar a file is read in follows its declared version; there is no fallback
+        // between the two, so every 1.6 message stays as it was.
+        let mode = declared.unwrap_or(Protocol::V16);
         if raw.name.trim().is_empty() {
             return Err(Located::plain("`name` must not be empty"));
         }
@@ -538,7 +644,7 @@ impl Scenario {
             .enumerate()
             .map(|(i, table)| {
                 let offset = table.span().start;
-                parse_step(table.into_inner(), 0)
+                parse_step(table.into_inner(), 0, mode)
                     .map_err(|e| Located::at(format!("step {}: {e}", i + 1), offset))
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -549,6 +655,7 @@ impl Scenario {
             steps,
             tags: raw.tags,
             source: None,
+            ocpp_version: declared,
         };
         scenario.validate(max_steps)?;
         Ok(scenario)
@@ -611,7 +718,14 @@ impl Scenario {
         let needle = format!("${{{name}}}");
         self.steps
             .iter()
-            .any(|step| serde_json::to_value(step).is_ok_and(|value| mentions(&value, &needle)))
+            .any(|step| step.to_json().is_ok_and(|value| mentions(&value, &needle)))
+    }
+
+    /// The OCPP version the scenario is written for: the declared `ocpp_version`, 1.6 when the
+    /// file declares none.
+    #[must_use]
+    pub fn protocol(&self) -> Protocol {
+        self.ocpp_version.unwrap_or(Protocol::V16)
     }
 
     fn validate(&self, max_steps: u64) -> Result<(), ScenarioError> {
@@ -765,6 +879,11 @@ fn validate_steps(
                         "action `reply`: `delay_ms` must be at most {}",
                         crate::station::response_rules::MAX_DELAY_MS
                     ));
+                }
+            }
+            Action::V201(action) => {
+                if let Err(message) = action.validate() {
+                    return bad(&message);
                 }
             }
             _ => {}
@@ -982,6 +1101,7 @@ fn parse_repeat(
     mut table: toml::Table,
     name: Option<String>,
     open_loops: usize,
+    mode: Protocol,
 ) -> Result<Step, String> {
     if open_loops >= MAX_REPEAT_DEPTH {
         return Err(format!(
@@ -1027,7 +1147,8 @@ fn parse_repeat(
             return Err(format!("repeat step {}: must be a table", i + 1));
         };
         steps.push(
-            parse_step(inner, open_loops + 1).map_err(|e| format!("repeat step {}: {e}", i + 1))?,
+            parse_step(inner, open_loops + 1, mode)
+                .map_err(|e| format!("repeat step {}: {e}", i + 1))?,
         );
     }
     Ok(Step {
@@ -1038,9 +1159,16 @@ fn parse_repeat(
     })
 }
 
-/// `open_loops` is the number of `repeat` steps around this one.
-fn parse_step(mut table: toml::Table, open_loops: usize) -> Result<Step, String> {
-    super::check_reserved_keys(&table)?;
+/// `open_loops` is the number of `repeat` steps around this one; `mode` is the grammar of the
+/// file (`Protocol::V16` or `Protocol::V201`).
+fn parse_step(mut table: toml::Table, open_loops: usize, mode: Protocol) -> Result<Step, String> {
+    if mode == Protocol::V201 {
+        return super::model2::parse_step(table, open_loops);
+    }
+    // The hint names the way out for a file that was written for 2.0.1 but does not say so.
+    super::check_reserved_keys(&table).map_err(|message| {
+        format!("{message} (use `ocpp_version = \"2.0.1\"` for OCPP 2.0.1 scenarios)")
+    })?;
     let name = match table.remove("name") {
         None => None,
         Some(toml::Value::String(s)) => Some(s),
@@ -1052,7 +1180,7 @@ fn parse_step(mut table: toml::Table, open_loops: usize) -> Result<Step, String>
                 "action `repeat`: `expect` and `capture` are not allowed on a loop".to_owned(),
             );
         }
-        return parse_repeat(table, name, open_loops);
+        return parse_repeat(table, name, open_loops, mode);
     }
     let expect = match table.remove("expect") {
         None => None,
@@ -1555,9 +1683,9 @@ call = "Heartbeat"
         let e = err(&format!("name = \"t\"\nschema = 2\nfuture_key = 1\n{step}"));
         assert!(e.contains("unsupported schema 2"), "{e}");
         let e = err(&format!(
-            "name = \"t\"\nocpp_version = \"2.0.1\"\nfuture_key = 1\n{step}"
+            "name = \"t\"\nocpp_version = \"2.1\"\nfuture_key = 1\n{step}"
         ));
-        assert!(e.contains("OCPP 1.6 only"), "{e}");
+        assert!(e.contains("OCPP 1.6 and 2.0.1 only"), "{e}");
         let e = err(&format!("name = \"t\"\nschema = \"1\"\n{step}"));
         assert!(e.contains("`schema` must be an integer"), "{e}");
         let e = err(&format!("name = \"t\"\nocpp_version = 1.6\n{step}"));
@@ -1616,6 +1744,11 @@ call = "Heartbeat"
             );
             assert!(!e.contains("unknown field"), "{e}");
         }
+        let e = err("name = \"t\"\n[[steps]]\naction = \"plug\"\nevse = 1\n");
+        assert!(
+            e.contains("(use `ocpp_version = \"2.0.1\"` for OCPP 2.0.1 scenarios)"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -1626,14 +1759,65 @@ call = "Heartbeat"
         ))
         .unwrap();
         assert_eq!(ok.tags, ["a", "b"]);
+        let e = err(&format!("name = \"t\"\nocpp_version = \"2.1\"\n{step}"));
+        assert!(
+            e.contains("OCPP 1.6 and 2.0.1 only") && e.contains("2.1"),
+            "{e}"
+        );
+        // 2.0.1 is a valid version; the file then fails in the 2.0.1 grammar.
         let e = err(&format!("name = \"t\"\nocpp_version = \"2.0.1\"\n{step}"));
-        assert!(e.contains("OCPP 1.6 only") && e.contains("2.0.1"), "{e}");
+        assert!(
+            !e.contains("this build supports") && e.contains("not implemented yet"),
+            "{e}"
+        );
         let e = err(&format!("name = \"t\"\nschema = 2\n{step}"));
         assert!(e.contains("unsupported schema 2"), "{e}");
         let e = err(&format!("name = \"t\"\ntags = [1]\n{step}"));
         assert!(e.contains("string"), "{e}");
         let e = err(&format!("name = \"t\"\ncolour = 1\n{step}"));
         assert!(e.contains("unknown field `colour`"), "{e}");
+    }
+
+    #[test]
+    fn the_declared_version_is_kept_and_defaults_to_1_6() {
+        use crate::scenario::parse_contract_version;
+        let step = "[[steps]]\naction = \"heartbeat\"\n";
+        let none = Scenario::from_toml(&format!("name = \"t\"\n{step}")).unwrap();
+        assert_eq!((none.ocpp_version, none.protocol()), (None, Protocol::V16));
+        let v16 =
+            Scenario::from_toml(&format!("name = \"t\"\nocpp_version = \"1.6\"\n{step}")).unwrap();
+        assert_eq!(
+            (v16.ocpp_version, v16.protocol()),
+            (Some(Protocol::V16), Protocol::V16)
+        );
+
+        assert_eq!(parse_contract_version(None), Ok(None));
+        assert_eq!(parse_contract_version(Some("1.6")), Ok(Some(Protocol::V16)));
+        assert_eq!(
+            parse_contract_version(Some("2.0.1")),
+            Ok(Some(Protocol::V201))
+        );
+        for bad in ["2.1", "1.6j", "ocpp1.6", ""] {
+            let e = parse_contract_version(Some(bad)).unwrap_err();
+            assert!(
+                e.contains("OCPP 1.6 and 2.0.1 only") && e.contains(bad),
+                "{e}"
+            );
+        }
+    }
+
+    #[test]
+    fn csms_scripts_still_check_for_1_6_only() {
+        use crate::scenario::check_contract_keys;
+        assert_eq!(check_contract_keys(Some("1.6"), Some(1)), Ok(()));
+        assert_eq!(
+            check_contract_keys(Some("2.0.1"), None).unwrap_err(),
+            "`ocpp_version = \"2.0.1\"`: this build supports OCPP 1.6 only"
+        );
+        assert_eq!(
+            check_contract_keys(None, Some(2)).unwrap_err(),
+            "unsupported schema 2 (this build reads schema 1)"
+        );
     }
 
     #[test]

@@ -259,6 +259,7 @@ async fn a_cancel_after_the_last_step_does_not_mark_the_report_cancelled() {
         steps: Vec::new(),
         tags: Vec::new(),
         source: None,
+        ocpp_version: None,
     };
     let cancel = CancelToken::new();
     cancel.cancel();

@@ -11,6 +11,7 @@ mod protocol2;
 mod record;
 mod state;
 mod suite;
+mod suite2;
 mod support;
 mod ux;
 mod ux_fixes;

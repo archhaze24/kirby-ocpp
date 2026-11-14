@@ -1,4 +1,8 @@
-//! Running a [`Scenario`] against a [`StationHandle`].
+//! Running a [`Scenario`] against a station: a [`StationHandle`] (OCPP 1.6) or a
+//! [`Station2Handle`](crate::station2::Station2Handle) (OCPP 2.0.1).
+//!
+//! The runner itself (frame bookkeeping, `expect_call`, variables, reports) is protocol-neutral.
+//! What differs per protocol sits behind [`ScenarioTarget`].
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -14,6 +18,7 @@ use super::model::{Action, Expect, ReplyError, Step};
 use super::vars::{self, Vars};
 use super::{CancelToken, Scenario, ScenarioError};
 use crate::error::StationError;
+use crate::ocpp::Protocol;
 use crate::station::ResponseRule;
 use crate::station::response_rules::canonical_action;
 use crate::station::scripted_reply::{ScriptedAnswer, ScriptedReply};
@@ -217,9 +222,12 @@ impl ScenarioRunner {
 /// Runs the steps in order and stops at the first failure (the rest is `Skipped`).
 /// Cancelling `cancel` fails the step in flight with "cancelled".
 ///
+/// `handle` is a [`StationHandle`] or a [`Station2Handle`](crate::station2::Station2Handle);
+/// the report's `ocpp_version` is the station's.
+///
 /// This function has no re-entrancy guard; use [`ScenarioRunner`] for that.
-pub async fn run_scenario(
-    handle: &StationHandle,
+pub async fn run_scenario<T: ScenarioTarget>(
+    handle: &T,
     scenario: &Scenario,
     cancel: &CancelToken,
     progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
@@ -232,8 +240,8 @@ pub async fn run_scenario(
 /// place in a fleet, 1 for a single station). `${station_id}` is the station's id.
 ///
 /// Names in `overrides` that are built-ins are ignored (the built-ins always win).
-pub async fn run_scenario_with_vars(
-    handle: &StationHandle,
+pub async fn run_scenario_with_vars<T: ScenarioTarget>(
+    handle: &T,
     scenario: &Scenario,
     cancel: &CancelToken,
     progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
@@ -256,8 +264,8 @@ pub async fn run_scenario_with_vars(
 /// before connecting: `expect_call` steps then also see CALLs that arrived while the caller
 /// waited for the boot, before the scenario started. The receiver's queue is bounded (the
 /// station's broadcast capacity); events lost to lag are reported like any other.
-pub async fn run_scenario_subscribed(
-    handle: &StationHandle,
+pub async fn run_scenario_subscribed<T: ScenarioTarget>(
+    handle: &T,
     scenario: &Scenario,
     cancel: &CancelToken,
     progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
@@ -276,7 +284,12 @@ pub async fn run_scenario_subscribed(
     .await
 }
 
-fn initial_vars(handle: &StationHandle, scenario: &Scenario, overrides: &Vars, index: u64) -> Vars {
+fn initial_vars<T: ScenarioTarget>(
+    handle: &T,
+    scenario: &Scenario,
+    overrides: &Vars,
+    index: u64,
+) -> Vars {
     let mut vars = scenario.vars.clone();
     for (name, value) in overrides.iter() {
         let _ = match overrides.written_text(name) {
@@ -284,15 +297,15 @@ fn initial_vars(handle: &StationHandle, scenario: &Scenario, overrides: &Vars, i
             None => vars.insert(name, value.clone()),
         };
     }
-    let _ = vars.insert("station_id", handle.snapshot().charge_point_id.into());
+    let _ = vars.insert("station_id", handle.station_id().into());
     let _ = vars.insert("index", index.into());
     vars
 }
 
 /// [`run_scenario`] with an explicit event subscription (tests use a tiny channel to force lag).
 #[doc(hidden)]
-pub async fn run_scenario_with_events(
-    handle: &StationHandle,
+pub async fn run_scenario_with_events<T: ScenarioTarget>(
+    handle: &T,
     scenario: &Scenario,
     cancel: &CancelToken,
     progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
@@ -302,8 +315,8 @@ pub async fn run_scenario_with_events(
     run_inner(handle, scenario, cancel, progress, events, vars).await
 }
 
-async fn run_inner(
-    handle: &StationHandle,
+async fn run_inner<T: ScenarioTarget>(
+    handle: &T,
     scenario: &Scenario,
     cancel: &CancelToken,
     progress: Option<&mpsc::UnboundedSender<ScenarioProgress>>,
@@ -405,7 +418,8 @@ async fn run_inner(
         millis(started.elapsed()),
     );
     report.started_at = started_at;
-    report.station = Some(handle.snapshot().charge_point_id.clone());
+    report.ocpp_version = String::from(handle.protocol().ocpp_version());
+    report.station = Some(handle.station_id());
     report.source.clone_from(&scenario.source);
     report
 }
@@ -413,18 +427,13 @@ async fn run_inner(
 /// Disarms the scripted replies the scenario left behind. Unless the scenario failed already
 /// (then an unused reply is a consequence, not a cause), a `reply` step with `must_fire = true`
 /// whose reply was not used up fails in the final report.
-async fn finish_replies(
-    handle: &StationHandle,
+async fn finish_replies<T: ScenarioTarget>(
+    handle: &T,
     flat: &[super::model::FlatStep<'_>],
     steps: &mut [StepReport],
     failed: bool,
 ) {
-    let cleared = timeout(
-        Duration::from_secs(2),
-        handle.send(Command::ClearScriptedReplies),
-    )
-    .await;
-    let Ok(Ok(Outcome::Response { payload })) = cleared else {
+    let Some(payload) = handle.clear_replies().await else {
         return;
     };
     if failed {
@@ -464,15 +473,15 @@ async fn finish_replies(
 
 /// What a failed step can tell about itself beyond the reason text.
 #[derive(Debug, Default)]
-struct Evidence {
-    params: Option<Value>,
-    expected: Option<Value>,
-    actual: Option<String>,
+pub struct Evidence {
+    pub(crate) params: Option<Value>,
+    pub(crate) expected: Option<Value>,
+    pub(crate) actual: Option<String>,
 }
 
 /// The step's parameters as JSON, without the `action` tag, secrets redacted.
 fn step_params(step: &Step) -> Option<Value> {
-    let mut value = serde_json::to_value(&step.action).ok()?;
+    let mut value = step.action.to_json().ok()?;
     let fields = value.as_object_mut()?;
     fields.remove("action");
     if let Some(expect) = &step.expect
@@ -538,9 +547,10 @@ fn wanted_calls(scenario: &Scenario) -> HashMap<String, bool> {
     wanted
 }
 
-struct Ctx<'a> {
+struct Ctx<'a, T: ScenarioTarget = StationHandle> {
     evidence: Evidence,
-    handle: &'a StationHandle,
+    /// The station under test.
+    handle: &'a T,
     events: broadcast::Receiver<Event>,
     /// Events lost since the last report: the subscription dropped them because the runner
     /// fell behind, or `frames` overflowed. Frames may be among them, so an `expect_call`
@@ -562,7 +572,7 @@ struct Ctx<'a> {
     index: u64,
 }
 
-impl Ctx<'_> {
+impl<T: ScenarioTarget> Ctx<'_, T> {
     fn record(&mut self, event: Event) {
         let Event::Frame(mut record) = event else {
             return;
@@ -626,7 +636,7 @@ impl Ctx<'_> {
 
     /// Awaits `work` while recording station events, so a long wait (sleep, condition, command)
     /// cannot let the subscription overflow and lose frames a later `expect_call` needs.
-    async fn with_events<T>(&mut self, work: impl Future<Output = T>) -> T {
+    async fn with_events<R>(&mut self, work: impl Future<Output = R>) -> R {
         tokio::pin!(work);
         let mut open = true;
         loop {
@@ -653,27 +663,12 @@ impl Ctx<'_> {
                 self.with_events(sleep(Duration::from_millis(*ms))).await;
                 None
             }
-            Action::WaitFor {
-                condition,
-                timeout_ms,
-            } => {
-                let mut rx = handle.watch_snapshot();
-                match self
-                    .with_events(timeout(
-                        Duration::from_millis(*timeout_ms),
-                        rx.wait_for(|s| condition.holds(s)),
-                    ))
-                    .await
-                {
-                    Ok(Ok(_)) => None,
-                    Ok(Err(_)) => return Err("station stopped".to_owned()),
-                    Err(_) => {
-                        self.evidence.expected = serde_json::to_value(condition).ok();
-                        return Err(format!(
-                            "timed out after {timeout_ms} ms waiting for {condition:?}"
-                        ));
-                    }
+            _ if step.action.is_wait_for() => {
+                if let Err(failure) = self.with_events(handle.wait_for(step)).await {
+                    self.evidence.expected = failure.expected;
+                    return Err(failure.reason);
                 }
+                None
             }
             Action::ExpectCall {
                 call,
@@ -684,31 +679,16 @@ impl Ctx<'_> {
                 self.expect_call(call, *direction, matches.as_ref(), *timeout_ms)
                     .await?,
             ),
-            Action::Reply {
-                call,
-                result,
-                error,
-                times,
-                delay_ms,
-                ..
-            } => {
-                let command = reply_command(
-                    self.index,
-                    call,
-                    result.as_ref(),
-                    error.as_ref(),
-                    *times,
-                    *delay_ms,
-                )?;
-                self.with_events(handle.send(command))
-                    .await
-                    .map_err(|error| format!("reply: {error}"))?;
-                None
-            }
-            action => {
-                let command = to_command(action)?;
-                let result = self.with_events(handle.send(command)).await;
-                check(step, action, result, &mut self.evidence)?
+            _ => {
+                // The target maps the step to a command and checks its outcome. Evidence it
+                // collects (expected, actual) joins the step's own parameters.
+                let mut evidence = Evidence::default();
+                let answer = self
+                    .with_events(handle.run_command_step(step, self.index, &mut evidence))
+                    .await;
+                self.evidence.expected = evidence.expected;
+                self.evidence.actual = evidence.actual;
+                answer?
             }
         };
         for (name, pointer) in &step.capture {
@@ -794,6 +774,152 @@ impl Ctx<'_> {
                 }
                 () = self.cancel.cancelled() => return Err("cancelled".to_owned()),
             }
+        }
+    }
+}
+
+pub(super) mod sealed {
+    /// Keeps [`ScenarioTarget`](super::ScenarioTarget) implementable inside this crate only.
+    pub trait Sealed {}
+}
+
+/// Why a `wait_for` step failed.
+#[derive(Debug)]
+pub struct WaitFailure {
+    /// The failure reason for the step report.
+    pub(crate) reason: String,
+    /// What the step waited for (failure evidence), when the failure is a timeout.
+    pub(crate) expected: Option<Value>,
+}
+
+/// The station side of a scenario run: what differs between OCPP versions.
+///
+/// Sealed: [`StationHandle`] (OCPP 1.6) and [`Station2Handle`](crate::station2::Station2Handle)
+/// (OCPP 2.0.1) are the targets. The trait is not part of the public API; it appears only as
+/// the bound of [`run_scenario`] and its variants. Everything else the runner does (frame
+/// bookkeeping, `expect_call`, `sleep`, variables, reports) is the same for both.
+pub trait ScenarioTarget: sealed::Sealed + Sync {
+    /// The protocol the station speaks; the report's `ocpp_version` follows it.
+    fn protocol(&self) -> Protocol;
+
+    /// The station's id, for the report and the `${station_id}` variable.
+    fn station_id(&self) -> String;
+
+    /// A new subscription to the station's events.
+    fn subscribe(&self) -> broadcast::Receiver<Event>;
+
+    /// Waits until the station state satisfies the condition of the `wait_for` step (within the
+    /// step's `timeout_ms`).
+    fn wait_for(&self, step: &Step) -> impl Future<Output = Result<(), WaitFailure>> + Send;
+
+    /// Maps a command step (any step except `sleep`, `wait_for` and `expect_call`) to the
+    /// station's command, sends it and checks the step's `expect`. `tag` is the step's index in
+    /// the expanded scenario. Returns the answer a `capture` may read, if the step has one.
+    fn run_command_step(
+        &self,
+        step: &Step,
+        tag: u64,
+        evidence: &mut Evidence,
+    ) -> impl Future<Output = Result<Option<Value>, String>> + Send;
+
+    /// Disarms every scripted reply. The answer lists the ones that were not used up:
+    /// `{"unused":[{"tag":..,"remaining":..}]}`; `None` when the station gave none.
+    fn clear_replies(&self) -> impl Future<Output = Option<Value>> + Send;
+}
+
+impl sealed::Sealed for StationHandle {}
+
+impl ScenarioTarget for StationHandle {
+    fn protocol(&self) -> Protocol {
+        Protocol::V16
+    }
+
+    fn station_id(&self) -> String {
+        self.snapshot().charge_point_id
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<Event> {
+        StationHandle::subscribe(self)
+    }
+
+    async fn wait_for(&self, step: &Step) -> Result<(), WaitFailure> {
+        let Action::WaitFor {
+            condition,
+            timeout_ms,
+        } = &step.action
+        else {
+            return Err(WaitFailure {
+                reason: format!("`{}` is not a wait_for step", step.action.name()),
+                expected: None,
+            });
+        };
+        let mut rx = self.watch_snapshot();
+        match timeout(
+            Duration::from_millis(*timeout_ms),
+            rx.wait_for(|s| condition.holds(s)),
+        )
+        .await
+        {
+            Ok(Ok(snapshot)) => {
+                drop(snapshot);
+                Ok(())
+            }
+            Ok(Err(_)) => Err(WaitFailure {
+                reason: "station stopped".to_owned(),
+                expected: None,
+            }),
+            Err(_) => Err(WaitFailure {
+                reason: format!("timed out after {timeout_ms} ms waiting for {condition:?}"),
+                expected: serde_json::to_value(condition).ok(),
+            }),
+        }
+    }
+
+    async fn run_command_step(
+        &self,
+        step: &Step,
+        tag: u64,
+        evidence: &mut Evidence,
+    ) -> Result<Option<Value>, String> {
+        match &step.action {
+            Action::Reply {
+                call,
+                result,
+                error,
+                times,
+                delay_ms,
+                ..
+            } => {
+                let command = reply_command(
+                    tag,
+                    call,
+                    result.as_ref(),
+                    error.as_ref(),
+                    *times,
+                    *delay_ms,
+                )?;
+                self.send(command)
+                    .await
+                    .map_err(|error| format!("reply: {error}"))?;
+                Ok(None)
+            }
+            action => {
+                let command = to_command(action)?;
+                let result = self.send(command).await;
+                check(step, action, result, evidence)
+            }
+        }
+    }
+
+    async fn clear_replies(&self) -> Option<Value> {
+        let cleared = timeout(
+            Duration::from_secs(2),
+            self.send(Command::ClearScriptedReplies),
+        )
+        .await;
+        match cleared {
+            Ok(Ok(Outcome::Response { payload })) => Some(payload),
+            _ => None,
         }
     }
 }
@@ -929,6 +1055,12 @@ fn to_command(action: &Action) -> Result<Command, String> {
         | Action::Repeat { .. } => {
             return Err("not a command".to_owned());
         }
+        Action::V201(action) => {
+            return Err(format!(
+                "`{}` is an OCPP 2.0.1 step; this station speaks OCPP 1.6",
+                action.name()
+            ));
+        }
     })
 }
 
@@ -1027,19 +1159,24 @@ fn check(
 /// substitution), the other string fields (text), and `expect`. Fields with another type
 /// (`connector`, `reason`, `wh_delta`, `ms`, `timeout_ms`, ...) are never substituted.
 fn substitute_step(step: &Step, vars: &Vars) -> Result<Step, String> {
-    let mut action = serde_json::to_value(&step.action).map_err(|e| e.to_string())?;
+    let mut action = step.action.to_json().map_err(|e| e.to_string())?;
     let mut out = step.clone();
     if action.to_string().contains('$')
         && let Value::Object(fields) = &mut action
     {
+        // `data` is free-form JSON in 2.0.1 (a string in 1.6).
+        let typed: &[&str] = match step.action.grammar() {
+            Protocol::V201 => &["payload", "match", "result", "error", "data"],
+            _ => &["payload", "match", "result", "error"],
+        };
         for (key, value) in fields.iter_mut() {
-            if matches!(key.as_str(), "payload" | "match" | "result" | "error") {
+            if typed.contains(&key.as_str()) {
                 *value = vars::substitute(value, vars).map_err(|e| format!("{key}: {e}"))?;
             } else if let Value::String(text) = value {
                 *text = vars::substitute_str(text, vars).map_err(|e| format!("{key}: {e}"))?;
             }
         }
-        out.action = serde_json::from_value(action)
+        out.action = Action::from_json(action, step.action.grammar())
             .map_err(|e| format!("{} after substituting variables: {e}", step.action.name()))?;
     }
     if let Some(expect) = &mut out.expect {
@@ -1199,6 +1336,134 @@ mod tests {
             assert_eq!(ctx.frames.len(), 1);
             ctx.expect_call("Heartbeat", None, None, 50).await.unwrap();
         });
+    }
+
+    // The OCPP 2.0.1 seam: a hand-built 2.0.1 step goes through variable substitution, label
+    // and parameter rendering exactly like a 1.6 step.
+
+    fn v201_step(action: crate::scenario::Action2) -> Step {
+        Step {
+            name: None,
+            expect: None,
+            capture: std::collections::BTreeMap::new(),
+            action: Action::V201(Box::new(action)),
+        }
+    }
+
+    fn tag_vars() -> Vars {
+        let mut vars = Vars::new();
+        vars.insert("tag", json!("KIRBY-1")).unwrap();
+        vars.insert("count", json!(3)).unwrap();
+        vars
+    }
+
+    #[test]
+    fn a_v201_step_substitutes_variables_and_renders_label_and_params() {
+        use crate::ocpp::v2::types::IdTokenType;
+        use crate::scenario::Action2;
+
+        let step = v201_step(Action2::StartTx {
+            evse: 1,
+            id_token: "${tag}".to_owned(),
+            token_type: IdTokenType::Iso14443,
+        });
+        assert_eq!(step.action.name(), "start_tx");
+        assert_eq!(step.action.grammar(), Protocol::V201);
+        assert_eq!(step.stable_label(), "start_tx e1 ${tag}");
+
+        let resolved = substitute_step(&step, &tag_vars()).unwrap();
+        assert_eq!(
+            resolved.action,
+            Action::V201(Box::new(Action2::StartTx {
+                evse: 1,
+                id_token: "KIRBY-1".to_owned(),
+                token_type: IdTokenType::Iso14443,
+            }))
+        );
+        assert_eq!(resolved.stable_label(), "start_tx e1 KIRBY-1");
+        assert_eq!(
+            step_params(&resolved),
+            Some(json!({"evse": 1, "id_token": "KIRBY-1", "type": "ISO14443"}))
+        );
+    }
+
+    #[test]
+    fn v201_data_is_substituted_as_json_and_neutral_steps_keep_their_form() {
+        use crate::scenario::Action2;
+
+        let step = v201_step(Action2::DataTransfer {
+            vendor_id: "v-${tag}".to_owned(),
+            message_id: None,
+            data: Some(json!({"n": "${count}", "s": "x-${tag}"})),
+        });
+        let resolved = substitute_step(&step, &tag_vars()).unwrap();
+        assert_eq!(
+            resolved.action,
+            Action::V201(Box::new(Action2::DataTransfer {
+                vendor_id: "v-KIRBY-1".to_owned(),
+                message_id: None,
+                data: Some(json!({"n": 3, "s": "x-KIRBY-1"})),
+            }))
+        );
+
+        // A protocol-neutral step substitutes as a 1.6 `Action`, in a 2.0.1 scenario too.
+        let neutral = Step {
+            name: None,
+            expect: None,
+            capture: std::collections::BTreeMap::new(),
+            action: Action::SendRaw {
+                call: "Heartbeat".to_owned(),
+                payload: json!({"k": "${tag}"}),
+                validate: false,
+            },
+        };
+        let resolved = substitute_step(&neutral, &tag_vars()).unwrap();
+        assert_eq!(
+            step_params(&resolved),
+            Some(json!({"call": "Heartbeat", "payload": {"k": "KIRBY-1"}, "validate": false}))
+        );
+    }
+
+    #[test]
+    fn v201_steps_round_trip_through_json_and_work_inside_repeat() {
+        use crate::scenario::Action2;
+
+        let action = Action::V201(Box::new(Action2::Plug { evse: 2 }));
+        let json = action.to_json().unwrap();
+        assert_eq!(json, json!({"action": "plug", "evse": 2}));
+        assert_eq!(Action::from_json(json, Protocol::V201).unwrap(), action);
+        // The same JSON is not a 1.6 step.
+        assert!(Action::from_json(json!({"action": "plug", "evse": 2}), Protocol::V16).is_err());
+        assert!(Action::from_json(json!({"action": "plug"}), Protocol::V21).is_err());
+
+        let looped = Scenario {
+            name: "t".to_owned(),
+            description: String::new(),
+            vars: Vars::new(),
+            steps: vec![Step {
+                name: None,
+                expect: None,
+                capture: std::collections::BTreeMap::new(),
+                action: Action::Repeat {
+                    count: 2,
+                    var: None,
+                    steps: vec![v201_step(Action2::StartTx {
+                        evse: 1,
+                        id_token: "${tag}".to_owned(),
+                        token_type: crate::ocpp::v2::types::IdTokenType::Iso14443,
+                    })],
+                },
+            }],
+            tags: Vec::new(),
+            source: None,
+            ocpp_version: Some(Protocol::V201),
+        };
+        assert_eq!(looped.protocol(), Protocol::V201);
+        assert!(looped.uses_variable("tag"));
+        assert!(!looped.uses_variable("other"));
+        let flat = looped.expanded_steps();
+        assert_eq!(flat.len(), 2);
+        assert_eq!(flat[1].label, "start_tx e1 ${tag} [2]");
     }
 
     #[test]

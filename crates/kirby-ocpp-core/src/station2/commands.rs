@@ -62,6 +62,11 @@ impl Station2Actor {
                 variable,
                 value,
             } => self.cmd_set_variable(component, variable, value, reply),
+            Command2::SampleMeter { evse } => self.cmd_sample_meter(evse, reply),
+            Command2::ArmScriptedReply { reply: scripted } => {
+                self.cmd_arm_scripted_reply(scripted, reply);
+            }
+            Command2::ClearScriptedReplies => self.cmd_clear_scripted_replies(reply),
             // The actor loop stops the station before commands are executed.
             Command2::Shutdown => {
                 let _ = reply.send(Ok(Outcome2::Done));

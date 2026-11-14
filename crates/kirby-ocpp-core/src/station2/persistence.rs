@@ -326,7 +326,7 @@ impl Station2Actor {
 /// Restoring transactions includes ending each restored active transaction with `PowerLoss` /
 /// `AbnormalCondition` as the first queued event after an accepted boot.
 impl Station2Actor {
-    /// S2: device-model values that differ from their defaults, never secrets.
+    /// Device-model values that differ from their defaults, never secrets.
     fn persist_device_model(&self) -> DeviceModelPersist {
         self.dm.persist()
     }
@@ -339,12 +339,12 @@ impl Station2Actor {
         self.dm.restore(&values);
     }
 
-    /// S2: the `BasicAuthPassword` read from the secrets file.
+    /// The `BasicAuthPassword` read from the secrets file.
     fn restore_basic_auth_password(&mut self, password: Option<String>) {
         self.dm.set_password(password);
     }
 
-    /// S5: the authorization cache.
+    /// The authorization cache.
     fn persist_auth_cache(&self) -> AuthCachePersist {
         self.auth_cache_persist()
     }
@@ -353,7 +353,7 @@ impl Station2Actor {
         self.auth_cache_restore(cache);
     }
 
-    /// S4: active transactions and the ids of the last stopped ones.
+    /// Active transactions and the ids of the last stopped ones.
     fn persist_transactions(&self) -> TxPersist {
         self.tx_persist()
     }
@@ -362,7 +362,7 @@ impl Station2Actor {
         self.tx_restore(tx);
     }
 
-    /// S4: the queued transaction events.
+    /// The queued transaction events.
     fn persist_queue(&self) -> QueuePersist {
         self.queue_persist()
     }

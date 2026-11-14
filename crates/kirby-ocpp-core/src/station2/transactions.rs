@@ -1299,6 +1299,18 @@ impl Station2Actor {
         }
     }
 
+    /// `Command2::SampleMeter`: one meter sample as the periodic timer would take it. Not
+    /// written yet; answers `NotImplemented`.
+    #[allow(
+        clippy::unused_self,
+        reason = "the sampling reads the actor state once it is implemented"
+    )]
+    pub(super) fn cmd_sample_meter(&mut self, _evse: u32, reply: Reply2) {
+        let _ = reply.send(Err(StationError::NotImplemented {
+            command: "sample_meter",
+        }));
+    }
+
     // ----- persistence -----------------------------------------------------------------
 
     /// Active transactions and the ids of the last stopped ones, for the state file.
