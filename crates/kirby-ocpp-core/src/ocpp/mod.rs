@@ -8,7 +8,9 @@ pub mod messages;
 pub mod protocol;
 pub mod responder;
 pub mod schema;
+mod schema_v201;
 pub mod types;
+pub mod v2;
 
 pub use action::{Action, InboundAction, OutboundAction};
 pub use frame::{

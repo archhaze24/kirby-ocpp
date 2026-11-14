@@ -140,22 +140,23 @@ async fn sessions_report_the_protocol_they_negotiated() {
 }
 
 #[tokio::test]
-async fn a_session_without_schemas_gets_no_validation_and_the_protocol_error_spelling() {
+async fn each_session_is_validated_against_its_own_schemas_with_the_protocol_error_spelling() {
     let csms = start(any_of(&["ocpp1.6", "ocpp2.0.1"])).await;
     let (mut old, _) = connect(&csms, "CP-OLD", "ocpp1.6").await.expect("accepted");
     let (mut new, _) = connect(&csms, "CP-NEW", "ocpp2.0.1")
         .await
         .expect("accepted");
 
-    // An empty BootNotification breaks the 1.6 schema, which only the 1.6 session is held to.
+    // An empty BootNotification breaks the schema of both versions; each session is
+    // answered in its own spelling.
     let boot = r#"[2,"b1","BootNotification",{}]"#;
     assert_eq!(
         call_error_code(&mut old, boot).await,
         ErrorCode::OccurenceConstraintViolation
     );
     assert_eq!(
-        call_error_code(&mut new, boot).await,
-        ErrorCode::NotImplemented
+        call_error_code(&mut new, boot).await.as_str(),
+        "OccurrenceConstraintViolation"
     );
 
     // A CALL without a payload is a formation error in 1.6 and a format error in 2.x.

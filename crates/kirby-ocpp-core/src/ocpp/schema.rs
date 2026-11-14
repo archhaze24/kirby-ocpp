@@ -1,19 +1,20 @@
 //! JSON-schema validation of OCPP payloads.
 //!
-//! The bundled OCPP 1.6J schemas (28 core actions + 11 Security Whitepaper actions, x request/response; the core ones are draft-04, the security ones draft-06 but only use keywords draft-04 shares) are
-//! the source of truth for payload validity. Validation applies to **both
-//! directions**: requests we send, requests we receive, responses we receive and
-//! the replies we send ourselves.
+//! The bundled schemas are the source of truth for payload validity: OCPP 1.6J (28 core
+//! actions + 11 Security Whitepaper actions, x request/response; the core ones are draft-04,
+//! the security ones draft-06 but only use keywords draft-04 shares) and OCPP 2.0.1 (64
+//! actions, all draft-06). Validation applies to **both directions**: requests we send,
+//! requests we receive, responses we receive and the replies we send ourselves.
 //!
-//! The schemas live in `crates/kirby-ocpp-core/schemas/` and are embedded with
-//! `include_str!` (no runtime file lookup). [`SchemaRegistry::new`] compiles each
-//! of them once with the `jsonschema` crate forced to Draft 4. Before compiling,
-//! the root `$schema`, `id` and `$id` keys are removed (as the TS validator does): the
-//! official files carry `"id": "urn:OCPP:1.6:..."`, which Draft 4 would treat as
-//! the base URI of the document. Only the **root** keys are stripped, so a
-//! property that is literally named `id` (`ClearChargingProfile`) is untouched.
-//! `format` is validated (`date-time`, `uri`), unknown keywords such as
-//! `javaType` are ignored.
+//! The schemas live in `crates/kirby-ocpp-core/schemas/` (2.0.1 in `schemas/ocpp201/`) and
+//! are embedded with `include_str!` (no runtime file lookup). Each registry compiles its
+//! files once with the `jsonschema` crate: 1.6 forced to Draft 4, 2.0.1 to Draft 6. Before
+//! compiling, the root `$schema`, `id` and `$id` keys are removed (as the TS validator
+//! does): the official 1.6 files carry `"id": "urn:OCPP:1.6:..."`, which Draft 4 would treat
+//! as the base URI of the document. Only the **root** keys are stripped, so a property that
+//! is literally named `id` (`ClearChargingProfile`) and nested `id` keys are untouched.
+//! `format` is validated (`date-time`, `uri`), unknown keywords such as `javaType` are
+//! ignored. [`SchemaRegistry::schema_source`] returns the embedded bytes unmodified.
 
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -24,6 +25,7 @@ use thiserror::Error;
 
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::protocol::Protocol;
+use crate::ocpp::schema_v201::EMBEDDED_V201;
 
 /// Which payload of an action a schema describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,7 +100,7 @@ impl SchemaKeyword {
 /// Why a payload was rejected.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViolationCause {
-    /// There is no schema for this action name (not an OCPP 1.6J action).
+    /// There is no schema for this action name (not an action of the registry's version).
     UnknownAction,
     /// Schema errors, as the keywords that failed (one entry per error).
     Keywords(Vec<SchemaKeyword>),
@@ -127,6 +129,8 @@ impl std::fmt::Display for SchemaIssue {
 /// A payload that does not conform to the schema of its action.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SchemaViolation {
+    /// The version whose schema rejected the payload.
+    pub protocol: Protocol,
     pub action: String,
     pub kind: PayloadKind,
     pub cause: ViolationCause,
@@ -141,10 +145,11 @@ impl std::fmt::Display for SchemaViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} {} violates OCPP 1.6J schema ({}): {}",
+            "{} {} violates {} schema ({}): {}",
             self.action,
             self.kind,
-            self.error_code(),
+            version_label(self.protocol),
+            self.error_code_for(self.protocol),
             self.errors.join("; ")
         )
     }
@@ -152,18 +157,35 @@ impl std::fmt::Display for SchemaViolation {
 
 impl std::error::Error for SchemaViolation {}
 
+/// How diagnostics name a version: `OCPP 1.6J`, `OCPP 2.0.1`, `OCPP 2.1`.
+fn version_label(protocol: Protocol) -> String {
+    match protocol {
+        Protocol::V16 => "OCPP 1.6J".to_owned(),
+        other => format!("OCPP {}", other.ocpp_version()),
+    }
+}
+
 impl SchemaViolation {
-    fn unknown_action(action: &str, kind: PayloadKind) -> Self {
+    fn unknown_action(protocol: Protocol, action: &str, kind: PayloadKind) -> Self {
         Self {
+            protocol,
             action: action.to_owned(),
             kind,
             cause: ViolationCause::UnknownAction,
-            errors: vec![format!("`{action}` is not an OCPP 1.6J action")],
+            errors: vec![format!(
+                "`{action}` is not an {} action",
+                version_label(protocol)
+            )],
             issues: Vec::new(),
         }
     }
 
-    fn from_issues(action: &str, kind: PayloadKind, mut issues: Vec<SchemaIssue>) -> Self {
+    fn from_issues(
+        protocol: Protocol,
+        action: &str,
+        kind: PayloadKind,
+        mut issues: Vec<SchemaIssue>,
+    ) -> Self {
         issues.sort_by(|a, b| {
             (&a.instance_path, keyword_name(&a.keyword), &a.message).cmp(&(
                 &b.instance_path,
@@ -172,6 +194,7 @@ impl SchemaViolation {
             ))
         });
         Self {
+            protocol,
             action: action.to_owned(),
             kind,
             cause: ViolationCause::Keywords(issues.iter().map(|i| i.keyword.clone()).collect()),
@@ -194,12 +217,17 @@ impl SchemaViolation {
     /// Like [`SchemaViolation::error_code`] with the spellings of `protocol`: 2.x answers
     /// `OccurrenceConstraintViolation` and `FormatViolation` where 1.6 says
     /// `OccurenceConstraintViolation` (sic) and `FormationViolation`. The other codes do not
-    /// change.
+    /// change. For 2.x an array that breaks `minItems`/`maxItems` counts as an occurrence
+    /// violation too (the 2.x schemas express cardinality that way); 1.6 never did.
     pub fn error_code_for(&self, protocol: Protocol) -> ErrorCode {
         let ViolationCause::Keywords(keywords) = &self.cause else {
             return ErrorCode::NotImplemented;
         };
-        if keywords.contains(&SchemaKeyword::Required) {
+        let cardinality = protocol != Protocol::V16
+            && keywords.iter().any(
+                |k| matches!(k, SchemaKeyword::Other(name) if name == "minItems" || name == "maxItems"),
+            );
+        if cardinality || keywords.contains(&SchemaKeyword::Required) {
             ErrorCode::occurrence_constraint_violation(protocol)
         } else if keywords.contains(&SchemaKeyword::Type) {
             ErrorCode::TypeConstraintViolation
@@ -319,7 +347,9 @@ pub enum SchemaError {
     Load(#[from] SchemaLoadError),
 }
 
+/// Compiles one schema file in the dialect of `protocol`: Draft 4 for 1.6, Draft 6 for 2.x.
 fn compile(
+    protocol: Protocol,
     action: &'static str,
     kind: PayloadKind,
     source: &str,
@@ -335,10 +365,13 @@ fn compile(
         root.remove("id");
         root.remove("$id");
     }
-    jsonschema::draft4::options()
-        .should_validate_formats(true)
-        .build(&schema)
-        .map_err(|e| fail(e.to_string()))
+    match protocol {
+        Protocol::V16 => jsonschema::draft4::options(),
+        _ => jsonschema::draft6::options(),
+    }
+    .should_validate_formats(true)
+    .build(&schema)
+    .map_err(|e| fail(e.to_string()))
 }
 
 impl SchemaRegistry {
@@ -351,13 +384,18 @@ impl SchemaRegistry {
     /// The shared registry of `protocol`, compiled on first use.
     ///
     /// # Errors
-    /// [`SchemaError::Unavailable`] for a version this build embeds no schemas for (every
-    /// one but 1.6 today); [`SchemaError::Load`] if a bundled schema does not compile.
+    /// [`SchemaError::Unavailable`] for a version this build embeds no schemas for (2.1
+    /// today); [`SchemaError::Load`] if a bundled schema does not compile.
     pub fn for_protocol(protocol: Protocol) -> Result<Arc<Self>, SchemaError> {
         static V16: OnceLock<Result<Arc<SchemaRegistry>, SchemaLoadError>> = OnceLock::new();
+        static V201: OnceLock<Result<Arc<SchemaRegistry>, SchemaLoadError>> = OnceLock::new();
         match protocol {
             Protocol::V16 => V16
                 .get_or_init(|| Self::new().map(Arc::new))
+                .clone()
+                .map_err(SchemaError::Load),
+            Protocol::V201 => V201
+                .get_or_init(|| Self::build(Protocol::V201, EMBEDDED_V201).map(Arc::new))
                 .clone()
                 .map_err(SchemaError::Load),
             other => Err(SchemaError::Unavailable(other)),
@@ -375,8 +413,8 @@ impl SchemaRegistry {
             actions.insert(
                 action,
                 Entry {
-                    request: compile(action, PayloadKind::Request, request_source)?,
-                    response: compile(action, PayloadKind::Response, response_source)?,
+                    request: compile(protocol, action, PayloadKind::Request, request_source)?,
+                    response: compile(protocol, action, PayloadKind::Response, response_source)?,
                     request_source,
                     response_source,
                 },
@@ -389,12 +427,14 @@ impl SchemaRegistry {
         })
     }
 
-    /// `true` if `action` is one of the 39 known actions (28 core + 11 security extensions).
+    /// `true` if `action` has a schema in this registry (1.6: 28 core + 11 security
+    /// extensions; 2.0.1: 64).
     pub fn knows_action(&self, action: &str) -> bool {
         self.actions.contains_key(action)
     }
 
-    /// The 39 action names: the 28 core ones in alphabetical order, then the 11 security ones.
+    /// The action names in table order. 1.6: the 28 core ones alphabetically, then the 11
+    /// security ones; 2.0.1: all 64 alphabetically.
     pub fn action_names(&self) -> impl Iterator<Item = &'static str> {
         self.table.iter().map(|&(name, _, _)| name)
     }
@@ -425,14 +465,15 @@ impl SchemaRegistry {
         payload: &Value,
     ) -> Result<(), SchemaViolation> {
         let Some(entry) = self.actions.get(action) else {
-            return Err(SchemaViolation::unknown_action(action, kind));
+            return Err(SchemaViolation::unknown_action(self.protocol, action, kind));
         };
         let validator = match kind {
             PayloadKind::Request => &entry.request,
             PayloadKind::Response => &entry.response,
         };
         // The validator's messages quote the offending value; that must never be a secret.
-        let secret = kind == PayloadKind::Request && carries_authorization_key(action, payload);
+        let secret = kind == PayloadKind::Request && carries_authorization_key(action, payload)
+            || super::frame::carries_device_model_secret(payload);
         let issues: Vec<SchemaIssue> = validator
             .iter_errors(payload)
             .map(|error| SchemaIssue {
@@ -451,7 +492,12 @@ impl SchemaRegistry {
         if issues.is_empty() {
             Ok(())
         } else {
-            Err(SchemaViolation::from_issues(action, kind, issues))
+            Err(SchemaViolation::from_issues(
+                self.protocol,
+                action,
+                kind,
+                issues,
+            ))
         }
     }
 }
@@ -472,6 +518,7 @@ mod tests {
 
     fn violation(keywords: &[&str]) -> SchemaViolation {
         SchemaViolation {
+            protocol: Protocol::V16,
             action: "Authorize".into(),
             kind: PayloadKind::Request,
             cause: ViolationCause::Keywords(
@@ -533,6 +580,7 @@ mod tests {
     #[test]
     fn unknown_action_is_not_implemented() {
         let v = SchemaViolation {
+            protocol: Protocol::V16,
             action: "Frobnicate".into(),
             kind: PayloadKind::Request,
             cause: ViolationCause::UnknownAction,
@@ -863,17 +911,228 @@ mod tests {
 
     #[test]
     fn for_protocol_refuses_versions_without_schemas() {
-        for protocol in [Protocol::V201, Protocol::V21] {
-            let error = SchemaRegistry::for_protocol(protocol).unwrap_err();
-            assert!(
-                matches!(error, SchemaError::Unavailable(p) if p == protocol),
-                "{error:?}"
-            );
-            assert_eq!(
-                error.to_string(),
-                format!("this build has no OCPP schemas for {}", protocol.token())
-            );
+        let protocol = Protocol::V21;
+        let error = SchemaRegistry::for_protocol(protocol).unwrap_err();
+        assert!(
+            matches!(error, SchemaError::Unavailable(p) if p == protocol),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!("this build has no OCPP schemas for {}", protocol.token())
+        );
+    }
+
+    // ---- OCPP 2.0.1 ----
+
+    fn v201() -> Arc<SchemaRegistry> {
+        SchemaRegistry::for_protocol(Protocol::V201).expect("2.0.1 schemas compile")
+    }
+
+    fn v16() -> Arc<SchemaRegistry> {
+        SchemaRegistry::for_protocol(Protocol::V16).unwrap()
+    }
+
+    fn schema_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/ocpp201")
+    }
+
+    #[test]
+    fn v201_embeds_64_unique_pairs_matching_the_files() {
+        let registry = v201();
+        assert_eq!(registry.protocol(), Protocol::V201);
+        let names: Vec<_> = registry.action_names().collect();
+        assert_eq!(names.len(), 64);
+        let unique: std::collections::HashSet<_> = names.iter().copied().collect();
+        assert_eq!(unique.len(), 64);
+        let mut files: Vec<String> = std::fs::read_dir(schema_dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name != "README.md")
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 128);
+        let mut expected: Vec<String> = names
+            .iter()
+            .flat_map(|n| [format!("{n}Request.json"), format!("{n}Response.json")])
+            .collect();
+        expected.sort();
+        assert_eq!(files, expected);
+        for name in names {
+            assert!(registry.knows_action(name), "{name}");
+            for (kind, suffix) in [
+                (PayloadKind::Request, "Request"),
+                (PayloadKind::Response, "Response"),
+            ] {
+                let on_disk =
+                    std::fs::read_to_string(schema_dir().join(format!("{name}{suffix}.json")))
+                        .unwrap();
+                assert_eq!(registry.schema_source(name, kind), Some(on_disk.as_str()));
+            }
         }
+    }
+
+    #[test]
+    fn v201_registry_is_shared_and_isolated_from_1_6() {
+        let first = SchemaRegistry::for_protocol(Protocol::V201).unwrap();
+        assert!(Arc::ptr_eq(&first, &v201()));
+        assert!(!Arc::ptr_eq(&first, &v16()));
+        assert_eq!(v16().action_names().count(), 39);
+        // Names that exist in one version only.
+        assert!(v16().knows_action("RemoteStartTransaction"));
+        assert!(!v201().knows_action("RemoteStartTransaction"));
+        assert!(v201().knows_action("RequestStartTransaction"));
+        assert!(!v16().knows_action("RequestStartTransaction"));
+        let unknown = v201()
+            .validate_request("RemoteStartTransaction", &json!({}))
+            .unwrap_err();
+        assert_eq!(unknown.cause, ViolationCause::UnknownAction);
+        assert_eq!(unknown.protocol, Protocol::V201);
+        assert_eq!(
+            unknown.errors,
+            ["`RemoteStartTransaction` is not an OCPP 2.0.1 action"]
+        );
+    }
+
+    #[test]
+    fn a_shared_action_name_validates_its_own_shape() {
+        let boot16 = json!({"chargePointVendor": "v", "chargePointModel": "m"});
+        let boot201 = json!({
+            "reason": "PowerUp",
+            "chargingStation": {"model": "m", "vendorName": "v"}
+        });
+        v16().validate_request("BootNotification", &boot16).unwrap();
+        v201()
+            .validate_request("BootNotification", &boot201)
+            .unwrap();
+        let wrong201 = v201()
+            .validate_request("BootNotification", &boot16)
+            .unwrap_err();
+        assert_eq!(
+            wrong201.error_code_for(Protocol::V201).as_str(),
+            "OccurrenceConstraintViolation"
+        );
+        assert!(
+            wrong201
+                .to_string()
+                .starts_with("BootNotification request violates OCPP 2.0.1 schema (Occurrence")
+        );
+        assert!(
+            v16()
+                .validate_request("BootNotification", &boot201)
+                .is_err()
+        );
+        v201()
+            .validate_response(
+                "BootNotification",
+                &json!({"currentTime": "2026-05-06T07:08:09Z", "interval": 300, "status": "Accepted"}),
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn v201_validates_real_actions() {
+        let registry = v201();
+        registry.validate_request("Heartbeat", &json!({})).unwrap();
+        registry
+            .validate_request(
+                "GetVariables",
+                &json!({"getVariableData": [
+                    {"component": {"name": "SecurityCtrlr"}, "variable": {"name": "OrganizationName"}}
+                ]}),
+            )
+            .unwrap();
+        // minItems: 1 on the list.
+        let empty = registry
+            .validate_request("GetVariables", &json!({"getVariableData": []}))
+            .unwrap_err();
+        assert_eq!(
+            empty.issues[0].keyword,
+            SchemaKeyword::Other("minItems".into())
+        );
+        assert_eq!(
+            empty.error_code_for(Protocol::V201).as_str(),
+            "OccurrenceConstraintViolation"
+        );
+        // Cardinality is not an occurrence violation in 1.6 (unchanged mapping).
+        assert_eq!(
+            empty.error_code_for(Protocol::V16),
+            ErrorCode::FormationViolation
+        );
+        let event = json!({
+            "eventType": "Started",
+            "timestamp": "2026-05-06T07:08:09Z",
+            "triggerReason": "Authorized",
+            "seqNo": 0,
+            "transactionInfo": {"transactionId": "tx-1"}
+        });
+        registry
+            .validate_request("TransactionEvent", &event)
+            .unwrap();
+        let mut bad = event.clone();
+        bad["seqNo"] = json!("0");
+        bad["timestamp"] = json!("yesterday");
+        let violation = registry
+            .validate_request("TransactionEvent", &bad)
+            .unwrap_err();
+        assert_eq!(
+            violation.error_code_for(Protocol::V201),
+            ErrorCode::TypeConstraintViolation
+        );
+        assert!(
+            violation
+                .issues
+                .iter()
+                .any(|i| i.keyword == SchemaKeyword::Format)
+        );
+        let mut missing = event;
+        missing.as_object_mut().unwrap().remove("transactionInfo");
+        assert_eq!(
+            registry
+                .validate_request("TransactionEvent", &missing)
+                .unwrap_err()
+                .error_code_for(Protocol::V201)
+                .as_str(),
+            "OccurrenceConstraintViolation"
+        );
+    }
+
+    #[test]
+    fn the_compiler_selects_the_dialect_per_protocol() {
+        // `const` and numeric `exclusiveMinimum` exist from draft 6 on; `propertyNames` too.
+        const SCHEMA: &str = r#"{
+            "type": "object",
+            "properties": {
+                "kind": {"const": "a"},
+                "n": {"type": "integer", "exclusiveMinimum": 0}
+            },
+            "propertyNames": {"maxLength": 4}
+        }"#;
+        let draft6 = compile(Protocol::V201, "Synthetic", PayloadKind::Request, SCHEMA).unwrap();
+        assert!(draft6.is_valid(&json!({"kind": "a", "n": 1})));
+        assert!(!draft6.is_valid(&json!({"kind": "b"})));
+        assert!(!draft6.is_valid(&json!({"n": 0})));
+        assert!(!draft6.is_valid(&json!({"toolong": 1})));
+        // Draft 4 reads `exclusiveMinimum: 0` as a malformed boolean flag or ignores the
+        // draft-6 keywords; either way it must not behave like draft 6.
+        let draft4 = compile(Protocol::V16, "Synthetic", PayloadKind::Request, SCHEMA);
+        match draft4 {
+            Ok(validator) => {
+                assert!(validator.is_valid(&json!({"kind": "b"})));
+                assert!(validator.is_valid(&json!({"toolong": 1})));
+            }
+            Err(error) => assert!(error.message.contains("boolean"), "{error}"),
+        }
+    }
+
+    #[test]
+    fn v201_keeps_nested_ids_and_original_bytes() {
+        // Only root metadata is stripped for compiling; the source stays untouched.
+        let source = v201()
+            .schema_source("BootNotification", PayloadKind::Request)
+            .unwrap();
+        assert!(source.contains("\"$id\": \"urn:OCPP:Cp:2:2020:3:BootNotificationRequest\""));
+        assert!(source.contains("draft-06"));
     }
 
     #[test]
@@ -922,7 +1181,7 @@ mod tests {
             assert_eq!(wire(keywords, Protocol::V201), v2);
             assert_eq!(wire(keywords, Protocol::V21), v2);
         }
-        let unknown = SchemaViolation::unknown_action("Nope", PayloadKind::Request);
+        let unknown = SchemaViolation::unknown_action(Protocol::V16, "Nope", PayloadKind::Request);
         for protocol in Protocol::ALL {
             assert_eq!(unknown.error_code_for(protocol), ErrorCode::NotImplemented);
         }

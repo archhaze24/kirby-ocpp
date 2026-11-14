@@ -99,6 +99,34 @@ mod tests {
     }
 
     #[test]
+    fn a_2_0_1_session_request_is_validated_against_the_2_0_1_schemas() {
+        let schemas = EngineSchemas::load();
+        let (code, _) = schemas
+            .inbound_violation(
+                Protocol::V201,
+                "BootNotification",
+                &json!({"chargePointVendor": "v", "chargePointModel": "m"}),
+            )
+            .expect("a 1.6 boot payload violates the 2.0.1 schema");
+        assert_eq!(code.as_str(), "OccurrenceConstraintViolation");
+        // Unknown names are left to the dispatcher.
+        assert!(
+            schemas
+                .inbound_violation(Protocol::V201, "RemoteStartTransaction", &json!({}))
+                .is_none()
+        );
+        assert!(
+            schemas
+                .inbound_violation(
+                    Protocol::V201,
+                    "BootNotification",
+                    &json!({"reason": "PowerUp", "chargingStation": {"model": "m", "vendorName": "v"}}),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
     fn the_subprotocol_picks_the_session_protocol() {
         assert_eq!(session_protocol(None), Protocol::V16);
         assert_eq!(session_protocol(Some("ocpp1.6")), Protocol::V16);

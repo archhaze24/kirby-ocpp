@@ -478,7 +478,11 @@ pub fn redact_secrets(frame: &Frame) -> Frame {
     match &mut copy {
         Frame::Call {
             action, payload, ..
-        } if action == "ChangeConfiguration" => {
+        } if matches!(
+            action.as_str(),
+            "ChangeConfiguration" | "SetVariables" | "NotifyReport"
+        ) =>
+        {
             redact_payload(payload);
         }
         Frame::CallResult { payload, .. } => redact_payload(payload),
@@ -488,11 +492,77 @@ pub fn redact_secrets(frame: &Frame) -> Frame {
     copy
 }
 
-/// Replaces the `value` beside a case-insensitive `"key": "AuthorizationKey"` anywhere
-/// in a JSON payload with [`REDACTED`]. Other keys and values are preserved.
+/// OCPP 2.0.1 device-model variables whose values are secrets, as
+/// `(component, variable)`. Names match case-insensitively; component and variable
+/// instances and the EVSE qualifier do not matter.
+const SECRET_VARIABLES: [(&str, &str); 6] = [
+    ("SecurityCtrlr", "BasicAuthPassword"),
+    ("NetworkConfiguration", "BasicAuthPassword"),
+    ("NetworkConfiguration", "VpnPassword"),
+    ("NetworkConfiguration", "VpnKey"),
+    ("NetworkConfiguration", "ApnPassword"),
+    ("WebPaymentsCtrlr", "SharedSecret"),
+];
+
+/// `true` when `fields` has a `component` and a `variable` naming a secret variable.
+fn names_secret_variable(fields: &serde_json::Map<String, Value>) -> bool {
+    let name = |key: &str| {
+        fields
+            .get(key)
+            .and_then(|part| part.get("name"))
+            .and_then(Value::as_str)
+    };
+    match (name("component"), name("variable")) {
+        (Some(component), Some(variable)) => SECRET_VARIABLES
+            .iter()
+            .any(|(c, v)| component.eq_ignore_ascii_case(c) && variable.eq_ignore_ascii_case(v)),
+        _ => false,
+    }
+}
+
+/// Replaces the values of a secret device-model variable in one JSON object:
+/// `attributeValue` (SetVariables request, GetVariables result) and every
+/// `variableAttribute[].value` (NotifyReport), whatever the attribute type.
+fn redact_variable_values(fields: &mut serde_json::Map<String, Value>) {
+    if !names_secret_variable(fields) {
+        return;
+    }
+    if let Some(value) = fields.get_mut("attributeValue") {
+        *value = Value::from(REDACTED);
+    }
+    if let Some(Value::Array(attributes)) = fields.get_mut("variableAttribute") {
+        for attribute in attributes {
+            if let Some(value) = attribute.get_mut("value") {
+                *value = Value::from(REDACTED);
+            }
+        }
+    }
+}
+
+/// `true` when a payload holds a value of a secret device-model variable. Schema
+/// diagnostics use it to avoid quoting the offending value.
+pub(crate) fn carries_device_model_secret(payload: &Value) -> bool {
+    match payload {
+        Value::Object(fields) => {
+            (names_secret_variable(fields)
+                && (fields.contains_key("attributeValue")
+                    || fields.contains_key("variableAttribute")))
+                || fields.values().any(carries_device_model_secret)
+        }
+        Value::Array(items) => items.iter().any(carries_device_model_secret),
+        _ => false,
+    }
+}
+
+/// Replaces secret values anywhere in a JSON payload with [`REDACTED`]: the `value`
+/// beside a case-insensitive `"key": "AuthorizationKey"` (1.6) and the values of the
+/// `BasicAuthPassword` variables of `SecurityCtrlr` and `NetworkConfiguration` (2.0.1).
+/// The 2.0.1 variables are found by shape, so no action name is needed. Other keys and
+/// values are preserved.
 pub fn redact_payload(payload: &mut Value) {
     match payload {
         Value::Object(fields) => {
+            redact_variable_values(fields);
             if fields
                 .get("key")
                 .and_then(Value::as_str)
@@ -896,6 +966,179 @@ mod tests {
     fn serde_deserialize_reports_frame_errors() {
         let err = serde_json::from_str::<Frame>(r"[9]").unwrap_err();
         assert!(err.to_string().contains("unsupported message type"));
+    }
+
+    const SENTINEL: &str = "sentinel-secret-1";
+
+    fn redacted(mut value: Value) -> Value {
+        redact_payload(&mut value);
+        value
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn set_variable(component: Value, variable: Value, value: &str) -> Value {
+        json!({"component": component, "variable": variable, "attributeValue": value})
+    }
+
+    #[test]
+    fn device_model_secrets_are_redacted_in_every_shape() {
+        let secret_attr = |kind: &str| json!({"type": kind, "value": SENTINEL});
+        let cases = [
+            // SetVariables request, GetVariables result.
+            set_variable(
+                json!({"name": "SecurityCtrlr"}),
+                json!({"name": "BasicAuthPassword"}),
+                SENTINEL,
+            ),
+            set_variable(
+                json!({"name": "networkconfiguration", "instance": "1"}),
+                json!({"name": "BASICAUTHPASSWORD", "instance": "x"}),
+                SENTINEL,
+            ),
+            set_variable(
+                json!({"name": "SECURITYCTRLR", "evse": {"id": 1, "connectorId": 2}}),
+                json!({"name": "basicauthpassword"}),
+                SENTINEL,
+            ),
+            set_variable(
+                json!({"name": "NetworkConfiguration"}),
+                json!({"name": "VpnPassword"}),
+                SENTINEL,
+            ),
+            set_variable(
+                json!({"name": "NetworkConfiguration"}),
+                json!({"name": "vpnkey"}),
+                SENTINEL,
+            ),
+            set_variable(
+                json!({"name": "NetworkConfiguration"}),
+                json!({"name": "ApnPassword"}),
+                SENTINEL,
+            ),
+            set_variable(
+                json!({"name": "WebPaymentsCtrlr"}),
+                json!({"name": "SharedSecret"}),
+                SENTINEL,
+            ),
+            // NotifyReport entry with every attribute type.
+            json!({
+                "component": {"name": "SecurityCtrlr"},
+                "variable": {"name": "BasicAuthPassword"},
+                "variableAttribute": Vec::from(
+                    ["Actual", "Target", "MinSet", "MaxSet"].map(secret_attr)
+                ),
+            }),
+        ];
+        for case in cases {
+            let wrapped = json!({"setVariableData": [case.clone()], "reportData": [case]});
+            let text = redacted(wrapped).to_string();
+            assert!(!text.contains(SENTINEL), "{text}");
+            assert!(text.contains(REDACTED), "{text}");
+        }
+    }
+
+    #[test]
+    fn device_model_redaction_touches_only_secret_entries() {
+        let other = |component: &str, variable: &str| {
+            set_variable(
+                json!({"name": component}),
+                json!({"name": variable}),
+                "keep-me",
+            )
+        };
+        let batch = json!({"setVariableData": [
+            other("SecurityCtrlr", "BasicAuthPasswordHint"),
+            set_variable(
+                json!({"name": "SecurityCtrlr", "instance": "a"}),
+                json!({"name": "BasicAuthPassword"}),
+                SENTINEL,
+            ),
+            other("OtherCtrlr", "BasicAuthPassword"),
+            other("SecurityCtrlr", "Identity"),
+            {"attributeValue": "no-names"},
+        ]});
+        let out = redacted(batch.clone());
+        let entries = out["setVariableData"].as_array().unwrap();
+        assert_eq!(entries[0], batch["setVariableData"][0]);
+        assert_eq!(entries[1]["attributeValue"], REDACTED);
+        assert_eq!(entries[1]["component"]["instance"], "a");
+        assert_eq!(entries[2], batch["setVariableData"][2]);
+        assert_eq!(entries[3], batch["setVariableData"][3]);
+        assert_eq!(entries[4], batch["setVariableData"][4]);
+        assert!(!out.to_string().contains(SENTINEL));
+    }
+
+    #[test]
+    fn device_model_redaction_covers_the_frame_helpers() {
+        let entry = set_variable(
+            json!({"name": "NetworkConfiguration"}),
+            json!({"name": "BasicAuthPassword"}),
+            SENTINEL,
+        );
+        let report = json!({"reportData": [{
+            "component": {"name": "SecurityCtrlr"},
+            "variable": {"name": "BasicAuthPassword"},
+            "variableAttribute": [{"value": SENTINEL}],
+        }]});
+        let frames = [
+            Frame::call(
+                "1",
+                "SetVariables",
+                json!({"setVariableData": [entry.clone()]}),
+            ),
+            Frame::call("2", "NotifyReport", report),
+            Frame::call_result("3", json!({"getVariableResult": [entry.clone()]})),
+            Frame::CallError {
+                id: "4".into(),
+                code: ErrorCode::FormationViolation,
+                description: "bad".into(),
+                details: json!({"request": entry}),
+            },
+        ];
+        for frame in frames {
+            let text = redact_secrets(&frame).to_json_string();
+            assert!(!text.contains(SENTINEL), "{text}");
+            assert!(text.contains(REDACTED), "{text}");
+        }
+        let text = redact_malformed_text(&json!([2, 5, {"x": [entry_text()]}]).to_string(), false);
+        assert!(!text.contains(SENTINEL), "{text}");
+    }
+
+    fn entry_text() -> Value {
+        set_variable(
+            json!({"name": "SecurityCtrlr"}),
+            json!({"name": "BasicAuthPassword"}),
+            SENTINEL,
+        )
+    }
+
+    #[test]
+    fn carries_device_model_secret_needs_a_value() {
+        assert!(carries_device_model_secret(&json!({"a": [entry_text()]})));
+        let read = json!({"component": {"name": "SecurityCtrlr"}, "variable": {"name": "BasicAuthPassword"}});
+        assert!(!carries_device_model_secret(&read));
+        assert!(!carries_device_model_secret(&json!({"a": 1})));
+    }
+
+    #[test]
+    fn schema_diagnostics_never_quote_device_model_secrets() {
+        use crate::ocpp::{Protocol, SchemaRegistry};
+        let registry = SchemaRegistry::for_protocol(Protocol::V201).unwrap();
+        // Value over the 2500-character limit plus an unknown property: both violate the schema.
+        let long = format!("{SENTINEL}{}", "x".repeat(3000));
+        let payload = json!({"setVariableData": [{
+            "attributeValue": long,
+            "bogus": SENTINEL,
+            "component": {"name": "SecurityCtrlr"},
+            "variable": {"name": "BasicAuthPassword"},
+        }]});
+        let violation = registry
+            .validate_request("SetVariables", &payload)
+            .unwrap_err();
+        assert_ne!(violation.errors.len(), 0);
+        let shown = format!("{violation} {violation:?}");
+        assert!(!shown.contains(SENTINEL), "{shown}");
+        assert!(shown.contains("/setVariableData/0"), "{shown}");
     }
 
     #[test]
