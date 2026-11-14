@@ -31,6 +31,8 @@ use kirby_ocpp_core::ocpp::types::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::state201::StationState2;
+
 /// Most connector ids (including 0) tracked per station; reports for further ids are ignored.
 pub const MAX_CONNECTORS: usize = 1024;
 /// Most simultaneously active transactions tracked per station; beyond it the oldest active
@@ -80,6 +82,11 @@ pub struct StationState {
     /// The last answered `GetInstalledCertificateIds` per `certificateType` (the request's
     /// filter, as on the wire, e.g. `CentralSystemRootCertificate`).
     pub installed_certificates: BTreeMap<String, InstalledCertificates>,
+    /// The OCPP 2.0.1 read model (EVSEs, transactions, meter readings). `None`, and absent
+    /// from the JSON, for stations on any other protocol. Interpret `state` by the station's
+    /// protocol: the shared fields above are filled for both.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub v2: Option<Box<StationState2>>,
 }
 
 /// An answered `GetInstalledCertificateIds`.
@@ -213,6 +220,152 @@ pub struct TransactionRecord {
     pub power_w: Option<f64>,
     /// The station's timestamp of the latest `MeterValues` entry that updated this record.
     pub last_meter_at: Option<DateTime<Utc>>,
+}
+
+/// A transaction id: an integer in OCPP 1.6, a string in 2.0.1. Serializes as the bare
+/// number or string.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[serde(untagged)]
+pub enum TransactionId {
+    Number(i32),
+    Text(String),
+}
+
+impl std::fmt::Display for TransactionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(id) => write!(f, "{id}"),
+            Self::Text(id) => f.write_str(id),
+        }
+    }
+}
+
+/// A running transaction, protocol-neutral.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ActiveTransaction {
+    pub id: TransactionId,
+    /// `None` while a 2.0.1 transaction has not reported a connector.
+    pub connector: Option<u32>,
+    /// OCPP 2.0.1 only.
+    pub evse: Option<u32>,
+}
+
+/// One transaction as listed to clients, protocol-neutral. For OCPP 1.6 the JSON is the
+/// [`TransactionRecord`] object plus `"evse": null`, with a numeric `id`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TransactionRow {
+    pub id: TransactionId,
+    /// `None` while a 2.0.1 transaction has not reported a connector.
+    pub connector: Option<u32>,
+    pub id_tag: Option<String>,
+    /// The authorization status we answered, as on the wire.
+    pub id_tag_status: Option<String>,
+    /// Register reading at the start, Wh. `None` in 2.0.1 when the station sent no
+    /// `Transaction.Begin` sample.
+    pub meter_start: Option<i64>,
+    pub started_at: DateTime<Utc>,
+    pub status: TransactionStatus,
+    pub meter_stop: Option<i64>,
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// The stop reason as on the wire.
+    pub stop_reason: Option<String>,
+    pub energy_wh: Option<f64>,
+    pub power_w: Option<f64>,
+    pub last_meter_at: Option<DateTime<Utc>>,
+    /// OCPP 2.0.1 only.
+    pub evse: Option<u32>,
+}
+
+impl From<&TransactionRecord> for TransactionRow {
+    fn from(tx: &TransactionRecord) -> Self {
+        Self {
+            id: TransactionId::Number(tx.id),
+            connector: Some(tx.connector),
+            id_tag: Some(tx.id_tag.clone()),
+            id_tag_status: wire_name(&tx.id_tag_status),
+            meter_start: Some(tx.meter_start),
+            started_at: tx.started_at,
+            status: tx.status,
+            meter_stop: tx.meter_stop,
+            stopped_at: tx.stopped_at,
+            stop_reason: tx.stop_reason.as_ref().and_then(wire_name),
+            energy_wh: tx.energy_wh,
+            power_w: tx.power_w,
+            last_meter_at: tx.last_meter_at,
+            evse: None,
+        }
+    }
+}
+
+/// The wire spelling of a string enum.
+fn wire_name<T: Serialize>(value: &T) -> Option<String> {
+    match serde_json::to_value(value) {
+        Ok(Value::String(name)) => Some(name),
+        _ => None,
+    }
+}
+
+/// Protocol-neutral views over the 1.6 vectors and the 2.0.1 side state.
+impl StationState {
+    /// `(vendor, model)` of the last boot.
+    pub fn vendor_model(&self) -> Option<(&str, &str)> {
+        let boot = self.boot.as_ref()?;
+        Some((boot.vendor.as_str(), boot.model.as_str()))
+    }
+
+    /// Connector key to status name. Keys are the decimal connector id in 1.6 and
+    /// `"<evse>/<connector>"` in 2.0.1; treat them as opaque.
+    pub fn connector_statuses(&self) -> BTreeMap<String, String> {
+        let mut statuses: BTreeMap<String, String> = self
+            .connectors
+            .iter()
+            .map(|(id, connector)| {
+                (
+                    id.to_string(),
+                    wire_name(&connector.status).unwrap_or_default(),
+                )
+            })
+            .collect();
+        if let Some(v2) = &self.v2 {
+            statuses.extend(v2.connector_statuses());
+        }
+        statuses
+    }
+
+    /// The running transactions, oldest first.
+    pub fn active_transactions(&self) -> Vec<ActiveTransaction> {
+        let legacy = self
+            .transactions
+            .iter()
+            .filter(|tx| tx.status == TransactionStatus::Active)
+            .map(|tx| ActiveTransaction {
+                id: TransactionId::Number(tx.id),
+                connector: Some(tx.connector),
+                evse: None,
+            });
+        legacy
+            .chain(self.v2.iter().flat_map(|v2| v2.active_transactions()))
+            .collect()
+    }
+
+    /// How many transactions are running.
+    pub fn active_transaction_count(&self) -> usize {
+        let legacy = self
+            .transactions
+            .iter()
+            .filter(|tx| tx.status == TransactionStatus::Active)
+            .count();
+        legacy + self.v2.as_ref().map_or(0, |v2| v2.active_count())
+    }
+
+    /// Every tracked transaction, oldest first.
+    pub fn transaction_rows(&self) -> Vec<TransactionRow> {
+        self.transactions
+            .iter()
+            .map(TransactionRow::from)
+            .chain(self.v2.iter().flat_map(|v2| v2.rows()))
+            .collect()
+    }
 }
 
 impl StationState {

@@ -26,7 +26,7 @@ pub struct CsmsOptions {
 impl Default for CsmsOptions {
     fn default() -> Self {
         Self {
-            subprotocol: SubprotocolPolicy::default(),
+            subprotocol: SubprotocolPolicy::Require("ocpp1.6".to_owned()),
             heartbeat_interval: 5,
             transaction_ids: TransactionIds::default(),
             call_timeout: Duration::from_secs(3),

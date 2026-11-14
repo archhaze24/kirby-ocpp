@@ -7,11 +7,13 @@ use crate::common::{
     wait_closed,
 };
 use chrono::{DateTime, Utc};
+use futures_util::SinkExt;
 use kirby_ocpp_testkit::{
     CsmsOptions, ErrorCode, Fault, Frame, MockCsms, Reply, SubprotocolPolicy, TestkitError,
     TransactionIds,
 };
 use serde_json::{Value, json};
+use tokio_tungstenite::tungstenite::Message;
 
 const SHORT: Duration = Duration::from_millis(100);
 
@@ -71,6 +73,182 @@ async fn boot_and_heartbeat_roundtrip() {
     assert_eq!(received[1].action, "Heartbeat");
     assert!(received[0].ts <= received[1].ts);
     assert!(received.iter().all(|call| call.connection == 1));
+}
+
+async fn start_with(policy: SubprotocolPolicy) -> MockCsms {
+    MockCsms::start(CsmsOptions {
+        subprotocol: policy,
+        heartbeat_interval: 9,
+        ..CsmsOptions::default()
+    })
+    .await
+    .expect("start mock CSMS")
+}
+
+async fn connect_as(csms: &MockCsms, protocols: &[&str]) -> crate::common::PlainSocket {
+    let (socket, _) = connect_plain(&csms.charge_point_url("CP-201"), protocols)
+        .await
+        .expect("connect charge point");
+    socket
+}
+
+async fn assert_v201_answers(csms: &MockCsms, protocols: &[&str]) {
+    let mut cp = connect_as(csms, protocols).await;
+
+    let boot = result_payload(
+        cp_call(
+            &mut cp,
+            "boot-1",
+            "BootNotification",
+            json!({
+                "reason": "PowerUp",
+                "chargingStation": {"model": "TUI-201", "vendorName": "kirby-ocpp"}
+            }),
+        )
+        .await,
+    );
+    assert_eq!(boot["status"], "Accepted");
+    assert_eq!(boot["interval"], 9);
+    DateTime::parse_from_rfc3339(boot["currentTime"].as_str().expect("time"))
+        .expect("RFC 3339 currentTime");
+
+    let event = result_payload(
+        cp_call(
+            &mut cp,
+            "tx-1",
+            "TransactionEvent",
+            json!({
+                "eventType": "Started",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "triggerReason": "Authorized",
+                "seqNo": 0,
+                "transactionInfo": {"transactionId": "T-1"},
+                "idToken": {"idToken": "TAG-1", "type": "ISO14443"}
+            }),
+        )
+        .await,
+    );
+    assert_eq!(event["idTokenInfo"]["status"], "Accepted");
+
+    let beat = result_payload(cp_call(&mut cp, "hb-1", "Heartbeat", heartbeat()).await);
+    assert!(beat["currentTime"].as_str().is_some());
+
+    let received = csms.received();
+    assert_eq!(received.len(), 3);
+    assert!(
+        received
+            .iter()
+            .all(|call| call.subprotocol.as_deref() == Some("ocpp2.0.1"))
+    );
+}
+
+#[tokio::test]
+async fn v201_station_gets_v201_answers_when_required() {
+    let csms = start_with(SubprotocolPolicy::Require("ocpp2.0.1".to_owned())).await;
+    assert_v201_answers(&csms, &["ocpp2.0.1"]).await;
+}
+
+#[tokio::test]
+async fn v201_station_gets_v201_answers_with_require_any() {
+    let csms = start_with(SubprotocolPolicy::RequireAny(vec![
+        "ocpp1.6".to_owned(),
+        "ocpp2.0.1".to_owned(),
+    ]))
+    .await;
+    assert_v201_answers(&csms, &["ocpp2.0.1"]).await;
+}
+
+#[tokio::test]
+async fn require_any_serves_each_connection_by_its_own_subprotocol() {
+    let csms = start_with(SubprotocolPolicy::RequireAny(vec![
+        "ocpp1.6".to_owned(),
+        "ocpp2.0.1".to_owned(),
+    ]))
+    .await;
+    let mut v16 = connect_as(&csms, &["ocpp1.6"]).await;
+    let mut v201 = connect_as(&csms, &["ocpp2.0.1"]).await;
+
+    let started = result_payload(
+        cp_call(
+            &mut v16,
+            "start-1",
+            "StartTransaction",
+            json!({"connectorId": 1, "idTag": "TAG-1", "meterStart": 0, "timestamp": "2026-01-01T00:00:00Z"}),
+        )
+        .await,
+    );
+    assert_eq!(started["transactionId"], 123);
+    assert_eq!(started["idTagInfo"]["status"], "Accepted");
+
+    let boot = result_payload(
+        cp_call(
+            &mut v201,
+            "boot-1",
+            "BootNotification",
+            json!({
+                "reason": "PowerUp",
+                "chargingStation": {"model": "TUI-201", "vendorName": "kirby-ocpp"}
+            }),
+        )
+        .await,
+    );
+    assert_eq!(boot["status"], "Accepted");
+
+    let received = csms.received();
+    assert_eq!(received[0].subprotocol.as_deref(), Some("ocpp1.6"));
+    assert_eq!(received[1].subprotocol.as_deref(), Some("ocpp2.0.1"));
+}
+
+/// A CALL without a payload: the id is readable, the frame is not valid.
+const BROKEN_CALL: &str = r#"[2,"bad-1","Heartbeat"]"#;
+
+async fn broken_call_code(csms: &MockCsms, protocol: &str) -> String {
+    let mut cp = connect_as(csms, &[protocol]).await;
+    cp.send(Message::text(BROKEN_CALL))
+        .await
+        .expect("send broken frame");
+    match recv_frame(&mut cp).await {
+        Frame::CallError { id, code, .. } => {
+            assert_eq!(id, "bad-1");
+            code.as_str().to_owned()
+        }
+        other => panic!("expected CALLERROR, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn malformed_call_error_spelling_follows_the_protocol() {
+    let csms = start_with(SubprotocolPolicy::RequireAny(vec![
+        "ocpp1.6".to_owned(),
+        "ocpp2.0.1".to_owned(),
+    ]))
+    .await;
+    assert_eq!(
+        broken_call_code(&csms, "ocpp2.0.1").await,
+        "FormatViolation"
+    );
+    assert_eq!(
+        broken_call_code(&csms, "ocpp1.6").await,
+        "FormationViolation"
+    );
+}
+
+#[tokio::test]
+async fn v16_calls_record_the_subprotocol() {
+    let csms = start().await;
+    let mut cp = connect_cp(&csms, "CP-001").await;
+    result_payload(cp_call(&mut cp, "hb-1", "Heartbeat", heartbeat()).await);
+    let received = csms.received();
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].subprotocol.as_deref(), Some("ocpp1.6"));
+}
+
+#[tokio::test]
+async fn default_options_require_ocpp16() {
+    assert_eq!(
+        CsmsOptions::default().subprotocol,
+        SubprotocolPolicy::Require("ocpp1.6".to_owned())
+    );
 }
 
 #[tokio::test]

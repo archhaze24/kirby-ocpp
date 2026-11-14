@@ -23,10 +23,13 @@ pub fn is_charge_point_action(action: &str) -> bool {
     is_charge_point_action_for(Protocol::V16, action)
 }
 
-/// Whether `action` is one a charge point of `protocol` may initiate. Always `false` for a
-/// protocol without an action table (every one but 1.6 today).
+/// Whether `action` is one a charge point of `protocol` may initiate. `false` for every
+/// action of a protocol without an action table (2.1 today).
 pub fn is_charge_point_action_for(protocol: Protocol, action: &str) -> bool {
-    crate::registry::is_station_action(protocol.token(), action)
+    match protocol {
+        Protocol::V201 => crate::defaults201::is_station_action(action),
+        _ => crate::registry::is_station_action(protocol.token(), action),
+    }
 }
 
 /// The default answer for `action` in OCPP 1.6, used when no fault or responder applies.
@@ -49,8 +52,9 @@ pub fn default_reply(
     )
 }
 
-/// Like [`default_reply`] for `protocol`. A protocol without default answers (every one but
-/// 1.6 today) gets `{}` for every action.
+/// Like [`default_reply`] for `protocol`. OCPP 2.0.1 has its own answers and ignores
+/// `transaction_id` (the station names its transactions); a protocol without default answers
+/// (2.1 today) gets `{}` for every action.
 pub fn default_reply_for(
     protocol: Protocol,
     action: &str,
@@ -58,8 +62,17 @@ pub fn default_reply_for(
     heartbeat_interval: u32,
     transaction_id: Option<i32>,
 ) -> Reply {
-    if protocol != Protocol::V16 {
-        return Reply::Result(json!({}));
+    match protocol {
+        Protocol::V16 => {}
+        Protocol::V201 => {
+            return crate::defaults201::default_reply(
+                action,
+                payload,
+                heartbeat_interval,
+                Utc::now(),
+            );
+        }
+        _ => return Reply::Result(json!({})),
     }
     let now = Utc::now();
     let id_tag = payload
@@ -117,7 +130,7 @@ fn expired(now: DateTime<Utc>) -> String {
 }
 
 /// JavaScript `Date.prototype.toISOString` format (millisecond precision, `Z`).
-fn iso(time: DateTime<Utc>) -> String {
+pub(crate) fn iso(time: DateTime<Utc>) -> String {
     time.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
@@ -174,7 +187,17 @@ mod tests {
     fn protocol_variants_delegate_for_1_6_and_know_nothing_else() {
         assert_eq!(ACTIONS_PROTOCOL, "ocpp1.6");
         assert!(is_charge_point_action_for(Protocol::V16, "Heartbeat"));
-        assert!(!is_charge_point_action_for(Protocol::V201, "Heartbeat"));
+        assert!(is_charge_point_action_for(Protocol::V201, "Heartbeat"));
+        assert!(is_charge_point_action_for(
+            Protocol::V201,
+            "TransactionEvent"
+        ));
+        assert!(!is_charge_point_action_for(
+            Protocol::V201,
+            "StartTransaction"
+        ));
+        assert!(!is_charge_point_action_for(Protocol::V201, "Reset"));
+        assert!(!is_charge_point_action_for(Protocol::V21, "Heartbeat"));
         let Reply::Result(body) =
             default_reply_for(Protocol::V16, "Heartbeat", &json!({}), 5, None)
         else {
@@ -182,7 +205,13 @@ mod tests {
         };
         assert!(body["currentTime"].is_string());
         let Reply::Result(body) =
-            default_reply_for(Protocol::V201, "Heartbeat", &json!({}), 5, None)
+            default_reply_for(Protocol::V201, "Heartbeat", &json!({}), 5, Some(7))
+        else {
+            panic!("expected a result");
+        };
+        assert!(body["currentTime"].is_string());
+        let Reply::Result(body) =
+            default_reply_for(Protocol::V21, "Heartbeat", &json!({}), 5, None)
         else {
             panic!("expected a result");
         };

@@ -12,6 +12,10 @@
 //! * send CSMS-originated CALLs to the charge point with [`MockCsms::send_call`],
 //! * drop or count connections, and check subprotocol negotiation and mTLS.
 //!
+//! The canned answers follow the subprotocol negotiated on each connection: `ocpp1.6` (also
+//! the fallback when none was selected) or `ocpp2.0.1`. Serve 2.0.1 by setting
+//! [`CsmsOptions::subprotocol`] to `Require("ocpp2.0.1")` or `RequireAny` of several names.
+//!
 //! Waiting is event driven: every `wait_for_*` method takes a timeout and returns as soon as
 //! the condition holds. Nothing sleeps for a fixed time.
 //!

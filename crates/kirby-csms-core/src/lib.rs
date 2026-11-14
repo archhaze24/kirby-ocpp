@@ -41,9 +41,11 @@
 mod auth;
 mod config;
 mod defaults;
+mod defaults201;
 mod error;
 mod event;
 mod fault;
+mod ids;
 mod observe;
 mod policy;
 pub mod registry;
@@ -51,6 +53,7 @@ mod rules;
 mod schemas;
 mod server;
 mod state;
+mod state201;
 mod tls;
 mod typed;
 
@@ -73,10 +76,15 @@ pub use server::{
     ConnectedSession, CsmsHandle, CsmsServer, HistoryPage, InitError, MAX_STATION_ID_LEN,
     StartOptions, event_frame, station_id_from_path,
 };
+pub use state::{ActiveTransaction, TransactionId, TransactionRow};
 pub use state::{
     BootInfo, CertificateRequest, ConnectorState, InstalledCertificates, LogReport,
     MAX_ACTIVE_TRANSACTIONS, MAX_CONNECTORS, MAX_INSTALLED_CERTIFICATES, MAX_SECURITY_EVENTS,
     Reported, SecurityEventRecord, SignedFirmwareReport, StationState, TransactionRecord,
     TransactionStatus,
+};
+pub use state201::{
+    Connector2State, Counters2, EvseState, MAX_METER_EVSES, MAX_SEQ_RANGES, MeterReading,
+    ReportInfo, SeqTracker, StationState2, Tx2Record,
 };
 pub use tls::{server_config_from_pem, server_config_with_client_ca};

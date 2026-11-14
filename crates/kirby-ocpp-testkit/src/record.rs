@@ -8,6 +8,8 @@ pub struct Received {
     pub ts: DateTime<Utc>,
     /// Id of the connection it arrived on (see [`ConnectionInfo::id`]).
     pub connection: u64,
+    /// Subprotocol selected on that connection, if any (see [`ConnectionInfo::subprotocol`]).
+    pub subprotocol: Option<String>,
     /// OCPP-J message id of the CALL.
     pub message_id: String,
     /// Action name, e.g. `StartTransaction`.

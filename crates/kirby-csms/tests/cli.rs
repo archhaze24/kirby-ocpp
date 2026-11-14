@@ -552,7 +552,7 @@ async fn stdin_history_rules_faults_and_forget() {
     for line in [
         r#"{"cmd":"rules","op":"set","action":"Reset","payload":{}}"#,
         r#"{"cmd":"rules","op":"set","action":"Heartbeat","payload":[]}"#,
-        r#"{"cmd":"rules","op":"set","action":"Heartbeat","payload":{},"protocol":"ocpp2.0.1"}"#,
+        r#"{"cmd":"rules","op":"set","action":"StartTransaction","payload":{},"protocol":"ocpp2.0.1"}"#,
         r#"{"cmd":"rules","op":"dance"}"#,
         r#"{"cmd":"rules","station":5}"#,
     ] {

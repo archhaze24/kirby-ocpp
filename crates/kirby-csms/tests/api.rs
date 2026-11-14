@@ -960,7 +960,7 @@ async fn protocol_scoped_global_rules_are_listed_set_and_removed() {
     // Bad protocol and a protocol with no such action are refused.
     for bad in [
         "/v1/rules/Heartbeat?protocol=nope",
-        "/v1/rules/Heartbeat?protocol=ocpp2.0.1",
+        "/v1/rules/StartTransaction?protocol=ocpp2.0.1",
     ] {
         assert_eq!(
             http(addr, "PUT", bad, &[], Some("{}")).await.0,
@@ -2169,9 +2169,9 @@ async fn station_rule_requests_are_validated() {
         ),
         (
             "PUT",
-            "/v1/stations/CP-1/rules/Heartbeat?protocol=ocpp2.0.1",
+            "/v1/stations/CP-1/rules/StartTransaction?protocol=ocpp2.0.1",
             "{}",
-            "bad_request",
+            "unsupported_action",
         ),
         (
             "PUT",
@@ -2370,7 +2370,7 @@ async fn scoped_fault_requests_are_validated_and_bounded() {
     let addr = &csms.api_addr;
     let long = "S".repeat(129);
     for body in [
-        r#"{"action":"Heartbeat","kind":"silence","protocol":"ocpp2.0.1"}"#.to_owned(),
+        r#"{"action":"Heartbeat","kind":"silence","protocol":"ocpp2.1"}"#.to_owned(),
         r#"{"action":"Heartbeat","kind":"silence","station":""}"#.to_owned(),
         r#"{"action":"Heartbeat","kind":"silence","station":"CP\u001b"}"#.to_owned(),
         format!(r#"{{"action":"Heartbeat","kind":"silence","station":"{long}"}}"#),

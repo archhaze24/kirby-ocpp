@@ -9,8 +9,10 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use chrono::Utc;
-use kirby_csms_core::{Fault, Reply, Responder, SubprotocolPolicy, TransactionIds, default_reply};
-use kirby_ocpp_core::ocpp::Frame;
+use kirby_csms_core::{
+    Fault, Reply, Responder, SubprotocolPolicy, TransactionIds, default_reply_for,
+};
+use kirby_ocpp_core::ocpp::{Frame, Protocol};
 use serde_json::Value;
 use tokio::sync::{Notify, mpsc, oneshot};
 
@@ -76,6 +78,14 @@ impl State {
     pub(crate) fn next_message_id(&mut self) -> String {
         self.next_message_id += 1;
         format!("csms-{}", self.next_message_id)
+    }
+
+    /// The subprotocol selected on `connection`, if any.
+    fn subprotocol_of(&self, connection: u64) -> Option<String> {
+        self.connections
+            .iter()
+            .find(|info| info.id == connection)
+            .and_then(|info| info.subprotocol.clone())
     }
 
     fn allocate_transaction_id(&mut self) -> i32 {
@@ -185,9 +195,11 @@ impl Shared {
     fn record_call(&self, connection: u64, message_id: &str, action: &str, payload: Value) {
         {
             let mut state = self.lock();
+            let subprotocol = state.subprotocol_of(connection);
             state.received.push(Received {
                 ts: Utc::now(),
                 connection,
+                subprotocol,
                 message_id: message_id.to_owned(),
                 action: action.to_owned(),
                 payload,
@@ -199,7 +211,7 @@ impl Shared {
     /// Decides the reply to a CP-originated CALL: fault, then responder, then default.
     ///
     /// A responder runs outside the lock, so it may safely inspect this handle.
-    fn decide(&self, action: &str, payload: &Value) -> Reply {
+    fn decide(&self, protocol: Protocol, action: &str, payload: &Value) -> Reply {
         let mut state = self.lock();
         if let Some(reply) = state.take_fault(action) {
             return reply;
@@ -210,13 +222,29 @@ impl Shared {
             drop(state);
             return (*responder)(payload);
         }
-        let transaction_id =
-            (action == "StartTransaction").then(|| state.allocate_transaction_id());
-        default_reply(action, payload, self.heartbeat_interval, transaction_id)
+        // Transaction ids are 1.6 integers; 2.x transactions are named by the station.
+        let transaction_id = (protocol == Protocol::V16 && action == "StartTransaction")
+            .then(|| state.allocate_transaction_id());
+        default_reply_for(
+            protocol,
+            action,
+            payload,
+            self.heartbeat_interval,
+            transaction_id,
+        )
+    }
+
+    /// The protocol of `connection`: its negotiated subprotocol, 1.6 when none or unknown.
+    fn protocol_of(&self, connection: u64) -> Protocol {
+        self.lock()
+            .subprotocol_of(connection)
+            .and_then(|token| Protocol::from_token(&token))
+            .unwrap_or(Protocol::V16)
     }
 
     /// Handles one inbound text frame from `connection`. Returns the frame to send back, if any.
     pub(crate) fn handle_inbound(&self, connection: u64, text: &str) -> Option<Outbound> {
+        let protocol = self.protocol_of(connection);
         match Frame::parse(text) {
             Ok(Frame::Call {
                 id,
@@ -224,16 +252,17 @@ impl Shared {
                 payload,
             }) => {
                 self.record_call(connection, &id, &action, payload.clone());
-                reply_outbound(&id, self.decide(&action, &payload))
+                reply_outbound(&id, self.decide(protocol, &action, &payload))
             }
             Ok(frame @ (Frame::CallResult { .. } | Frame::CallError { .. })) => {
                 self.resolve_pending(connection, frame);
                 None
             }
             Ok(_) => None,
-            // A malformed CALL with a readable id gets a FormationViolation; anything else is ignored.
+            // A malformed CALL with a readable id gets a formation violation error (spelled
+            // per protocol); anything else is ignored.
             Err(error) => error
-                .reply()
+                .reply_for(protocol)
                 .map(|frame| Outbound::Text(frame.to_json_string())),
         }
     }
