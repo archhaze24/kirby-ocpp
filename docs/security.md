@@ -26,7 +26,7 @@ Contents: [Profiles](#profiles) · [CSMS side](#csms-side) · [Emulator side](#e
 
 Invalid combinations exit with code 2 before the server binds.
 
-- Keys: `--auth-key` is visible in `ps` and shell history; prefer `KIRBY_CSMS_AUTH_KEY` (`ID=KEY;ID=KEY`, used only when no `--auth-key` is given) or `--auth-keys-file` (lines `ID=KEY`, `#` comments; keep it `0600`, its permissions are not checked). `--default-auth-key` covers stations without an entry. A station without any key is refused.
+- Keys: `--auth-key` is visible in `ps` and shell history; prefer `KIRBY_CSMS_AUTH_KEY` (`ID=KEY;ID=KEY`, used only when no `--auth-key` is given) or `--auth-keys-file` (lines `ID=KEY`, `#` comments; keep it `0600`; a startup warning is printed on Unix when group or others can read it). `--default-auth-key` covers stations without an entry. A station without any key is refused.
 - Profiles 1 and 2: the user name must equal the station id from the URL and the password must equal that station's key, compared byte for byte (constant time).
 - Profile 3: TLS with a client certificate that chains to `--tls-client-ca` and whose subject Common Name equals the station id. A station without a valid certificate fails the TLS handshake.
 - Refusals answer HTTP 401 with a `WWW-Authenticate: Basic` challenge for credentials, 403 for certificate problems and `TLS required` on a plain socket. The body never says why. Each refusal prints an `auth_failed` event with a fixed reason (`missing or malformed credentials`, `no key configured for the station`, `invalid credentials`, `TLS required`, `client certificate required`, `client certificate does not match the station id`); keys are never printed. A failed TLS handshake under profile 3 is reported with `"station":null`.

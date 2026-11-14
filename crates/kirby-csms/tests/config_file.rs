@@ -428,6 +428,24 @@ fn check_config_reports_ok_and_does_not_bind() {
     );
     let message = rejected(&["--config", &missing, "--check-config"], &[]);
     assert!(message.contains("nope.key"), "{message}");
+    assert!(
+        message.contains("security.default_auth_key_file"),
+        "{message}"
+    );
+    assert!(!message.contains("--default-auth-key-file"), "{message}");
+
+    // The same file named by the flag keeps the flag's name.
+    let message = rejected(
+        &[
+            "--security-profile",
+            "1",
+            "--default-auth-key-file",
+            "nope.key",
+            "--check-config",
+        ],
+        &[],
+    );
+    assert!(message.contains("--default-auth-key-file"), "{message}");
 
     // The two options exclude each other.
     let both = run(&["--print-config", "--check-config"], &[]);

@@ -239,7 +239,7 @@ pub struct Cli {
     pub record_overwrite: bool,
 
     /// Read JSON-line commands from stdin even on a terminal (automatic when stdin is not a
-    /// terminal and there is no --script)
+    /// terminal and there is no --script or --replay)
     #[arg(
         long, env = "KIRBY_CSMS_STDIN", action = ArgAction::SetTrue,
         value_parser = BoolishValueParser::new()
@@ -247,7 +247,7 @@ pub struct Cli {
     pub stdin: bool,
 
     /// Never start the terminal UI; print events to stdout instead (automatic when stdout or
-    /// stdin is not a terminal, and with --json, --script or --stdin)
+    /// stdin is not a terminal, and with --json, --script, --replay or --stdin)
     #[arg(
         long, env = "KIRBY_CSMS_NO_TUI", action = ArgAction::SetTrue,
         value_parser = BoolishValueParser::new()
@@ -513,10 +513,25 @@ impl Cli {
     /// never the key.
     pub fn load_default_key_file(&mut self) -> Result<(), String> {
         if let Some(path) = &self.default_auth_key_file {
-            let key = read_key_file(path, "--default-auth-key-file")?;
+            let key = read_key_file(
+                path,
+                &self.source_name("security.default_auth_key_file", "--default-auth-key-file"),
+            )?;
             self.default_auth_key = Some(key);
         }
         Ok(())
+    }
+}
+
+impl Cli {
+    /// How an error names a setting: the configuration file key when the value came from the
+    /// file, the flag otherwise.
+    fn source_name(&self, key_path: &str, flag: &str) -> String {
+        if self.blocks.file_keys.iter().any(|key| key == key_path) {
+            format!("`{key_path}`")
+        } else {
+            flag.to_owned()
+        }
     }
 }
 
@@ -581,14 +596,10 @@ impl Cli {
     /// the listen address: a non-loopback address needs a token and TLS.
     pub fn api_token(&self) -> Result<Option<String>, String> {
         let token = if let Some(path) = &self.api_token_file {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-            let token = text.trim_end_matches(['\n', '\r']);
-            if token.is_empty() {
-                return Err(format!("{} is empty", path.display()));
-            }
-            warn_if_shared(path);
-            Some(token.to_owned())
+            Some(read_key_file(
+                path,
+                &self.source_name("api.api_token_file", "--api-token-file"),
+            )?)
         } else {
             self.api_token.clone()
         };

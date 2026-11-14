@@ -222,7 +222,7 @@ complete format, bounds, timing and examples. To send an immediate bulk call, us
 
 Use `--record session.jsonl` to record frames from all stations in one file, in arrival order. Each frame includes its station and session; direction is relative to the CSMS. Initial frames are included even when history is disabled. `AuthorizationKey` values and URL passwords are always redacted, including with `--show-secrets`.
 
-The recorder stops and marks the file incomplete if its queue fills, a frame exceeds 64 KiB, or writing fails. An incomplete recording exits 1. New files are private on Unix; existing files require `--record-overwrite`, and symlinks are refused. An empty run leaves no new file and preserves an existing one. The recording cannot share a path with an input file, log or report. CALL frames include an action; replies are identified by message ID. See [the format](emulator.md#recording-and-replay).
+The recorder stops and marks the file incomplete if its queue fills, a frame exceeds 64 KiB, or writing fails. An incomplete recording turns an exit code 0 into 1; any other code is kept. New files are private on Unix; existing files require `--record-overwrite`, and symlinks are refused. An empty run leaves no new file and preserves an existing one. The recording cannot share a path with an input file, log or report. CALL frames include an action; replies are identified by message ID. See [the format](emulator.md#recording-and-replay).
 
 Frames from a replaced or forgotten connection retain their original session identity. Malformed text is represented by its byte count, without the original content.
 
@@ -238,7 +238,8 @@ The whole file is checked before the server binds or any output opens; a problem
 * has one session per station (a station that reconnected during the recording is refused; record one connection per station);
 * holds an answer for every CALL the CSMS sent, and for every `StartTransaction`;
 * holds no redacted value (`***` `AuthorizationKey`, URL password) in a replayed CALL; masked values elsewhere in the file are ignored because they are never sent;
-* names a transaction id only in `RemoteStopTransaction`, and only one that a recorded `StartTransaction` was answered with and that was not stopped before; any other CALL with a `transactionId` key at any depth is refused;
+* names a transaction id only in `RemoteStopTransaction`, and only one that a recorded `StartTransaction` was answered with and that was not stopped before; a `RemoteStopTransaction` with a `transactionId` key below the top level, and any other CALL with a `transactionId` key at any depth, are refused;
+* holds at most 1024 `StartTransaction`s per station;
 * spans less recorded time between its first and last CALL than `--timeout`.
 
 Payloads are sent as recorded; text such as `${name}` stays literal. Recorded pauses between CALLs are kept (the first CALL is not delayed), one CALL at a time. A recorded transaction id is never sent: the `RemoteStopTransaction` carries the id of the live `StartTransaction`, which must come from the same station, connector and `idTag`, in the same order as the recorded starts. The run fails instead of guessing when a live start differs, was refused, got a transaction id that is still active, or has not happened within `--call-timeout`. A CALL waits for the live BootNotification (answer `Accepted`) when the recording booted the station before it.

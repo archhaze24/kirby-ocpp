@@ -59,6 +59,12 @@ tag as the GitHub release notes.
 
 ### Fixed
 
+- Secrets: recordings mask a URL password that holds `#`, `(`, `?` or other delimiters and an `AuthorizationKey` that sits in JSON text inside a string; `--print-config` and configuration files no longer let a password through in forms such as `ws:///CP:pw@host`; CALLRESULT and CALLERROR answers of `kirby-csms` calls (HTTP API, `ctl`, stdin) mask `AuthorizationKey` values unless `--show-secrets` is set. `scenarios from-recording` skips steps that hold a masked value.
+- `kirby-csms` answers a WebSocket Close frame with a Close frame; `kirby-ocpp check` reports a connection ended without a close reply as a warning and bounds the close wait by `--timeout`.
+- `GET /v1/stations/{id}/history` builds JSON only for the returned page; a station id over 128 bytes is a `400` on every station route; `DELETE /v1/rules/{action}?protocol=` compares and clears the rule under one lock; the OpenAPI document lists `401`, `403` and `413`.
+- `kirby-csms --replay` refuses a nested transaction id in `RemoteStopTransaction` and more than 1024 recorded starts per station; a station whose CALLs are all sent may disconnect.
+- An incomplete recording keeps an existing failure exit code (130, 2) instead of replacing it with 1; the emulator's `--record` refuses the configuration, TLS and report files and their aliases like `kirby-csms` does.
+- `suite` row names no longer change with `--filter` or `--tag`; the Markdown summary escapes text from the CSMS; `kirby-csms --api-token-file` reads at most 64 KiB; a missing recording is reported as unreadable, not unwritable.
 - Session recordings mask URL passwords in free text and long strings, preserve queued entries on overflow, and keep existing files when a replacement run fails to start. Replay handles failed StartTransaction calls, literal `${` in action names and recordings above 10000 generated steps.
 - `kirby-csms ctl` bounds event-stream reconnect failures, reports reconnects without an event id, returns exit code 4 when a bulk pattern matches no station, escapes carriage returns in errors and protects export files and temporary files from unintended replacement.
 - The emulator preserves a received CALLRESULT or CALLERROR when the CSMS closes the connection immediately after replying. Conformance scripts no longer need a final pause before closing.

@@ -845,3 +845,63 @@ async fn a_recording_path_that_is_a_symlink_is_refused() {
     );
     assert_eq!(csms.connections(), 0, "nothing ran");
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn record_never_replaces_a_tls_file_or_an_alias_of_the_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let url = "ws://127.0.0.1:9/ocpp";
+    let key = dir.path().join("client.key");
+    std::fs::write(&key, "private\n").unwrap();
+    let cert = dir.path().join("client.crt");
+    std::fs::write(&cert, "certificate\n").unwrap();
+    let output = run(strings(&[
+        "--url",
+        url,
+        "--tls-cert",
+        path(&cert),
+        "--tls-key",
+        path(&key),
+        "--record",
+        path(&key),
+        "--record-overwrite",
+        "--no-tui",
+    ]))
+    .await;
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("the TLS key"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(std::fs::read_to_string(&key).unwrap(), "private\n");
+
+    let report = dir.path().join("report.json");
+    std::fs::write(&report, "report\n").unwrap();
+    let hard = dir.path().join("hard.jsonl");
+    std::fs::hard_link(&report, &hard).unwrap();
+    let soft = dir.path().join("soft.jsonl");
+    std::os::unix::fs::symlink(&report, &soft).unwrap();
+    for alias in [&hard, &soft] {
+        let output = run(strings(&[
+            "--url",
+            url,
+            "--record",
+            path(alias),
+            "--record-overwrite",
+            "run",
+            "--scenario",
+            "heartbeat-and-status",
+            "--report",
+            path(&report),
+        ]))
+        .await;
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+        assert!(
+            stderr(&output).contains("would overwrite"),
+            "{}",
+            stderr(&output)
+        );
+        assert_eq!(std::fs::read_to_string(&report).unwrap(), "report\n");
+    }
+}

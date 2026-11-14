@@ -307,7 +307,7 @@ pub fn parse_str(
             let place = error.span().map_or_else(String::new, |span| {
                 let before = &text[..span.start.min(text.len())];
                 let line = before.matches('\n').count() + 1;
-                let column = before.rsplit('\n').next().map_or(0, str::len) + 1;
+                let column = before.rsplit('\n').next().map_or(0, |s| s.chars().count()) + 1;
                 format!("line {line}, column {column}: ")
             });
             return Err(fail(format!("{place}{}", error.message())));
@@ -793,33 +793,52 @@ fn toml_string(text: &str) -> String {
 /// # Errors
 /// The URL has a password.
 pub fn reject_url_password(url: &str) -> Result<(), String> {
-    match split_userinfo(url) {
-        Some((_, userinfo, _)) if userinfo.contains(':') => Err(
+    if has_password(url) {
+        Err(
             "the URL carries a password, which a configuration file never holds; \
              pass the URL with its password through the command-line flag or the \
              environment variable"
                 .to_owned(),
-        ),
-        _ => Ok(()),
+        )
+    } else {
+        Ok(())
     }
 }
 
 /// `url` without the password of its userinfo (`user:secret@host` becomes `user@host`).
 pub fn strip_url_password(url: &str) -> String {
-    match split_userinfo(url) {
-        Some((head, userinfo, tail)) if userinfo.contains(':') => {
-            let user = userinfo.split(':').next().unwrap_or_default();
-            format!("{head}{user}@{tail}")
+    match url::Url::parse(url) {
+        Ok(mut parsed) if !parsed.cannot_be_a_base() => {
+            if parsed.password().is_none() {
+                return url.to_owned();
+            }
+            let _ = parsed.set_password(None);
+            parsed.to_string()
         }
-        _ => url.to_owned(),
+        _ => match split_userinfo(url) {
+            Some((head, userinfo, tail)) if userinfo.contains(':') => {
+                let user = userinfo.split(':').next().unwrap_or_default();
+                format!("{head}{user}@{tail}")
+            }
+            _ => url.to_owned(),
+        },
     }
 }
 
-/// Splits `scheme://` + userinfo + `@` + rest, when the authority has a userinfo.
+/// Whether the URL has a password. A string the `url` crate cannot parse is checked by text:
+/// anything with a colon before its last `@` counts.
+fn has_password(url: &str) -> bool {
+    match url::Url::parse(url) {
+        Ok(parsed) if !parsed.cannot_be_a_base() => parsed.password().is_some(),
+        _ => split_userinfo(url).is_some_and(|(_, userinfo, _)| userinfo.contains(':')),
+    }
+}
+
+/// Splits `scheme://` + userinfo + `@` + rest at the last `@`, for text that is not a valid URL
+/// (delimiters inside the userinfo cannot be told from the end of the authority).
 fn split_userinfo(url: &str) -> Option<(&str, &str, &str)> {
     let (scheme, rest) = url.split_once("://")?;
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let at = rest[..end].rfind('@')?;
+    let at = rest.rfind('@')?;
     let head_len = scheme.len() + 3;
     Some((&url[..head_len], &rest[..at], &rest[at + 1..]))
 }
@@ -1027,6 +1046,38 @@ mod tests {
         let message = err("[connection]\nurl = \"hunter2\n");
         assert!(message.contains("line 2"), "{message}");
         assert!(!message.contains("hunter2"), "{message}");
+    }
+
+    #[test]
+    fn syntax_error_columns_count_characters() {
+        let ascii = err("[connection]\nurl = \"aa\" x\n");
+        let wide = err("[connection]\nurl = \"éé\" x\n");
+        let column = |message: &str| {
+            message
+                .split("column ")
+                .nth(1)
+                .and_then(|rest| rest.split(':').next())
+                .map(str::to_owned)
+        };
+        assert!(column(&ascii).is_some(), "{ascii}");
+        assert_eq!(column(&ascii), column(&wide), "{ascii} / {wide}");
+    }
+
+    #[test]
+    fn url_passwords_hidden_from_the_first_slash_are_rejected() {
+        for url in [
+            "ws:///CP:hunter2@h:9000/ocpp",
+            "ws:\\\\CP:hunter2@h/ocpp",
+            "ws://CP:hunter2@h:9000/ocpp",
+        ] {
+            // A TOML literal string keeps the backslashes.
+            let text = format!("[connection]\nurl = '{url}'\n");
+            let message = err(&text);
+            assert!(message.contains("`connection.url`"), "{url}: {message}");
+            assert!(!message.contains("hunter2"), "{url}: {message}");
+            assert!(!strip_url_password(url).contains("hunter2"), "{url}");
+        }
+        assert!(reject_url_password("ws:///CP@h/ocpp").is_ok());
     }
 
     #[test]

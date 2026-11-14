@@ -569,17 +569,20 @@ where
         return;
     }
     connection.close();
-    match timeout(CLOSE_WAIT, closed_rx).await {
+    // Bounded by what is left of the overall deadline, like every other step.
+    let close_wait = rec.cap().min(CLOSE_WAIT);
+    match timeout(close_wait, closed_rx).await {
         Ok(Ok((code, _))) => {
             let code_text = code.map_or_else(|| "no code".to_owned(), |c| c.to_string());
             if code == Some(1006) {
-                // The check is over; a server that drops the socket without echoing the
-                // close frame does not change what it found.
-                rec.pass(
+                // The handshake is incomplete, but the check itself is over: warn only.
+                rec.push(
                     "close",
                     started,
+                    StepStatus::Warning,
                     "closed by the station; the server ended the connection without a close reply"
                         .to_owned(),
+                    None,
                 );
             } else {
                 rec.pass(
@@ -593,7 +596,7 @@ where
             "close",
             started,
             StepStatus::Warning,
-            format!("no close reply within {} s", CLOSE_WAIT.as_secs()),
+            format!("no close reply within {} ms", close_wait.as_millis()),
             None,
         ),
     }

@@ -38,14 +38,7 @@ pub fn escape_json_unsafe(json: &str) -> String {
 
 /// Drops the `user:password@` part of a URL so credentials are never displayed or printed.
 pub fn redact_url(url: &str) -> String {
-    let Some((scheme, rest)) = url.split_once("://") else {
-        return url.to_owned();
-    };
-    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    match rest[..end].rfind('@') {
-        Some(at) => format!("{scheme}://{}", &rest[at + 1..]),
-        None => url.to_owned(),
-    }
+    kirby_ocpp_core::config::redact_url_userinfo(url)
 }
 
 /// Cuts `s` to at most `max` cells, ending in `…` when something was dropped.
@@ -453,6 +446,18 @@ mod redact_tests {
         assert_eq!(redact_url("wss://tok@h/x"), "wss://h/x");
         assert_eq!(redact_url("ws://h/x@y"), "ws://h/x@y");
         assert_eq!(redact_url("garbage"), "garbage");
+        for url in [
+            "ws:///CP:hunter2@h:9000/ocpp",
+            "ws:\\\\CP:hunter2@h/ocpp",
+            "ws://CP:hunter2@h:9000/ocpp",
+        ] {
+            let shown = redact_url(url);
+            assert!(
+                !shown.contains("hunter2") && !shown.contains("CP"),
+                "{shown}"
+            );
+        }
+        assert_eq!(redact_url("ws://CP:pw@h:9000/ocpp"), "ws://h:9000/ocpp");
     }
 
     #[test]

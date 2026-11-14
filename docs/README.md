@@ -21,7 +21,7 @@ Contents: [Start here](#start-here) · [Pages](#pages)
 | Page | Content |
 | --- | --- |
 | [architecture.md](architecture.md) | Crate map, layer contracts, data flow, invariants, where each concern lives, test layout |
-| [cookbook.md](cookbook.md) | Eight copy-pasteable recipes: first run, built-in suite, rejected tag, reconnect, fleet load, scripted CSMS, TLS, variables and loops |
+| [cookbook.md](cookbook.md) | Fifteen copy-pasteable recipes: first run, built-in suite, rejected tag, scripted reply, record and replay, reconnect, fleet load, configuration files, scripted CSMS, export and metrics, TLS, variables and loops, debugging a connection, state reset |
 | [ci.md](ci.md) | Workflows for GitHub Actions and GitLab CI, exit codes, timeouts, reports and reading failures |
 | [emulator.md](emulator.md) | Using the charge point emulator: TUI, headless mode, fleet, state |
 | [csms.md](csms.md) | Using the central system: TUI, stdin commands, rules, fault injection, scripts |

@@ -2,7 +2,7 @@
 
 Short, copy-pasteable recipes for the most common jobs. Each one states the goal, the commands, what you should see and where the details live. Commands assume `kirby-ocpp` and `kirby-csms` are on your `PATH` ([install](../README.md#install)) and use `127.0.0.1` with port 9000. Recipes that use `suite` need version 0.5.0 or newer.
 
-Contents: [First run](#first-run) · [Check a CSMS with the built-in scenarios](#check-a-csms-with-the-built-in-scenarios) · [Test a rejected tag](#test-a-rejected-tag) · [Lost connection and reconnect](#lost-connection-and-reconnect) · [Load test with a fleet](#load-test-with-a-fleet) · [Keep a CSMS setup in a configuration file](#keep-a-csms-setup-in-a-configuration-file) · [Script the central system](#script-the-central-system) · [TLS and mutual TLS](#tls-and-mutual-tls) · [Variables, captures and loops](#variables-captures-and-loops) · [Related pages](#related-pages)
+Contents: [First run](#first-run) · [Check a CSMS with the built-in scenarios](#check-a-csms-with-the-built-in-scenarios) · [Test a rejected tag](#test-a-rejected-tag) · [Answer a CSMS command with a scripted reply](#answer-a-csms-command-with-a-scripted-reply) · [Record a session, turn it into a scenario, replay it](#record-a-session-turn-it-into-a-scenario-replay-it) · [Lost connection and reconnect](#lost-connection-and-reconnect) · [Load test with a fleet](#load-test-with-a-fleet) · [Keep a test setup in a configuration file](#keep-a-test-setup-in-a-configuration-file) · [Keep a CSMS setup in a configuration file](#keep-a-csms-setup-in-a-configuration-file) · [Script the central system](#script-the-central-system) · [Export traffic and scrape metrics](#export-traffic-and-scrape-metrics) · [TLS and mutual TLS](#tls-and-mutual-tls) · [Variables, captures and loops](#variables-captures-and-loops) · [Debug a connection](#debug-a-connection) · [Look at or reset a station's state](#look-at-or-reset-a-stations-state) · [Related pages](#related-pages)
 
 ## First run
 
@@ -190,7 +190,7 @@ kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id 'LOAD-{n:03}' --count 20 --stagge
   run --scenario charge-session --junit fleet.xml -q
 ```
 
-Expected: `fleet: 20/20 stations PASSED`, exit 0; otherwise `fleet: 19/20 stations passed, FAILED: LOAD-007` and exit 1. `--timeout` covers the whole fleet, stagger included. Each station keeps its own state file named after its id; add `--no-persist` for throwaway runs.
+Expected: `fleet: 20/20 stations PASSED`, exit 0; otherwise `fleet: 19/20 stations passed, FAILED: LOAD-007` and exit 1. `--timeout` covers the whole fleet, stagger included. `run` keeps no state files unless `run --persist` is given; then each station keeps its own state file named after its id.
 
 Reference: [Fleet mode](emulator.md#fleet-mode), [Fleet runs](scenarios.md#fleet-runs), [Id templates](configuration.md#id-templates).
 

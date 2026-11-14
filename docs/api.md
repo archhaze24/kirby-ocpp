@@ -20,7 +20,7 @@ The shapes in this page are a public contract, versioned by the path prefix and 
 - Protocol-level outcomes of a call (the station answered with a CALLERROR, or did not answer in time) are HTTP `200` with `"ok":false`; HTTP errors mean the request was not delivered or was not valid, see [Errors and limits](#errors-and-limits).
 - Browsers are refused by design: there are no CORS headers, and a request with an `Origin` header is refused without a token. `OPTIONS` answers `204` with an `Allow` header for every known path (behind the same token and `Host` checks) and is meant for tools, not for browser preflights.
 - `Allow` is derived from the route table that `GET /v1` lists and appears only on a `405` and on the `204` answer to `OPTIONS`, in one format: the route's methods plus `HEAD` (for a `GET` route) and `OPTIONS`, sorted, joined by a comma and a space (`GET, HEAD, OPTIONS`). No other status (`200`, `401`, `403`, `404`, ...) carries it.
-- Absent and `null`: a field that exists in a shape is always present. A value that is not known yet is an explicit `null` (a station that never booted has `"vendor":null`), a collection that is empty is `[]` or `{}`, a counter is `0`. A key that is missing means the field does not exist in this version of the API: clients must tolerate keys they do not know and must not rely on a key being absent. Optional extension fields that are not defined yet are simply not sent.
+- Absent and `null`: a field that exists in a shape is always present, with one exception: the outcome-dependent fields of the single-call answer (`POST /v1/stations/{id}/calls`). `outcome` and `ok` are always present; `result` is present only for `outcome` `result`; `error`, `code` and `details` are present only for `call_error`; a `timeout` carries `error` and no `result`, `code` or `details`. A value that is not known yet is an explicit `null` (a station that never booted has `"vendor":null`), a collection that is empty is `[]` or `{}`, a counter is `0`. A key that is missing means the field does not exist in this version of the API: clients must tolerate keys they do not know and must not rely on a key being absent. Optional extension fields that are not defined yet are simply not sent.
 - Golden shapes (top-level keys, checked by the test suite): health `ok`, `api_version`, `version`, `stations`; index `api_version`, `version`, `resources` (each `path`, `methods`); station object (in the list and in `GET /v1/stations/{id}`) `id`, `connected`, `protocol`, `received_calls`, `remote_addr`, `vendor`, `model`, `connectors`, `active_transactions`, `security_events`, and `state` in `GET /v1/stations/{id}` only; history `station`, `frames`, `next_cursor`, `gap`, each history frame the keys of an event frame plus `cursor`; transaction list `transactions`, `truncated`, each transaction `station`, `id`, `connector`, `id_tag`, `id_tag_status`, `meter_start`, `started_at`, `status`, `meter_stop`, `stopped_at`, `stop_reason`, `energy_wh`, `power_w`, `last_meter_at`; frames and events as in [Event stream](#event-stream); faults list `remaining`, `faults`, each fault `id`, `scope`, `station`, `protocol`, `action`, `kind`, `remaining`; station rules list `station`, `rules` (each `action`, `protocol`, `payload`); one station rule `station`, `action`, `protocol`, `payload`.
 
 ## Start
@@ -77,7 +77,7 @@ Handshakes: a client has 5 s to finish the TLS handshake, and at most 64 handsha
 
 ## Endpoints
 
-JSON in and out, `Content-Type: application/json`. Errors have the body `{"error":{"code":"...","message":"..."}}`, see [Errors and limits](#errors-and-limits). Station ids in the path are percent-decoded; an id with control or bidi characters is `400`. Text from stations is escaped like the `--json` lines.
+JSON in and out, `Content-Type: application/json`. Errors have the body `{"error":{"code":"...","message":"..."}}`, see [Errors and limits](#errors-and-limits). Station ids in the path are percent-decoded; an id longer than 128 bytes or with control or bidi characters is `400`. Text from stations is escaped like the `--json` lines.
 
 | Method and path | Meaning |
 | --- | --- |
@@ -88,7 +88,7 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `GET /v1/stations/{id}/history` | `{"station":..,"frames":[...],"next_cursor":..,"gap":..}`, oldest first; query parameters `limit`, `since`, `action`, `kind`, `direction`, `format` (`json`, `ndjson`, `csv`); frames are shaped like the `--json` frame lines plus a `cursor`; `AuthorizationKey` values are redacted unless `--show-secrets`; `404` `unknown_station` if never seen. See [History, export and metrics](#history-export-and-metrics) |
 | `GET /v1/transactions` | `{"transactions":[...],"truncated":..}`: the transactions of every station, with the filters `station`, `state`, `since`, `limit` and `format` (`json`, `csv`) |
 | `GET /v1/metrics` | Counters and gauges in the Prometheus text format |
-| `POST /v1/stations/{id}/calls` | Sends a CALL; body `{"action":"Reset","payload":{...},"timeout_ms":5000}` (`payload` default `{}`, `timeout_ms` 1..=86400000, default `--call-timeout`). Answers with `outcome` (`"result"`, `"call_error"` or `"timeout"`), `ok` and `result` or `error` (plus `code`, `details` for a CALLERROR); no `type`, `station` or `action` (the request names them), see below |
+| `POST /v1/stations/{id}/calls` | Sends a CALL; body `{"action":"Reset","payload":{...},"timeout_ms":5000}` (`payload` default `{}`, `timeout_ms` 1..=86400000, default `--call-timeout`). Answers with `outcome` (`"result"`, `"call_error"` or `"timeout"`) and `ok` always, plus `result` for `result`, `error`, `code` and `details` for `call_error`, and `error` for `timeout` (the fields of the other outcomes are absent); `result` and `details` have `AuthorizationKey` values redacted unless `--show-secrets`; no `type`, `station` or `action` (the request names them), see below |
 | `POST /v1/calls` | Sends one action to at most 64 stations selected by a glob and optional protocol; returns bounded per-station outcomes, sorted by station id. See [Bulk calls](#bulk-calls) |
 | `DELETE /v1/stations/{id}` | Forgets a disconnected station (`{"station":..,"forgotten":true}`); `409` `conflict` while it is connected (decided atomically with the removal), `404` `unknown_station` if never seen |
 | `GET /v1/events?station=ID` | Server-Sent Events, see [Event stream](#event-stream); resumes after the `Last-Event-ID` header or `last_event_id=ID` |
@@ -353,7 +353,7 @@ Faults beat rules at every scope. `times` counts per fault: two faults for the s
 $ curl -s -X PUT http://127.0.0.1:9100/v1/rules/Heartbeat -d '{"currentTime":"2030-01-01T00:00:00Z"}'
 {"action":"Heartbeat","set":true}
 $ curl -s http://127.0.0.1:9100/v1/rules
-{"rules":["Heartbeat"]}
+{"protocol_rules":[],"rules":["Heartbeat"]}
 $ curl -s -X DELETE http://127.0.0.1:9100/v1/rules/Heartbeat
 {"action":"Heartbeat","cleared":true}
 

@@ -10,6 +10,7 @@ use kirby_csms_core::registry;
 use kirby_csms_core::{
     CsmsError, CsmsHandle, Direction, Fault, FaultInfo, Frame, FrameEntry, Reply, RuleInfo, Scope,
 };
+use kirby_ocpp_core::ocpp::redact_payload;
 use kirby_ocpp_core::text::is_unsafe_char;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -363,23 +364,33 @@ pub async fn call(
         None => handle.call(station, action, payload).await,
     };
     let (value, outcome) = match result {
-        Ok(Frame::CallResult { payload, .. }) => (
-            json!({"type": "result", "station": station, "action": action, "ok": true, "result": payload}),
-            Outcome::Result,
-        ),
+        Ok(Frame::CallResult { mut payload, .. }) => {
+            if !handle.show_secrets() {
+                redact_payload(&mut payload);
+            }
+            (
+                json!({"type": "result", "station": station, "action": action, "ok": true, "result": payload}),
+                Outcome::Result,
+            )
+        }
         Ok(Frame::CallError {
             code,
             description,
-            details,
+            mut details,
             ..
-        }) => (
-            json!({
-                "type": "result", "station": station, "action": action, "ok": false,
-                "error": format!("CALLERROR {}: {description}", code.as_str()),
-                "code": code.as_str(), "details": details,
-            }),
-            Outcome::CallError,
-        ),
+        }) => {
+            if !handle.show_secrets() {
+                redact_payload(&mut details);
+            }
+            (
+                json!({
+                    "type": "result", "station": station, "action": action, "ok": false,
+                    "error": format!("CALLERROR {}: {description}", code.as_str()),
+                    "code": code.as_str(), "details": details,
+                }),
+                Outcome::CallError,
+            )
+        }
         Ok(_) => (
             failure(Some(station), Some(action), "unexpected CALL as an answer"),
             Outcome::Failed(CsmsError::InvalidResponse {

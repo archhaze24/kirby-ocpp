@@ -39,7 +39,8 @@ fn stringify_list(list: &mut Value) {
     }
 }
 
-/// The decoded station id of the path, refused when it holds control or bidi characters.
+/// The decoded station id of the path, refused when it is longer than 128 bytes or holds
+/// control or bidi characters.
 pub(super) fn station_id(id: Result<Path<String>, PathRejection>) -> Result<String, Box<Response>> {
     let Ok(Path(id)) = id else {
         return Err(Box::new(error(
@@ -48,6 +49,13 @@ pub(super) fn station_id(id: Result<Path<String>, PathRejection>) -> Result<Stri
             "invalid station id in the path",
         )));
     };
+    if id.len() > kirby_csms_core::MAX_STATION_ID_LEN {
+        return Err(Box::new(error(
+            StatusCode::BAD_REQUEST,
+            "bad_request",
+            "station id is longer than 128 bytes",
+        )));
+    }
     if id.chars().any(is_unsafe_char) {
         return Err(Box::new(error(
             StatusCode::BAD_REQUEST,

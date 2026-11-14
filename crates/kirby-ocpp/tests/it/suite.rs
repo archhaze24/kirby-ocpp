@@ -275,6 +275,24 @@ async fn duplicate_names_get_their_source_appended() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn row_names_do_not_change_with_the_selection() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let one = write(&dir, "one.toml", &tagged("same", &["x"], PASSING));
+    let two = write(&dir, "two.toml", &tagged("same", &["y"], PASSING));
+    // Full run and a tag selection that leaves one `same`: both name the rows alike.
+    let (_, all) = report_of(&csms, &[&one, &two]).await;
+    assert_eq!(
+        scenario_names(&all),
+        [format!("same ({one})"), format!("same ({two})")]
+    );
+    let (output, only) = report_of(&csms, &[&one, &two, "--tag", "y"]).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(scenario_names(&only), [format!("same ({two})")]);
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_existing_path_beats_a_built_in_name_and_repeats_run_once() {
     let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
     let dir = tempfile::tempdir().unwrap();

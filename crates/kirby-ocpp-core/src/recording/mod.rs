@@ -73,13 +73,19 @@ pub enum Role {
     Unknown,
 }
 
-/// Why a recording could not be written or read.
+/// Why a recording could not be written or read ([`Io`](Self::Io) is the write side,
+/// [`Read`](Self::Read) the read side).
 ///
 /// Messages never echo file content; text that came from the file is escaped and clipped.
 #[derive(Debug, Error)]
 pub enum RecordError {
     #[error("cannot write the recording {}: {source}", path.display())]
     Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("cannot read the recording {}: {source}", path.display())]
+    Read {
         path: PathBuf,
         source: std::io::Error,
     },

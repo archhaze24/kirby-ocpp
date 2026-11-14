@@ -120,9 +120,9 @@ impl Recording {
     /// # Errors
     /// [`RecordError::Invalid`] with the line number for a malformed line, a file without a
     /// header, a newer `schema`, a line longer than [`MAX_LINE_BYTES`] or more than
-    /// [`MAX_ENTRIES`] entries; [`RecordError::Io`] for read errors.
+    /// [`MAX_ENTRIES`] entries; [`RecordError::Read`] for read errors.
     pub fn read(path: &Path) -> Result<Self, RecordError> {
-        let io = |source| RecordError::Io {
+        let io = |source| RecordError::Read {
             path: path.to_path_buf(),
             source,
         };

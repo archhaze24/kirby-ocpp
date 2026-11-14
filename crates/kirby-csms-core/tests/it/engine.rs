@@ -24,6 +24,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 const STEP: Duration = Duration::from_secs(8);
 
@@ -150,6 +152,51 @@ async fn raw_expect_closed(socket: &mut Raw) {
 }
 
 // ---- tests ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_close_from_the_station_is_echoed_before_the_socket_drops() {
+    let csms = start(|_| {}).await;
+    let mut socket = raw_connect(&csms, "/ocpp/CP-CLOSE").await;
+    socket
+        .send(Message::Close(Some(CloseFrame {
+            code: CloseCode::Normal,
+            reason: "bye".into(),
+        })))
+        .await
+        .unwrap();
+    // The first frame back must be the Close reply, with the code the station sent.
+    loop {
+        match timeout(STEP, socket.next())
+            .await
+            .expect("close reply in time")
+        {
+            Some(Ok(Message::Close(frame))) => {
+                assert_eq!(frame.map(|f| f.code), Some(CloseCode::Normal));
+                break;
+            }
+            Some(Ok(_)) => {}
+            other => panic!("no close reply: {other:?}"),
+        }
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_global_rule_clears_only_when_its_protocol_matches() {
+    let csms = start(|_| {}).await;
+    csms.respond_scoped(
+        &Scope::global().protocol("ocpp1.6"),
+        "Heartbeat",
+        json!({"currentTime": "protocol"}),
+    )
+    .unwrap();
+    assert!(!csms.clear_global_rule_for_protocol("Heartbeat", "ocpp2.0.1"));
+    assert!(!csms.clear_global_rule_for_protocol("Authorize", "ocpp1.6"));
+    assert_eq!(csms.scoped_rules(None).len(), 1);
+    assert!(csms.clear_global_rule_for_protocol("Heartbeat", "ocpp1.6"));
+    assert_eq!(csms.scoped_rules(None).len(), 0);
+    csms.shutdown().await;
+}
 
 #[tokio::test]
 async fn three_stations_connect_at_once_and_are_listed() {

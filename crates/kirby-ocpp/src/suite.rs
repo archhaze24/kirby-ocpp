@@ -483,18 +483,20 @@ pub async fn run(
         tag: &args.tag,
         skip_tag: &args.skip_tag,
     };
-    let entries: Vec<Entry> = if selection.is_active() {
+    // Row names come from the full list, so a selection never renames a row.
+    let names = unique_names(&entries);
+    let (entries, names): (Vec<Entry>, Vec<String>) = if selection.is_active() {
         entries
             .into_iter()
-            .filter(|entry| selection.selects(&entry.scenario.name, &entry.scenario.tags))
-            .collect()
+            .zip(names)
+            .filter(|(entry, _)| selection.selects(&entry.scenario.name, &entry.scenario.tags))
+            .unzip()
     } else {
-        entries
+        (entries, names)
     };
     if let Some(error) = selection_error(entries.len(), loaded) {
         return usage_error(&error);
     }
-    let names = unique_names(&entries);
     config.persist = false;
     let overrides = override_vars(&args.vars);
     for entry in &entries {

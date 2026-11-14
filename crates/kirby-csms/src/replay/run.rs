@@ -14,11 +14,8 @@ use std::time::Duration;
 use kirby_csms_core::{ConnectedSession, CsmsHandle, Frame, Observation, Observer};
 use tokio::time::{Instant, sleep_until, timeout_at};
 
-use super::plan::{Plan, Step};
+use super::plan::{MAX_LIVE_STARTS, Plan, Step};
 use crate::headless::sanitize;
-
-/// Most `StartTransaction`s kept per live session.
-const MAX_LIVE_STARTS: usize = 1024;
 
 struct LiveStart {
     connector: Option<u32>,

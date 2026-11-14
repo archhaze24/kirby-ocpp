@@ -505,6 +505,23 @@ fn redact_url(value: &str) -> String {
     }
 }
 
+/// `value` for display with the user name and password of its authority removed. A URL
+/// without userinfo comes back unchanged; one that does not parse loses everything before its
+/// last `@`, so no credential survives odd forms such as `ws:///user:pw@host`.
+#[must_use]
+pub fn redact_url_userinfo(value: &str) -> String {
+    match Url::parse(value) {
+        Ok(parsed) if !parsed.cannot_be_a_base() => {
+            if parsed.username().is_empty() && parsed.password().is_none() {
+                value.to_owned()
+            } else {
+                redact_url(value)
+            }
+        }
+        _ => redact_unparsable_url(value),
+    }
+}
+
 pub(crate) fn redact_unparsable_url(value: &str) -> String {
     let (scheme, rest) = value.split_once("://").unwrap_or(("", value));
     // Everything up to the last `@` is dropped, even past a `/`: a malformed URL may hold a

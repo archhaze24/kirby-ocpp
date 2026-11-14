@@ -305,6 +305,16 @@ impl Scripted {
         }
     }
 
+    /// Clears the global rule for `action` only when it names `protocol`.
+    pub(crate) fn clear_global_rule_for_protocol(&mut self, action: &str, protocol: &str) -> bool {
+        let key = (None, action.to_owned());
+        let matches = self
+            .rules
+            .get(&key)
+            .is_some_and(|rule| rule.protocol.as_deref() == Some(protocol));
+        matches && self.clear_rule(None, action)
+    }
+
     pub(crate) fn clear_rules(&mut self) {
         self.rules.clear();
         self.rule_bytes = 0;

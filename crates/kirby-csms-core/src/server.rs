@@ -309,6 +309,12 @@ impl CsmsHandle {
         self.inner.config.security.profile
     }
 
+    /// Whether secrets are shown as received ([`CsmsConfig::show_secrets`]); by default frames
+    /// and replies handed to callers have them masked.
+    pub fn show_secrets(&self) -> bool {
+        self.inner.config.show_secrets
+    }
+
     /// Subscribes to server events. See [`CsmsEvent`] for lag behaviour.
     pub fn subscribe(&self) -> broadcast::Receiver<CsmsEvent> {
         self.inner.events.subscribe()
@@ -703,6 +709,14 @@ impl CsmsHandle {
     /// `action`; returns whether there was one.
     pub fn clear_scoped_rule(&self, station: Option<&str>, action: &str) -> bool {
         self.inner.lock().scripted.clear_rule(station, action)
+    }
+
+    /// Clears the global rule for `action` only when it names `protocol`, under one lock.
+    pub fn clear_global_rule_for_protocol(&self, action: &str, protocol: &str) -> bool {
+        self.inner
+            .lock()
+            .scripted
+            .clear_global_rule_for_protocol(action, protocol)
     }
 
     /// The scoped rule of one station for `action`.
@@ -1533,7 +1547,13 @@ where
                     }
                     match inbound {
                         Some(Ok(Message::Text(text))) => self.on_text(text.as_str()).await,
-                        Some(Ok(Message::Close(_)) | Err(_)) | None => Some(DisconnectReason::Closed),
+                        Some(Ok(Message::Close(_))) => {
+                            // RFC 6455 5.5.1: answer a Close with a Close. tungstenite queued
+                            // the reply when it read the frame; flushing writes it.
+                            let _ = timeout(CLOSE_WRITE_TIMEOUT, self.socket.flush()).await;
+                            Some(DisconnectReason::Closed)
+                        }
+                        Some(Err(_)) | None => Some(DisconnectReason::Closed),
                         Some(Ok(_)) => None,
                     }
                 }

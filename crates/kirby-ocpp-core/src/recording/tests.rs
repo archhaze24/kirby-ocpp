@@ -1103,3 +1103,78 @@ fn recorded_action_names_are_never_placeholders() {
         Some("Evil$${nope} x$${nope}")
     );
 }
+
+#[test]
+fn a_url_password_with_free_text_delimiters_is_hidden() {
+    for (url, kept) in [
+        (
+            "ftp://svc:pa#ss(1)@host/fw.bin",
+            "ftp://svc:***@host/fw.bin",
+        ),
+        ("ftp://svc:p(1@host/fw.bin", "ftp://svc:***@host/fw.bin"),
+        ("ftp://svc:a#b@host/x", "ftp://svc:***@host/x"),
+        ("ftp://svc:a?b@host/x", "ftp://svc:***@host/x"),
+        ("ftp://svc:a[b]{c}<d>'e\"f@host", "ftp://svc:***@host"),
+    ] {
+        let text = redacted(json!({ "location": url }));
+        assert_eq!(text, json!({ "location": kept }).to_string(), "{url}");
+    }
+    // Inside prose the delimiters still end the authority.
+    let text = redacted(json!("fetch (ftp://svc:secret@host/x) now"));
+    assert_eq!(text, json!("fetch (ftp://svc:***@host/x) now").to_string());
+}
+
+#[test]
+fn authorization_key_inside_json_text_is_masked() {
+    let text = redacted(json!({
+        "data": "{\"key\":\"AuthorizationKey\",\"value\":\"s3cret\"}",
+        "list": " [{\"key\":\"authorizationkey\",\"value\":\"s3cret2\"}]",
+        "broken": "{\"key\":\"AuthorizationKey\",\"value\":\"s3cret3\"",
+        "plain": "{\"key\":\"Other\",\"value\":\"kept\"}",
+    }));
+    assert!(!text.contains("s3cret"), "{text}");
+    assert!(text.contains("kept"), "{text}");
+    let value: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(value["broken"], json!("***"));
+    assert!(holds_redacted(&value["data"]));
+    assert!(holds_redacted(&value["list"]));
+    assert!(holds_redacted(&value["broken"]));
+    assert!(!holds_redacted(&value["plain"]));
+}
+
+#[test]
+fn commands_with_redacted_payloads_are_not_converted() {
+    let recording = lines(
+        "emulator",
+        "1.6",
+        &[
+            cmd(
+                json!({"command": "send_raw", "action": "DataTransfer", "payload": {"data": "ws://u:***@h"}}),
+            ),
+            cmd(json!({"command": "send_raw", "action": "Heartbeat", "payload": {}})),
+            cmd(json!({"command": "data_transfer", "vendor_id": "v", "data": "***"})),
+            cmd(json!({"command": "data_transfer", "vendor_id": "v", "data": "ok"})),
+        ],
+    );
+    let conversion = to_scenario(&recording).unwrap();
+    let scenario = Scenario::from_toml(&conversion.toml).unwrap();
+    assert_eq!(actions(&scenario), ["send_raw", "data_transfer"]);
+    assert!(!conversion.toml.contains("***\"\n"), "{}", conversion.toml);
+    assert_eq!(
+        conversion
+            .warnings
+            .iter()
+            .filter(|w| w.contains("skipped"))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn a_missing_recording_is_a_read_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let error = Recording::read(&dir.path().join("nofile.jsonl")).unwrap_err();
+    let text = error.to_string();
+    assert!(text.starts_with("cannot read the recording "), "{text}");
+    assert!(!text.contains("cannot write"), "{text}");
+}

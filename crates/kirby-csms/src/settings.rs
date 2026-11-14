@@ -324,6 +324,9 @@ pub struct Blocks {
     pub rules: Vec<RuleBlock>,
     /// Scheduled commands and connection hooks in file order.
     pub commands: Vec<crate::automation::CommandSpec>,
+    /// Key paths (`security.default_auth_key_file`) whose value came from the file, not from
+    /// a flag or variable; errors name them instead of the flag.
+    pub file_keys: Vec<String>,
 }
 
 impl Blocks {
@@ -368,6 +371,7 @@ impl Blocks {
             stations,
             rules,
             commands,
+            file_keys: Vec::new(),
         })
     }
 
@@ -474,8 +478,17 @@ pub fn parse_matches(args: Vec<OsString>) -> (ArgMatches, Blocks) {
         Ok(settings) => settings,
         Err(error) => fail(&error.to_string()),
     };
-    let blocks = Blocks::from_settings(&settings).unwrap_or_else(|error| fail(&error));
+    let mut blocks = Blocks::from_settings(&settings).unwrap_or_else(|error| fail(&error));
     let (extra, synthesized) = synthesize(&first, &settings);
+    blocks.file_keys = synthesized
+        .iter()
+        .map(|item| {
+            SCHEMA.section_of(item.key).map_or_else(
+                || item.key.to_owned(),
+                |table| format!("{table}.{}", item.key),
+            )
+        })
+        .collect();
     if extra.is_empty() && strict {
         return (first, blocks);
     }

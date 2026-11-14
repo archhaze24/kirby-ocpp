@@ -3102,3 +3102,140 @@ async fn metrics_follow_the_traffic_and_need_the_token() {
         );
     }
 }
+
+/// Reads one unfragmented text frame sent by the server.
+async fn read_text_frame(stream: &mut TcpStream) -> String {
+    loop {
+        let mut head = [0_u8; 2];
+        tokio::time::timeout(WAIT, stream.read_exact(&mut head))
+            .await
+            .expect("frame timeout")
+            .unwrap();
+        let mut length = usize::from(head[1] & 0x7f);
+        if length == 126 {
+            let mut extra = [0_u8; 2];
+            stream.read_exact(&mut extra).await.unwrap();
+            length = usize::from(u16::from_be_bytes(extra));
+        }
+        let mut payload = vec![0_u8; length];
+        stream.read_exact(&mut payload).await.unwrap();
+        if head[0] & 0x0f == 1 {
+            return String::from_utf8(payload).unwrap();
+        }
+    }
+}
+
+/// Sends one text frame with a zero mask.
+async fn write_text_frame(stream: &mut TcpStream, text: &str) {
+    let mut frame = vec![0x81_u8];
+    let length = text.len();
+    if length < 126 {
+        frame.push(0x80 | u8::try_from(length).unwrap());
+    } else {
+        frame.push(0x80 | 0x7e);
+        frame.extend_from_slice(&u16::try_from(length).unwrap().to_be_bytes());
+    }
+    frame.extend_from_slice(&[0; 4]);
+    frame.extend_from_slice(text.as_bytes());
+    stream.write_all(&frame).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn call_answers_redact_the_authorization_key() {
+    let csms = Csms::start(&[]);
+    let mut raw = silent_station(&csms.station_addr, "CP-1").await;
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while csms.get("/v1/stations/CP-1").await.0 != 200 {
+        assert!(tokio::time::Instant::now() < deadline, "station not listed");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let secret = json!([{"key": "AuthorizationKey", "readonly": false, "value": "supersecret12"}]);
+    let answer = async {
+        let text = read_text_frame(&mut raw).await;
+        let call: Value = serde_json::from_str(&text).unwrap();
+        let id = call[1].as_str().unwrap().to_owned();
+        let reply = if call[2] == "GetConfiguration" {
+            json!([3, id, {"configurationKey": secret}])
+        } else {
+            json!([4, id, "InternalError", "no", {"configurationKey": secret}])
+        };
+        write_text_frame(&mut raw, &reply.to_string()).await;
+    };
+    let request = json!({"action": "GetConfiguration"});
+    let ((), (status, body)) = tokio::join!(answer, csms.post_call("CP-1", &request));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["outcome"], "result");
+    let text = body.to_string();
+    assert!(!text.contains("supersecret12"), "{text}");
+    assert_eq!(body["result"]["configurationKey"][0]["value"], "***");
+    let answer = async {
+        let text = read_text_frame(&mut raw).await;
+        let call: Value = serde_json::from_str(&text).unwrap();
+        let id = call[1].as_str().unwrap().to_owned();
+        let reply = json!([4, id, "InternalError", "no", {"configurationKey": secret}]);
+        write_text_frame(&mut raw, &reply.to_string()).await;
+    };
+    let request = json!({"action": "Reset"});
+    let ((), (status, body)) = tokio::join!(answer, csms.post_call("CP-1", &request));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["outcome"], "call_error");
+    let text = body.to_string();
+    assert!(!text.contains("supersecret12"), "{text}");
+    assert_eq!(body["details"]["configurationKey"][0]["value"], "***");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn station_ids_over_128_bytes_are_bad_requests() {
+    let csms = Csms::start(&[]);
+    let long = "a".repeat(129);
+    for (method, path, body) in [
+        ("GET", format!("/v1/stations/{long}"), None),
+        ("GET", format!("/v1/stations/{long}/history"), None),
+        ("DELETE", format!("/v1/stations/{long}"), None),
+        (
+            "POST",
+            format!("/v1/stations/{long}/calls"),
+            Some(r#"{"action":"Reset"}"#),
+        ),
+        ("GET", format!("/v1/stations/{long}/rules"), None),
+    ] {
+        let (status, answer) = http(&csms.api_addr, method, &path, &[], body).await;
+        assert_eq!(status, 400, "{method} {path}: {answer}");
+        assert_eq!(answer["error"]["code"], "bad_request", "{answer}");
+    }
+    let exact = "a".repeat(128);
+    let (status, _) = csms.get(&format!("/v1/stations/{exact}")).await;
+    assert_eq!(status, 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn history_limit_keeps_the_shape_on_a_long_history() {
+    let csms = Csms::start(&[]);
+    let station = station(&csms.station_addr, "CP-1").await;
+    for _ in 0..60 {
+        let (status, body) = csms
+            .post_call("CP-1", &json!({"action": "GetConfiguration"}))
+            .await;
+        assert_eq!(status, 200, "{body}");
+    }
+    let (_, all) = csms.get("/v1/stations/CP-1/history").await;
+    let frames = all["frames"].as_array().unwrap();
+    assert!(frames.len() >= 120, "{}", frames.len());
+    let (status, newest) = csms.get("/v1/stations/CP-1/history?limit=1").await;
+    assert_eq!(status, 200);
+    assert_eq!(newest["frames"], json!(frames[frames.len() - 1..]));
+    assert_eq!(newest["next_cursor"], all["next_cursor"]);
+    assert_eq!(newest["gap"], false);
+    let cursor = frames[9]["cursor"].as_str().unwrap();
+    let (_, page) = csms
+        .get(&format!("/v1/stations/CP-1/history?since={cursor}&limit=1"))
+        .await;
+    assert_eq!(page["frames"], json!(frames[10..11]));
+    assert_eq!(page["next_cursor"], frames[10]["cursor"]);
+    let (_, filtered) = csms
+        .get("/v1/stations/CP-1/history?action=GetConfiguration&kind=result&limit=1")
+        .await;
+    assert_eq!(filtered["frames"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["frames"][0]["kind"], "result");
+    let _ = station.shutdown().await;
+}

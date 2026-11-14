@@ -118,16 +118,26 @@ where
     let code = body(Some(sink)).await;
     let Ok(summary) = tokio::task::spawn_blocking(move || guard.finish_unless_empty()).await else {
         eprintln!("error: the recording could not be finished");
-        return ExitCode::FAILURE;
+        return keep_failure(code);
     };
     if let Some(reason) = summary.incomplete {
         eprintln!(
             "error: the recording is incomplete: {}",
             crate::headless::sanitize(&reason)
         );
-        return ExitCode::FAILURE;
+        return keep_failure(code);
     }
     code
+}
+
+/// An incomplete recording fails a run that succeeded; a code that already says why the run
+/// failed (usage 2, interrupted 130, ...) is kept.
+fn keep_failure(code: ExitCode) -> ExitCode {
+    if code == ExitCode::SUCCESS {
+        ExitCode::FAILURE
+    } else {
+        code
+    }
 }
 
 #[cfg(test)]

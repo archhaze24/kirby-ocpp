@@ -4,6 +4,7 @@
 mod automation_sessions;
 mod engine;
 mod observe;
+mod probe_close;
 mod redaction;
 mod security;
 mod state;

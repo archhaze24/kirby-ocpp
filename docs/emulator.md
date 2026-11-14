@@ -164,9 +164,11 @@ PASS  tcp       connected to 127.0.0.1:9311 in 0 ms
 SKIP  tls       not applicable: the URL scheme is ws
 PASS  websocket 101 Switching Protocols, subprotocol `ocpp1.6`
 PASS  boot      Accepted, heartbeat interval 300 s, server time +0 s from this machine
-PASS  close     closed by the station; the server ended the connection without a close reply
+PASS  close     closed by the station (code 1000)
 PASSED  6 passed, 1 skipped
 ```
+
+A server that drops the socket without answering the close frame, or does not answer it before the overall `--timeout` runs out, gets a `WARN` on the `close` step; the check still passes.
 
 A failed step stops the steps that depend on it and adds a hint:
 
@@ -225,9 +227,9 @@ Every scenario runs on its own new station (same URL, id and station options as 
 
 ```text
 PASS charge-session (1.2 s)
-FAIL my-auth: authorize - Blocked
+FAIL blocked-tag: authorize - authorize: expected status Blocked, got Accepted
 SKIP last-one
-suite: 1/3 scenarios passed, FAILED: my-auth, SKIPPED: last-one
+suite: 1/3 scenarios passed, FAILED: blocked-tag, SKIPPED: last-one
 ```
 
 `--fail-fast` skips the rest after the first failure. `--count` above 1 is a usage error (exit 2). Options, JSON and JUnit shapes: [scenarios.md](scenarios.md#suite-runs); exit codes: [configuration.md](configuration.md#kirby-ocpp-suite).

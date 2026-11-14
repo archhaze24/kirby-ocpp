@@ -402,17 +402,17 @@ kirby-ocpp --url ws://127.0.0.1:9000/ocpp suite scenarios/ --tag smoke --skip-ta
 `--github-annotations` prints one workflow command per failed scenario and one per flaky pass to stdout, after the last scenario finished and before the `suite:` line, in selection order:
 
 ```text
-::error file=scenarios/bad.toml,title=bad::authorize - expected Accepted, got Blocked
+::error file=scenarios/blocked-tag.toml,title=blocked-tag::authorize - authorize: expected status Blocked, got Accepted
 ::warning file=scenarios/wobbly.toml,title=wobbly::flaky: passed on attempt 2 after a failure (heartbeat - timeout)
 ```
 
 `file` is the scenario file (omitted for built-ins), `title` the scenario name and the message the first failing step and its reason (the setup error for a scenario that never booted). `%`, CR and LF are escaped as the workflow command syntax requires, `:` and `,` also in `file` and `title`; control characters and invisible marks in station-controlled text are written as `\u{XXXX}`. The flag is a plain switch instead of a `--format` value because `--format` is reserved for choosing the report format of every command; the workflow commands are extra lines next to the usual output. It cannot be combined with `--json` (exit 2): a JSON stream must stay machine-readable.
 
-`--summary-md PATH` writes a Markdown summary: a headline (`7 of 8 scenarios passed, 1 failed, 1 flaky (9.0 s).`) and a table with scenario, status (`flaky` for a flaky pass), time, attempts and the failure message (clipped to 300 characters; `|`, `<`, `>`, `&` and control characters neutralized). When the environment variable `GITHUB_STEP_SUMMARY` names a file, the same text is also appended to it, with or without the flag, so a plain `suite` step in a workflow adds its table to the job summary. The summary holds names, statuses, durations and failure messages only. `PATH` must not be a scenario, `--report` or `--junit` file (exit 2).
+`--summary-md PATH` writes a Markdown summary: a headline (`7 of 8 scenarios passed, 1 failed, 1 flaky (9.0 s).`) and a table with scenario, status (`flaky` for a flaky pass), time, attempts and the failure message (clipped to 300 characters; `|`, `<`, `>`, `&`, control characters and the Markdown specials `[ ] ( ) ! * _ ~ \` and `@` neutralized, so server text cannot render images, links or mentions). When the environment variable `GITHUB_STEP_SUMMARY` names a file, the same text is also appended to it, with or without the flag, so a plain `suite` step in a workflow adds its table to the job summary. The summary holds names, statuses, durations and failure messages only. `PATH` must not be a scenario, `--report` or `--junit` file (exit 2).
 
 #### Output and exit codes
 
-`PASS name (1.2 s)`, `FAIL name: first failing step - reason` (or the setup error), `SKIP name`, then `suite: 7/8 scenarios passed, FAILED: a, b` (`, SKIPPED: ...` when some were skipped). The JSON summary (`--report`, and the last line under `--json`) is `{"type":"suite_report","schema":1,"ocpp_version":"1.6","tool_version":"0.5.0","started_at":"...","status":"failed","counts":{"passed":7,"failed":1,"error":0,"skipped":0},"passed":false,"total":8,"passed_count":7,"failed":["a"],"failed_names":["a"],"error_names":[],"skipped":[],"scenarios":[{"name":"a","scenario":"a","status":"failed","ocpp_version":"1.6","source":"a.toml","station":"CP-001","started_at":"...","duration_ms":1200,"report":{...}}],"duration_ms":9000}`. `status` is `passed`, `failed`, `error` (never booted, or cut short; carries `error` instead of `report`) or `skipped`.
+`PASS name (1.2 s)`, `FAIL name: first failing step - reason` (or the setup error), `SKIP name`, then `suite: 7/8 scenarios passed, FAILED: a, b` (`, SKIPPED: ...` when some were skipped). The JSON summary (`--report`, and the last line under `--json`) is `{"type":"suite_report","schema":1,"ocpp_version":"1.6","tool_version":"0.6.0-dev","started_at":"...","status":"failed","counts":{"passed":7,"failed":1,"error":0,"skipped":0},"passed":false,"total":8,"passed_count":7,"failed":["a"],"failed_names":["a"],"error_names":[],"flaky_names":[],"retries":0,"skipped":[],"scenarios":[{"name":"a","scenario":"a","status":"failed","ocpp_version":"1.6","source":"a.toml","station":"CP-001","started_at":"...","duration_ms":1200,"attempts":1,"flaky":false,"attempt_results":[{"attempt":1,"status":"failed","duration_ms":1200,"message":"..."}],"report":{...}}],"duration_ms":9000}`. `status` is `passed`, `failed`, `error` (never booted, or cut short; carries `error` instead of `report`) or `skipped`.
 
 Exit codes: 0 only if every scenario passes, 1 if any does not, 2 for a usage error. On SIGINT and SIGTERM the running scenario is stopped, the rest are `skipped`, and the reports are written for what finished. The full table is in [configuration.md](configuration.md#kirby-ocpp-suite). More CI recipes: [ci.md](ci.md).
 
@@ -691,7 +691,7 @@ Report fields:
 `cancelled` is true when the run was stopped (timeout or signal). With `--json` the same object is printed on stdout as one line with an extra `"type": "report"`. Without `--json` the text form is:
 
 ```text
-scenario smoke
+script smoke
   PASS  1 respond DataTransfer (0 ms)
   PASS  2 wait_station CP-1 (412 ms)
   FAIL  3 wait_call StartTransaction (20001 ms): no matching StartTransaction CALL within 20000 ms

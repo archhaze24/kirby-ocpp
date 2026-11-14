@@ -8,6 +8,7 @@ use axum::extract::rejection::PathRejection;
 use axum::http::{HeaderValue, StatusCode, Uri};
 use axum::response::Response;
 use chrono::{DateTime, Utc};
+use kirby_csms_core::{Direction, Frame, FrameEntry, HistoryPage};
 use kirby_ocpp_core::text::is_unsafe_char;
 use serde_json::{Map, Value, json};
 
@@ -101,6 +102,14 @@ struct Selection {
     gap: bool,
 }
 
+/// What [`pick`] chose: positions in the held list, and where to continue.
+#[derive(Debug, PartialEq)]
+struct Pick {
+    positions: Vec<usize>,
+    next: Option<u64>,
+    gap: bool,
+}
+
 /// Picks the frames of `held` (frame objects with their sequence numbers, oldest first) that
 /// `query` asks for. `dropped_through` is the newest sequence of this station that left the
 /// history.
@@ -109,7 +118,7 @@ struct Selection {
 /// `next` is the cursor to ask from next: the last frame returned when `limit` cut the answer,
 /// else the newest frame held (every frame up to it was looked at, returned or not), else
 /// `since`; `None` when there is nothing to point at.
-fn select(held: &[(u64, Value)], dropped_through: u64, query: &HistoryQuery) -> Selection {
+fn pick(held: &[(u64, Value)], dropped_through: u64, query: &HistoryQuery) -> Pick {
     let text = |row: &Value, key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
     // A reply names no action: it takes the one of the CALL it answers, which went the other
     // way.
@@ -151,15 +160,17 @@ fn select(held: &[(u64, Value)], dropped_through: u64, query: &HistoryQuery) -> 
     };
     let after = query.since.unwrap_or(0);
     let limit = query.limit.unwrap_or(usize::MAX);
-    let matching: Vec<&(u64, Value)> = held
+    let matching: Vec<usize> = held
         .iter()
-        .filter(|(sequence, row)| *sequence > after && wanted(row))
+        .enumerate()
+        .filter(|(_, (sequence, row))| *sequence > after && wanted(row))
+        .map(|(position, _)| position)
         .collect();
     let newest_held = held
         .last()
         .map(|(sequence, _)| *sequence)
         .filter(|sequence| *sequence > after);
-    let (picked, cut): (&[&(u64, Value)], bool) = if query.since.is_some() {
+    let (picked, cut): (&[usize], bool) = if query.since.is_some() {
         (
             matching.get(..limit.min(matching.len())).unwrap_or(&[]),
             matching.len() > limit,
@@ -172,13 +183,30 @@ fn select(held: &[(u64, Value)], dropped_through: u64, query: &HistoryQuery) -> 
             false,
         )
     };
+    let sequence_at = |position: usize| held.get(position).map(|(sequence, _)| *sequence);
     let next = if cut {
-        picked.last().map(|(sequence, _)| *sequence).or(query.since)
+        picked
+            .last()
+            .and_then(|position| sequence_at(*position))
+            .or(query.since)
     } else {
         newest_held.or(query.since)
     };
+    Pick {
+        positions: picked.to_vec(),
+        next,
+        gap: query.since.is_some_and(|since| dropped_through > since),
+    }
+}
+
+/// The test-facing form of [`pick`]: the picked rows with their `cursor`.
+#[cfg(test)]
+fn select(held: &[(u64, Value)], dropped_through: u64, query: &HistoryQuery) -> Selection {
+    let picked = pick(held, dropped_through, query);
     let rows = picked
+        .positions
         .iter()
+        .filter_map(|position| held.get(*position))
         .map(|(sequence, row)| {
             let mut row = row.clone();
             if let Some(object) = row.as_object_mut() {
@@ -189,8 +217,63 @@ fn select(held: &[(u64, Value)], dropped_through: u64, query: &HistoryQuery) -> 
         .collect();
     Selection {
         rows,
-        next,
-        gap: query.since.is_some_and(|since| dropped_through > since),
+        next: picked.next,
+        gap: picked.gap,
+    }
+}
+
+/// The identifying fields of a frame (no payload): what [`pick`] filters on.
+fn light_row(entry: &FrameEntry) -> Value {
+    let mut row = match &entry.frame {
+        Frame::Call { id, action, .. } => {
+            json!({"kind": "call", "id": id.clone(), "action": action})
+        }
+        Frame::CallResult { id, .. } => json!({"kind": "result", "id": id.clone()}),
+        Frame::CallError { id, .. } => json!({"kind": "error", "id": id.clone()}),
+        other => json!({"kind": "unknown", "id": other.id()}),
+    };
+    if let Some(object) = row.as_object_mut() {
+        object.insert(
+            "direction".to_owned(),
+            match entry.direction {
+                Direction::In => "in",
+                Direction::Out => "out",
+            }
+            .into(),
+        );
+    }
+    row
+}
+
+/// Filters on the identifying fields of every held frame; the full JSON (and the clone it
+/// needs) is built only for the frames the answer carries.
+fn select_page(id: &str, page: &HistoryPage, query: &HistoryQuery) -> Selection {
+    let held: Vec<(u64, Value)> = page
+        .frames
+        .iter()
+        .map(|(sequence, entry)| (*sequence, light_row(entry)))
+        .collect();
+    let picked = pick(&held, page.dropped_through, query);
+    let (sequences, entries): (Vec<u64>, Vec<FrameEntry>) = picked
+        .positions
+        .iter()
+        .filter_map(|position| page.frames.get(*position))
+        .map(|(sequence, entry)| (*sequence, entry.clone()))
+        .unzip();
+    let rows = commands::history_frames(id, &entries)
+        .into_iter()
+        .zip(sequences)
+        .map(|(mut row, sequence)| {
+            if let Some(object) = row.as_object_mut() {
+                object.insert("cursor".to_owned(), cursor_text(sequence).into());
+            }
+            row
+        })
+        .collect();
+    Selection {
+        rows,
+        next: picked.next,
+        gap: picked.gap,
     }
 }
 
@@ -263,14 +346,7 @@ pub(super) async fn history(
     if query.since.is_some_and(|since| since > page.newest) {
         return bad_request("`since` is newer than any frame of this run");
     }
-    let entries: Vec<_> = page.frames.iter().map(|(_, entry)| entry.clone()).collect();
-    let held: Vec<(u64, Value)> = page
-        .frames
-        .iter()
-        .map(|(sequence, _)| *sequence)
-        .zip(commands::history_frames(&id, &entries))
-        .collect();
-    let selection = select(&held, page.dropped_through, &query);
+    let selection = select_page(&id, &page, &query);
     match format {
         Format::Json => reply(
             StatusCode::OK,

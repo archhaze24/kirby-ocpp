@@ -492,7 +492,12 @@ where
         let outbound = tokio::select! {
             inbound = socket.next() => match inbound {
                 Some(Ok(Message::Text(text))) => shared.handle_inbound(connection, text.as_str()),
-                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(Message::Close(_))) => {
+                    // Send the queued Close reply before the socket is dropped.
+                    let _ = socket.flush().await;
+                    break;
+                }
+                Some(Err(_)) | None => break,
                 Some(Ok(_)) => None,
             },
             queued = outbound_rx.recv() => match queued {

@@ -147,8 +147,9 @@ pub(crate) fn annotations(rows: &[CiRow]) -> Vec<String> {
 /// Longest failure message in a summary cell, in characters.
 const CELL_LIMIT: usize = 300;
 
-/// Text for a Markdown table cell: unsafe characters escaped, clipped, and `|`, `<`, `>`,
-/// and `&` neutralized.
+/// Text for a Markdown table cell: unsafe characters escaped, clipped, `<`, `>` and `&`
+/// neutralized, and Markdown specials (`| [ ] ( ) ! * _ ~ \`, `@`) escaped so server text
+/// cannot render images, links, emphasis or mentions.
 fn cell(text: &str) -> String {
     let clean = escape_unsafe(text);
     let clipped: String = if clean.chars().count() > CELL_LIMIT {
@@ -158,12 +159,24 @@ fn cell(text: &str) -> String {
     } else {
         clean
     };
-    clipped
+    let html_safe = clipped
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
-        .replace('|', "\\|")
-        .replace('`', "'")
+        .replace('`', "'");
+    let mut out = String::with_capacity(html_safe.len());
+    for c in html_safe.chars() {
+        match c {
+            '\\' | '|' | '[' | ']' | '(' | ')' | '!' | '*' | '_' | '~' => {
+                out.push('\\');
+                out.push(c);
+            }
+            // A zero-width space after `@` keeps a name from becoming a mention.
+            '@' => out.push_str("@&#8203;"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// A duration: milliseconds below one second, else seconds with one decimal.
@@ -215,6 +228,18 @@ mod tests {
 
     fn strings(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    #[test]
+    fn cells_cannot_render_images_links_or_mentions() {
+        let out = cell("![](https://evil/x.png) [a](b) @user *bold* a|b\nc");
+        assert!(!out.contains("!["), "{out}");
+        assert!(!out.contains("]("), "{out}");
+        assert!(!out.contains("@user"), "{out}");
+        assert!(out.contains(r"\!\[\]\(https://evil/x.png\)"), "{out}");
+        assert!(out.contains(r"\*bold\*"), "{out}");
+        assert!(out.contains(r"a\|b"), "{out}");
+        assert!(!out.contains('\n'), "{out}");
     }
 
     #[test]
@@ -363,7 +388,7 @@ mod tests {
         assert!(md.contains("| Scenario | Status | Time | Attempts | Message |"));
         assert!(md.contains("| ok | passed | 1.2 s | 1 |  |"), "{md}");
         assert!(
-            md.contains("| a\\|b &lt;x&gt; | failed | 1.2 s | 1 | step - 'x' \\| y\\u{000a}z |"),
+            md.contains("| a\\|b &lt;x&gt; | failed | 1.2 s | 1 | step - 'x' \\| y\\\\u{000a}z |"),
             "{md}"
         );
         assert!(md.contains("| wobbly | flaky | 1.2 s | 2 | late |"), "{md}");

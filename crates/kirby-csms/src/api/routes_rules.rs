@@ -258,12 +258,9 @@ pub(super) async fn delete_rule(
         Err(response) => return *response,
     };
     let existed = match protocol {
-        Some(protocol) => {
-            let stored = global_protocol_rules(&state)
-                .into_iter()
-                .any(|(held, scope)| held == action && scope == protocol);
-            stored && state.handle.clear_scoped_rule(None, &action)
-        }
+        Some(protocol) => state
+            .handle
+            .clear_global_rule_for_protocol(&action, &protocol),
         None => state.handle.clear_responder(&action),
     };
     reply(

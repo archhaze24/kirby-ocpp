@@ -11,6 +11,7 @@ use std::fmt::Write as _;
 use serde_json::{Map, Value, json};
 
 use super::read::{CommandLine, Entry, FrameLine, Recording};
+use super::redact::holds_redacted;
 use super::toml_out::{escape_placeholders, step, string};
 use super::{RecordError, Role, at_text, clean, frame_parts};
 use crate::ocpp::frame::Direction;
@@ -339,6 +340,10 @@ impl<'a> Converter<'a> {
                 self.push(Value::Object(fields), at);
             }
             "data_transfer" => {
+                if get("data").as_ref().is_some_and(holds_redacted) {
+                    self.skip("a data_transfer command whose data was redacted", at);
+                    return;
+                }
                 action(&mut fields, "data_transfer");
                 copy(&mut fields, &["vendor_id", "message_id", "data"]);
                 self.push(Value::Object(fields), at);
@@ -354,9 +359,14 @@ impl<'a> Converter<'a> {
                     self.skip("a send_raw command without an action", at);
                     return;
                 };
+                let payload = get("payload");
+                if payload.as_ref().is_some_and(holds_redacted) {
+                    self.skip("a send_raw command whose payload was redacted", at);
+                    return;
+                }
                 action(&mut fields, "send_raw");
                 fields.insert("call".to_owned(), json!(call));
-                if let Some(payload) = get("payload") {
+                if let Some(payload) = payload {
                     fields.insert("payload".to_owned(), payload);
                 }
                 if get("validate") == Some(json!(false)) {

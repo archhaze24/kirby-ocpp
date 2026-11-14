@@ -107,10 +107,13 @@ async fn real_main() -> ExitCode {
     let spec = cli.fleet_spec();
     let templated = cli.id_template.is_some();
     let log_file = cli.log_file.clone();
-    let record = cli.record.clone().map(|path| RecordTarget {
-        path,
-        overwrite: cli.record_overwrite,
-    });
+    let mut record = cli
+        .record
+        .clone()
+        .map(|path| RecordTarget::new(path, cli.record_overwrite));
+    if let Some(target) = &mut record {
+        target.protect("the configuration file", cli.config.as_deref());
+    }
     let state_dir_given = cli.state_dir.is_some();
     let connector = ConnectorId::new(cli.connector);
     let mut config = match cli.into_config() {
@@ -179,6 +182,24 @@ async fn real_main() -> ExitCode {
                 ExitCode::FAILURE
             }
         };
+    }
+    if let Some(target) = &mut record {
+        target.protect("the TLS CA file", config.tls.ca_file.as_deref());
+        target.protect("the TLS certificate", config.tls.cert_file.as_deref());
+        target.protect("the TLS key", config.tls.key_file.as_deref());
+        target.protect("the log file", log_file.as_deref());
+        match &command {
+            Some(Cmd::Run(args)) => {
+                target.protect("the report", args.report.as_deref());
+                target.protect("the JUnit report", args.junit.as_deref());
+            }
+            Some(Cmd::Replay(args)) => {
+                target.protect("the report", args.report.as_deref());
+                target.protect("the JUnit report", args.junit.as_deref());
+                target.protect("the recording that is replayed", Some(&args.recording));
+            }
+            _ => {}
+        }
     }
     // Only a command that connects needs the TLS files (`--print-config` does not).
     if let Err(error) = config.check_tls_files() {
@@ -1032,6 +1053,17 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
         match (std::fs::canonicalize(parent), path.file_name()) {
             (Ok(parent), Some(name)) => parent.join(name),
             _ => path.to_path_buf(),
+        }
+    }
+    // Hard links and other aliases of an existing file share the inode.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b))
+            && a.dev() == b.dev()
+            && a.ino() == b.ino()
+        {
+            return true;
         }
     }
     resolve(a) == resolve(b)

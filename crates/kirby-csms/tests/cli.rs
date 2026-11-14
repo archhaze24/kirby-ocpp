@@ -2304,3 +2304,73 @@ fn replay_conflicts_with_a_script_and_cannot_be_recorded_over_itself() {
     let (code, _, _) = run_to_end(&["--check-config", "--replay", &bad]);
     assert_eq!(code, 2);
 }
+
+#[cfg(unix)]
+#[test]
+fn replay_interrupted_by_sigint_finishes_the_log_and_the_recording() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = csms_recording(&[
+        (
+            "out",
+            "CP-9",
+            0,
+            json!([2,"a","DataTransfer",{"vendorId":"v"}]),
+        ),
+        ("in", "CP-9", 1, json!([3,"a",{"status":"Rejected"}])),
+    ]);
+    let path = write(dir.path(), "session.jsonl", &text);
+    let log = dir.path().join("events.jsonl");
+    let log_text = log.to_str().unwrap().to_owned();
+    let record = dir.path().join("again.jsonl");
+    let record_text = record.to_str().unwrap().to_owned();
+    let csms = Csms::start(&[
+        "--replay",
+        &path,
+        "--timeout",
+        "60",
+        "--log-file",
+        &log_text,
+        "--record",
+        &record_text,
+    ]);
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &csms.child.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (code, _, stderr) = csms.finish();
+    assert_eq!(code, 130, "{stderr}");
+    let lines = std::fs::read_to_string(&log).unwrap();
+    assert!(!lines.is_empty(), "the log holds the startup events");
+    for line in lines.lines() {
+        serde_json::from_str::<serde_json::Value>(line).expect("complete JSON line");
+    }
+    let recorded = std::fs::read_to_string(&record).unwrap_or_default();
+    assert!(
+        recorded.is_empty() || recorded.trim_end().ends_with('}'),
+        "{recorded}"
+    );
+}
+
+#[test]
+fn api_token_file_is_bounded_and_must_be_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = write(dir.path(), "big", &"a".repeat(64 * 1024 + 1));
+    let binary = dir.path().join("binary");
+    std::fs::write(&binary, [0xff, 0xfe, 0x41]).unwrap();
+    let binary = binary.to_str().unwrap().to_owned();
+    for (file, needle) in [(&big, "larger than"), (&binary, "not valid UTF-8")] {
+        let (code, _, stderr) = run_to_end(&[
+            "--api-listen",
+            "127.0.0.1:0",
+            "--api-token-file",
+            file,
+            "--check-config",
+        ]);
+        assert_eq!(code, 2, "{stderr}");
+        assert!(stderr.contains(needle), "{stderr}");
+        assert!(stderr.contains("--api-token-file"), "{stderr}");
+    }
+}

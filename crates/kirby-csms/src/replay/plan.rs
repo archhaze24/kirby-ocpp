@@ -13,6 +13,8 @@ use serde_json::Value;
 /// Longest station id and `idTag` the plan accepts.
 const MAX_STATION_ID: usize = 128;
 const MAX_ID_TAG: usize = kirby_csms_core::MAX_OBSERVED_ID_TAG;
+/// Most `StartTransaction`s kept per station: recorded in the plan, live in the runner.
+pub(super) const MAX_LIVE_STARTS: usize = 1024;
 
 /// A CALL the CSMS sent in the recording.
 #[derive(Debug, Clone)]
@@ -161,6 +163,14 @@ pub(super) fn plan(recording: &Recording) -> Result<Plan, String> {
                     }
                     let mut start = None;
                     if action == "RemoteStopTransaction" {
+                        if payload.as_object().is_some_and(|fields| {
+                            fields.values().any(|v| holds_key(v, "transactionId"))
+                        }) {
+                            return Err(
+                                "a recorded RemoteStopTransaction carries a nested transaction id; only the top-level one is supported"
+                                    .into(),
+                            );
+                        }
                         let id = payload
                             .get("transactionId")
                             .and_then(transaction_id)
@@ -208,6 +218,11 @@ pub(super) fn plan(recording: &Recording) -> Result<Plan, String> {
                         return Err("a recorded StartTransaction has no valid identity".into());
                     };
                     let plan = stations.entry(station.clone()).or_default();
+                    if plan.starts.len() >= MAX_LIVE_STARTS {
+                        return Err(format!(
+                            "a station started more than {MAX_LIVE_STARTS} transactions in the recording"
+                        ));
+                    }
                     slot = Some(plan.starts.len());
                     plan.starts.push(RecordedStart {
                         connector,
@@ -474,6 +489,51 @@ mod tests {
         }
         renumber(&mut record);
         assert!(plan(&record).unwrap_err().contains("more than once"));
+    }
+
+    #[test]
+    fn rejects_a_nested_transaction_id_in_a_remote_stop() {
+        let mut record = sample();
+        if let Entry::Frame(line) = &mut record.entries[2] {
+            line.frame = Some(json!([2,"x","RemoteStopTransaction",{
+                "transactionId":7,"x":{"transactionId":99}
+            }]));
+        }
+        let error = plan(&record).unwrap_err();
+        assert!(error.contains("nested"), "{error}");
+    }
+
+    #[test]
+    fn rejects_more_recorded_starts_than_the_runner_keeps() {
+        let start = |id: u32| {
+            [
+                frame(
+                    "in",
+                    1,
+                    json!([2,format!("s{id}"),"StartTransaction",{"connectorId":1,"idTag":"A"}]),
+                ),
+                frame(
+                    "out",
+                    1,
+                    json!([3,format!("s{id}"),{"transactionId":id,"idTagInfo":{"status":"Accepted"}}]),
+                ),
+            ]
+        };
+        let build = |count: u32| {
+            let mut frames: Vec<Value> = (1..=count).flat_map(start).collect();
+            frames.push(frame(
+                "out",
+                1,
+                json!([2,"x","RemoteStopTransaction",{"transactionId":1}]),
+            ));
+            frames.push(frame("in", 1, json!([3,"x",{"status":"Accepted"}])));
+            recording(frames)
+        };
+        #[allow(clippy::cast_possible_truncation, reason = "the limit is 1024")]
+        let limit = MAX_LIVE_STARTS as u32;
+        assert!(plan(&build(limit)).is_ok());
+        let error = plan(&build(limit + 1)).unwrap_err();
+        assert!(error.contains("more than"), "{error}");
     }
 
     #[test]
