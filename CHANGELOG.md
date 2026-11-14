@@ -22,6 +22,9 @@ tag as the GitHub release notes.
 
 - `kirby-csms --record` writes the negotiated subprotocol of each session into its frames (`protocol`, absent when none was negotiated). `--replay` refuses a recording that names a protocol other than `ocpp1.6`; recordings without the key still replay as 1.6.
 
+- Scenario failure reasons no longer show an unredacted `AuthorizationKey` (failed `capture`) or quote the text of an unterminated `${`. The `params` of failure evidence is bounded (long strings clipped, an oversized object replaced by `{"truncated": true, "bytes": N}`).
+- JUnit output keeps the rerun elements of earlier attempts when the final attempt fails during setup.
+
 ### Added
 
 - `--authorization-key-encoding literal|hex` (`OCPP_AUTHORIZATION_KEY_ENCODING`, `[tls].authorization_key_encoding`) selects how the emulator turns the 1.6 `AuthorizationKey` into the Basic Auth password. `literal` (default) sends the key text; `hex` sends the decoded bytes and accepts only hexadecimal keys.

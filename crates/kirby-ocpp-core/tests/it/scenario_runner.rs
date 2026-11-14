@@ -806,6 +806,44 @@ expect = { status = "Never" }
 }
 
 #[tokio::test]
+async fn oversized_step_params_are_bounded_in_evidence() {
+    let rig = booted_rig().await;
+    let run = |payload: String| {
+        let rig = &rig;
+        async move {
+            let s = scenario(&format!(
+                r#"
+[[steps]]
+action = "send_raw"
+call = "ChangeConfiguration"
+payload = {payload}
+expect = {{ status = "Never" }}
+"#
+            ));
+            let report = run_scenario(&rig.station, &s, &CancelToken::new(), None).await;
+            serde_json::to_value(&report).unwrap()["steps"][0].clone()
+        }
+    };
+    let keys = |step: &serde_json::Value| -> Vec<String> {
+        step.as_object().unwrap().keys().cloned().collect()
+    };
+    let small = run(r#"{ key = "k", value = "v" }"#.to_owned()).await;
+    let long = "x".repeat(200_000);
+    let clipped = run(format!(r#"{{ key = "k", value = "{long}" }}"#)).await;
+    assert_eq!(keys(&small), keys(&clipped));
+    let text = clipped["params"].to_string();
+    assert!(text.len() < 4096, "{}", text.len());
+    assert!(clipped["params"]["payload"]["value"].is_string(), "{text}");
+
+    let items = vec!["\"y\""; 20_000].join(", ");
+    let marker = run(format!(r#"{{ key = "k", value = [{items}] }}"#)).await;
+    assert_eq!(keys(&small), keys(&marker));
+    assert_eq!(marker["params"]["truncated"], true, "{marker}");
+    assert!(marker["params"].to_string().len() < 256);
+    rig.shutdown().await;
+}
+
+#[tokio::test]
 async fn expected_payload_evidence_is_redacted() {
     let rig = booted_rig().await;
     let s = scenario(

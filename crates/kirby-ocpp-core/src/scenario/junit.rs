@@ -272,7 +272,10 @@ fn render_suite(run: &JunitRun<'_>, retries: Option<&JunitRetries<'_>>) -> (Stri
             counts.millis = run.duration_ms;
             let error = escape(error);
             let time = seconds(run.duration_ms);
-            let extra = extras.remove(&0).unwrap_or_default();
+            // Every earlier-attempt element lands on the setup case, in step order.
+            let mut keys: Vec<usize> = extras.keys().copied().collect();
+            keys.sort_unstable();
+            let extra: String = keys.iter().filter_map(|key| extras.remove(key)).collect();
             let _ = writeln!(
                 cases,
                 "    <testcase classname=\"{classname}\" name=\"setup\" time=\"{time}\">\n      <error message=\"{error}\" type=\"SetupError\">{error}</error>\n{extra}    </testcase>"
@@ -682,6 +685,40 @@ mod tests {
                 .collect()
         };
         assert_eq!(names(&xml), names(&plain));
+    }
+
+    #[test]
+    fn a_setup_error_after_retries_keeps_earlier_rerun_elements() {
+        let failed = report(
+            vec![
+                step(0, "boot", StepStatus::Passed, 1),
+                step(3, "start", StepStatus::Failed("late".to_owned()), 1),
+            ],
+            false,
+        );
+        let run = JunitRun {
+            suite: JunitSuite {
+                station: None,
+                scenario: "demo",
+                outcome: Err("no boot"),
+            },
+            source: None,
+            duration_ms: 0,
+        };
+        let earlier = [Ok(&failed)];
+        let xml = junit_xml_retried(&[(
+            run,
+            JunitRetries {
+                attempts: 2,
+                earlier: &earlier,
+            },
+        )]);
+        assert!(xml.contains("name=\"setup\""), "{xml}");
+        assert!(
+            xml.contains("<rerunFailure message=\"late\" type=\"StepFailed\">"),
+            "{xml}"
+        );
+        assert!(xml.contains("<error message=\"no boot\""), "{xml}");
     }
 
     #[test]

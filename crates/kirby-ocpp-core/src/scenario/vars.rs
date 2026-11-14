@@ -186,7 +186,13 @@ const CLIP_CHARS: usize = 200;
 /// end up in failure reasons.
 #[must_use]
 pub fn clip_text(text: &str) -> String {
-    match text.char_indices().nth(CLIP_CHARS) {
+    clip_chars(text, CLIP_CHARS)
+}
+
+/// `text` cut to `max` characters with a `...` marker.
+#[must_use]
+pub fn clip_chars(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
         Some((at, _)) => format!("{}... ({} bytes)", &text[..at], text.len()),
         None => text.to_owned(),
     }
@@ -277,7 +283,7 @@ pub fn substitute_str(text: &str, vars: &Vars) -> Result<String, String> {
         } else if let Some(after) = tail.strip_prefix("${") {
             let end = after
                 .find('}')
-                .ok_or_else(|| format!("unterminated `${{` in `{text}`"))?;
+                .ok_or_else(|| format!("unterminated `${{` at byte {}", text.len() - tail.len()))?;
             let name = &after[..end];
             if !is_valid_name(name) {
                 return Err(format!("invalid variable name `{name}` in `${{{name}}}`"));
@@ -311,10 +317,12 @@ pub fn substitute_str(text: &str, vars: &Vars) -> Result<String, String> {
 /// A bad pointer or nothing at that place.
 pub fn capture(value: &Value, pointer: &str) -> Result<Value, String> {
     check_pointer(pointer)?;
-    value
-        .pointer(pointer)
-        .cloned()
-        .ok_or_else(|| format!("nothing at `{pointer}` in {}", clip_json(value)))
+    value.pointer(pointer).cloned().ok_or_else(|| {
+        format!(
+            "nothing at `{pointer}` in {}",
+            clip_json(&super::redacted(value))
+        )
+    })
 }
 
 #[cfg(test)]
@@ -434,15 +442,21 @@ mod tests {
         assert!(e.contains("nope"), "{e}");
         let e = substitute(&json!("${nope}"), &v).unwrap_err();
         assert!(e.contains("nope"), "{e}");
-        assert!(
-            substitute_str("a ${n", &v)
-                .unwrap_err()
-                .contains("unterminated")
-        );
+        let e = substitute_str("secret-1 ${n", &v).unwrap_err();
+        assert!(e.contains("unterminated") && e.contains("byte 9"), "{e}");
+        assert!(!e.contains("secret-1"), "{e}");
         assert!(substitute_str("${}", &v).is_err());
         assert!(substitute_str("${a b}", &v).unwrap_err().contains("a b"));
         let e = substitute_str("x ${o}", &v).unwrap_err();
         assert!(e.contains('o') && e.contains("not text"), "{e}");
+    }
+
+    #[test]
+    fn failed_capture_does_not_show_secrets() {
+        let call = json!({"key": "AuthorizationKey", "value": "s3cret-value-123"});
+        let e = capture(&call, "/nope").unwrap_err();
+        assert!(e.contains("/nope"), "{e}");
+        assert!(!e.contains("s3cret-value-123"), "{e}");
     }
 
     #[test]

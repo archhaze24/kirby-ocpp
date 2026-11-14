@@ -481,7 +481,34 @@ fn step_params(step: &Step) -> Option<Value> {
         fields.insert("expect".to_owned(), expect);
     }
     super::redact_params(&mut value);
-    Some(value)
+    Some(bound_params(value))
+}
+
+/// Characters of one string parameter kept in failure evidence.
+const PARAM_CLIP_CHARS: usize = 1024;
+
+/// Serialized size above which the evidence holds a marker instead of the parameters.
+const PARAMS_MAX_BYTES: usize = 16 * 1024;
+
+/// Clips long string values; an object that is still larger than [`PARAMS_MAX_BYTES`]
+/// becomes `{"truncated": true, "bytes": N}`.
+fn bound_params(mut value: Value) -> Value {
+    fn clip(value: &mut Value) {
+        match value {
+            Value::String(text) if text.chars().nth(PARAM_CLIP_CHARS).is_some() => {
+                *text = vars::clip_chars(text, PARAM_CLIP_CHARS);
+            }
+            Value::Array(items) => items.iter_mut().for_each(clip),
+            Value::Object(map) => map.values_mut().for_each(clip),
+            _ => {}
+        }
+    }
+    clip(&mut value);
+    let bytes = value.to_string().len();
+    if bytes > PARAMS_MAX_BYTES {
+        return serde_json::json!({"truncated": true, "bytes": bytes});
+    }
+    value
 }
 
 fn millis(duration: Duration) -> u64 {
