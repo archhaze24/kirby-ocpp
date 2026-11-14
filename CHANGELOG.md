@@ -25,6 +25,8 @@ tag as the GitHub release notes.
 - Scenario failure reasons no longer show an unredacted `AuthorizationKey` (failed `capture`) or quote the text of an unterminated `${`. The `params` of failure evidence is bounded (long strings clipped, an oversized object replaced by `{"truncated": true, "bytes": N}`).
 - JUnit output keeps the rerun elements of earlier attempts when the final attempt fails during setup.
 
+- The control API bounds the request bodies it buffers at once (32 MiB; an excess request gets `429 too_many_requests`), and a history request copies only the frames it returns instead of the whole station history under the engine lock. Compact `ctl` output re-serializes an answer that holds a control byte between JSON tokens.
+
 ### Added
 
 - `--authorization-key-encoding literal|hex` (`OCPP_AUTHORIZATION_KEY_ENCODING`, `[tls].authorization_key_encoding`) selects how the emulator turns the 1.6 `AuthorizationKey` into the Basic Auth password. `literal` (default) sends the key text; `hex` sends the decoded bytes and accepts only hexadecimal keys.

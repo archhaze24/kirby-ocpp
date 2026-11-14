@@ -105,6 +105,7 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `DELETE /v1/faults/{id}` | Removes one fault (`{"id":..,"removed":true\|false}`) |
 
 Status of a call: `200` also when the station answered with a CALLERROR or the call timed out (`"ok":false` and `outcome` `call_error` or `timeout` in the body); `404` `unknown_station` when the id was never seen; `409` `station_not_connected` when the station is known but has no open connection (or the connection closed before the answer); `400` for a bad body; `413` above 1 MiB; `429` `too_many_requests` when 256 commands (stdin and API together) are already in flight, or when the request bodies of the calls in flight already hold 32 MiB (a body counts while its call runs; only the payload is kept in memory, the rest of the body is dropped before the call starts).
+- Request bodies are also bounded while they arrive: every JSON body being read (calls, bulk, rules, faults) is charged its declared length, or 1 MiB when it declares none, against a 32 MiB budget. A request that does not fit gets `429` `too_many_requests` at once; the charge is returned when the body is parsed.
 - The 256 slots are shared with the stdin handler: when they are full the API answers `429` at once, while a stdin line waits for a free slot.
 
 A station object always has these fields:

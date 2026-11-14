@@ -258,7 +258,7 @@ fn select_page(id: &str, page: &HistoryPage, query: &HistoryQuery) -> Selection 
         .positions
         .iter()
         .filter_map(|position| page.frames.get(*position))
-        .map(|(sequence, entry)| (*sequence, entry.clone()))
+        .map(|(sequence, entry)| (*sequence, FrameEntry::clone(entry)))
         .unzip();
     let rows = commands::history_frames(id, &entries)
         .into_iter()

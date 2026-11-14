@@ -22,7 +22,7 @@ pub(super) async fn call(
         Ok(id) => id,
         Err(response) => return *response,
     };
-    let (body, body_bytes) = match read_json(request).await {
+    let (body, body_bytes) = match read_json(&state.body_reads, request).await {
         Ok(body) => body,
         Err(response) => return *response,
     };
@@ -90,7 +90,7 @@ pub(super) async fn call(
 
 /// Sends a bounded batch after reserving capacity for the entire selection.
 pub(super) async fn bulk(State(state): State<ApiState>, request: Request<Body>) -> Response {
-    let (body, bytes) = match read_json(request).await {
+    let (body, bytes) = match read_json(&state.body_reads, request).await {
         Ok(body) => body,
         Err(response) => return *response,
     };

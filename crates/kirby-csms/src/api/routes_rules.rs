@@ -76,7 +76,7 @@ pub(super) async fn put_rule(
         Ok(action) => action,
         Err(response) => return *response,
     };
-    let payload = match read_rule_payload(request).await {
+    let payload = match read_rule_payload(&state, request).await {
         Ok(payload) => payload,
         Err(response) => return *response,
     };
@@ -91,8 +91,11 @@ pub(super) async fn put_rule(
 }
 
 /// The body of a rule request: a JSON object, the whole CALLRESULT payload.
-async fn read_rule_payload(request: Request<Body>) -> Result<Value, Box<Response>> {
-    match read_json(request).await {
+async fn read_rule_payload(
+    state: &ApiState,
+    request: Request<Body>,
+) -> Result<Value, Box<Response>> {
+    match read_json(&state.body_reads, request).await {
         Ok((payload, _)) if payload.is_object() => Ok(payload),
         Ok(_) => Err(Box::new(error(
             StatusCode::BAD_REQUEST,
@@ -204,7 +207,7 @@ pub(super) async fn put_station_rule(
         Ok(pair) => pair,
         Err(response) => return *response,
     };
-    let payload = match read_rule_payload(request).await {
+    let payload = match read_rule_payload(&state, request).await {
         Ok(payload) => payload,
         Err(response) => return *response,
     };
@@ -292,7 +295,7 @@ pub(super) async fn inject_fault(
     State(state): State<ApiState>,
     request: Request<Body>,
 ) -> Response {
-    let body = match read_json(request).await {
+    let body = match read_json(&state.body_reads, request).await {
         Ok((body, _)) => body,
         Err(response) => return *response,
     };

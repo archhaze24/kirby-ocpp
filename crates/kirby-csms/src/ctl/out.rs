@@ -23,18 +23,44 @@ pub fn escape_json_text(text: &str) -> String {
     out
 }
 
+/// Whether `text` holds a byte below 0x20 outside a JSON string (whitespace between tokens).
+fn has_control_outside_string(text: &str) -> bool {
+    let (mut in_string, mut escaped) = (false, false);
+    for byte in text.bytes() {
+        if in_string {
+            match (escaped, byte) {
+                (true, _) => escaped = false,
+                (false, b'\\') => escaped = true,
+                (false, b'"') => in_string = false,
+                _ => {}
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte < 0x20 {
+            return true;
+        }
+    }
+    false
+}
+
 /// The JSON `body` as printed: validated, optionally pretty, escaped. Compact output keeps
-/// the bytes the API sent (numbers are not re-rendered).
+/// the bytes the API sent (numbers are not re-rendered) unless they hold a control byte
+/// outside a string, such as a bare carriage return, in which case the re-serialized text
+/// is printed.
 pub fn json_text(body: &[u8], pretty: bool) -> Result<String, String> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|_| "the answer is not JSON; is --url the control API?".to_owned())?;
     let text = if pretty {
         serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?
     } else {
-        std::str::from_utf8(body)
+        let raw = std::str::from_utf8(body)
             .map_err(|_| "the answer is not UTF-8".to_owned())?
-            .trim()
-            .to_owned()
+            .trim();
+        if has_control_outside_string(raw) {
+            serde_json::to_string(&value).map_err(|e| e.to_string())?
+        } else {
+            raw.to_owned()
+        }
     };
     Ok(escape_json_text(&text))
 }
@@ -106,6 +132,20 @@ pub fn write_stdout(bytes: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_json_drops_control_bytes_between_tokens() {
+        let raw = "{\"a\":\r1,\"b\":\"x\\\"\\r\",\n\"c\":[2,\t3]}";
+        let text = json_text(raw.as_bytes(), false).unwrap();
+        assert!(!text.bytes().any(|b| b < 0x20), "{text:?}");
+        let back: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(back["a"], 1);
+        assert_eq!(back["b"], "x\"\r");
+        assert!(text.contains("\"x\\\"\\r\""), "{text}");
+        // Clean input keeps its bytes (the number is not re-rendered).
+        let clean = json_text(b"{\"n\": 1.50}\n", false).unwrap();
+        assert_eq!(clean, "{\"n\": 1.50}");
+    }
 
     #[test]
     fn json_escapes_only_what_is_unsafe_and_stays_json() {

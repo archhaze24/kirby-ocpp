@@ -6,9 +6,12 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, Request};
 use axum::http::{StatusCode, Uri, header};
 use axum::response::Response;
+use std::sync::Arc;
+
 use futures_util::StreamExt;
 use kirby_ocpp_core::text::is_unsafe_char;
 use serde_json::Value;
+use tokio::sync::Semaphore;
 
 use super::error::error;
 use super::limits::{BODY_TIMEOUT, MAX_BODY_BYTES};
@@ -66,8 +69,14 @@ pub(super) fn station_id(id: Result<Path<String>, PathRejection>) -> Result<Stri
     Ok(id)
 }
 
-/// The request body (at most 1 MiB, read within 10 s) parsed as JSON.
-pub(super) async fn read_json(request: Request<Body>) -> Result<(Value, usize), Box<Response>> {
+/// The request body (at most 1 MiB, read within 10 s) parsed as JSON. The bytes buffered
+/// while it arrives are charged to `reads` (the declared length, or 1 MiB when none is
+/// declared); the charge is returned once the body is parsed, and a body that does not fit
+/// is refused with `429` instead of waiting.
+pub(super) async fn read_json(
+    reads: &Arc<Semaphore>,
+    request: Request<Body>,
+) -> Result<(Value, usize), Box<Response>> {
     let too_large = || {
         Box::new(error(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -83,6 +92,14 @@ pub(super) async fn read_json(request: Request<Body>) -> Result<(Value, usize), 
     if declared.is_some_and(|length| length > MAX_BODY_BYTES) {
         return Err(too_large());
     }
+    let charge = u32::try_from(declared.unwrap_or(MAX_BODY_BYTES)).unwrap_or(u32::MAX);
+    let Ok(_reads) = Arc::clone(reads).try_acquire_many_owned(charge) else {
+        return Err(Box::new(error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too_many_requests",
+            "too many request bodies are being received; retry shortly",
+        )));
+    };
     let collect = async {
         let mut chunks = request.into_body().into_data_stream();
         let mut bytes = Vec::new();

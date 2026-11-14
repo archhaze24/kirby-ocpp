@@ -32,6 +32,10 @@ pub(super) const DRAIN_BYTES: usize = 64 * 1024;
 /// received, while its call runs); further requests get `429`.
 #[cfg(test)]
 pub(super) const PAYLOAD_BUDGET: usize = crate::commands::PAYLOAD_BUDGET;
+/// Most request-body bytes buffered at once while bodies are being received (a body is
+/// charged its declared length, or the 1 MiB maximum when none is declared); a request that
+/// does not fit gets `429` at once.
+pub(super) const BODY_READ_BUDGET: usize = 32 * 1024 * 1024;
 /// Time a client gets to send the whole request body.
 pub(super) const BODY_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -51,6 +55,8 @@ pub(super) struct Limits {
     pub(super) stream_max_age: Duration,
     #[cfg(test)]
     pub(super) payload_budget: usize,
+    #[cfg(test)]
+    pub(super) body_read_budget: usize,
 }
 
 impl Limits {
@@ -60,6 +66,8 @@ impl Limits {
         stream_max_age: STREAM_MAX_AGE,
         #[cfg(test)]
         payload_budget: PAYLOAD_BUDGET,
+        #[cfg(test)]
+        body_read_budget: BODY_READ_BUDGET,
     };
 }
 

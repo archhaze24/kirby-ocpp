@@ -62,6 +62,8 @@ use self::sse::events;
 struct ApiState {
     handle: CsmsHandle,
     commands: crate::commands::CommandLimits,
+    /// Bytes of request bodies that may be buffered at once, see [`limits::BODY_READ_BUDGET`].
+    body_reads: Arc<Semaphore>,
     token: Option<Arc<str>>,
     streams: Arc<Semaphore>,
     /// The address the API listens on.
@@ -154,9 +156,14 @@ fn spawn_inner(
     let bound = listener
         .local_addr()
         .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |addr| addr.ip());
+    #[cfg(test)]
+    let body_read_budget = limits.body_read_budget;
+    #[cfg(not(test))]
+    let body_read_budget = limits::BODY_READ_BUDGET;
     let state = ApiState {
         handle,
         commands,
+        body_reads: Arc::new(Semaphore::new(body_read_budget)),
         token: token.map(Arc::from),
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
         bound,

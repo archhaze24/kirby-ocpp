@@ -9,7 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
-use super::limits::{DRAIN_BYTES, DRAIN_TIME, Limits, PAYLOAD_BUDGET};
+use super::limits::{BODY_READ_BUDGET, DRAIN_BYTES, DRAIN_TIME, Limits, PAYLOAD_BUDGET};
 use super::meta::ROUTES;
 use super::server::StallIo;
 use super::{bind, spawn, spawn_with};
@@ -146,6 +146,7 @@ const LONG: Limits = Limits {
     response_deadline: Duration::from_secs(600),
     stream_max_age: Duration::from_secs(600),
     payload_budget: PAYLOAD_BUDGET,
+    body_read_budget: BODY_READ_BUDGET,
 };
 
 #[tokio::test]
@@ -453,6 +454,75 @@ async fn a_slow_but_moving_write_is_left_alone() {
     });
     io.write_all(&[0_u8; 64]).await.unwrap();
     reader.await.unwrap();
+}
+
+/// Bodies that are still arriving are charged against their own budget: a body that does not
+/// fit gets 429 at once, and the share comes back when the slow body ends.
+#[tokio::test]
+async fn request_bodies_being_received_are_capped() {
+    let csms = CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap()))
+        .await
+        .unwrap();
+    let listener = bind("127.0.0.1:0".parse().unwrap()).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let api = spawn_with(
+        listener,
+        csms.clone(),
+        Arc::new(Semaphore::new(16)),
+        None,
+        Limits {
+            body_read_budget: 2000,
+            ..LONG
+        },
+    );
+    let put = move |declared: usize, sent: usize| async move {
+        let head = format!(
+            "PUT /v1/rules/Heartbeat HTTP/1.1\r\nHost: {addr}\r\n\
+             Connection: close\r\nContent-Length: {declared}\r\n\r\n"
+        );
+        let mut body = String::from("{\"pad\":\"");
+        body.push_str(&"a".repeat(declared.saturating_sub(10)));
+        body.push_str("\"}");
+        body.truncate(sent);
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body.as_bytes()).await.unwrap();
+        stream
+    };
+    let answer = |mut stream: TcpStream| async move {
+        let mut raw = Vec::new();
+        let _ = stream.read_to_end(&mut raw).await;
+        String::from_utf8_lossy(&raw).into_owned()
+    };
+    // A slow body that declares 1500 bytes and sends 20.
+    let slow = put(1500, 20).await;
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let reply = answer(put(1000, 1000).await).await;
+        if reply.contains(" 429 ") {
+            assert!(reply.contains("too_many_requests"), "{reply}");
+            break;
+        }
+        assert!(reply.contains(" 200 "), "{reply}");
+        assert!(Instant::now() < deadline, "never saw 429");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // A body that fits next to the slow one is still served.
+    let reply = answer(put(400, 400).await).await;
+    assert!(reply.contains(" 200 "), "{reply}");
+    // The slow body goes away; its share returns.
+    drop(slow);
+    loop {
+        let reply = answer(put(1000, 1000).await).await;
+        if reply.contains(" 200 ") {
+            break;
+        }
+        assert!(reply.contains(" 429 "), "{reply}");
+        assert!(Instant::now() < deadline, "the share never came back");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    api.finish().await;
+    csms.shutdown().await;
 }
 
 #[tokio::test]

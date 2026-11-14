@@ -484,11 +484,12 @@ impl CsmsHandle {
 
     /// The most recent frames of a station (at most `history_cap`), oldest first.
     pub fn history(&self, id: &str) -> Option<Vec<FrameEntry>> {
-        self.inner
-            .lock()
-            .stations
-            .get(id)
-            .map(|rec| rec.history.iter().map(|item| item.entry.clone()).collect())
+        self.inner.lock().stations.get(id).map(|rec| {
+            rec.history
+                .iter()
+                .map(|item| FrameEntry::clone(&item.entry))
+                .collect()
+        })
     }
 
     /// The protocol state of a station (see [`StationState`]); it survives disconnects and
@@ -511,7 +512,7 @@ impl CsmsHandle {
             rec.history
                 .iter()
                 .skip(skip)
-                .map(|item| item.entry.clone())
+                .map(|item| FrameEntry::clone(&item.entry))
                 .collect()
         })
     }
@@ -530,7 +531,7 @@ impl CsmsHandle {
                     .history
                     .iter()
                     .skip(start)
-                    .map(|item| (item.seq, item.entry.clone()))
+                    .map(|item| (item.seq, Arc::clone(&item.entry)))
                     .collect(),
                 dropped_through: rec.dropped_seq,
                 newest,
@@ -927,7 +928,7 @@ fn unix_micros() -> u64 {
 pub struct HistoryPage {
     /// Every frame still held that is newer than `after`, oldest first, with its sequence
     /// number.
-    pub frames: Vec<(u64, FrameEntry)>,
+    pub frames: Vec<(u64, Arc<FrameEntry>)>,
     /// The largest sequence of a frame of this station that left the history without being
     /// kept (0 when none did): a cursor older than this has lost frames.
     pub dropped_through: u64,
@@ -949,7 +950,8 @@ struct StationRec {
 struct HistoryItem {
     /// Position in the sequence of [`State::frame_seq`].
     seq: u64,
-    entry: FrameEntry,
+    /// Shared so that a history page copies pointers under the engine lock, not frames.
+    entry: Arc<FrameEntry>,
     /// Size of the frame as JSON text.
     bytes: usize,
 }
@@ -1294,11 +1296,11 @@ impl Inner {
                 rec.history_bytes += bytes;
                 rec.history.push_back(HistoryItem {
                     seq,
-                    entry: FrameEntry {
+                    entry: Arc::new(FrameEntry {
                         ts: Utc::now(),
                         direction,
                         frame: stored,
-                    },
+                    }),
                     bytes,
                 });
             } else {
