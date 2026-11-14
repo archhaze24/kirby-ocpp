@@ -7,7 +7,24 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
-### Added
+## [0.6.0] - 2026-11-14
+
+**The automation release: configuration files and profiles for both tools, a connection doctor, session recording and replay, scripted replies and a conformance family, a much larger HTTP control API with TLS, OpenAPI and a `ctl` client, and per-station rules and faults in `kirby-csms`.**
+
+### 0.6.0 in numbers
+
+| Metric | Since 0.5.0 |
+| --- | --- |
+| 🧾 Commits | **55** in eight days (7 to 14 November 2026) |
+| ✏️ Lines of code | **+37.6k / −2.6k** across 195 files; Rust grew from 86.9k to **118.7k** lines |
+| 🧪 Tests | **+402** new test functions: 1,330 → **1,732** (all run in the `nextest` gate) |
+| 📦 Crates | 7 → **7** (new dependency: `clap_mangen`) |
+| 🔎 Reviews | Whole-branch correctness, security, documentation and product reviews that ran the real binaries and both terminal UIs |
+| ✨ New features | **35** |
+| 🔧 Changes | **9** |
+| 🐛 Fixes and hardening | **10** |
+
+### ✨ Added
 
 - `kirby-csms --record` writes frames from all stations to one redacted JSONL recording.
 - `kirby-csms --replay FILE` sends the CALLs a CSMS recording holds to the connecting stations, in recorded order with fresh message ids and the recorded pauses, and exits with a verdict (0 passed, 1 failed, 2 invalid recording, 130 SIGINT). A `RemoteStopTransaction` is tied to the live `StartTransaction` of the same station, connector and `idTag`; a recorded transaction id is never sent, and the run fails when the live start differs, is ambiguous or missing. The file is validated before the server binds: a redacted CALL, several sessions of a station or a transaction id outside `RemoteStopTransaction` are refused. `--timeout` now also applies to a replay. See [CSMS replay](docs/csms.md#replay).
@@ -369,6 +386,7 @@ New binary `kirby-csms` (default listen `0.0.0.0:9000`) and the new crates `kirb
 - SIGTERM during `kirby-csms --script` still writes the JUnit report.
 - A scenario `lagged` failure no longer sticks for the rest of the run.
 
-[Unreleased]: https://github.com/archhaze24/kirby-ocpp/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/archhaze24/kirby-ocpp/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.3.0...v0.4.0
