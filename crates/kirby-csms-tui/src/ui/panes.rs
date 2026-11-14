@@ -199,9 +199,13 @@ pub fn details(f: &mut Frame<'_>, app: &App, area: Rect) {
         connectors(f, app, state, c);
         transactions(f, app, state, t);
     } else {
-        // Stacked: the connectors need a header and one row each, at most a third of the room.
+        // Stacked: the connectors need a header and one row each. They keep at least a third
+        // of the room and may take more while the transactions keep a header and two rows.
         let wanted = u16::try_from(state.connectors.len() + 1).unwrap_or(u16::MAX);
-        let conn_h = wanted.clamp(2, (tables.height / 3).max(2));
+        let cap = (tables.height / 3)
+            .max(tables.height.saturating_sub(3))
+            .max(2);
+        let conn_h = wanted.clamp(2, cap);
         let [c, t] =
             Layout::vertical([Constraint::Length(conn_h), Constraint::Min(0)]).areas(tables);
         connectors(f, app, state, c);

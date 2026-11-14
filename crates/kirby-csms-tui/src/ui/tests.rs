@@ -162,6 +162,28 @@ fn list_details_and_log_are_drawn() {
 }
 
 #[test]
+fn stacked_tables_give_every_connector_a_row_at_110x30() {
+    let mut app = loaded();
+    let mut st = state();
+    let template = st.connectors.get(&1).cloned().unwrap();
+    st.connectors.insert(0, template.clone());
+    st.connectors.insert(2, template);
+    update(
+        &mut app,
+        Msg::Loaded {
+            id: "CP-1".into(),
+            history: vec![],
+            info: Some(Box::new(info("CP-1", true))),
+            state: Some(Box::new(st)),
+        },
+    );
+    let s = render(&app, 110, 30);
+    let rows = s.lines().filter(|l| l.contains("plugged")).count();
+    assert_eq!(rows, 3, "{s}");
+    assert!(s.contains("4242"), "{s}");
+}
+
+#[test]
 fn disconnected_and_replaced_stations_are_marked() {
     let mut app = loaded();
     app.stations[1].connected = false;
