@@ -263,7 +263,6 @@ impl Station2Actor {
 
     /// The token that authorizes `evse` now: of the running transaction, or of an
     /// authorization waiting for the EV.
-    #[allow(dead_code, reason = "called by the authorization module")]
     pub(super) fn authorized_token(&self, evse: u32) -> Option<&IdTokenRef> {
         match self.tx.active.get(&evse) {
             Some(tx) => tx.token.as_ref().filter(|_| tx.authorized),
@@ -491,7 +490,6 @@ impl Station2Actor {
     /// Sends `MeterValues` outside a transaction for `evse` (every EVSE for `None`); never
     /// queued offline. Used by `Command2::AdvanceMeter` without a transaction and by
     /// `TriggerMessage(MeterValues)`.
-    #[allow(dead_code, reason = "called by the authorization module")]
     pub(super) fn send_meter_values(&mut self, evse: Option<u32>, origin: Origin2) {
         self.settle_tx_meters();
         let ids: Vec<u32> = match evse {
@@ -656,7 +654,7 @@ impl Station2Actor {
     /// event is followed by `Updated`/`ChargingStateChanged` when the energy offer can start.
     #[allow(
         dead_code,
-        reason = "the authorization module may start a transaction directly"
+        reason = "kept for starting a transaction regardless of the start points; no caller yet"
     )]
     pub(super) fn begin_transaction(
         &mut self,
@@ -777,7 +775,6 @@ impl Station2Actor {
     /// The event carries `trigger`; when the start point is reached by this authorization the
     /// `Started` event carries it too. An energy offer that starts as a result follows in a
     /// separate `ChargingStateChanged` event.
-    #[allow(dead_code, reason = "called by the authorization module")]
     pub(super) fn on_authorized(
         &mut self,
         evse: u32,
@@ -864,8 +861,8 @@ impl Station2Actor {
     /// running transaction gets an `Updated` event with `CablePluggedIn` and the `evse` field.
     pub(super) fn on_ev_connected(&mut self, evse: u32) {
         self.settle_tx_meters();
-        self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
         if let Some(tx) = self.tx.active.get_mut(&evse) {
+            self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
             tx.ev_connected = true;
             tx.evse_sent = false;
             tx.charging_state = ChargingState::EvConnected;
@@ -886,8 +883,13 @@ impl Station2Actor {
         let can_charge = authorized && self.connector_ready(evse);
         let Some(reached) = start_reached(&self.tx_start_points(), true, authorized, can_charge)
         else {
+            // A waiting authorization keeps its timer: it still has to expire.
+            if !authorized {
+                self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
+            }
             return;
         };
+        self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
         let (trigger, initial) = if reached == Reached::Energy {
             (
                 TriggerReason::ChargingStateChanged,
@@ -968,7 +970,6 @@ impl Station2Actor {
     /// Changes the charging state of the transaction on `evse` from inside the station and
     /// sends the event. When energy stops and `EnergyTransfer` is a stop point the transaction
     /// ends instead.
-    #[allow(dead_code, reason = "called by the authorization module")]
     pub(super) fn set_charging_state_internal(
         &mut self,
         evse: u32,
@@ -1033,7 +1034,6 @@ impl Station2Actor {
     /// With `StopAuthorized` the stopping event carries the `idToken` of the transaction. In
     /// the event that does not end the transaction the charging state returns to
     /// `EVConnected`.
-    #[allow(dead_code, reason = "called by the authorization module")]
     pub(super) fn on_deauthorized(
         &mut self,
         evse: u32,
@@ -1063,7 +1063,6 @@ impl Station2Actor {
     /// `RequestStopTransaction` accepted for the transaction on `evse`: `Ended` when a stop
     /// point ends, otherwise `Updated` with `RemoteStop` and energy delivery stops (F03.FR.02,
     /// F03.FR.03).
-    #[allow(dead_code, reason = "called by the remote control module")]
     pub(super) fn remote_stop(&mut self, evse: u32) {
         self.settle_tx_meters();
         let Some(tx) = self.tx.active.get(&evse) else {
@@ -1575,6 +1574,23 @@ mod tests {
         assert_eq!(summary(&a).len(), 0);
         plug(&mut a, 1);
         assert!(summary(&a).is_empty(), "the dropped token starts nothing");
+    }
+
+    #[tokio::test]
+    async fn a_plug_that_starts_nothing_keeps_the_connect_timeout_armed() {
+        let mut a = actor();
+        set_var(&mut a, "TxCtrlr", "TxStartPoint", "PowerPathClosed");
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(a.timers.is_armed(&TimerKey2::EvConnectTimeout(1)));
+        // The connector is not occupied, so the power path stays open.
+        a.on_ev_connected(1);
+        assert!(a.tx.active.is_empty(), "nothing starts");
+        assert!(a.tx.pending.contains_key(&1), "the token is still waiting");
+        assert!(
+            a.timers.is_armed(&TimerKey2::EvConnectTimeout(1)),
+            "the pending token must still expire"
+        );
     }
 
     #[tokio::test]

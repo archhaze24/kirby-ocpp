@@ -251,21 +251,18 @@ impl Frames {
     }
 
     /// Waits for a log line containing `text`.
-    pub async fn log_containing(&mut self, text: &str) {
+    pub async fn log_containing(&mut self, text: &str) -> String {
         let result = timeout(STEP, async {
             loop {
                 match self.0.recv().await {
-                    Ok(Event::Log(record)) if record.text.contains(text) => return,
+                    Ok(Event::Log(record)) if record.text.contains(text) => return record.text,
                     Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => panic!("station stopped"),
                 }
             }
         })
         .await;
-        assert!(
-            result.is_ok(),
-            "timed out waiting for the log line {text:?}"
-        );
+        result.unwrap_or_else(|_| panic!("timed out waiting for the log line {text:?}"))
     }
 }
 
@@ -793,6 +790,23 @@ async fn remote_start_and_stop_are_rejected_while_the_boot_is_pending() {
         .await,
         "Rejected"
     );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_transaction_id_from_the_csms_is_sanitized_in_the_log() {
+    let rig = Rig::new().await;
+    let mut frames = Frames::new(&rig.station);
+    assert_eq!(
+        rig.status_of(
+            "RequestStopTransaction",
+            json!({"transactionId": "unknown\u{1b}[31m"})
+        )
+        .await,
+        "Rejected"
+    );
+    let line = frames.log_containing("no transaction unknown").await;
+    assert!(!line.contains('\u{1b}'), "control character in {line:?}");
     rig.stop().await;
 }
 

@@ -6,6 +6,7 @@
 
 use super::actor::Station2Actor;
 use super::authorization::AuthDecision;
+use super::link::sanitize;
 use super::types::IdTokenRef;
 use crate::ocpp::responder::Responder;
 use crate::ocpp::v2::messages::{
@@ -185,7 +186,7 @@ pub(super) fn request_stop_transaction(
             LogLevel::Info,
             format!(
                 "RequestStopTransaction rejected: no transaction {}",
-                request.transaction_id
+                sanitize(&request.transaction_id)
             ),
         );
         actor.respond(

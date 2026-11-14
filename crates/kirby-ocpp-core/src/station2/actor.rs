@@ -41,10 +41,6 @@ use crate::ws::{ConnectError, Connection, ConnectionEvent, ConnectionState};
 const CLOSE_GRACE: Duration = Duration::from_secs(2);
 
 /// Names of the timers the actor uses.
-#[allow(
-    dead_code,
-    reason = "the modules that own a timer start it; some have no caller yet"
-)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum TimerKey2 {
     /// Periodic `Heartbeat`.
@@ -83,10 +79,9 @@ pub(crate) enum Internal2 {
         result: Result<Value, CallError>,
     },
     /// A state file write finished.
-    #[allow(dead_code, reason = "sent by the persistence module")]
     Saved(Result<(), StoreError>),
     /// A log line from asynchronous work.
-    #[allow(dead_code, reason = "sent by tasks of the modules")]
+    #[allow(dead_code, reason = "handled by the loop; no task sends it yet")]
     Log(LogLevel, String),
 }
 
@@ -98,10 +93,6 @@ enum Wake {
     Timer(TimerKey2),
 }
 
-#[allow(
-    dead_code,
-    reason = "the sub-structs are read by the modules that implement them"
-)]
 pub(crate) struct Station2Actor {
     pub(super) config: StationConfig,
     pub(super) clock: Arc<dyn Clock>,

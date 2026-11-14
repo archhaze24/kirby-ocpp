@@ -10,7 +10,8 @@
 //!    queued and are sent after the reboot (B12.FR.05). Without a registered link there is
 //!    nothing to wait for.
 //! 3. `Rebooting`: the link is closed and opened again, and the next `BootNotification`
-//!    carries `RemoteReset`. The link drops the plan when it sends that boot.
+//!    carries `RemoteReset`. The link drops the plan when it sends that boot, or when the
+//!    link is disconnected by command (the next boot is a power-up then).
 
 use std::time::Duration;
 
@@ -104,6 +105,8 @@ impl Station2Actor {
                 } else if plan.kind == ResetKind::OnIdle && self.any_active_tx() {
                     // A transaction started after the plan became ready: wait for it too.
                     self.set_reset_phase(ResetPhase::WaitingForIdle);
+                    // The next delivery wait starts from its own deadline.
+                    self.auth.reset_deadline = None;
                     return;
                 }
                 self.wait_for_delivery();
@@ -187,5 +190,66 @@ impl Station2Actor {
         self.log(LogLevel::Info, "rebooting".to_owned());
         self.flush_now();
         self.reconnect_for_reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::{broadcast, mpsc, oneshot};
+
+    use super::*;
+    use crate::clock::ManualClock;
+    use crate::config::StationConfig;
+    use crate::ocpp::Protocol;
+    use crate::ocpp::v2::types::IdTokenType;
+    use crate::station2::types::IdTokenRef;
+
+    fn actor() -> Station2Actor {
+        let mut config = StationConfig::new("ws://127.0.0.1:1")
+            .with_connectors(2)
+            .without_persistence();
+        config.protocol = Protocol::V201;
+        let (_commands, receiver) = mpsc::channel(4);
+        let (events, _) = broadcast::channel(64);
+        Station2Actor::new(
+            config,
+            Arc::new(ManualClock::new(chrono::Utc::now())),
+            receiver,
+            events,
+            None,
+        )
+        .0
+    }
+
+    #[tokio::test]
+    async fn an_on_idle_plan_that_falls_back_forgets_the_delivery_deadline() {
+        let mut a = actor();
+        let (reply, _answer) = oneshot::channel();
+        a.cmd_plug_in(1, reply);
+        a.on_authorized(
+            1,
+            IdTokenRef {
+                id_token: "TAG".to_owned(),
+                kind: IdTokenType::Local,
+            },
+            None,
+            TriggerReason::Authorized,
+        )
+        .expect("authorized");
+        a.reset = Some(ResetPlan {
+            kind: ResetKind::OnIdle,
+            phase: ResetPhase::EndingTransactions,
+            reason: BootReason::RemoteReset,
+        });
+        // The deadline of an earlier delivery wait has passed long ago.
+        a.auth.reset_deadline = Some(Instant::now());
+        a.on_reset_timer();
+        assert_eq!(
+            a.reset.as_ref().map(|plan| plan.phase),
+            Some(ResetPhase::WaitingForIdle)
+        );
+        assert!(a.auth.reset_deadline.is_none(), "a stale deadline is kept");
     }
 }

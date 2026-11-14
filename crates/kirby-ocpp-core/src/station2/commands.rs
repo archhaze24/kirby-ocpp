@@ -3,21 +3,9 @@
 //! Completion rules follow the 1.6 station: state commands are answered as soon as the local
 //! state changed, CALL commands when the CSMS answered or the CALL failed.
 
-#![allow(
-    dead_code,
-    reason = "the router has no caller until the actor loop is implemented; remove this allow then"
-)]
-
 use super::actor::Station2Actor;
 use super::command::{Command2, Outcome2};
 use super::types::Reply2;
-use crate::error::StationError;
-
-/// Answers a command whose module does not implement it yet.
-pub(super) fn not_implemented(reply: Reply2, command: &'static str) {
-    // The requester may have gone away; nothing to do about that.
-    let _ = reply.send(Err(StationError::NotImplemented { command }));
-}
 
 impl Station2Actor {
     /// Runs one command; the answer goes to `reply` now or when the CSMS has answered.

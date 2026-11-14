@@ -20,10 +20,6 @@
     clippy::needless_pass_by_value,
     reason = "handlers share the signature `fn(&mut Station2Actor, Responder<A>, A::Req)`"
 )]
-#![allow(
-    dead_code,
-    reason = "the dispatcher has no caller until the actor loop is implemented; remove this allow then"
-)]
 
 pub(super) mod availability;
 pub(super) mod control;
@@ -31,6 +27,7 @@ pub(super) mod device_model;
 pub(super) mod tx;
 
 use super::actor::Station2Actor;
+use super::link::sanitize;
 use super::remote;
 use crate::ocpp::action::{Action, InboundAction};
 use crate::ocpp::frame::ErrorCode;
@@ -116,7 +113,10 @@ impl Station2Actor {
                 } else {
                     format!("{other} is not implemented")
                 };
-                self.log(LogLevel::Warn, format!("{other} is not handled: {text}"));
+                self.log(
+                    LogLevel::Warn,
+                    format!("{} is not handled", sanitize(other)),
+                );
                 let _ = reply.reject(code, text);
             }
         }
@@ -135,7 +135,11 @@ impl Station2Actor {
             Err(error) => {
                 self.log(
                     LogLevel::Warn,
-                    format!("{} payload cannot be decoded: {error}", A::NAME),
+                    format!(
+                        "{} payload cannot be decoded: {}",
+                        A::NAME,
+                        sanitize(&error.to_string())
+                    ),
                 );
                 let _ = responder.reject_error(
                     ErrorCode::TypeConstraintViolation,

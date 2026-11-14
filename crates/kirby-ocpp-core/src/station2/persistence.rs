@@ -66,7 +66,6 @@ pub(crate) struct Persistence2 {
 impl Persistence2 {
     /// Opens the store of `config` (if persistence is on) and reads the state and secrets
     /// files. Messages for the log are appended to `logs`.
-    #[allow(dead_code, reason = "called by the actor constructor")]
     pub(super) fn open(config: &StationConfig, logs: &mut Vec<(LogLevel, String)>) -> Self {
         let mut this = Self::default();
         if !config.persist {
@@ -152,7 +151,6 @@ fn drop_expired(cache: &mut AuthCachePersist, now: DateTime<Utc>) {
 impl Station2Actor {
     /// Applies the state read by [`Persistence2::open`] to the freshly built actor. Call it
     /// once, after the EVSEs and the device model exist.
-    #[allow(dead_code, reason = "called by the actor constructor")]
     pub(super) fn restore_persisted(&mut self) {
         if let Some(secrets) = self.persistence.loaded_secrets.take() {
             self.restore_basic_auth_password(secrets.basic_auth_password);
@@ -221,10 +219,6 @@ impl Station2Actor {
     }
 
     /// An important change: write now (still off the actor task, and still one at a time).
-    #[allow(
-        dead_code,
-        reason = "called by availability, device-model, transaction and queue code"
-    )]
     pub(super) fn flush_now(&mut self) {
         self.mark_dirty();
         self.timers.cancel(&TimerKey2::PersistFlush);
@@ -283,7 +277,6 @@ impl Station2Actor {
     }
 
     /// Final write at shutdown: wait for the one in flight, then write what is dirty.
-    #[allow(dead_code, reason = "called by the actor loop at shutdown")]
     pub(super) async fn finish_persistence(&mut self) {
         self.timers.cancel(&TimerKey2::PersistFlush);
         let mut had_in_flight = false;

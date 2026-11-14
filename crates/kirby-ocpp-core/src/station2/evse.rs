@@ -59,7 +59,6 @@ pub(crate) struct Evse {
 
 impl Evse {
     /// An operative EVSE with `connectors` idle connectors.
-    #[allow(dead_code, reason = "used by `init_evses`")]
     pub(super) fn new(id: u32, connectors: u32, now: DateTime<Utc>) -> Self {
         Self {
             id,
@@ -85,7 +84,6 @@ impl Evse {
     }
 
     /// Whether anything on this EVSE waits for the end of a transaction.
-    #[allow(dead_code, reason = "used by `release_pending`")]
     fn has_pending(&self) -> bool {
         self.pending_inoperative
             || self.pending_station_inoperative
@@ -179,7 +177,6 @@ pub(crate) fn apply_availability(
 
 /// The transaction on `evse_id` ended: applies what waited for it. A station-level request
 /// takes effect once no EVSE waits for it any more. Returns whether any flag changed.
-#[allow(dead_code, reason = "used once the transaction engine calls the hook")]
 pub(crate) fn release_pending(
     evses: &mut [Evse],
     station_operative: &mut bool,
@@ -213,7 +210,6 @@ pub(crate) fn release_pending(
 impl Station2Actor {
     /// Creates the EVSEs from the configuration and fills the snapshot. Called once when the
     /// actor is built, before any state is restored.
-    #[allow(dead_code, reason = "called when the actor is built")]
     pub(super) fn init_evses(&mut self) {
         let now = self.clock.now_utc();
         self.evses = (1..=self.config.connector_count)
@@ -234,7 +230,6 @@ impl Station2Actor {
     }
 
     /// Whether the EVSE and the station are operative.
-    #[allow(dead_code, reason = "read by the device model")]
     pub(super) fn evse_operative(&self, id: u32) -> bool {
         self.state.availability_operative && self.evse(id).is_some_and(|e| e.operative)
     }
@@ -245,7 +240,10 @@ impl Station2Actor {
     }
 
     /// The `operative` flag of one connector itself.
-    #[allow(dead_code, reason = "read by the device model")]
+    #[allow(
+        dead_code,
+        reason = "no caller yet; the device model reads the EVSE flag only"
+    )]
     pub(super) fn connector_operative(&self, evse: u32, connector: u32) -> Option<bool> {
         self.evse(evse)?.connector(connector).map(|c| c.operative)
     }
@@ -262,13 +260,11 @@ impl Station2Actor {
     }
 
     /// The `ConnectorStatus` wire text of a connector.
-    #[allow(dead_code, reason = "read by the device model")]
     pub(super) fn connector_status_text(&self, evse: u32, connector: u32) -> Option<&'static str> {
         self.connector_status(evse, connector).map(|s| s.as_str())
     }
 
     /// The availability flags for the state file.
-    #[allow(dead_code, reason = "called by the persistence slice")]
     pub(super) fn availability_snapshot(&self) -> Vec<EvseAvail> {
         self.evses
             .iter()
@@ -282,7 +278,6 @@ impl Station2Actor {
 
     /// Restores the availability flags from the state file; unknown EVSEs and connectors are
     /// ignored. Statuses are recorded without a notification: the boot sends them all.
-    #[allow(dead_code, reason = "called by the persistence slice")]
     pub(super) fn restore_availability(&mut self, station_operative: bool, saved: &[EvseAvail]) {
         self.state.availability_operative = station_operative;
         for entry in saved {
@@ -434,7 +429,6 @@ impl Station2Actor {
     }
 
     /// The transaction on `evse` ended: applies an availability change that waited for it.
-    #[allow(dead_code, reason = "called by the transaction engine")]
     pub(super) fn on_transaction_ended(&mut self, evse: u32) {
         let mut station = self.state.availability_operative;
         if release_pending(&mut self.evses, &mut station, evse) {

@@ -1,10 +1,5 @@
 //! Small types shared by the OCPP 2.0.1 station modules.
 
-#![allow(
-    dead_code,
-    reason = "placeholder module; remove this allow when the types are used"
-)]
-
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::oneshot;

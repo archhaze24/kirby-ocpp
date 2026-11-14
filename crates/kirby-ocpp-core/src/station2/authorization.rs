@@ -19,6 +19,7 @@ use super::actor::Station2Actor;
 use super::calls::call_failure;
 use super::command::Outcome2;
 use super::device_model::Lookup;
+use super::link::sanitize;
 use super::types::{IdTokenRef, Origin2, Reply2};
 use crate::error::{CallError, StationError};
 use crate::ocpp::v2::messages::{Authorize, AuthorizeRequest, AuthorizeResponse, TriggerReason};
@@ -326,7 +327,10 @@ impl Station2Actor {
             Err(error) => {
                 self.log(
                     LogLevel::Warn,
-                    format!("Authorize failed ({error}); deciding locally"),
+                    format!(
+                        "Authorize failed ({}); deciding locally",
+                        sanitize(&error.to_string())
+                    ),
                 );
                 let cached = self.cache_lookup(&token_key(token));
                 self.offline_decision(cached.as_ref())
@@ -372,21 +376,40 @@ impl Station2Actor {
 
     /// An `idTokenInfo` arrived in a `TransactionEventResponse` for the transaction
     /// `transaction_id` on `evse`: updates the cache and applies `StopTxOnInvalidId`.
-    pub(super) fn on_id_token_info(&mut self, evse: u32, transaction_id: &str, info: &Value) {
+    ///
+    /// The answer belongs to the token of the event it answers (`event_token`, when that event
+    /// carried one) or else to the token of the transaction `transaction_id`, when that
+    /// transaction is the one running on `evse`. With neither the cache is left alone: the
+    /// running transaction may be another one with another token.
+    pub(super) fn on_id_token_info(
+        &mut self,
+        evse: u32,
+        transaction_id: &str,
+        event_token: Option<IdTokenRef>,
+        info: &Value,
+    ) {
         let parsed = match serde_json::from_value::<IdTokenInfo>(info.clone()) {
             Ok(parsed) => parsed,
             Err(error) => {
                 self.log(
                     LogLevel::Warn,
-                    format!("idTokenInfo of a TransactionEventResponse cannot be read: {error}"),
+                    format!(
+                        "idTokenInfo of a TransactionEventResponse cannot be read: {}",
+                        sanitize(&error.to_string())
+                    ),
                 );
                 return;
             }
         };
-        let (current, token) = self
+        let (current, active_token) = self
             .active_tx(evse)
             .map_or((None, None), |tx| (Some(tx.id.0.clone()), tx.token.clone()));
-        if let Some(token) = token {
+        let of_transaction = if current.as_deref() == Some(transaction_id) {
+            active_token
+        } else {
+            None
+        };
+        if let Some(token) = event_token.or(of_transaction) {
             self.cache_store(&token, &parsed);
         }
         let ongoing = self.tx_by_id(transaction_id).is_some_and(|tx| tx.ongoing);
@@ -643,6 +666,21 @@ mod tests {
 
     fn clock() -> ManualClock {
         ManualClock::new(Utc.with_ymd_and_hms(2026, 3, 1, 12, 0, 0).single().unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_late_answer_for_another_transaction_does_not_cache_the_current_token() {
+        let clock = clock();
+        let mut actor = actor(&clock);
+        let (reply, _answer) = tokio::sync::oneshot::channel();
+        actor.cmd_plug_in(1, reply);
+        actor
+            .on_authorized(1, token("B"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(actor.active_tx(1).is_some_and(|tx| tx.token.is_some()));
+        let blocked = serde_json::json!({"status": "Blocked"});
+        actor.on_id_token_info(1, "an-earlier-transaction", None, &blocked);
+        assert!(actor.cache_lookup(&token_key(&token("B"))).is_none());
     }
 
     #[test]

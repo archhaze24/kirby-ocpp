@@ -797,13 +797,11 @@ impl DeviceModel {
     }
 
     /// Sets or clears the password without validation (restore from the secrets file).
-    #[allow(dead_code, reason = "called by the persistence module")]
     pub(super) fn set_password(&mut self, password: Option<String>) {
         self.password = password;
     }
 
     /// The values to write to the state file.
-    #[allow(dead_code, reason = "called by the persistence module")]
     pub(super) fn persist(&self) -> DeviceModelPersist {
         DeviceModelPersist {
             values: self.values.clone(),
@@ -812,7 +810,6 @@ impl DeviceModel {
 
     /// Restores persisted values. Keys that are not writable variables of this station and
     /// values that no longer validate are ignored.
-    #[allow(dead_code, reason = "called by the persistence module")]
     pub(super) fn restore(&mut self, persisted: &DeviceModelPersist) {
         for (key, text) in &persisted.values {
             let Some(spec) = TABLE.iter().find(|spec| {
@@ -987,7 +984,6 @@ impl DeviceModel {
     }
 
     /// Adopts a heartbeat interval the CSMS gave (a boot response).
-    #[allow(dead_code, reason = "called by the link module")]
     pub(super) fn set_heartbeat_interval(&mut self, secs: u32) {
         if secs > 0
             && let Some(spec) = TABLE.iter().find(|s| s.variable == "HeartbeatInterval")
@@ -1133,14 +1129,12 @@ impl Station2Actor {
     }
 
     /// Adopts a heartbeat interval from the CSMS: the variable and the snapshot follow.
-    #[allow(dead_code, reason = "called by the link module")]
     pub(super) fn adopt_heartbeat_interval(&mut self, secs: u32) {
         self.dm.set_heartbeat_interval(secs);
         self.state.heartbeat_interval_secs = self.heartbeat_interval_secs();
     }
 }
 
-#[allow(dead_code, reason = "each accessor is read by the module it serves")]
 impl Station2Actor {
     /// `OCPPCommCtrlr.HeartbeatInterval`.
     pub(super) fn heartbeat_interval_secs(&self) -> u32 {

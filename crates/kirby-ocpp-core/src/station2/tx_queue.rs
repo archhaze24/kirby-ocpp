@@ -13,7 +13,9 @@
 //!   undelivered entry is flagged `offline` (E11.FR.07). Delivery starts again when the boot
 //!   or the reconnect has been accepted ([`Station2Actor::flush_queue`]).
 //! * The queue holds [`QUEUE_CAP`] entries. When it is full, every second `Updated` event is
-//!   dropped (E12.FR.04/05); `Started` and `Ended` are never dropped.
+//!   dropped (E12.FR.04/05); `Started` and `Ended` are never dropped. An `Updated` event that
+//!   carries a once-only field (`evse`, `idToken`, `transactionInfo.remoteStartId`, the
+//!   `Transaction.Begin` meter value) is kept too, since no later event repeats the field.
 
 use std::collections::VecDeque;
 
@@ -21,9 +23,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::actor::{Station2Actor, TimerKey2};
-use super::types::Origin2;
+use super::types::{IdTokenRef, Origin2};
 use crate::error::CallError;
 use crate::ocpp::v2::messages::TransactionEventKind;
+use crate::ocpp::v2::types::IdToken;
 use crate::station::LogLevel;
 
 /// Entries the queue holds before it starts dropping `Updated` events.
@@ -80,14 +83,50 @@ fn set_offline(payload: &mut Value) {
     }
 }
 
+/// The token a `TransactionEvent` payload carries, if any.
+fn event_token(payload: &Value) -> Option<IdTokenRef> {
+    let token: IdToken = serde_json::from_value(payload.get("idToken")?.clone()).ok()?;
+    Some(IdTokenRef {
+        id_token: token.id_token,
+        kind: token.kind,
+    })
+}
+
+/// Whether the payload carries a field that is sent only once per transaction: `evse`,
+/// `idToken`, `transactionInfo.remoteStartId` or the `Transaction.Begin` meter value. Later
+/// events do not repeat them, so the CSMS would lose them with this event.
+fn carries_once_only_field(payload: &Value) -> bool {
+    payload.get("evse").is_some()
+        || payload.get("idToken").is_some()
+        || payload.pointer("/transactionInfo/remoteStartId").is_some()
+        || payload
+            .get("meterValue")
+            .and_then(Value::as_array)
+            .is_some_and(|meter_values| {
+                meter_values.iter().any(|meter_value| {
+                    meter_value
+                        .get("sampledValue")
+                        .and_then(Value::as_array)
+                        .is_some_and(|samples| {
+                            samples.iter().any(|sample| {
+                                sample.get("context").and_then(Value::as_str)
+                                    == Some("Transaction.Begin")
+                            })
+                        })
+                })
+            })
+}
+
 /// Drops every second `Updated` event after the first one, never the head (it may be in
-/// flight). Returns how many were dropped.
+/// flight) and never an event that carries a once-only field. Returns how many were dropped.
 fn thin_updated(events: &mut VecDeque<QueuedEvent>) -> usize {
     let updated: Vec<usize> = events
         .iter()
         .enumerate()
         .skip(1)
-        .filter(|(_, event)| event.kind == TransactionEventKind::Updated)
+        .filter(|(_, event)| {
+            event.kind == TransactionEventKind::Updated && !carries_once_only_field(&event.payload)
+        })
         .map(|(index, _)| index)
         .collect();
     let mut dropped = 0;
@@ -220,7 +259,8 @@ impl Station2Actor {
                 // The hook may end the transaction and queue more events; the delivered one is
                 // gone and nothing is in flight by now.
                 if let Some(info) = answer.get("idTokenInfo") {
-                    self.on_id_token_info(done.evse, &done.transaction_id, info);
+                    let token = event_token(&done.payload);
+                    self.on_id_token_info(done.evse, &done.transaction_id, token, info);
                 }
                 self.queue_pump();
             }
@@ -358,6 +398,35 @@ mod tests {
         .into();
         assert_eq!(thin_updated(&mut events), 0);
         assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn thinning_keeps_updated_events_with_once_only_fields() {
+        let carrying = |seq_no: i32, extra: Value| {
+            let mut e = event(TransactionEventKind::Updated, seq_no);
+            if let (Some(payload), Some(extra)) = (e.payload.as_object_mut(), extra.as_object()) {
+                payload.extend(extra.clone());
+            }
+            e
+        };
+        let mut events: VecDeque<_> = [
+            event(TransactionEventKind::Started, 0),
+            event(TransactionEventKind::Updated, 1),
+            carrying(2, json!({"evse": {"id": 1}})),
+            carrying(3, json!({"idToken": {"idToken": "T", "type": "Local"}})),
+            carrying(4, json!({"transactionInfo": {"remoteStartId": 7}})),
+            carrying(
+                5,
+                json!({"meterValue": [{"sampledValue": [{"context": "Transaction.Begin"}]}]}),
+            ),
+            event(TransactionEventKind::Updated, 6),
+            event(TransactionEventKind::Updated, 7),
+            event(TransactionEventKind::Ended, 8),
+        ]
+        .into();
+        // Plain candidates after the head: 1, 6, 7; the second, 6, goes.
+        assert_eq!(thin_updated(&mut events), 1);
+        assert_eq!(seqs(&events), [0, 1, 2, 3, 4, 5, 7, 8]);
     }
 
     #[test]

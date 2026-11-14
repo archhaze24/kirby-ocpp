@@ -102,7 +102,6 @@ impl Station2Actor {
 
     /// Sends the status of every connector, or only of those that changed at or after the
     /// given time.
-    #[allow(dead_code, reason = "called by the link code after boot and reconnect")]
     pub(super) fn send_all_statuses(&mut self, only_changed_since: Option<DateTime<Utc>>) {
         let due: Vec<(u32, u32)> = self
             .evses

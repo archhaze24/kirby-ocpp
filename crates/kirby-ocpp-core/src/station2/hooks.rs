@@ -3,11 +3,6 @@
 //! Each hook routes to the one module that implements it, so a module never needs to edit
 //! another module's file.
 
-#![allow(
-    dead_code,
-    reason = "the hooks have no caller until the actor loop is implemented; remove this allow then"
-)]
-
 use super::actor::{Station2Actor, TimerKey2};
 use crate::store::StoreError;
 

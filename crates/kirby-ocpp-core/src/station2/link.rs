@@ -13,7 +13,8 @@
 //! * `Disconnect` and shutdown cancel reconnect, boot retry and heartbeat and fail calls in
 //!   flight. A `Closed` event of a link the station closed itself never reaches the actor
 //!   (the link is dropped first), so it can never trigger a backoff. Frames the link had
-//!   already buffered are published first, up to a bound.
+//!   already buffered are published first, up to a bound. A `Disconnect` also drops a reset
+//!   that is in its `Rebooting` phase, so the next boot is a power-up.
 //! * Every task result carries the link generation; results of an older link are ignored.
 //!
 //! # Registration (B01 to B04)
@@ -198,6 +199,14 @@ impl Station2Actor {
 
     /// `Command2::Disconnect`.
     pub(super) fn cmd_disconnect(&mut self, reply: Reply2) {
+        // A reboot that was cut short: the next connect is a power-up, not the end of the reset.
+        if self
+            .reset
+            .as_ref()
+            .is_some_and(|plan| plan.phase == ResetPhase::Rebooting)
+        {
+            self.reset = None;
+        }
         self.disconnect();
         let _ = reply.send(Ok(Outcome2::Done));
     }
@@ -801,6 +810,22 @@ mod tests {
             }
         }
         ids
+    }
+
+    #[tokio::test]
+    async fn a_manual_disconnect_ends_a_reboot_in_progress() {
+        use crate::ocpp::v2::messages::ResetKind;
+        use crate::station2::reset::ResetPlan;
+
+        let (mut actor, _observed, _ids) = actor_with_buffered_events(0);
+        actor.reset = Some(ResetPlan {
+            kind: ResetKind::Immediate,
+            phase: ResetPhase::Rebooting,
+            reason: BootReason::RemoteReset,
+        });
+        let (reply, _answer) = tokio::sync::oneshot::channel();
+        actor.cmd_disconnect(reply);
+        assert!(actor.reset.is_none(), "the next connect is a power-up");
     }
 
     #[tokio::test]
