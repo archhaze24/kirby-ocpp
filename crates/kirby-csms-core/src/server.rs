@@ -1215,12 +1215,22 @@ impl Inner {
         });
     }
 
-    fn record_frame(&self, station: &str, session_id: u64, direction: Direction, frame: &Frame) {
+    /// `subprotocol` is the one the writing session negotiated, not the registry's: a session
+    /// that was replaced or forgotten keeps its own.
+    fn record_frame(
+        &self,
+        station: &str,
+        subprotocol: Option<&str>,
+        session_id: u64,
+        direction: Direction,
+        frame: &Frame,
+    ) {
         let mut guard = self.lock();
         let state = &mut *guard;
         if let Some(sink) = &self.recording {
-            sink.frame_for_station(
+            sink.frame_for_session(
                 station,
+                subprotocol,
                 session_id,
                 &FrameRecord {
                     ts: Utc::now(),
@@ -1844,8 +1854,9 @@ where
             Err(error) => {
                 if let Some(sink) = &self.inner.recording {
                     let _state = self.inner.lock();
-                    sink.frame_for_station(
+                    sink.frame_for_session(
                         &self.station,
+                        self.subprotocol.as_deref(),
                         self.link_id,
                         &FrameRecord {
                             ts: Utc::now(),
@@ -1868,8 +1879,13 @@ where
                 };
             }
         };
-        self.inner
-            .record_frame(&self.station, self.link_id, Direction::In, &frame);
+        self.inner.record_frame(
+            &self.station,
+            self.subprotocol.as_deref(),
+            self.link_id,
+            Direction::In,
+            &frame,
+        );
         match frame {
             Frame::Call {
                 id,
@@ -1918,8 +1934,13 @@ where
 
     /// Records and writes a frame. `Some` means the socket is gone.
     async fn send(&mut self, frame: &Frame) -> Option<DisconnectReason> {
-        self.inner
-            .record_frame(&self.station, self.link_id, Direction::Out, frame);
+        self.inner.record_frame(
+            &self.station,
+            self.subprotocol.as_deref(),
+            self.link_id,
+            Direction::Out,
+            frame,
+        );
         let write = self.socket.send(Message::text(frame.to_json_string()));
         match timeout(self.inner.config.write_timeout, write).await {
             Ok(Ok(())) => None,

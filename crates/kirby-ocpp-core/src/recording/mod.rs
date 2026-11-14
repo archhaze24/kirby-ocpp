@@ -16,6 +16,10 @@
 //!   received.
 //! * `seq` numbers frames and commands in one sequence, `elapsed_ms` is monotonic time since
 //!   the recording started, `session` counts the connections of the run.
+//! * CSMS frames also carry `station` and, when the session negotiated a WebSocket
+//!   subprotocol, `protocol` (`ocpp1.6`, ...). A frame without `protocol` belongs to a
+//!   session without a negotiated subprotocol or to a file from before the key; both mean
+//!   OCPP 1.6.
 //! * A frame that is larger than [`MAX_FRAME_BYTES`] is written as `"frame":null` with
 //!   `truncated_bytes`; text that is not an OCPP-J frame is written as `"frame":null` with
 //!   `invalid_bytes` (its content is never stored).

@@ -6,9 +6,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::frame::{Direction, Frame};
 use kirby_ocpp_core::recording::{Entry, Recording, Role, holds_redacted};
 use serde_json::Value;
+
+/// Characters of a recorded protocol name shown in an error.
+const MAX_SHOWN_PROTOCOL: usize = 40;
 
 /// Longest station id and `idTag` the plan accepts.
 const MAX_STATION_ID: usize = 128;
@@ -122,6 +126,21 @@ pub(super) fn plan(recording: &Recording) -> Result<Plan, String> {
         };
         if line.session == 0 {
             return Err("a frame has an invalid session".into());
+        }
+        // A recording without the key (or with null) predates it or has no subprotocol: 1.6.
+        if let Some(protocol) = line
+            .protocol
+            .as_deref()
+            .filter(|protocol| *protocol != Protocol::V16.token())
+        {
+            let shown: String = kirby_ocpp_core::text::escape_unsafe(protocol)
+                .chars()
+                .take(MAX_SHOWN_PROTOCOL)
+                .collect();
+            return Err(format!(
+                "a session used the protocol \"{shown}\"; only {} sessions can be replayed",
+                Protocol::V16.token()
+            ));
         }
         let scratch_entry = scratch.entry(station.clone()).or_default();
         if scratch_entry.session == 0 {
@@ -393,6 +412,42 @@ mod tests {
         assert_eq!(result.steps[0].payload["transactionId"], 7);
         assert_eq!(result.stations["CP-1"].starts[0].id_tag, "${literal}");
         assert!(!result.steps[0].expect_error);
+    }
+
+    #[test]
+    fn accepts_1_6_sessions_with_or_without_a_recorded_protocol() {
+        for protocol in [None, Some(json!(null)), Some(json!("ocpp1.6"))] {
+            let mut record = sample();
+            for entry in &mut record.entries {
+                if let Entry::Frame(line) = entry {
+                    line.protocol = protocol.as_ref().and_then(Value::as_str).map(str::to_owned);
+                }
+            }
+            plan(&record).unwrap();
+        }
+    }
+
+    #[test]
+    fn rejects_an_unsupported_session_protocol_with_a_clean_message() {
+        for protocol in ["ocpp2.0.1", "ocpp2.1", "OCPP1.6", "ocpp1.6 ", ""] {
+            let mut record = sample();
+            if let Entry::Frame(line) = &mut record.entries[2] {
+                line.protocol = Some(protocol.to_owned());
+            }
+            let error = plan(&record).unwrap_err();
+            assert!(error.contains("protocol"), "{protocol:?}: {error}");
+        }
+        let hostile = format!("ocpp2.0.1\u{1b}[31m\n{}", "x".repeat(10_000));
+        let mut record = sample();
+        if let Entry::Frame(line) = &mut record.entries[0] {
+            line.protocol = Some(hostile);
+        }
+        let error = plan(&record).unwrap_err();
+        assert!(
+            !error.chars().any(kirby_ocpp_core::text::is_unsafe_char),
+            "{error:?}"
+        );
+        assert!(error.len() < 300, "{}", error.len());
     }
 
     #[test]

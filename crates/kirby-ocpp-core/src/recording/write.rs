@@ -356,15 +356,33 @@ impl RecordSink {
     /// Records a frame as it crossed the wire, `session` being the connection it belongs to.
     /// Secrets are redacted here, whatever the frame record holds.
     pub fn frame(&self, session: u64, record: &FrameRecord) {
-        self.write_frame(None, session, record);
+        self.write_frame(None, None, session, record);
     }
 
     /// Records a CSMS frame with its station and connection identity.
     pub fn frame_for_station(&self, station: &str, session: u64, record: &FrameRecord) {
-        self.write_frame(Some(station), session, record);
+        self.write_frame(Some(station), None, session, record);
     }
 
-    fn write_frame(&self, station: Option<&str>, session: u64, record: &FrameRecord) {
+    /// Like [`RecordSink::frame_for_station`], with the WebSocket subprotocol the session
+    /// negotiated (`None` when it negotiated none; the key is then left out of the line).
+    pub fn frame_for_session(
+        &self,
+        station: &str,
+        protocol: Option<&str>,
+        session: u64,
+        record: &FrameRecord,
+    ) {
+        self.write_frame(Some(station), protocol, session, record);
+    }
+
+    fn write_frame(
+        &self,
+        station: Option<&str>,
+        protocol: Option<&str>,
+        session: u64,
+        record: &FrameRecord,
+    ) {
         let direction = match record.direction {
             Direction::In => "in",
             Direction::Out => "out",
@@ -415,6 +433,10 @@ impl RecordSink {
             if let Some(station) = station {
                 line.push_str(",\"station\":");
                 line.push_str(&Value::from(station).to_string());
+            }
+            if let Some(protocol) = protocol {
+                line.push_str(",\"protocol\":");
+                line.push_str(&Value::from(protocol).to_string());
             }
             if let Some(id) = &msg_id {
                 line.push_str(",\"msg_id\":");

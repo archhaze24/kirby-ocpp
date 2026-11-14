@@ -1216,6 +1216,45 @@ async fn malformed_events_do_not_carry_the_authorization_key() {
 }
 
 #[tokio::test]
+async fn recorded_frames_carry_the_negotiated_subprotocol() {
+    use kirby_ocpp_core::recording::{self, Entry, RecordOptions, Recording, Role};
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("protocol.jsonl");
+    let (sink, guard) =
+        recording::start(&path, "1.6", Role::Csms, "", &RecordOptions::default()).unwrap();
+    let csms = CsmsServer::start_recorded(CsmsConfig::new("127.0.0.1:0".parse().unwrap()), sink)
+        .await
+        .unwrap();
+    let mut raw = raw_connect(&csms, "/CP-PROTO").await;
+    raw_send(&mut raw, &json!([2, "h1", "Heartbeat", {}]).to_string()).await;
+    raw_recv(&mut raw).await;
+    // Text that is not a frame is recorded as well, with the same session protocol; the
+    // answer to the next CALL proves it was handled first.
+    raw_send(&mut raw, "not a frame").await;
+    raw_send(&mut raw, &json!([2, "h2", "Heartbeat", {}]).to_string()).await;
+    raw_recv(&mut raw).await;
+    csms.shutdown().await;
+    assert!(guard.finish().incomplete.is_none());
+    let recording = Recording::read(&path).unwrap();
+    let frames: Vec<_> = recording
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Frame(frame) => Some(frame),
+            Entry::Command(_) => None,
+        })
+        .collect();
+    assert!(frames.iter().any(|frame| frame.invalid_bytes.is_some()));
+    assert!(frames.len() >= 5, "{}", frames.len());
+    assert!(
+        frames
+            .iter()
+            .all(|frame| frame.protocol.as_deref() == Some("ocpp1.6"))
+    );
+}
+
+#[tokio::test]
 async fn long_action_names_are_counted_as_other() {
     let csms = start(|_| {}).await;
     let mut raw = raw_connect(&csms, "/CP-LONG").await;

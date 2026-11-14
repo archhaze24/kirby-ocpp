@@ -33,6 +33,11 @@ pub struct FrameLine {
     /// Station identity for a multi-station CSMS recording.
     #[serde(default)]
     pub station: Option<String>,
+    /// The WebSocket subprotocol the session negotiated (CSMS recordings); `None` when none
+    /// was negotiated, the recorder did not write one, or the file predates the key. Text
+    /// from the file: escape it before printing.
+    #[serde(default)]
+    pub protocol: Option<String>,
     /// Relative to the producer of the file.
     pub direction: Direction,
     #[serde(default)]

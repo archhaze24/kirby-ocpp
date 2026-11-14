@@ -81,6 +81,75 @@ fn round_trip_keeps_order_counts_and_header() {
 }
 
 #[test]
+fn csms_frames_carry_the_session_protocol_and_emulator_frames_do_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("csms.jsonl");
+    let (sink, guard) = start(&path, "1.6", Role::Csms, "", &RecordOptions::default()).unwrap();
+    let call = record(Direction::In, json!([2, "1", "Heartbeat", {}]));
+    sink.frame_for_session("CP-1", Some("ocpp1.6"), 1, &call);
+    sink.frame_for_session("CP-2", Some("ocpp2.0.1"), 2, &call);
+    sink.frame_for_session("CP-3", None, 3, &call);
+    sink.frame_for_station("CP-4", 4, &call);
+    assert_eq!(guard.finish().frames, 4);
+    let read = Recording::read(&path).unwrap();
+    let protocols: Vec<Option<&str>> = read
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Frame(frame) => Some(frame.protocol.as_deref()),
+            Entry::Command(_) => None,
+        })
+        .collect();
+    assert_eq!(protocols, [Some("ocpp1.6"), Some("ocpp2.0.1"), None, None]);
+    // Without a protocol the key is absent, so such lines are byte-identical to older files.
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(lines[1].contains(",\"protocol\":\"ocpp1.6\""), "{text}");
+    assert!(!lines[3].contains("protocol"), "{text}");
+    assert!(!lines[4].contains("protocol"), "{text}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (sink, guard, path) = started(&dir, &RecordOptions::default());
+    sink.frame(1, &record(Direction::Out, json!([2, "a", "Heartbeat", {}])));
+    guard.finish();
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("protocol"));
+}
+
+#[test]
+fn a_protocol_with_control_characters_is_escaped_in_the_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("csms.jsonl");
+    let (sink, guard) = start(&path, "1.6", Role::Csms, "", &RecordOptions::default()).unwrap();
+    let call = record(Direction::In, json!([2, "1", "Heartbeat", {}]));
+    sink.frame_for_session("CP-1", Some("ocpp\"1\n\u{1b}[31m"), 1, &call);
+    assert_eq!(guard.finish().frames, 1);
+    let read = Recording::read(&path).unwrap();
+    let Entry::Frame(frame) = &read.entries[0] else {
+        panic!("a frame");
+    };
+    assert_eq!(frame.protocol.as_deref(), Some("ocpp\"1\n\u{1b}[31m"));
+}
+
+#[test]
+fn recordings_without_a_protocol_key_still_load() {
+    let text = [
+        r#"{"type":"header","schema":1,"ocpp_version":"1.6","role":"csms"}"#,
+        r#"{"type":"frame","seq":0,"elapsed_ms":0,"session":1,"station":"CP-1","direction":"in","frame":[2,"1","Heartbeat",{}]}"#,
+        r#"{"type":"frame","seq":1,"elapsed_ms":1,"session":1,"station":"CP-1","direction":"out","protocol":null,"frame":[3,"1",{}]}"#,
+        r#"{"type":"end","frames":2,"commands":0,"elapsed_ms":1}"#,
+    ]
+    .join("\n");
+    let read = Recording::parse(format!("{text}\n").as_bytes()).unwrap();
+    assert!(read.is_complete());
+    for entry in &read.entries {
+        let Entry::Frame(frame) = entry else {
+            panic!("a frame");
+        };
+        assert_eq!(frame.protocol, None);
+    }
+}
+
+#[test]
 fn csms_frames_include_station_and_stop_at_oversized_frame() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("csms.jsonl");

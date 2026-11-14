@@ -334,6 +334,8 @@ async fn recording_captures_multiple_sessions_before_history_truncation() {
         .map(|f| f["session"].as_u64().unwrap())
         .collect();
     assert_eq!(sessions.len(), 2, "{text}");
+    // Every session negotiated the 1.6 subprotocol; the recording names it.
+    assert!(frames.iter().all(|f| f["protocol"] == "ocpp1.6"), "{text}");
     assert!(frames.iter().any(|f| f["action"] == "ChangeConfiguration"
         && f["direction"] == "out"
         && f["frame"][3]["value"] == "***"));
@@ -1967,6 +1969,26 @@ async fn replay_maps_the_recorded_transaction_and_keeps_literal_payloads() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_accepts_a_recording_that_names_the_ocpp_1_6_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = stop_recording("CP-1", "TAGX")
+        .replace("\"session\":1", "\"protocol\":\"ocpp1.6\",\"session\":1");
+    assert!(text.contains("\"protocol\":\"ocpp1.6\""), "{text}");
+    let path = write(dir.path(), "session.jsonl", &text);
+    let mut csms = Csms::start(&["--replay", &path, "--timeout", "30", "--history-cap", "0"]);
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    station
+        .start_transaction(ConnectorId::new(1), IdTag::new("TAGX").unwrap())
+        .await
+        .unwrap();
+    let verdict = csms.wait(|v| v["type"] == "replay");
+    assert_eq!(verdict["status"], "passed", "{verdict}");
+    let (code, _, stderr) = csms.finish();
+    assert_eq!(code, 0, "{stderr}");
+    let _ = station.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replay_fails_when_the_live_start_differs_from_the_recording() {
     let dir = tempfile::tempdir().unwrap();
     let path = write(dir.path(), "session.jsonl", &stop_recording("CP-1", "TAGX"));
@@ -2226,6 +2248,8 @@ fn invalid_replay_input_exits_2_before_binding_or_writing() {
         ),
         ("in", "CP-1", 1, json!([3,"p",{"status":"Accepted"}])),
     ]);
+    let newer_protocol = stop_recording("CP-1", "A")
+        .replace("\"session\":1", "\"protocol\":\"ocpp2.0.1\",\"session\":1");
     // Taken: a bound port would be a different error, and nothing may be written.
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = taken.local_addr().unwrap().to_string();
@@ -2234,6 +2258,7 @@ fn invalid_replay_input_exits_2_before_binding_or_writing() {
         ("silent", silent),
         ("cut", cut),
         ("foreign", foreign),
+        ("protocol", newer_protocol),
     ] {
         let path = write(dir.path(), &format!("{name}.jsonl"), &text);
         let (code, _, stderr) =
