@@ -379,7 +379,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | `--auth-keys-file <FILE>` | `KIRBY_CSMS_AUTH_KEYS_FILE` | none | Lines `ID=KEY`; blank lines and `#` comments are skipped. A leading UTF-8 BOM is ignored, leading spaces and the line end are dropped, trailing spaces belong to the key. At most 1 MiB. A startup warning is printed when the file is readable by group or others (Unix) |
 | `--default-auth-key <KEY>` | `KIRBY_CSMS_DEFAULT_AUTH_KEY` | none | Key for stations without an `ID=KEY` entry; excludes `--default-auth-key-file` |
 | `--default-auth-key-file <FILE>` | `KIRBY_CSMS_DEFAULT_AUTH_KEY_FILE` | none | File holding the default key (read once, trailing line end dropped, must not be empty, at most 64 KiB; a warning on unix when group/world readable); excludes `--default-auth-key` |
-| `--subprotocol <POLICY>` | `KIRBY_CSMS_SUBPROTOCOL` | `require:ocpp1.6` | `require:NAME` (refuse clients that do not offer it), `select:NAME` (always select it), `omit` (select nothing), `reject` (refuse every upgrade) |
+| `--subprotocol <POLICY>` | `KIRBY_CSMS_SUBPROTOCOL` | `require:ocpp1.6` | `require:NAME` (refuse clients that do not offer it), `require:A,B` (select the first name the client offers, in the client's order, that is on the list; refuse if it offers none), `select:NAME` (always select it), `omit` (select nothing), `reject` (refuse every upgrade). Names in a list are trimmed and must not be empty; a list of one name is `require:NAME` |
 | `--show-secrets` | `KIRBY_CSMS_SHOW_SECRETS` | off | Keep `AuthorizationKey` values in frame logs and history; by default replaced by `***` |
 
 ### Behavior

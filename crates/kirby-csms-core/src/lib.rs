@@ -48,17 +48,21 @@ mod observe;
 mod policy;
 pub mod registry;
 mod rules;
+mod schemas;
 mod server;
 mod state;
 mod tls;
 mod typed;
 
 pub use config::{CsmsConfig, SecurityPolicy, SecurityProfile};
-pub use defaults::{ACTIONS_PROTOCOL, CHARGE_POINT_ACTIONS, default_reply, is_charge_point_action};
+pub use defaults::{
+    ACTIONS_PROTOCOL, CHARGE_POINT_ACTIONS, default_reply, default_reply_for,
+    is_charge_point_action, is_charge_point_action_for,
+};
 pub use error::CsmsError;
 pub use event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
 pub use fault::{Fault, Reply, Responder};
-pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
+pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame, Protocol};
 pub use observe::{MAX_OBSERVED_ID_TAG, Observation, ObserveError, Observer, SessionId};
 pub use policy::{SubprotocolPolicy, TransactionIdAllocator, TransactionIds};
 pub use rules::{

@@ -8,7 +8,7 @@ use std::time::Duration;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use kirby_ocpp_core::ocpp::frame::{Direction as RecordDirection, FrameRecord};
-use kirby_ocpp_core::ocpp::{ErrorCode, Frame, redact_secrets};
+use kirby_ocpp_core::ocpp::{ErrorCode, Frame, Protocol, SchemaRegistry, redact_secrets};
 use kirby_ocpp_core::recording::RecordSink;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -26,15 +26,15 @@ use tokio_tungstenite::{WebSocketStream, accept_hdr_async_with_config};
 
 use crate::auth::{self, PeerIdentity};
 use crate::config::{CsmsConfig, SecurityProfile};
-use crate::defaults::{default_reply, is_charge_point_action};
+use crate::defaults::{default_reply_for, is_charge_point_action_for};
 use crate::error::CsmsError;
 use crate::event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
 use crate::fault::{Fault, Reply, Responder};
 use crate::observe::{self, MAX_OBSERVED_ID_TAG, Observation, ObserveSender, Observer, SessionId};
 use crate::policy::TransactionIdAllocator;
 use crate::rules::{FaultInfo, RuleInfo, Scope, Scripted};
+use crate::schemas::{EngineSchemas, session_protocol};
 use crate::state::StationState;
-use crate::typed::schemas;
 
 const SEC_WEBSOCKET_PROTOCOL: HeaderName = HeaderName::from_static("sec-websocket-protocol");
 /// Time a new socket gets for the TLS and WebSocket handshakes.
@@ -200,6 +200,7 @@ impl CsmsServer {
                 history_dropped: 0,
             }),
             config,
+            schemas: EngineSchemas::load(),
             recording,
             observer: observer_tx,
             events,
@@ -250,6 +251,12 @@ impl ConnectedSession {
     /// The negotiated WebSocket subprotocol.
     pub fn protocol(&self) -> Option<&str> {
         self.protocol.as_deref()
+    }
+
+    /// The OCPP version of the negotiated subprotocol; `None` when none was negotiated or the
+    /// name is not one this build knows.
+    pub fn protocol_kind(&self) -> Option<Protocol> {
+        self.protocol.as_deref().and_then(Protocol::from_token)
     }
 
     /// The identity of this connection in [`Observation`]s.
@@ -325,6 +332,24 @@ impl CsmsHandle {
         let state = self.inner.lock();
         let rec = state.stations.get(station)?;
         self.session_token(rec)
+    }
+
+    /// The protocol `station` negotiated; 1.6 for an unknown station, a station without a
+    /// subprotocol and a subprotocol name this build does not know.
+    pub(crate) fn station_protocol(&self, station: &str) -> Protocol {
+        let state = self.inner.lock();
+        session_protocol(
+            state
+                .stations
+                .get(station)
+                .and_then(|rec| rec.info.subprotocol.as_deref()),
+        )
+    }
+
+    /// The schemas of `protocol`; `None` for a protocol this build has none for, which
+    /// leaves its payloads unchecked.
+    pub(crate) fn schemas_for(&self, protocol: Protocol) -> Option<&SchemaRegistry> {
+        self.inner.schemas.schemas_for(protocol)
     }
 
     /// Tokens for every currently connected session.
@@ -783,6 +808,8 @@ impl CsmsHandle {
 
 struct Inner {
     config: CsmsConfig,
+    /// Schemas per protocol, loaded once for this server.
+    schemas: EngineSchemas,
     recording: Option<RecordSink>,
     observer: Option<ObserveSender>,
     local_addr: SocketAddr,
@@ -1249,29 +1276,25 @@ impl Inner {
     /// charge point may not send get `NotSupported`, unknown ones `NotImplemented`.
     fn decide(&self, station: &str, action: &str, payload: &Value) -> Reply {
         let mut state = self.lock();
-        let protocol = state
+        let subprotocol = state
             .stations
             .get(station)
             .and_then(|rec| rec.info.subprotocol.clone());
+        let protocol = session_protocol(subprotocol.as_deref());
         if let Some(reply) = state
             .scripted
-            .take_fault(station, protocol.as_deref(), action)
+            .take_fault(station, subprotocol.as_deref(), action)
         {
             return reply;
         }
         if self.config.validate_inbound
-            && let Some(schemas) = schemas()
-            && schemas.knows_action(action)
-            && let Err(violation) = schemas.validate_request(action, payload)
+            && let Some((code, errors)) = self.schemas.inbound_violation(protocol, action, payload)
         {
-            return Reply::Error(
-                violation.error_code(),
-                truncate_chars(&violation.errors.join("; "), MAX_ERROR_DESCRIPTION),
-            );
+            return Reply::Error(code, truncate_chars(&errors, MAX_ERROR_DESCRIPTION));
         }
         if let Some(payload) = state
             .scripted
-            .rule_payload(station, protocol.as_deref(), action)
+            .rule_payload(station, subprotocol.as_deref(), action)
         {
             return Reply::Result(payload);
         }
@@ -1280,10 +1303,12 @@ impl Inner {
             drop(state);
             return (*responder)(payload);
         }
-        if !is_charge_point_action(action) {
+        if !is_charge_point_action_for(protocol, action) {
             // OCPP-J: NotImplemented for a name nobody knows, NotSupported for a known action
             // that a charge point may not send to a central system.
-            return if kirby_ocpp_core::ocpp::messages::registry::find(action).is_some() {
+            return if protocol == Protocol::V16
+                && kirby_ocpp_core::ocpp::messages::registry::find(action).is_some()
+            {
                 Reply::Error(
                     ErrorCode::NotSupported,
                     format!("action {} is not supported", sanitize_action(action)),
@@ -1296,7 +1321,8 @@ impl Inner {
             };
         }
         let transaction_id = (action == "StartTransaction").then(|| state.tx_ids.allocate());
-        default_reply(
+        default_reply_for(
+            protocol,
             action,
             payload,
             self.config.heartbeat_interval,
@@ -1447,6 +1473,7 @@ async fn run_session<S>(
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let slots = Arc::new(CallSlots::default());
+    let protocol = session_protocol(subprotocol.as_deref());
     let session_id = match inner.register(&station, peer, subprotocol, cmd_tx, Arc::clone(&slots)) {
         Ok(session_id) => session_id,
         Err(RegisterError::Shutdown) => return,
@@ -1471,6 +1498,7 @@ async fn run_session<S>(
     let mut session = Session {
         inner: Arc::clone(&inner),
         link_id: session_id,
+        protocol,
         station,
         socket,
         slots,
@@ -1510,6 +1538,8 @@ struct InFlight {
 struct Session<S> {
     inner: Arc<Inner>,
     link_id: u64,
+    /// The protocol of the negotiated subprotocol (1.6 when none or an unknown one).
+    protocol: Protocol,
     station: String,
     socket: WebSocketStream<S>,
     slots: Arc<CallSlots>,
@@ -1737,8 +1767,9 @@ where
                     station: self.station.clone(),
                     text: malformed_text(text, self.inner.config.show_secrets),
                 });
-                // Only a CALL with a readable id gets a FormationViolation; the rest is dropped.
-                return match error.reply() {
+                // Only a CALL with a readable id gets a FormationViolation (FormatViolation
+                // in 2.x); the rest is dropped.
+                return match error.reply_for(self.protocol) {
                     Some(reply) => self.send(&reply).await,
                     None => None,
                 };

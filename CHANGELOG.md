@@ -7,6 +7,10 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- `kirby-csms --subprotocol require:NAME,NAME` accepts a list: the first subprotocol the client offers (in the client's order) that is on the list is selected, and a client that offers none of them is refused with HTTP 400. `kirby-csms-core` has the matching `SubprotocolPolicy::RequireAny`.
+
 ## [0.6.0] - 2026-11-14
 
 **The automation release: configuration files and profiles for both tools, a connection doctor, session recording and replay, scripted replies and a conformance family, a much larger HTTP control API with TLS, OpenAPI and a `ctl` client, and per-station rules and faults in `kirby-csms`.**

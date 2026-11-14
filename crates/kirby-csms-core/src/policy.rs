@@ -7,6 +7,10 @@ pub enum SubprotocolPolicy {
     /// Select `name` if the client offered it; refuse the upgrade (HTTP 400) otherwise.
     /// The default is `Require("ocpp1.6")`.
     Require(String),
+    /// Select the first subprotocol of the client's offer (in the client's order) that is
+    /// one of these names; refuse the upgrade (HTTP 400) if the client offered none of them.
+    /// Use this to serve several OCPP versions on one listener.
+    RequireAny(Vec<String>),
     /// Always select `name`, even if the client did not offer it. Use this to test
     /// a charge point that must notice a protocol it did not ask for.
     Select(String),
@@ -32,6 +36,11 @@ impl SubprotocolPolicy {
                 Ok(Some(name.clone()))
             }
             Self::Require(_) => Err("required subprotocol was not offered"),
+            Self::RequireAny(names) => offered
+                .iter()
+                .find(|offer| names.contains(offer))
+                .map(|offer| Some(offer.clone()))
+                .ok_or("none of the required subprotocols was offered"),
             Self::Select(name) => Ok(Some(name.clone())),
             Self::Omit => Ok(None),
             Self::Reject => Err("handshake rejected by configuration"),
@@ -107,5 +116,23 @@ mod tests {
         assert!(policy.select(&[]).is_err());
         assert_eq!(SubprotocolPolicy::Omit.select(&[]), Ok(None));
         assert!(SubprotocolPolicy::Reject.select(&offered).is_err());
+    }
+
+    #[test]
+    fn require_any_follows_the_client_order() {
+        let policy =
+            SubprotocolPolicy::RequireAny(vec!["ocpp1.6".to_owned(), "ocpp2.1".to_owned()]);
+        let offered = vec![
+            "ocpp2.0.1".to_owned(),
+            "ocpp2.1".to_owned(),
+            "ocpp1.6".to_owned(),
+        ];
+        assert_eq!(policy.select(&offered), Ok(Some("ocpp2.1".to_owned())));
+        assert_eq!(
+            policy.select(&["ocpp1.6".to_owned()]),
+            Ok(Some("ocpp1.6".to_owned()))
+        );
+        assert!(policy.select(&["ocpp2.0.1".to_owned()]).is_err());
+        assert!(policy.select(&[]).is_err());
     }
 }

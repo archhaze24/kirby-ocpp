@@ -141,8 +141,9 @@ pub struct Cli {
     #[arg(long, env = "KIRBY_CSMS_DEFAULT_AUTH_KEY_FILE", value_name = "FILE", value_parser = non_empty_path)]
     pub default_auth_key_file: Option<PathBuf>,
 
-    /// WebSocket subprotocol policy: require:NAME (refuse clients that do not offer it), select:NAME
-    /// (always select it), omit (select nothing), reject (refuse every upgrade)
+    /// WebSocket subprotocol policy: require:NAME (refuse clients that do not offer it), require:A,B
+    /// (select the first offered name that is listed, refuse if none), select:NAME (always select
+    /// it), omit (select nothing), reject (refuse every upgrade)
     #[arg(
         long, env = "KIRBY_CSMS_SUBPROTOCOL", value_name = "POLICY",
         default_value = "require:ocpp1.6", value_parser = parse_policy
@@ -804,12 +805,31 @@ fn parse_policy(value: &str) -> Result<SubprotocolPolicy, String> {
         )),
     };
     match kind {
+        "require" if name.is_some_and(|name| name.contains(',')) => {
+            let mut listed: Vec<String> = Vec::new();
+            for part in name.unwrap_or_default().split(',') {
+                let part = part.trim();
+                if part.is_empty() {
+                    return Err(
+                        "`require` takes non-empty names, e.g. require:ocpp1.6,ocpp2.0.1"
+                            .to_owned(),
+                    );
+                }
+                if !listed.iter().any(|known| known == part) {
+                    listed.push(part.to_owned());
+                }
+            }
+            Ok(match <[String; 1]>::try_from(listed) {
+                Ok([only]) => SubprotocolPolicy::Require(only),
+                Err(several) => SubprotocolPolicy::RequireAny(several),
+            })
+        }
         "require" => named(name).map(SubprotocolPolicy::Require),
         "select" => named(name).map(SubprotocolPolicy::Select),
         "omit" | "reject" if name.is_some() => Err(format!("`{kind}` takes no value")),
         "omit" => Ok(SubprotocolPolicy::Omit),
         "reject" => Ok(SubprotocolPolicy::Reject),
-        _ => Err("expected require:NAME, select:NAME, omit or reject".to_owned()),
+        _ => Err("expected require:NAME[,NAME...], select:NAME, omit or reject".to_owned()),
     }
 }
 
@@ -999,6 +1019,40 @@ mod tests {
         assert!(parse_policy("require").is_err());
         assert!(parse_policy("omit:x").is_err());
         assert!(parse_policy("nope").is_err());
+    }
+
+    #[test]
+    fn require_takes_a_list_of_names() {
+        let names = |list: &[&str]| list.iter().map(|name| (*name).to_owned()).collect();
+        assert_eq!(
+            parse_policy("require:ocpp1.6,ocpp2.0.1"),
+            Ok(SubprotocolPolicy::RequireAny(names(&[
+                "ocpp1.6",
+                "ocpp2.0.1"
+            ])))
+        );
+        assert_eq!(
+            parse_policy("require: ocpp2.1 , ocpp1.6"),
+            Ok(SubprotocolPolicy::RequireAny(names(&[
+                "ocpp2.1", "ocpp1.6"
+            ])))
+        );
+        // A list that names one protocol is the single-name policy.
+        assert_eq!(
+            parse_policy("require:ocpp1.6,ocpp1.6"),
+            Ok(SubprotocolPolicy::Require("ocpp1.6".to_owned()))
+        );
+        for bad in [
+            "require:,",
+            "require:ocpp1.6,",
+            "require:,ocpp1.6",
+            "require:ocpp1.6,,ocpp2.1",
+            "require:a, ,b",
+            "require:",
+        ] {
+            assert!(parse_policy(bad).is_err(), "{bad}");
+        }
+        assert!(parse_policy("select:a,b").is_ok());
     }
 
     #[test]

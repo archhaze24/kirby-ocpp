@@ -1,8 +1,6 @@
 //! Typed CSMS commands: [`CsmsHandle::call_typed`] and thin wrappers for the 19 commands of OCPP 1.6
 //! and the 7 of the Security Whitepaper a central system sends. Requests and responses are the typed messages of `kirby-ocpp-core`.
 
-use std::sync::OnceLock;
-
 use kirby_ocpp_core::ids::{ConnectorId, IdTag, ReservationId};
 use kirby_ocpp_core::ocpp::messages::{
     CancelReservation, CancelReservationRequest, CancelReservationResponse, CertificateHashData,
@@ -31,17 +29,10 @@ use kirby_ocpp_core::ocpp::messages::{
 use kirby_ocpp_core::ocpp::types::{
     AvailabilityType, ChargingRateUnitType, MessageTrigger, ResetType,
 };
-use kirby_ocpp_core::ocpp::{Frame, InboundAction, SchemaRegistry};
+use kirby_ocpp_core::ocpp::{Frame, InboundAction};
 
 use crate::error::CsmsError;
 use crate::server::CsmsHandle;
-
-/// Compiled once on first use (tens of milliseconds, done synchronously). `None` if a bundled
-/// schema failed to compile, which is a build bug; validation is then skipped.
-pub(crate) fn schemas() -> Option<&'static SchemaRegistry> {
-    static SCHEMAS: OnceLock<Option<SchemaRegistry>> = OnceLock::new();
-    SCHEMAS.get_or_init(|| SchemaRegistry::new().ok()).as_ref()
-}
 
 impl CsmsHandle {
     /// Sends a typed command and returns the typed answer.
@@ -62,7 +53,10 @@ impl CsmsHandle {
             reason,
         };
         let payload = serde_json::to_value(&req).map_err(|e| invalid(e.to_string()))?;
-        if let Some(schemas) = schemas() {
+        // The schemas of the protocol the station negotiated (1.6 when unknown); none known
+        // for a protocol means no validation.
+        let protocol = self.station_protocol(station);
+        if let Some(schemas) = self.schemas_for(protocol) {
             schemas
                 .validate_request(A::NAME, &payload)
                 .map_err(|e| invalid(e.errors.join("; ")))?;
@@ -75,7 +69,7 @@ impl CsmsHandle {
         };
         match frame {
             Frame::CallResult { payload, .. } => {
-                if let Some(schemas) = schemas() {
+                if let Some(schemas) = self.schemas_for(protocol) {
                     schemas
                         .validate_response(A::NAME, &payload)
                         .map_err(|e| invalid_response(e.errors.join("; ")))?;

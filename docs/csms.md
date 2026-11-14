@@ -20,7 +20,7 @@ Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhos
 
 - URL: `ws(s)://HOST:PORT/<any prefix>/<station id>`. The station id is the last path segment, 1 to 128 bytes after percent-decoding, without control characters, line separators or bidi overrides (and not `.` or `..`). A connection whose URL holds no such id is refused with HTTP 400 and reported as an `auth_failed` event with `station` `null` and the reason `refused: no valid station id in the URL path (1 to 128 bytes, no control characters)`.
 - A second connection with the same id replaces the first one (the old one shows as "replaced"). At security profile 0 nothing authenticates the new connection, so anybody who can reach the listener can take over a live station's id; use a profile or a firewall (see [security.md](security.md)).
-- Default WebSocket subprotocol policy is `require:ocpp1.6` (`--subprotocol`: `require:NAME`, `select:NAME`, `omit`, `reject`).
+- Default WebSocket subprotocol policy is `require:ocpp1.6` (`--subprotocol`: `require:NAME`, `require:A,B` to accept the first offered name on the list, `select:NAME`, `omit`, `reject`). A session that negotiated no subprotocol, or a name the build does not know, is handled as OCPP 1.6.
 - TLS and authentication: [security.md](security.md).
 - Inbound CALLs are validated against the OCPP 1.6J schemas by default (`--validate-inbound`). An invalid payload gets a CALLERROR (`OccurenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormationViolation`) and is not tracked. A fault on the same action wins; unknown actions are not checked.
 - Actions a charge point may not send get a CALLERROR: `NotSupported` for known action names, `NotImplemented` for unknown ones.

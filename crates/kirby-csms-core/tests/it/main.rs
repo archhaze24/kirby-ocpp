@@ -5,6 +5,7 @@ mod automation_sessions;
 mod engine;
 mod observe;
 mod probe_close;
+mod protocols;
 mod redaction;
 mod security;
 mod state;

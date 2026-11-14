@@ -596,6 +596,7 @@ pub fn absolute_text(path: &Path) -> String {
 fn subprotocol_text(policy: &SubprotocolPolicy) -> String {
     match policy {
         SubprotocolPolicy::Require(name) => format!("require:{name}"),
+        SubprotocolPolicy::RequireAny(names) => format!("require:{}", names.join(",")),
         SubprotocolPolicy::Select(name) => format!("select:{name}"),
         SubprotocolPolicy::Omit => "omit".to_owned(),
         SubprotocolPolicy::Reject => "reject".to_owned(),

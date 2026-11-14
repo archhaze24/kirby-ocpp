@@ -365,6 +365,30 @@ times = 2
 }
 
 #[test]
+fn a_subprotocol_list_round_trips_through_print_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let printed = print(&["--subprotocol", "require:ocpp1.6,ocpp2.0.1"], &[]);
+    assert!(
+        printed.contains("subprotocol = \"require:ocpp1.6,ocpp2.0.1\""),
+        "{printed}"
+    );
+    let file = write(dir.path(), "csms.toml", &printed);
+    assert_eq!(print(&["--config", &file], &[]), printed);
+    let from_file = write(
+        dir.path(),
+        "list.toml",
+        "[listener]\nsubprotocol = \"require:ocpp2.1,ocpp1.6\"\n",
+    );
+    let printed = print(&["--config", &from_file], &[]);
+    assert!(
+        printed.contains("subprotocol = \"require:ocpp2.1,ocpp1.6\""),
+        "{printed}"
+    );
+    let error = rejected(&["--subprotocol", "require:ocpp1.6,"], &[]);
+    assert!(error.contains("non-empty names"), "{error}");
+}
+
+#[test]
 fn print_config_json_is_the_default_format() {
     let dir = tempfile::tempdir().unwrap();
     let file = write(
