@@ -353,6 +353,15 @@ kirby-ocpp --url ws://localhost:9000/ocpp --protocol ocpp2.0.1 check
 
 The WebSocket subprotocol offered is `ocpp2.0.1` unless `--ws-subprotocol` says otherwise; an explicit value that differs from the token of `--protocol` is offered as given and prints `note: offering NAME while behaving as PROTOCOL` (the messages and their schemas follow `--protocol`). Headless output, `--json` lines, `--log-file`, `--record` and `check` work as described elsewhere on this page; a recording of a 2.0.1 session carries `ocpp_version` `2.0.1` in its header.
 
+What the 2.0.1 station does:
+
+* Device model: `GetVariables`, `SetVariables` and `GetBaseReport` over the controller components the station implements (`OCPPCommCtrlr`, `TxCtrlr`, `AuthCtrlr`, `AuthCacheCtrlr`, `SampledDataCtrlr`, `AlignedDataCtrlr`, `SecurityCtrlr` and others). `SecurityCtrlr.BasicAuthPassword` is write-only and applies at the next connect.
+* Transactions start and end at the points set by `TxCtrlr.TxStartPoint` (default `PowerPathClosed`) and `TxCtrlr.TxStopPoint` (default `EVConnected,Authorized`). Transaction ids are UUIDs; `seqNo` counts from 0 per transaction. `TransactionEvent`s carry the sampled values of `SampledDataCtrlr` and, with `AlignedDataCtrlr.Interval` above 0, clock-aligned values.
+* Transaction events go out in order, one at a time. Events created while the link is down carry `offline: true` and are sent after the reconnect; a failed delivery is retried `OCPPCommCtrlr.MessageAttempts` times, `MessageAttemptInterval` times the attempt number apart. The queue holds 4096 events; when it is full, `Updated` events are dropped first. `GetTransactionStatus` reports the queue.
+* Authorization: `Authorize`, an authorization cache (1000 entries, `AuthCacheCtrlr.LifeTime`), `LocalAuthorizeOffline`, `LocalPreAuthorize` and `OfflineTxForUnknownIdEnabled`. Tokens of type `Central` and `NoAuthorization` need no `Authorize`. There is no local authorization list.
+* CSMS commands: `RequestStartTransaction`, `RequestStopTransaction`, `TriggerMessage`, `Reset` (station level; `OnIdle` waits for running transactions), `ChangeAvailability`, `UnlockConnector`, `ClearCache`, `DataTransfer` and `GetTransactionStatus`. Other defined actions are answered with `NotSupported`; a `chargingProfile` in `RequestStartTransaction` is ignored with a warning.
+* A transaction that was running when the process stopped is ended with `stoppedReason` `PowerLoss` after the next accepted boot; queued events survive a restart.
+
 Differences from the 1.6 station:
 
 * `--vendor` may have 50 characters (`vendorName`); `--connectors` is the number of EVSEs, at most 64.
