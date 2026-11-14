@@ -667,8 +667,6 @@ impl StationState {
     ///
     /// Updates that only bump a counter (a rejected or repeated `TransactionEvent`) and
     /// heartbeats do not count as a change. `protocol` other than 2.0.1 folds nothing.
-    // Temporary: nothing calls the fold until the engine dispatches 2.0.1 sessions to it.
-    #[allow(dead_code)]
     pub(crate) fn apply_v2(
         &mut self,
         protocol: Protocol,

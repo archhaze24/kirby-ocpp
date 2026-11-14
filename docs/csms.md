@@ -19,11 +19,27 @@ Point a station at it, for example the emulator: `kirby-ocpp --url ws://localhos
 ## Connecting stations
 
 - URL: `ws(s)://HOST:PORT/<any prefix>/<station id>`. The station id is the last path segment, 1 to 128 bytes after percent-decoding, without control characters, line separators or bidi overrides (and not `.` or `..`). A connection whose URL holds no such id is refused with HTTP 400 and reported as an `auth_failed` event with `station` `null` and the reason `refused: no valid station id in the URL path (1 to 128 bytes, no control characters)`.
-- A second connection with the same id replaces the first one (the old one shows as "replaced"). At security profile 0 nothing authenticates the new connection, so anybody who can reach the listener can take over a live station's id; use a profile or a firewall (see [security.md](security.md)).
+- OCPP 2.0.1 stations connect when the subprotocol policy allows `ocpp2.0.1`, for example `--subprotocol require:ocpp2.0.1` or `require:ocpp1.6,ocpp2.0.1` (one listener serves both; the order of the client's offer decides). On such a session the station id must also be 1 to 48 characters from `a-z A-Z 0-9 * - _ = + | @ .` (OCPP-J §3.1.1: no colon, because it separates user and password in Basic Auth). Any other id is refused with HTTP 400 and reported as an `auth_failed` event with `station` `null` and the reason `refused: station id is not valid for ocpp2.0.1 (1 to 48 characters from a-z A-Z 0-9 * - _ = + | @ .)`. This check runs before the credentials: a bad id is a 400 whatever the credentials are, bad credentials for a valid id stay a 401. The same id is accepted on `ocpp1.6`.
+- A second connection with the same id replaces the first one (the old one shows as "replaced"). When the new connection negotiated another protocol than the old one, the station's tracked state starts afresh (the library emits `StateChanged`), because a 1.6 connector map next to a 2.0.1 transaction list would mislead; a reconnect on the same protocol keeps the state. At security profile 0 nothing authenticates the new connection, so anybody who can reach the listener can take over a live station's id; use a profile or a firewall (see [security.md](security.md)).
 - Default WebSocket subprotocol policy is `require:ocpp1.6` (`--subprotocol`: `require:NAME`, `require:A,B` to accept the first offered name on the list, `select:NAME`, `omit`, `reject`). A session that negotiated no subprotocol, or a name the build does not know, is handled as OCPP 1.6.
 - TLS and authentication: [security.md](security.md). Basic Auth accepts the configured key literally on every protocol. Sessions handled as OCPP 1.6 also accept nonempty, even-length hex keys as decoded bytes (either hex case), as required by OCPP-J 1.6 §6.2.2 for a 40-digit key. Sessions on 2.x accept only the literal form. Binary passwords need not be UTF-8; their authentication challenge omits the UTF-8 charset hint.
-- Inbound CALLs are validated against the OCPP 1.6J schemas by default (`--validate-inbound`). An invalid payload gets a CALLERROR (`OccurenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormationViolation`) and is not tracked. A fault on the same action wins; unknown actions are not checked.
-- Actions a charge point may not send get a CALLERROR: `NotSupported` for known action names, `NotImplemented` for unknown ones.
+- Inbound CALLs are validated against the schemas of the session's protocol by default (`--validate-inbound`). An invalid payload gets a CALLERROR and is not tracked. OCPP 1.6 sessions get `OccurenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormationViolation`; OCPP 2.0.1 sessions get the spelling of that version (`OccurrenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation`, `FormatViolation`). A fault on the same action wins; unknown actions are not checked.
+- Actions a charge point may not send get a CALLERROR: `NotSupported` for action names the session's protocol defines, `NotImplemented` for the rest. On a 2.0.1 session `Reset` is `NotSupported` and `Foo` or the 1.6 action `StartTransaction` is `NotImplemented`.
+- OCPP 2.0.1 sessions answer the 25 actions a station may send with canned replies that validate against the 2.0.1 response schemas:
+
+  | Action | Reply |
+  | --- | --- |
+  | `BootNotification` | `Accepted`, `currentTime`, `interval` = `--heartbeat-interval` |
+  | `Heartbeat` | `currentTime` |
+  | `Authorize`, and `TransactionEvent` when the request carries an `idToken` | `idTokenInfo` with the status below; a `TransactionEvent` without `idToken` is answered `{}` |
+  | `DataTransfer` | `Accepted` with `data` `pong` |
+  | `SignCertificate` | `Accepted` |
+  | `Get15118EVCertificate`, `GetCertificateStatus` | `Failed` (no ISO 15118 backend) |
+  | `NotifyEVChargingNeeds`, `NotifyEVChargingSchedule` | `Rejected` |
+  | every other station action (`StatusNotification`, `MeterValues`, `NotifyReport`, `SecurityEventNotification`, ...) | `{}` |
+
+  The status of `idTokenInfo` depends on `idToken.idToken`: `BADTAG` and `BLOCKSTART` give `Blocked`; `EXPIREDAUTH` and `EXPIREDSTART` give `Expired`; `CONCURRENTAUTH` and `CONCURRENTSTART` give `ConcurrentTx`; `PARENTAUTH` gives `Accepted` with `groupIdToken` `PARENTTAG`; every other value, and any token of type `NoAuthorization`, gives `Accepted`. The answer to a `TransactionEvent` depends only on the request, so a retried or duplicated event gets the same answer. The boot answer is always `Accepted` unless a rule or fault changes it; the registration gate (`SecurityError` for CALLs before an accepted boot) is not applied.
+- State tracking follows the protocol of the session. For OCPP 2.0.1 the station's `state` keeps the shared fields (boot info, last heartbeat, security events) and a `state.v2` section: EVSEs with their connectors from `StatusNotification` (and from a `NotifyEvent` that reports `Connector` `AvailabilityState`), transactions from `TransactionEvent`, the latest meter readings per EVSE from `MeterValues`, and counters. Transactions are keyed by their station-made id (at most 36 characters). A repeated `seqNo` counts as a duplicate and changes nothing else; events may arrive late or out of order, optional fields that an event omits keep their value, and an event after `Ended` never reopens a transaction. Connector keys of 2.0.1 stations read `<evse>/<connector>`. Device-model values from `NotifyReport` are never stored.
 - Per station the server keeps the last `--history-cap` frames (default 1000, also capped at 8 MiB of text; a frame above that cap is kept as the marker `{"truncated":true,"originalBytes":N}`) and the last `--transaction-history-cap` stopped transactions (default 100). Frame events (`--json`, the HTTP event stream, `CsmsEvent::Frame`) carry the same marker for a frame above 64 KiB, so a stalled event consumer cannot hold large frames. Scripts (`wait_call` with `payload_contains` or `capture`) still see the full payload of such a frame: it is read from the station's history. If the history no longer holds it, the step fails with `payload truncated (N bytes)` instead of waiting for the timeout. A malformed text that is valid JSON with a broken OCPP envelope is shown as re-serialized JSON with the value of an `AuthorizationKey` entry replaced by `***`; text that is not valid JSON is shown as `<redacted: invalid JSON>` (both unless `--show-secrets`). Records are never evicted automatically; `F` in the TUI (or `CsmsHandle::forget`) removes a disconnected station.
 
 ## Output
@@ -190,7 +206,7 @@ For one CALL the engine picks, first match wins:
 5. the global rule (one per action; setting it again replaces it);
 6. the default answer.
 
-A rule or fault with a `protocol` applies only to stations that negotiated it; a station that negotiated no subprotocol matches only rules and faults without a `protocol`. Rules and faults of a station stay when the station is forgotten. Faults are listed with an opaque id (`f1`, ...) that stays valid until the fault is used up or removed; remove one by id over the API, stdin or a script.
+A rule or fault with a `protocol` applies only to stations that negotiated it; a station that negotiated no subprotocol matches only rules and faults without a `protocol`. A rule or fault without a `protocol` applies to every protocol by action name, and the payload of a rule is sent as given. When one listener serves OCPP 1.6 and 2.0.1, give a rule whose payload has the shape of one version (an `Authorize` answer with `idTagInfo`, or one with `idTokenInfo`) a `protocol`, otherwise it also answers stations of the other version. Rules and faults of a station stay when the station is forgotten. Faults are listed with an opaque id (`f1`, ...) that stays valid until the fault is used up or removed; remove one by id over the API, stdin or a script.
 
 | Fault kind | Effect |
 | --- | --- |
@@ -290,6 +306,23 @@ async fn run() -> Result<(), CsmsError> {
     Ok(())
 }
 ```
+
+`call_typed` picks the schemas of the station's protocol, so the same method sends typed OCPP 2.0.1 commands; the types are in `kirby_ocpp_core::ocpp::v2::messages`. Any action name also works through `call` with a raw payload.
+
+```rust
+use kirby_csms_core::{CsmsError, CsmsHandle};
+use kirby_ocpp_core::ocpp::v2::messages::{Reset, ResetRequest};
+
+async fn reset(csms: &CsmsHandle, station: &str) -> Result<(), CsmsError> {
+    let request: ResetRequest = serde_json::from_value(serde_json::json!({ "type": "OnIdle" }))
+        .expect("valid request");
+    let answer = csms.call_typed::<Reset>(station, request).await?;
+    println!("{station}: {}", serde_json::to_string(&answer).unwrap_or_default());
+    Ok(())
+}
+```
+
+`CsmsHandle::transactions` returns neutral `TransactionRow`s for both protocols (`id` is a number on 1.6 and the station-made string on 2.0.1, `evse` is set on 2.0.1 only). `StationState` has accessors that work for both: `vendor_model()`, `connector_statuses()`, `active_transactions()`, `active_transaction_count()` and `transaction_rows()`; the 2.0.1 details are in `StationState::v2`.
 
 `CsmsConfig` fields mirror the CLI flags (listen address, subprotocol and transaction id policies, heartbeat interval, history caps, `tls`, `security`, `show_secrets`, `validate_inbound`, ping settings). A subscriber that falls behind the event channel (4096 events) gets `RecvError::Lagged` and loses events. Internals: [architecture.md](architecture.md#csms-internals).
 

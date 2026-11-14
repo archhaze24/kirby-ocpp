@@ -30,6 +30,7 @@ use crate::defaults::{default_reply_for, is_charge_point_action_for};
 use crate::error::CsmsError;
 use crate::event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationInfo};
 use crate::fault::{Fault, Reply, Responder};
+use crate::ids;
 use crate::observe::{self, MAX_OBSERVED_ID_TAG, Observation, ObserveSender, Observer, SessionId};
 use crate::policy::TransactionIdAllocator;
 use crate::rules::{FaultInfo, RuleInfo, Scope, Scripted};
@@ -555,7 +556,7 @@ impl CsmsHandle {
         active: Option<bool>,
         since: Option<chrono::DateTime<Utc>>,
         limit: usize,
-    ) -> (Vec<(String, crate::state::TransactionRecord)>, bool) {
+    ) -> (Vec<(String, crate::state::TransactionRow)>, bool) {
         let state = self.inner.lock();
         let mut found = Vec::new();
         let mut more = false;
@@ -563,7 +564,7 @@ impl CsmsHandle {
             if station.is_some_and(|wanted| wanted != id) {
                 continue;
             }
-            for tx in &rec.state.transactions {
+            for tx in rec.state.transaction_rows() {
                 let running = tx.status == crate::state::TransactionStatus::Active;
                 if active.is_some_and(|wanted| wanted != running)
                     || since.is_some_and(|since| tx.started_at < since)
@@ -574,7 +575,7 @@ impl CsmsHandle {
                     more = true;
                     return (found, more);
                 }
-                found.push((id.clone(), tx.clone()));
+                found.push((id.clone(), tx));
             }
         }
         (found, more)
@@ -665,7 +666,7 @@ impl CsmsHandle {
         expected: Option<&ConnectedSession>,
     ) -> Result<Frame, CsmsError> {
         let timeout = timeout.min(MAX_CALL_TIMEOUT);
-        let tracked_request = (action == "GetInstalledCertificateIds").then(|| payload.clone());
+        let mut tracked_request = (action == "GetInstalledCertificateIds").then(|| payload.clone());
         let deadline = Instant::now()
             .checked_add(timeout)
             .unwrap_or_else(|| Instant::now() + MAX_CALL_TIMEOUT);
@@ -682,6 +683,11 @@ impl CsmsHandle {
                 station: station.to_owned(),
             };
             let session = rec.session.as_ref().ok_or_else(not_connected)?;
+            // The answer is folded with the 1.6 shape; 2.0.1 has an action of the same name
+            // with another one.
+            if session_protocol(rec.info.subprotocol.as_deref()) != Protocol::V16 {
+                tracked_request = None;
+            }
             if expected.is_some_and(|token| {
                 token.generation != session.id
                     || !Weak::ptr_eq(&token.server, &Arc::downgrade(&self.inner))
@@ -1157,6 +1163,7 @@ impl Inner {
                 state: StationState::default(),
                 session: None,
             });
+        let had_session = rec.info.connected_at.is_some();
         if let Some(old) = rec.session.take() {
             let _ = old.tx.send(SessionCmd::Close {
                 code: 1000,
@@ -1180,7 +1187,15 @@ impl Inner {
         rec.info.connected_at = Some(Utc::now());
         rec.info.disconnected_at = None;
         rec.info.remote_addr = Some(peer);
+        // A state folded for one protocol means nothing for another (a 1.6 connector map next
+        // to a 2.0.1 transaction list would mislead), so a protocol change starts it afresh.
+        let protocol_changed = had_session
+            && session_protocol(rec.info.subprotocol.as_deref())
+                != session_protocol(subprotocol.as_deref());
         rec.info.subprotocol = subprotocol;
+        if protocol_changed {
+            rec.state = StationState::default();
+        }
         self.observe(|| {
             Observation::Connected(ConnectedSession {
                 station: id.to_owned(),
@@ -1192,6 +1207,11 @@ impl Inner {
         self.emit(CsmsEvent::Connected {
             station: id.to_owned(),
         });
+        if protocol_changed {
+            self.emit(CsmsEvent::StateChanged {
+                station: id.to_owned(),
+            });
+        }
         Ok(session_id)
     }
 
@@ -1318,7 +1338,18 @@ impl Inner {
     }
 
     /// Folds an answered inbound CALL into the station's state.
-    fn track(&self, station: &str, session_id: u64, action: &str, request: &Value, reply: &Reply) {
+    ///
+    /// `protocol` is the one the answering session negotiated; the fold of another protocol's
+    /// state is never touched by it.
+    fn track(
+        &self,
+        station: &str,
+        session_id: u64,
+        protocol: Protocol,
+        action: &str,
+        request: &Value,
+        reply: &Reply,
+    ) {
         let Reply::Result(response) = reply else {
             return;
         };
@@ -1330,7 +1361,15 @@ impl Inner {
             return;
         }
         let cap = self.config.transaction_history_cap;
-        if rec.state.apply(action, request, response, Utc::now(), cap) {
+        let now = Utc::now();
+        let changed = match protocol {
+            Protocol::V16 => rec.state.apply(action, request, response, now, cap),
+            Protocol::V201 => rec
+                .state
+                .apply_v2(protocol, action, request, response, now, cap),
+            _ => false,
+        };
+        if changed {
             self.emit(CsmsEvent::StateChanged {
                 station: station.to_owned(),
             });
@@ -1396,20 +1435,15 @@ impl Inner {
             return (*responder)(payload);
         }
         if !is_charge_point_action_for(protocol, action) {
-            // OCPP-J: NotImplemented for a name nobody knows, NotSupported for a known action
-            // that a charge point may not send to a central system.
-            return if protocol == Protocol::V16
-                && kirby_ocpp_core::ocpp::messages::registry::find(action).is_some()
-            {
-                Reply::Error(
+            return match unhandled_code(protocol, action) {
+                ErrorCode::NotSupported => Reply::Error(
                     ErrorCode::NotSupported,
                     format!("action {} is not supported", sanitize_action(action)),
-                )
-            } else {
-                Reply::Error(
-                    ErrorCode::NotImplemented,
+                ),
+                code => Reply::Error(
+                    code,
                     format!("action {} is not implemented", sanitize_action(action)),
-                )
+                ),
             };
         }
         let transaction_id = (action == "StartTransaction").then(|| state.tx_ids.allocate());
@@ -1528,9 +1562,13 @@ async fn run_session<S>(
         // Selected first so authentication knows the session protocol, but a failed selection is
         // reported only after the credentials passed (bad credentials stay a 401).
         let selection = inner.config.subprotocol.select(&offered_protocols(request));
-        let binary_key = selection
+        let chosen_protocol = selection
             .as_ref()
-            .is_ok_and(|chosen| session_protocol(chosen.as_deref()) == Protocol::V16);
+            .ok()
+            .map(|chosen| session_protocol(chosen.as_deref()));
+        // The id rule comes before the credentials: a bad id is a 400 whatever they are.
+        check_station_id(&inner, peer, chosen_protocol, &id)?;
+        let binary_key = chosen_protocol == Some(Protocol::V16);
         if let Err(denied) =
             auth::check(&inner.config.security, request, &id, &identity, binary_key)
         {
@@ -1901,8 +1939,14 @@ where
                     &action,
                     &payload,
                 );
-                self.inner
-                    .track(&self.station, self.link_id, &action, &payload, &reply);
+                self.inner.track(
+                    &self.station,
+                    self.link_id,
+                    self.protocol,
+                    &action,
+                    &payload,
+                    &reply,
+                );
                 self.inner
                     .observe_inbound(&self.station, self.link_id, &action, &payload, &reply);
                 match reply {
@@ -2067,6 +2111,41 @@ fn offered_protocols(request: &Request) -> Vec<String> {
         .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+/// The CALLERROR code for an action a charge point may not send: OCPP-J says
+/// `NotImplemented` for a name nobody knows and `NotSupported` for a known action that a
+/// charge point may not send to a central system. A protocol without an action table
+/// knows no names.
+fn unhandled_code(protocol: Protocol, action: &str) -> ErrorCode {
+    match protocol {
+        Protocol::V16 if kirby_ocpp_core::ocpp::messages::registry::find(action).is_some() => {
+            ErrorCode::NotSupported
+        }
+        Protocol::V201 => kirby_ocpp_core::ocpp::v2::registry::unhandled_error_code(action),
+        _ => ErrorCode::NotImplemented,
+    }
+}
+
+/// Applies the station id rule of the session's protocol (`None`: the subprotocol selection
+/// failed, which is reported later). A refusal is an HTTP 400 and an `AuthFailed` event that
+/// names no id, because the id is unusable and attacker controlled.
+#[allow(clippy::result_large_err)] // `ErrorResponse` is fixed by tungstenite's `Callback`.
+fn check_station_id(
+    inner: &Inner,
+    peer: SocketAddr,
+    protocol: Option<Protocol>,
+    id: &str,
+) -> Result<(), ErrorResponse> {
+    if protocol.is_none_or(|protocol| ids::check_station_id_for(protocol, id).is_ok()) {
+        return Ok(());
+    }
+    inner.emit(CsmsEvent::AuthFailed {
+        station: None,
+        remote_addr: peer,
+        reason: "refused: station id is not valid for ocpp2.0.1 (1 to 48 characters from a-z A-Z 0-9 * - _ = + | @ .)".to_owned(),
+    });
+    Err(refusal("station id is not valid for ocpp2.0.1"))
 }
 
 /// An HTTP 503 refusal.

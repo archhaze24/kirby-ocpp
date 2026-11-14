@@ -171,3 +171,32 @@ async fn each_session_is_validated_against_its_own_schemas_with_the_protocol_err
     );
     csms.shutdown().await;
 }
+
+#[tokio::test]
+async fn requiring_ocpp_201_refuses_a_client_that_offers_only_1_6() {
+    let csms = start(SubprotocolPolicy::Require("ocpp2.0.1".to_owned())).await;
+    assert_eq!(connect(&csms, "CP-OLD", "ocpp1.6").await.err(), Some(400));
+    assert_eq!(
+        connect(&csms, "CP-OLD", "ocpp1.6, ocpp2.1").await.err(),
+        Some(400)
+    );
+    assert_eq!(csms.stations().len(), 0);
+    // A client that offers 2.0.1, alone or among others, is served with it.
+    let (mut new, selected) = connect(&csms, "CP-NEW", "ocpp2.0.1")
+        .await
+        .expect("accepted");
+    assert_eq!(selected.as_deref(), Some("ocpp2.0.1"));
+    let (_dual, selected) = connect(&csms, "CP-DUAL", "ocpp1.6, ocpp2.0.1")
+        .await
+        .expect("accepted");
+    assert_eq!(selected.as_deref(), Some("ocpp2.0.1"));
+    // The session answers with the 2.0.1 default, not with a 1.6 or empty body.
+    new.send(Message::text(r#"[2,"h1","Heartbeat",{}]"#))
+        .await
+        .unwrap();
+    match recv(&mut new).await {
+        Frame::CallResult { payload, .. } => assert!(payload["currentTime"].is_string()),
+        other => panic!("expected CALLRESULT, got {}", other.to_json_string()),
+    }
+    csms.shutdown().await;
+}

@@ -611,6 +611,82 @@ async fn decoded_hex_keys_are_limited_to_ocpp_16_sessions() {
     csms.shutdown().await;
 }
 
+/// A 40-digit hex key is a plain UTF-8 password on OCPP 2.0.1: only the literal text
+/// authenticates, the decoded bytes never do. OCPP 1.6 accepts both.
+#[tokio::test]
+async fn profile_one_on_ocpp_201_takes_the_literal_key_only() {
+    let csms = start(|c| {
+        c.security.profile = SecurityProfile::BasicAuth;
+        c.security
+            .keys
+            .insert("AL1000".to_owned(), SPEC_HEX_UPPER.to_owned());
+        c.subprotocol =
+            SubprotocolPolicy::RequireAny(vec!["ocpp1.6".to_owned(), "ocpp2.0.1".to_owned()]);
+    })
+    .await;
+    let mut events = csms.subscribe();
+    let decoded = basic_bytes("AL1000", &SPEC_BYTES);
+    let literal = basic("AL1000", SPEC_HEX_UPPER);
+
+    // 2.0.1: the literal key passes, the decoded one is a 401 with the UTF-8 hint.
+    let accepted = raw_handshake_offering(&csms, "AL1000", Some(&literal), Some("ocpp2.0.1")).await;
+    assert!(accepted.is_ok());
+    let (status, challenge) =
+        raw_handshake_offering(&csms, "AL1000", Some(&decoded), Some("ocpp2.0.1"))
+            .await
+            .unwrap_err();
+    assert_eq!(status, 401);
+    assert_eq!(
+        challenge.as_deref(),
+        Some("Basic realm=\"kirby-csms\", charset=\"UTF-8\"")
+    );
+    let (_, reason) = wait_refused(&mut events, Some("AL1000")).await;
+    assert_eq!(reason, "invalid credentials");
+
+    // 1.6: both forms pass.
+    for header in [&literal, &decoded] {
+        let accepted = raw_handshake_offering(&csms, "AL1000", Some(header), Some("ocpp1.6")).await;
+        assert!(accepted.is_ok());
+    }
+    csms.shutdown().await;
+}
+
+/// On OCPP 2.0.1 the id rule is judged before the credentials: a bad id is a 400 whatever the
+/// credentials are, and bad credentials for a valid id stay a 401.
+#[tokio::test]
+async fn the_ocpp_201_station_id_rule_comes_before_the_credentials() {
+    let csms = start(|c| {
+        basic_auth(c, SecurityProfile::BasicAuth);
+        c.subprotocol =
+            SubprotocolPolicy::RequireAny(vec!["ocpp1.6".to_owned(), "ocpp2.0.1".to_owned()]);
+    })
+    .await;
+    let mut events = csms.subscribe();
+    let id = "CP:A";
+    for header in [None, Some(basic(id, "nope")), Some(basic(id, KEY))] {
+        let result = raw_handshake_offering(&csms, id, header.as_deref(), Some("ocpp2.0.1")).await;
+        assert_eq!(result.unwrap_err().0, 400, "{header:?}");
+        let (station, reason) = wait_refused(&mut events, None).await;
+        assert_eq!(station, None);
+        assert!(
+            reason.starts_with("refused: station id is not valid"),
+            "{reason}"
+        );
+    }
+    // A valid id with wrong credentials is a 401.
+    let wrong = basic("CP-A", "nope");
+    let result = raw_handshake_offering(&csms, "CP-A", Some(&wrong), Some("ocpp2.0.1")).await;
+    assert_eq!(result.unwrap_err().0, 401);
+    // The same colon id is not refused for its form on 1.6 (it fails the key check only).
+    let result = raw_handshake_offering(&csms, id, Some(&basic(id, KEY)), Some("ocpp1.6")).await;
+    assert_eq!(
+        result.unwrap_err().0,
+        401,
+        "no key is configured for that id"
+    );
+    csms.shutdown().await;
+}
+
 #[tokio::test]
 async fn authentication_is_judged_before_the_protocol_refusal() {
     let csms = start(|c| {

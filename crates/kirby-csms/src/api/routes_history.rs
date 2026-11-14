@@ -413,6 +413,8 @@ pub(super) async fn transactions(State(state): State<ApiState>, uri: Uri) -> Res
                 Ok(Value::Object(object)) => object,
                 _ => Map::new(),
             };
+            // `evse` joins the documented shape together with the 2.0.1 API surface.
+            object.remove("evse");
             object.insert("station".to_owned(), station.into());
             object.insert("id".to_owned(), record.id.to_string().into());
             Value::Object(object)
