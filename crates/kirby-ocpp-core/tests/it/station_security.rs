@@ -697,13 +697,9 @@ async fn hex_encoding_rejects_keys_that_are_not_hex_and_keeps_the_old_key() {
             .expect_err("a key that is not hex is refused locally too");
         assert!(!error.to_string().contains(value), "{error}");
     }
-    // Neither refusal reconnected the station; the first accepted key does, in either case.
-    assert_eq!(rig.csms.connections(), 1);
+    // No refusal reconnected the station, and a valid key is stored at profile 0 without one.
     rig.cfg("AuthorizationKey", "0123456789ABCDEF").await;
-    rig.csms
-        .wait_for_connection_count(2, STEP)
-        .await
-        .expect("reconnect after the accepted key");
+    assert_eq!(rig.csms.connections(), 1);
     rig.observed.drain();
     assert!(rig.observed.logs.iter().all(|l| !l.contains(secret)));
     rig.shutdown().await;
@@ -852,19 +848,74 @@ async fn setting_the_current_profile_again_is_rejected_for_profiles_two_and_thre
     join.await.unwrap();
 }
 
+/// Waits until the CSMS has seen `count` boots in total (a reconnect that completed).
+async fn wait_boots(rig: &Rig, count: usize) {
+    rig.csms
+        .wait_for_call_count_after(0, "BootNotification", count, |_| true, STEP)
+        .await
+        .unwrap_or_else(|e| panic!("boot #{count}: {e}"));
+}
+
+fn reconfiguration_events(rig: &Rig) -> usize {
+    rig.calls("SecurityEventNotification", 0)
+        .iter()
+        .filter(|p| p["type"] == "ReconfigurationOfSecurityParameters")
+        .count()
+}
+
 #[tokio::test]
 async fn new_security_parameters_make_the_station_reconnect() {
     let mut rig = rig().await;
     rig.connect_booted().await;
     assert_eq!(rig.csms.connections(), 1);
+    // Profile 0 does not use the key: storing it changes nothing about the connection.
     rig.cfg("AuthorizationKey", "0123456789abcdef").await;
-    // The reply came first (cfg waited for it); then the station reconnects by itself.
+    // Raising the profile does; the reply came first (cfg waited for it), then the station
+    // reconnects by itself.
+    rig.cfg("SecurityProfile", "1").await;
     rig.csms
         .wait_for_connection_count(2, STEP)
         .await
+        .expect("reconnect after SecurityProfile");
+    wait_boots(&rig, 2).await;
+    // Profile 1 uses the key as the Basic Auth password.
+    rig.cfg("AuthorizationKey", "fedcba9876543210").await;
+    rig.csms
+        .wait_for_connection_count(3, STEP)
+        .await
         .expect("reconnect after AuthorizationKey");
-    rig.wait_registration(kirby_ocpp_core::ocpp::types::RegistrationStatus::Accepted)
-        .await;
+    wait_boots(&rig, 3).await;
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn writes_that_cannot_change_the_connection_do_not_reconnect_or_report() {
+    let mut rig = rig().await;
+    rig.connect_booted().await;
+    // Key at profile 0 and the unchanged profile 0: no reconnect, no event.
+    rig.cfg("AuthorizationKey", "0123456789abcdef").await;
+    rig.cfg("SecurityProfile", "0").await;
+    // The raise is the first change that matters.
+    rig.cfg("SecurityProfile", "1").await;
+    wait_boots(&rig, 2).await;
+    // Unchanged profile 1: no reconnect, no event.
+    rig.cfg("SecurityProfile", "1").await;
+    // A key change at profile 1 reconnects again; it also orders the checks below after
+    // everything the writes above could have caused.
+    rig.cfg("AuthorizationKey", "fedcba9876543210").await;
+    wait_boots(&rig, 3).await;
+    rig.csms
+        .wait_for_call_count_after(
+            0,
+            "SecurityEventNotification",
+            2,
+            |p| p["type"] == "ReconfigurationOfSecurityParameters",
+            STEP,
+        )
+        .await
+        .expect("two reconfiguration events");
+    assert_eq!(rig.csms.connections(), 3);
+    assert_eq!(reconfiguration_events(&rig), 2);
     rig.shutdown().await;
 }
 

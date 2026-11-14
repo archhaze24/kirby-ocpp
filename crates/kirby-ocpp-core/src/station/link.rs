@@ -15,7 +15,8 @@
 //!   `Connect` / `Reconnect`.
 //! * `Disconnect` and shutdown cancel reconnect, boot retry, heartbeat and debounce timers
 //!   and fail calls in flight; a `Closed` event of a link we closed ourselves never reaches
-//!   the actor (the link is dropped first), so it can never trigger a backoff.
+//!   the actor (the link is dropped first), so it can never trigger a backoff. Frames the
+//!   link had already buffered are published first (like at shutdown), up to a bound.
 //! * Every task result carries the link generation; results of an older link are ignored.
 //!
 //! # BootNotification
@@ -83,7 +84,8 @@ impl StationActor {
             handle.abort();
         }
         let connection = self.link.conn.clone();
-        let events = self.link.events.take();
+        let mut events = self.link.events.take();
+        self.drain_buffered_events(events.as_mut());
         self.link_down(&CallError::Closed { code: None });
         close_in_background(connection, events);
         self.state.connection = ConnectionState::Disconnected;
@@ -94,7 +96,8 @@ impl StationActor {
     /// automatic reconnect disabled); the boot follows through the normal lifecycle.
     pub(super) fn reconnect_for_hard_reset(&mut self) {
         let connection = self.link.conn.clone();
-        let events = self.link.events.take();
+        let mut events = self.link.events.take();
+        self.drain_buffered_events(events.as_mut());
         self.link_down(&CallError::Closed { code: None });
         close_in_background(connection, events);
         self.link.wanted = true;
@@ -500,6 +503,39 @@ fn redact_url(url: &str) -> String {
     }
 }
 
+/// Most buffered events taken from a link that is being dropped. The connection task buffers
+/// at most `ws::EVENT_CAPACITY` (64); the bound also covers a task that keeps emitting while
+/// the actor drains.
+const DRAIN_LIMIT: usize = 256;
+
+impl StationActor {
+    /// Publishes the events the connection task buffered before the link is dropped, so the
+    /// frames already received show up in logs, recordings and the UI the way the ones
+    /// handled before them did. Does not wait: the close handshake is not part of it.
+    ///
+    /// A buffered `CALL` is not dispatched on a link that is going away; dropping it makes
+    /// the connection answer `InternalError` if the socket is still writable. `Closed` ends
+    /// the drain.
+    fn drain_buffered_events(
+        &mut self,
+        events: Option<&mut tokio::sync::mpsc::Receiver<ConnectionEvent>>,
+    ) {
+        let Some(events) = events else {
+            return;
+        };
+        for _ in 0..DRAIN_LIMIT {
+            match events.try_recv() {
+                Ok(ConnectionEvent::Frame(record)) => self.emit_frame(record),
+                Ok(ConnectionEvent::ProtocolWarning(text)) => {
+                    self.log(LogLevel::Warn, format!("protocol: {text}"));
+                }
+                Ok(ConnectionEvent::Call(_)) => {}
+                Ok(ConnectionEvent::Closed { .. }) | Err(_) => break,
+            }
+        }
+    }
+}
+
 /// Closes `connection` and lets the close handshake finish in the background; its events
 /// are not needed.
 fn close_in_background(
@@ -523,7 +559,90 @@ fn close_in_background(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use tokio::sync::{broadcast, mpsc};
+
     use super::*;
+    use crate::ocpp::frame::{Direction, FrameRecord};
+    use crate::station::event::Event;
+
+    /// An actor whose link holds `frames` buffered inbound frames (and a `Call` and a warning
+    /// among them); `events` observes what the actor publishes.
+    fn actor_with_buffered_events(
+        frames: usize,
+    ) -> (StationActor, broadcast::Receiver<Event>, Vec<String>) {
+        let (_, commands) = mpsc::channel(1);
+        let (events, observed) = broadcast::channel(1024);
+        let mut actor = StationActor::new(
+            crate::config::StationConfig::new("ws://127.0.0.1:1/ocpp").without_persistence(),
+            Arc::new(crate::clock::SystemClock),
+            commands,
+            events,
+            None,
+        )
+        .0;
+        let (connection, _reply) = Connection::test_reply_channel();
+        let (sender, receiver) = mpsc::channel(frames + 2);
+        let mut ids = Vec::new();
+        for number in 0..frames {
+            let id = format!("buffered-{number}");
+            sender
+                .try_send(ConnectionEvent::Frame(FrameRecord {
+                    ts: chrono::Utc::now(),
+                    direction: Direction::In,
+                    msg_id: None,
+                    action: Some("Heartbeat".to_owned()),
+                    frame: serde_json::json!([3, id, {}]),
+                }))
+                .expect("room in the channel");
+            ids.push(id);
+            if number == 0 {
+                sender
+                    .try_send(ConnectionEvent::ProtocolWarning("odd frame".to_owned()))
+                    .expect("room in the channel");
+            }
+        }
+        actor.link.conn = Some(connection);
+        actor.link.events = Some(receiver);
+        (actor, observed, ids)
+    }
+
+    fn observed_frame_ids(observed: &mut broadcast::Receiver<Event>) -> Vec<String> {
+        let mut ids = Vec::new();
+        while let Ok(event) = observed.try_recv() {
+            if let Event::Frame(record) = event
+                && let Some(id) = record.frame.get(1).and_then(serde_json::Value::as_str)
+            {
+                ids.push(id.to_owned());
+            }
+        }
+        ids
+    }
+
+    #[tokio::test]
+    async fn disconnect_publishes_frames_already_received() {
+        let (mut actor, mut observed, ids) = actor_with_buffered_events(5);
+        actor.disconnect();
+        assert_eq!(observed_frame_ids(&mut observed), ids);
+    }
+
+    #[tokio::test]
+    async fn hard_reset_reconnect_publishes_frames_already_received() {
+        let (mut actor, mut observed, ids) = actor_with_buffered_events(5);
+        actor.reconnect_for_hard_reset();
+        assert_eq!(observed_frame_ids(&mut observed), ids);
+    }
+
+    #[tokio::test]
+    async fn draining_on_disconnect_stops_at_its_bound() {
+        let (mut actor, mut observed, ids) = actor_with_buffered_events(DRAIN_LIMIT + 10);
+        actor.disconnect();
+        let seen = observed_frame_ids(&mut observed);
+        // The warning in the buffer uses one of the steps.
+        assert_eq!(seen.len(), DRAIN_LIMIT - 1);
+        assert_eq!(seen, ids[..seen.len()]);
+    }
 
     #[test]
     fn urls_are_logged_without_credentials() {

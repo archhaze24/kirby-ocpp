@@ -66,7 +66,7 @@ There is no flag that sets the security profile (`--security-profile-fallback` o
 - Profile 3: the station presents the stored charge point certificate (from `CertificateSigned`) as the TLS client identity, unless `--tls-cert` / `--tls-key` are given.
 - `SecurityProfile` can only be raised. Exception: with `AllowSecurityProfileDowngrade` set to `true`, 3 may be lowered to 2. Lowering to 1 or 0 is never possible. Setting the current value is `Rejected` for 2 and 3 and a no-op `Accepted` for 0 and 1.
 - Prerequisites when changing: 1 needs credentials (an `AuthorizationKey` or a URL password), 2 needs a `wss://` URL as well, 3 additionally a client certificate (`--tls-cert` or a stored one).
-- After an accepted change of `SecurityProfile` or `AuthorizationKey`, and after `CertificateSigned` `Accepted`, the station sends the reply, disconnects and reconnects at once with the new parameters (even with auto-reconnect off).
+- After an accepted change of `SecurityProfile` or of the `AuthorizationKey`, and after `CertificateSigned` `Accepted`, the station sends the reply, disconnects and reconnects at once with the new parameters (even with auto-reconnect off). Writes that cannot change the connection do not reconnect and queue no `ReconfigurationOfSecurityParameters` event: setting `SecurityProfile` to the value it already has (0 or 1), and writing the `AuthorizationKey` while profile 0 or 3 is in force, where the key is only stored.
 - Transport settings are applied when a connection is opened, so other changes (for example `AllowCentralSystemTLSWildcards`) take effect at the next reconnect.
 - Failed connection attempts raise security events, see [Security events](#security-events).
 
@@ -78,7 +78,7 @@ There is no flag that sets the security profile (`--security-profile-fallback` o
 - With `hex` the registry key accepts only an even number of hexadecimal digits (either case, 16 to 40 characters, so 8 to 20 bytes); any other value is `Rejected` for `ChangeConfiguration` and refused for the local `SetConfiguration`, and the old key stays. A stored key that is not valid hex (for example saved under `literal`) makes every connection attempt fail with an error that does not show the key, retried with the usual backoff; the secrets file is left unchanged. `hex` applies to the `AuthorizationKey` of OCPP 1.6J only, never to a password written in the URL.
 - The key is percent-encoded when it is placed into the connection URL, so a `%` in the charge point id or the key reaches the wire as typed. A password in the `--url` userinfo is different: it is percent-decoded, so write a literal `%` as `%25` there, and `%XX` gives one raw byte.
 - The CSMS accepts both forms for OCPP 1.6J sessions, without a switch: the password equal to the configured key text, or equal to the bytes of that key when it is nonempty, even-length hexadecimal text. Sessions of other OCPP versions accept only the literal text. Both comparisons are byte for byte and constant time.
-- Changing the key with `ChangeConfiguration` reconnects the station, so the CSMS-side key must be updated in step with it.
+- Changing the key with `ChangeConfiguration` under profile 1 or 2 reconnects the station, so the CSMS-side key must be updated in step with it.
 - The key comes from the station's secrets file after a restart, see [Secrets storage](#secrets-storage). With `--no-persist` it is not kept.
 
 ## TLS and mTLS how-to

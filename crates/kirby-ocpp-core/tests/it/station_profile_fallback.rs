@@ -150,14 +150,10 @@ async fn rig(gate: &Gate, fallback: bool) -> Rig {
     rig
 }
 
-/// Sets the key and the profile through the CSMS; the station reconnects after each.
+/// Sets the key and the profile through the CSMS; profile 0 does not use the key, so only
+/// the profile change reconnects the station.
 async fn switch_to_profile_one(rig: &Rig) {
     rig.cfg("AuthorizationKey", "0123456789abcdef").await;
-    rig.csms
-        .wait_for_connection_count(2, STEP)
-        .await
-        .expect("reconnect after the key");
-    rig.wait_registration(RegistrationStatus::Accepted).await;
     rig.cfg("SecurityProfile", "1").await;
 }
 
@@ -212,7 +208,7 @@ async fn a_connection_with_the_new_profile_ends_the_fallback_window() {
     let rig = rig(&gate, true).await;
     switch_to_profile_one(&rig).await;
     rig.csms
-        .wait_for_connection_count(3, STEP)
+        .wait_for_connection_count(2, STEP)
         .await
         .expect("reconnect with profile 1");
     rig.wait_registration(RegistrationStatus::Accepted).await;
@@ -317,11 +313,6 @@ async fn a_failure_that_is_not_a_refusal_restarts_the_count() {
     // The first authenticated attempt is refused (counted), the following ones are closed.
     gate.set_mode(REFUSE_ONCE);
     rig.cfg("AuthorizationKey", "0123456789abcdef").await;
-    rig.csms
-        .wait_for_connection_count(2, STEP)
-        .await
-        .expect("reconnect after the key");
-    rig.wait_registration(RegistrationStatus::Accepted).await;
     rig.cfg("SecurityProfile", "1").await;
     wait_state(&rig.station, "a refusal and then closes", |_| {
         gate.refused() == 1 && gate.held() >= 2
@@ -443,17 +434,9 @@ async fn a_key_change_at_profile_zero_keeps_no_previous_key_on_disk() {
     let gate = Gate::start(FORWARD).await;
     let mut rig = rig(&gate, true).await;
     rig.cfg("AuthorizationKey", "0123456789abcdef").await;
-    rig.csms
-        .wait_for_connection_count(2, STEP)
-        .await
-        .expect("reconnect after the first key");
-    rig.wait_registration(RegistrationStatus::Accepted).await;
     rig.cfg("AuthorizationKey", "fedcba9876543210").await;
-    rig.csms
-        .wait_for_connection_count(3, STEP)
-        .await
-        .expect("reconnect after the second key");
-    rig.wait_registration(RegistrationStatus::Accepted).await;
+    // Profile 0 does not use the key: no reconnect, and no previous key is kept.
+    assert_eq!(rig.csms.connections(), 1);
     rig.station.shutdown().await.unwrap();
     rig.join.take().unwrap().await.unwrap();
     let name = format!(

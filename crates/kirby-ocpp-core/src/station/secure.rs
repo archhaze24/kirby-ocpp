@@ -848,7 +848,16 @@ impl StationActor {
             );
             self.mark_dirty();
         }
-        if key == AUTHORIZATION_KEY || key == SECURITY_PROFILE {
+        // Reconnect only when the new value can change the connection (A05.FR.06/07, A02.FR.08):
+        // a changed profile, or a key that the profile in force sends as the Basic Auth
+        // password (1 and 2). The key is only stored at profiles 0 and 3, and a write of the
+        // unchanged profile 0 or 1 leaves everything as it was.
+        let changes_connection = match key {
+            SECURITY_PROFILE => self.registry.security_profile() != previous_profile,
+            AUTHORIZATION_KEY => matches!(self.registry.security_profile(), 1 | 2),
+            _ => false,
+        };
+        if changes_connection {
             self.log(
                 LogLevel::Info,
                 format!("{key} changed; reconnecting so the new parameters are used"),
