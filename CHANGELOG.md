@@ -16,6 +16,12 @@ tag as the GitHub release notes.
 - The emulator percent-encodes the station id and the `AuthorizationKey` taken from the configuration registry before they reach the connection URL, so `%` sequences in either reach the wire literally. A password given in the URL is still percent-decoded once.
 - `kirby-csms` accepts, for OCPP 1.6 sessions, a Basic Auth password that holds the decoded bytes of a hexadecimal `AuthorizationKey` as OCPP-J 1.6 section 6.2.2 specifies, besides the literal key. Sessions on other subprotocols accept only the literal key.
 
+- The emulator no longer reconnects or queues a `ReconfigurationOfSecurityParameters` event for writes that cannot change the connection: `SecurityProfile` set to the value it already has (0 or 1), and `AuthorizationKey` written while profile 0 or 3 is in force.
+- Disconnects, hard resets and security reconnects publish the frames the connection had already received instead of discarding them.
+- The `kirby-csms` terminal UI shows every connector row in stacked layouts (for example 110x30) when the transaction table has room to spare.
+
+- `kirby-csms --record` writes the negotiated subprotocol of each session into its frames (`protocol`, absent when none was negotiated). `--replay` refuses a recording that names a protocol other than `ocpp1.6`; recordings without the key still replay as 1.6.
+
 ### Added
 
 - `--authorization-key-encoding literal|hex` (`OCPP_AUTHORIZATION_KEY_ENCODING`, `[tls].authorization_key_encoding`) selects how the emulator turns the 1.6 `AuthorizationKey` into the Basic Auth password. `literal` (default) sends the key text; `hex` sends the decoded bytes and accepts only hexadecimal keys.
