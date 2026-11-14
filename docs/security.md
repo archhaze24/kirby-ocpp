@@ -181,6 +181,7 @@ The CSMS keeps its keys in memory. They come from flags, the environment or key 
 - Session recordings from either tool written by `--record` are redacted by the recorder, whatever `--show-secrets` says: the same `AuthorizationKey` masking applies to every frame and command in the file, and the password of any `scheme://user:password@host` URL in a payload string becomes `***`, wherever the URL sits in the string (a bare value, `key=value` text, several URLs, a long string). The file is created `0600` and never overwritten without `--record-overwrite`. `replay` never sends a payload that holds a masked value; `kirby-csms --replay` refuses the whole recording when a CALL it would send holds one, and never sends a recorded transaction id. A recording still holds idTags, station ids and the content of other payloads, so treat it like the `--log-file`.
 - `--show-secrets` (`OCPP_SHOW_SECRETS` / `KIRBY_CSMS_SHOW_SECRETS`) keeps the real value in those places. Use it only for debugging; logs then contain the key.
 - Schema errors for `AuthorizationKey` never quote the value, and `Debug` output of the configuration registry and the CSMS security policy masks keys.
+- Malformed inbound frames use the same recursive masking when their text is valid JSON. Invalid JSON is replaced by `<redacted: invalid JSON>` unless `--show-secrets` is enabled.
 - `kirby-csms --auth-key` is not redacted from the process list. Use the environment or a key file instead.
 
 ## Known deviations

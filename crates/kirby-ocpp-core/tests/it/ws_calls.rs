@@ -553,21 +553,30 @@ async fn frames_in_and_out_are_reported_as_events() {
 }
 
 #[tokio::test]
-async fn text_that_is_not_a_frame_is_reported_raw_and_ignored() {
-    let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
-    let (_connection, mut events) = connect(&server.url("/ocpp"), options()).await;
-    let mut peer = server.next_peer().await;
+async fn invalid_json_is_hidden_unless_secrets_are_shown_and_ignored() {
+    for show_secrets in [false, true] {
+        let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+        let mut opts = options();
+        opts.show_secrets = show_secrets;
+        let (_connection, mut events) = connect(&server.url("/ocpp"), opts).await;
+        let mut peer = server.next_peer().await;
 
-    peer.send_text("not json at all").await;
-    let record = next_event(&mut events, |event| match event {
-        ConnectionEvent::Frame(record) => Some(record),
-        _ => None,
-    })
-    .await;
-    assert_eq!(record.frame, Value::String("not json at all".to_owned()));
-    assert!(
-        next_warning(&mut events)
-            .await
-            .contains("invalid OCPP-J frame")
-    );
+        peer.send_text("not json at all").await;
+        let record = next_event(&mut events, |event| match event {
+            ConnectionEvent::Frame(record) => Some(record),
+            _ => None,
+        })
+        .await;
+        let expected = if show_secrets {
+            "not json at all"
+        } else {
+            "<redacted: invalid JSON>"
+        };
+        assert_eq!(record.frame, Value::String(expected.to_owned()));
+        assert!(
+            next_warning(&mut events)
+                .await
+                .contains("invalid OCPP-J frame")
+        );
+    }
 }

@@ -1846,14 +1846,13 @@ fn sanitize_action(action: &str) -> String {
         .collect()
 }
 
-/// The text kept in a [`CsmsEvent::Malformed`]: cut to 512 characters. A frame that does not
-/// parse cannot be redacted field by field, so a text that mentions `AuthorizationKey` is
-/// replaced by a placeholder unless secrets are shown.
+/// The text kept in a [`CsmsEvent::Malformed`]: redacted, then cut to 512 characters.
+/// Invalid JSON is omitted unless secrets are shown.
 fn malformed_text(text: &str, show_secrets: bool) -> String {
-    if !show_secrets && text.to_ascii_lowercase().contains("authorizationkey") {
-        return "<redacted: mentions AuthorizationKey>".to_owned();
-    }
-    text.chars().take(MALFORMED_TEXT_CHARS).collect()
+    kirby_ocpp_core::ocpp::frame::redact_malformed_text(text, show_secrets)
+        .chars()
+        .take(MALFORMED_TEXT_CHARS)
+        .collect()
 }
 
 /// Largest frame (as JSON text) that an event carries in full; bigger ones are replaced by the

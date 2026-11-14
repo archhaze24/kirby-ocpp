@@ -28,7 +28,9 @@ use uuid::Uuid;
 
 use super::{ConnectOptions, ConnectionEvent, EVENT_CAPACITY, IncomingCall, SchemaSet};
 use crate::error::CallError;
-use crate::ocpp::frame::{Direction, ErrorCode, Frame, FrameRecord, redact_secrets};
+use crate::ocpp::frame::{
+    Direction, ErrorCode, Frame, FrameRecord, redact_malformed_text, redact_secrets,
+};
 use crate::ocpp::responder::ReplyHandle;
 
 /// Close code reported when the connection ended without a close handshake.
@@ -341,7 +343,7 @@ impl Task {
                     direction: Direction::In,
                     msg_id: error.message_id.clone(),
                     action: None,
-                    frame: Value::String(text.to_owned()),
+                    frame: Value::String(redact_malformed_text(text, self.show_secrets)),
                 };
                 self.emit(ConnectionEvent::Frame(record)).await?;
                 self.warn(format!("invalid OCPP-J frame: {error}")).await?;
@@ -808,6 +810,34 @@ mod tests {
         .await
         .expect("the call within the deadline");
         assert_eq!((call.id.as_str(), call.action.as_str()), ("7", "Ping"));
+    }
+
+    #[tokio::test]
+    async fn malformed_frame_events_hide_authorization_keys() {
+        for text in [
+            r#"[2,17,"ChangeConfiguration",{"key":"AuthorizationKey","value":"test-secret-sentinel"}]"#,
+            r#"[2,17,"ChangeConfiguration",{"key":"Authorization\u004bey","value":"test-secret-sentinel"}]"#,
+            r#"[2,"17","ChangeConfiguration",{"key":"AuthorizationKey","value":"test-secret-sentinel""#,
+        ] {
+            let mut rig = rig(SchemaSet::default()).await;
+            rig.peer.send(Message::Text(text.into())).await.unwrap();
+            let record = timeout(DEADLINE, async {
+                loop {
+                    match rig.events.recv().await {
+                        Some(ConnectionEvent::Frame(record)) => break record,
+                        Some(_) => {}
+                        None => panic!("the task ended"),
+                    }
+                }
+            })
+            .await
+            .expect("the frame within the deadline");
+            assert_eq!(record.direction, Direction::In);
+            assert!(
+                !record.frame.to_string().contains("test-secret-sentinel"),
+                "malformed frame event exposes a secret"
+            );
+        }
     }
 
     #[tokio::test]

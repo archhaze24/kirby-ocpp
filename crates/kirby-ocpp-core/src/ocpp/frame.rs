@@ -512,6 +512,22 @@ pub fn redact_payload(payload: &mut Value) {
     }
 }
 
+/// Returns malformed frame text safe for logs, unless secrets are explicitly shown.
+/// Valid JSON is redacted recursively even when its OCPP envelope is invalid. Invalid
+/// JSON is omitted because truncated or escaped property names cannot be matched safely.
+pub fn redact_malformed_text(text: &str, show_secrets: bool) -> String {
+    if show_secrets {
+        return text.to_owned();
+    }
+    match serde_json::from_str::<Value>(text) {
+        Ok(mut value) => {
+            redact_payload(&mut value);
+            value.to_string()
+        }
+        Err(_) => "<redacted: invalid JSON>".to_owned(),
+    }
+}
+
 /// Direction of a frame relative to this charge point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -542,6 +558,20 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn malformed_text_redacts_escaped_keys_and_respects_show_secrets() {
+        let text = r#"[2,17,"ChangeConfiguration",{"key":"Authorization\u004bey","value":"test-secret-sentinel"}]"#;
+        let safe: Value = serde_json::from_str(&redact_malformed_text(text, false)).unwrap();
+        assert_eq!(safe[3]["value"], REDACTED);
+        assert_eq!(redact_malformed_text(text, true), text);
+        assert_eq!(
+            redact_malformed_text("[2,", false),
+            "<redacted: invalid JSON>"
+        );
+        assert_eq!(redact_malformed_text("[2,", true), "[2,");
+        assert_eq!(redact_malformed_text("[2,17,{}]", false), "[2,17,{}]");
+    }
 
     fn roundtrip(frame: &Frame) {
         let text = frame.to_json_string();

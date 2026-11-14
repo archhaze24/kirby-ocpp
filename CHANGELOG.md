@@ -7,6 +7,10 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Both tools redact `AuthorizationKey` in malformed inbound frame logs, including escaped property names. Invalid JSON is omitted unless `--show-secrets` is enabled.
+
 ### Added
 
 - `kirby-csms --subprotocol require:NAME,NAME` accepts a list: the first subprotocol the client offers (in the client's order) that is on the list is selected, and a client that offers none of them is refused with HTTP 400. `kirby-csms-core` has the matching `SubprotocolPolicy::RequireAny`.
