@@ -334,8 +334,24 @@ impl<S: LinkSnapshot + Clone + Send + Sync + 'static> LinkWatch<S> {
         }
     }
 
-    /// The last connection failure or disconnect seen, with its hint.
-    pub fn last_error(&self) -> Option<String> {
+    /// Notes every event that is already queued. A lagged receiver reports the loss once and
+    /// then yields the newest events: keep reading until the queue is empty or closed.
+    fn catch_up(&mut self) {
+        loop {
+            match self.rx.try_recv() {
+                Ok(event) => self.note(&event),
+                Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                Err(
+                    broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed,
+                ) => break,
+            }
+        }
+    }
+
+    /// The last connection failure or disconnect logged so far, with its hint. Events still
+    /// queued are read first, so a failure logged just before the call is included.
+    pub fn last_error(&mut self) -> Option<String> {
+        self.catch_up();
         self.last_error.as_deref().map(with_hint)
     }
 
@@ -353,22 +369,9 @@ impl<S: LinkSnapshot + Clone + Send + Sync + 'static> LinkWatch<S> {
             };
             match step {
                 Step::Stopped(None) => return "the station stopped".to_owned(),
-                Step::Stopped(Some(reason)) => {
-                    // The failure log precedes the snapshot change: pick up what is queued.
-                    // A lagged receiver reports the loss once and then yields the newest
-                    // events: keep reading until the queue is empty or closed.
-                    loop {
-                        match self.rx.try_recv() {
-                            Ok(event) => self.note(&event),
-                            Err(broadcast::error::TryRecvError::Lagged(_)) => {}
-                            Err(
-                                broadcast::error::TryRecvError::Empty
-                                | broadcast::error::TryRecvError::Closed,
-                            ) => break,
-                        }
-                    }
-                    return self.describe(&reason);
-                }
+                // The failure log precedes the snapshot change: `describe` picks up what is
+                // queued.
+                Step::Stopped(Some(reason)) => return self.describe(&reason),
                 Step::Event(Ok(event)) => self.note(&event),
                 Step::Event(Err(broadcast::error::RecvError::Lagged(_))) => {}
                 Step::Event(Err(broadcast::error::RecvError::Closed)) => events_open = false,
@@ -376,7 +379,7 @@ impl<S: LinkSnapshot + Clone + Send + Sync + 'static> LinkWatch<S> {
         }
     }
 
-    fn describe(&self, reason: &str) -> String {
+    fn describe(&mut self, reason: &str) -> String {
         match self.last_error() {
             Some(last) => format!("reconnect stopped ({reason}); last error: {last}"),
             None => format!("reconnect stopped ({reason})"),
@@ -856,6 +859,23 @@ mod tests {
         let mut watch = LinkWatch::from_parts(event_rx, state_rx);
         let text = tokio::time::timeout(WAIT, watch.dead()).await.unwrap();
         assert!(text.contains("last error: refused"), "{text}");
+    }
+
+    #[test]
+    fn last_error_includes_a_failure_that_is_still_queued() {
+        // The boot-wait timeout asks for the last error without `dead` running: a failure
+        // logged just before must still be named.
+        let config = kirby_ocpp_core::config::StationConfig::new("ws://h/p");
+        let (_state_tx, state_rx) = watch::channel(Snapshot::initial(&config));
+        let (event_tx, event_rx) = broadcast::channel(4);
+        let mut watch = LinkWatch::from_parts(event_rx, state_rx);
+        event_tx
+            .send(log_event("connection failed: refused"))
+            .unwrap();
+        assert_eq!(
+            watch.last_error().as_deref(),
+            Some(with_hint("refused").as_str())
+        );
     }
 
     #[tokio::test]
