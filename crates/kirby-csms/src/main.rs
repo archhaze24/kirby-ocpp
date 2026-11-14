@@ -105,14 +105,21 @@ async fn run_server(
         Err(error) => return usage_error(&format!("cannot open the log file: {error}")),
     };
 
-    let (handle, observer) = match start_server(config, recording, replay.is_some()).await {
+    // The rules and the event receivers of the log and the script exist before the first
+    // station is accepted: no reply is decided without them and no event is missed.
+    let (handle, observer, startup) = match start_server(
+        config,
+        recording,
+        replay.is_some(),
+        &cli.blocks.rules,
+        script.is_some(),
+    )
+    .await
+    {
         Ok(started) => started,
         Err(code) => return code,
     };
-    if let Err(error) = apply_rules(&handle, &cli.blocks.rules) {
-        handle.shutdown().await;
-        return usage_error(&error);
-    }
+    let (sink_events, script_events, api_events) = (startup.sink, startup.script, startup.api);
     // The terminal UI is for interactive runs only. The `listening` line goes to stderr before
     // the alternate screen opens, so it is still in the scrollback after the UI ends.
     let session = if cli.wants_tui(
@@ -142,17 +149,15 @@ async fn run_server(
     // Headless runs: register the signal handlers before `listening` is printed, so a signal
     // sent after that line is never lost to the default action.
     let mut shutdown = session.is_none().then(Shutdown::install);
-    // Subscribe first, print `listening`, then start printing events: that line always comes
-    // first and nothing is missed.
-    let sink_events = handle.subscribe();
-    let script_events = script.is_some().then(|| handle.subscribe());
+    // The receivers were taken before the first accept; print `listening`, then start
+    // printing events: that line always comes first and nothing is missed.
     headless::announce(&out, &handle);
     if let Some(plan) = &api_plan {
         headless::announce_api(&out, plan.addr, plan.tls.is_some());
     }
     startup_notes(&handle, cli.json, Some(&out));
     let limits = commands::new_limits();
-    let api = api_plan.map(|plan| plan.spawn(&handle, &limits));
+    let api = api_plan.map(|plan| plan.spawn(&handle, &limits, api_events));
     let scheduler = start_automation(&handle, &cli, &limits, &out);
     let sink = (session.is_none() || cli.log_file.is_some())
         .then(|| Sink::spawn(&handle, sink_events, out.clone()));
@@ -344,13 +349,19 @@ struct ApiPlan {
 
 impl ApiPlan {
     /// Starts serving on the bound listener.
-    fn spawn(self, handle: &CsmsHandle, limits: &commands::CommandLimits) -> api::Api {
-        api::spawn(
+    fn spawn(
+        self,
+        handle: &CsmsHandle,
+        limits: &commands::CommandLimits,
+        events: broadcast::Receiver<CsmsEvent>,
+    ) -> api::Api {
+        api::spawn_with_events(
             self.listener,
             handle.clone(),
             limits.clone(),
             self.token,
             self.tls,
+            events,
         )
     }
 }
@@ -465,15 +476,30 @@ fn stderr_line(line: &str) {
     let _ = std::io::stderr().write_all(format!("{line}\n").as_bytes());
 }
 
-/// Starts the server; a bind error names the address that could not be bound.
+/// What exists before the server accepts its first connection, besides the rules.
+struct Startup {
+    /// Events for the log sink.
+    sink: broadcast::Receiver<CsmsEvent>,
+    /// Events for the script run, when there is a script.
+    script: Option<broadcast::Receiver<CsmsEvent>>,
+    /// Events for the API ring, including connections made during startup.
+    api: broadcast::Receiver<CsmsEvent>,
+}
+
+/// Starts the server and, before it accepts a connection, installs the `[[rule]]` blocks and
+/// takes the event receivers. A bind error names the address that could not be bound; a bad
+/// rule is a usage error (the listener is closed again without accepting anything).
 async fn start_server(
     config: kirby_csms_core::CsmsConfig,
     recording: Option<kirby_ocpp_core::recording::RecordSink>,
     observe: bool,
+    rules: &[settings::RuleBlock],
+    wants_script_events: bool,
 ) -> Result<
     (
         kirby_csms_core::CsmsHandle,
         Option<kirby_csms_core::Observer>,
+        Startup,
     ),
     ExitCode,
 > {
@@ -482,13 +508,23 @@ async fn start_server(
         recording,
         observe: observe.then_some(replay::OBSERVER_CAPACITY),
     };
-    match CsmsServer::start_with(config, options).await {
+    let started = CsmsServer::start_initialized(config, options, |handle| {
+        apply_rules(handle, rules)?;
+        Ok::<_, String>(Startup {
+            sink: handle.subscribe(),
+            script: wants_script_events.then(|| handle.subscribe()),
+            api: handle.subscribe(),
+        })
+    })
+    .await;
+    match started {
         Ok(started) => Ok(started),
-        Err(kirby_csms_core::CsmsError::Bind(error)) => {
+        Err(kirby_csms_core::InitError::Init(error)) => Err(usage_error(&error)),
+        Err(kirby_csms_core::InitError::Start(kirby_csms_core::CsmsError::Bind(error))) => {
             eprintln!("error: failed to bind the CSMS listener {listen}: {error}");
             Err(ExitCode::FAILURE)
         }
-        Err(error) => {
+        Err(kirby_csms_core::InitError::Start(error)) => {
             eprintln!("error: {error}");
             Err(ExitCode::FAILURE)
         }

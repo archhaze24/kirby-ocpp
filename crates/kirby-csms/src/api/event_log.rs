@@ -244,11 +244,11 @@ pub(super) fn event_station(event: &CsmsEvent) -> Option<&str> {
 /// the events that are queued) or the engine is gone.
 pub(super) fn spawn_pump(
     handle: &CsmsHandle,
+    mut rx: broadcast::Receiver<CsmsEvent>,
     log: Arc<EventLog>,
     metrics: Arc<Metrics>,
     mut stopped: watch::Receiver<bool>,
 ) {
-    let mut rx = handle.subscribe();
     let mut renderer = Renderer::new(handle);
     tokio::spawn(async move {
         let publish = |renderer: &mut Renderer, event: &CsmsEvent| {
@@ -298,6 +298,63 @@ pub(super) fn spawn_pump(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pump_preserves_events_queued_before_it_starts() {
+        use kirby_csms_core::{CsmsConfig, CsmsServer};
+        use kirby_ocpp_core::ws::{ConnectOptions, Connection};
+
+        let deadline = std::time::Duration::from_secs(5);
+        let handle = CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let events = handle.subscribe();
+        let mut observed = handle.subscribe();
+        let (_connection, _connection_events) = tokio::time::timeout(
+            deadline,
+            Connection::connect(
+                &handle.url(),
+                "CP-EARLY",
+                &kirby_ocpp_core::config::TlsConfig::default(),
+                "ocpp1.6",
+                ConnectOptions::default(),
+            ),
+        )
+        .await
+        .expect("handshake completed")
+        .unwrap();
+        tokio::time::timeout(deadline, async {
+            loop {
+                if matches!(observed.recv().await.unwrap(), CsmsEvent::Connected { .. }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("station connected before pump startup");
+
+        let log = EventLog::new(0);
+        let mut changes = log.subscribe();
+        let (stop, stopped) = watch::channel(false);
+        spawn_pump(&handle, events, Arc::clone(&log), Metrics::new(), stopped);
+        let published = tokio::time::timeout(deadline, async {
+            loop {
+                if log
+                    .read(1, None, 10)
+                    .entries
+                    .iter()
+                    .any(|entry| entry.event == "connected")
+                {
+                    break;
+                }
+                changes.changed().await.unwrap();
+            }
+        })
+        .await;
+        stop.send(true).unwrap();
+        handle.shutdown().await;
+        assert!(published.is_ok(), "the pump lost the early connected event");
+    }
 
     fn push(log: &EventLog, station: &str) {
         log.push(

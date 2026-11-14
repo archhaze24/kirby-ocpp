@@ -176,9 +176,12 @@ request abandons its unfinished calls and releases its budget.
 ## Event stream
 
 `GET /v1/events` is a Server-Sent Events stream of everything the server sees, from the moment of the request, or from the position a reconnecting client names (see [Resume](#resume)).
+
+The event log subscribes before the first station is accepted, so connections made during startup are included in the bounded ring.
+
 - Each SSE message has an `id:` line, an `event: <type>` line and one `data:` line. The `id:` is the number of the event in one log that every stream reads from: an event has the same `id:` on every stream, ids grow by one per event, and they start from the start time of the server in microseconds, so an id from an earlier run of the server is smaller than every id of the current one. Treat ids as opaque numbers that only compare equal or ascending. A stream with `station=` skips the ids of other stations' events.
 - The `data:` line holds the same JSON object that `--json` prints for that event. Event types are `connected`, `disconnected`, `frame`, `state`, `malformed`, `forgotten` and `auth_failed`.
-- Text is escaped the same way as in `--json`, and `AuthorizationKey` values are redacted unless `--show-secrets` is set (a `malformed` text that mentions `AuthorizationKey` is replaced by `<redacted: mentions AuthorizationKey>`).
+- Text is escaped the same way as in `--json`, and `AuthorizationKey` values are redacted unless `--show-secrets` is set. Malformed frames containing valid JSON receive recursive masking; invalid JSON is replaced by `<redacted: invalid JSON>`.
 - A `frame` event whose frame is larger than 64 KiB as JSON carries the payload marker `{"truncated":true,"originalBytes":N}` instead of the payload, like the frame history does above its own 8 MiB cap; `GET .../history` still returns the frame in full while it fits that cap.
 - The optional `station=ID` (percent-encoded, at most once) shows only that station's events (and the notes below); an id that does not exist is fine and matches nothing. The only other parameter is `last_event_id`; a repeated or any other parameter is `400`. A new stream without a resume point replays nothing: use `/history` for the past.
 

@@ -124,9 +124,10 @@ impl CsmsServer {
     /// [`CsmsError::Config`] if the security profile needs TLS (2 and 3) and
     /// [`CsmsConfig::tls`] is not set; [`CsmsError::Bind`] if the address is unavailable.
     pub async fn start(config: CsmsConfig) -> Result<CsmsHandle, CsmsError> {
-        Self::start_inner(config, None, None)
+        Self::start_inner(config, None, None, no_init)
             .await
-            .map(|(handle, _)| handle)
+            .map(|(handle, _, ())| handle)
+            .map_err(InitError::into_start)
     }
 
     /// Starts the server with a recorder attached before connections are accepted.
@@ -137,9 +138,10 @@ impl CsmsServer {
         config: CsmsConfig,
         sink: RecordSink,
     ) -> Result<CsmsHandle, CsmsError> {
-        Self::start_inner(config, Some(sink), None)
+        Self::start_inner(config, Some(sink), None, no_init)
             .await
-            .map(|(handle, _)| handle)
+            .map(|(handle, _, ())| handle)
+            .map_err(InitError::into_start)
     }
 
     /// Starts the server with the optional extras of [`StartOptions`], all attached before
@@ -152,34 +154,60 @@ impl CsmsServer {
         config: CsmsConfig,
         options: StartOptions,
     ) -> Result<(CsmsHandle, Option<Observer>), CsmsError> {
-        Self::start_inner(config, options.recording, options.observe).await
+        Self::start_inner(config, options.recording, options.observe, no_init)
+            .await
+            .map(|(handle, observer, ())| (handle, observer))
+            .map_err(InitError::into_start)
     }
 
-    async fn start_inner(
+    /// Like [`Self::start_with`], and runs `init` on the handle before the first connection is
+    /// accepted. The listener is already bound (its address is known), but a station that
+    /// connects meanwhile waits in the accept backlog and is served only after `init` returned
+    /// `Ok`. Use it for what must be in place for every first CALL and event: rules, faults,
+    /// responders and [`CsmsHandle::subscribe`] receivers, whose value `init` returns.
+    ///
+    /// `init` is plain synchronous code and must not block. If it fails nothing is accepted:
+    /// the listener closes and the error comes back as [`InitError::Init`].
+    ///
+    /// # Errors
+    /// [`InitError::Start`] with the errors of [`Self::start`]; [`InitError::Init`] with the
+    /// error of `init`.
+    pub async fn start_initialized<T, E>(
+        config: CsmsConfig,
+        options: StartOptions,
+        init: impl FnOnce(&CsmsHandle) -> Result<T, E>,
+    ) -> Result<(CsmsHandle, Option<Observer>, T), InitError<E>> {
+        Self::start_inner(config, options.recording, options.observe, init).await
+    }
+
+    async fn start_inner<T, E>(
         config: CsmsConfig,
         recording: Option<RecordSink>,
         observe: Option<usize>,
-    ) -> Result<(CsmsHandle, Option<Observer>), CsmsError> {
+        init: impl FnOnce(&CsmsHandle) -> Result<T, E>,
+    ) -> Result<(CsmsHandle, Option<Observer>, T), InitError<E>> {
         if config.tls.is_none()
             && matches!(
                 config.security.profile,
                 SecurityProfile::BasicAuthTls | SecurityProfile::MutualTls
             )
         {
-            return Err(CsmsError::Config(format!(
+            return Err(InitError::Start(CsmsError::Config(format!(
                 "security profile {} needs TLS (`tls` is not set)",
                 config.security.profile.number()
-            )));
+            ))));
         }
         if config.security.has_empty_key() {
-            return Err(CsmsError::Config(
+            return Err(InitError::Start(CsmsError::Config(
                 "security keys must not be empty".to_owned(),
-            ));
+            )));
         }
         let listener = TcpListener::bind(config.listen)
             .await
-            .map_err(CsmsError::Bind)?;
-        let local_addr = listener.local_addr().map_err(CsmsError::Bind)?;
+            .map_err(|error| InitError::Start(CsmsError::Bind(error)))?;
+        let local_addr = listener
+            .local_addr()
+            .map_err(|error| InitError::Start(CsmsError::Bind(error)))?;
         let acceptor = config.tls.clone().map(TlsAcceptor::from);
         let (events, _) = broadcast::channel(config.event_buffer.max(1));
         let (shutdown, _) = watch::channel(false);
@@ -208,9 +236,62 @@ impl CsmsServer {
             next_message: AtomicU64::new(0),
             accept: Mutex::new(None),
         });
-        let task = tokio::spawn(accept_loop(listener, acceptor, Arc::clone(&inner)));
-        *inner.accept.lock().unwrap_or_else(PoisonError::into_inner) = Some(task);
-        Ok((CsmsHandle { inner }, observer))
+        let handle = CsmsHandle { inner };
+        // Nothing is accepted yet. On failure the listener is dropped here, closing every
+        // socket that waited in its backlog.
+        let ready = init(&handle).map_err(InitError::Init)?;
+        let task = tokio::spawn(accept_loop(listener, acceptor, Arc::clone(&handle.inner)));
+        *handle
+            .inner
+            .accept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(task);
+        Ok((handle, observer, ready))
+    }
+}
+
+/// The `init` of the plain start functions: nothing to do.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "has the signature of `start_initialized`'s `init`"
+)]
+fn no_init(_: &CsmsHandle) -> Result<(), CsmsError> {
+    Ok(())
+}
+
+/// Why [`CsmsServer::start_initialized`] did not start the server.
+#[derive(Debug)]
+pub enum InitError<E> {
+    /// The server could not start; see [`CsmsServer::start`].
+    Start(CsmsError),
+    /// The `init` function failed. Nothing was accepted.
+    Init(E),
+}
+
+impl InitError<CsmsError> {
+    /// Collapses the error of a start without an `init` that can fail.
+    fn into_start(self) -> CsmsError {
+        match self {
+            Self::Start(error) | Self::Init(error) => error,
+        }
+    }
+}
+
+impl<E: fmt::Display> fmt::Display for InitError<E> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Start(error) => error.fmt(f),
+            Self::Init(error) => error.fmt(f),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for InitError<E> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Start(error) => Some(error),
+            Self::Init(error) => Some(error),
+        }
     }
 }
 
@@ -1274,17 +1355,19 @@ impl Inner {
     /// global ones), then schema validation (`validate_inbound`), then the station's rule, a
     /// global rule with a protocol, a global responder, then the default; known actions a
     /// charge point may not send get `NotSupported`, unknown ones `NotImplemented`.
-    fn decide(&self, station: &str, action: &str, payload: &Value) -> Reply {
+    ///
+    /// `subprotocol` is the one the asking session negotiated, not the registry's: a session
+    /// that was replaced or forgotten keeps its own protocol.
+    fn decide(
+        &self,
+        station: &str,
+        subprotocol: Option<&str>,
+        protocol: Protocol,
+        action: &str,
+        payload: &Value,
+    ) -> Reply {
         let mut state = self.lock();
-        let subprotocol = state
-            .stations
-            .get(station)
-            .and_then(|rec| rec.info.subprotocol.clone());
-        let protocol = session_protocol(subprotocol.as_deref());
-        if let Some(reply) = state
-            .scripted
-            .take_fault(station, subprotocol.as_deref(), action)
-        {
+        if let Some(reply) = state.scripted.take_fault(station, subprotocol, action) {
             return reply;
         }
         if self.config.validate_inbound
@@ -1292,10 +1375,7 @@ impl Inner {
         {
             return Reply::Error(code, truncate_chars(&errors, MAX_ERROR_DESCRIPTION));
         }
-        if let Some(payload) = state
-            .scripted
-            .rule_payload(station, subprotocol.as_deref(), action)
-        {
+        if let Some(payload) = state.scripted.rule_payload(station, subprotocol, action) {
             return Reply::Result(payload);
         }
         if let Some(responder) = state.responders.get(action).cloned() {
@@ -1474,7 +1554,13 @@ async fn run_session<S>(
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let slots = Arc::new(CallSlots::default());
     let protocol = session_protocol(subprotocol.as_deref());
-    let session_id = match inner.register(&station, peer, subprotocol, cmd_tx, Arc::clone(&slots)) {
+    let session_id = match inner.register(
+        &station,
+        peer,
+        subprotocol.clone(),
+        cmd_tx,
+        Arc::clone(&slots),
+    ) {
         Ok(session_id) => session_id,
         Err(RegisterError::Shutdown) => return,
         Err(RegisterError::TooManyStations) => {
@@ -1499,6 +1585,7 @@ async fn run_session<S>(
         inner: Arc::clone(&inner),
         link_id: session_id,
         protocol,
+        subprotocol,
         station,
         socket,
         slots,
@@ -1540,6 +1627,8 @@ struct Session<S> {
     link_id: u64,
     /// The protocol of the negotiated subprotocol (1.6 when none or an unknown one).
     protocol: Protocol,
+    /// The negotiated subprotocol name, the scope key of faults and rules.
+    subprotocol: Option<String>,
     station: String,
     socket: WebSocketStream<S>,
     slots: Arc<CallSlots>,
@@ -1783,7 +1872,13 @@ where
                 action,
                 payload,
             } => {
-                let reply = self.inner.decide(&self.station, &action, &payload);
+                let reply = self.inner.decide(
+                    &self.station,
+                    self.subprotocol.as_deref(),
+                    self.protocol,
+                    &action,
+                    &payload,
+                );
                 self.inner
                     .track(&self.station, self.link_id, &action, &payload, &reply);
                 self.inner
@@ -2002,5 +2097,66 @@ mod tests {
         let text = "é".repeat(300);
         assert_eq!(truncate_chars(&text, 255).chars().count(), 255);
         assert_eq!(truncate_chars("short", 255), "short");
+    }
+
+    fn register(inner: &Arc<Inner>, subprotocol: &str) -> u64 {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        inner
+            .register(
+                "CP",
+                "127.0.0.1:1".parse().unwrap(),
+                Some(subprotocol.to_owned()),
+                tx,
+                Arc::new(CallSlots::default()),
+            )
+            .unwrap_or_else(|_| panic!("registered"))
+    }
+
+    /// A session decides with the protocol it negotiated, whatever the registry says now.
+    #[tokio::test]
+    async fn a_replaced_or_forgotten_session_decides_with_its_own_protocol() {
+        let payload = json!({"connectorId": 1, "errorCode": "NoError", "status": "Available"});
+        let csms = CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap()))
+            .await
+            .unwrap();
+        let inner = &csms.inner;
+        register(inner, "ocpp1.6");
+        register(inner, "ocpp2.0.1");
+        csms.inject_scoped(
+            Fault::call_error("StatusNotification"),
+            Scope::station("CP").protocol("ocpp2.0.1"),
+        );
+        // The replaced 1.6 session is not in the scope of the fault.
+        let old = inner.decide(
+            "CP",
+            Some("ocpp1.6"),
+            Protocol::V16,
+            "StatusNotification",
+            &payload,
+        );
+        assert!(matches!(old, Reply::Result(_)));
+        assert_eq!(csms.faults_remaining(), 1);
+        // Nor is a forgotten one.
+        assert!(csms.forget("CP"));
+        let forgotten = inner.decide(
+            "CP",
+            Some("ocpp1.6"),
+            Protocol::V16,
+            "StatusNotification",
+            &payload,
+        );
+        assert!(matches!(forgotten, Reply::Result(_)));
+        assert_eq!(csms.faults_remaining(), 1);
+        // The 2.0.1 session is.
+        let current = inner.decide(
+            "CP",
+            Some("ocpp2.0.1"),
+            Protocol::V201,
+            "StatusNotification",
+            &payload,
+        );
+        assert!(matches!(current, Reply::Error(..)));
+        assert_eq!(csms.faults_remaining(), 0);
+        csms.shutdown().await;
     }
 }

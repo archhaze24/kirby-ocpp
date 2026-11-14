@@ -33,9 +33,9 @@ use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::routing::{delete, get, post, put};
-use kirby_csms_core::CsmsHandle;
+use kirby_csms_core::{CsmsEvent, CsmsHandle};
 use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, watch};
+use tokio::sync::{Semaphore, broadcast, watch};
 use tokio::task::JoinHandle;
 use tokio_rustls::TlsAcceptor;
 
@@ -88,6 +88,7 @@ pub async fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
 
 /// Serves the API on `listener` until [`Api::finish`].
 /// With `tls` the listener serves HTTPS (HTTP/1.1 only), otherwise plain HTTP.
+#[cfg(test)]
 pub fn spawn(
     listener: TcpListener,
     handle: CsmsHandle,
@@ -95,7 +96,28 @@ pub fn spawn(
     token: Option<String>,
     tls: Option<Arc<TlsConfig>>,
 ) -> Api {
-    spawn_inner(listener, handle, commands, token, Limits::DEFAULT, tls)
+    let events = handle.subscribe();
+    spawn_with_events(listener, handle, commands, token, tls, events)
+}
+
+/// Serves the API with an event subscription taken before the first station was accepted.
+pub fn spawn_with_events(
+    listener: TcpListener,
+    handle: CsmsHandle,
+    commands: crate::commands::CommandLimits,
+    token: Option<String>,
+    tls: Option<Arc<TlsConfig>>,
+    events: broadcast::Receiver<CsmsEvent>,
+) -> Api {
+    spawn_inner(
+        listener,
+        handle,
+        commands,
+        token,
+        Limits::DEFAULT,
+        tls,
+        events,
+    )
 }
 
 #[cfg(test)]
@@ -110,7 +132,8 @@ fn spawn_with(
         slots,
         payload: Arc::new(Semaphore::new(limits.payload_budget)),
     };
-    spawn_inner(listener, handle, commands, token, limits, None)
+    let events = handle.subscribe();
+    spawn_inner(listener, handle, commands, token, limits, None, events)
 }
 
 fn spawn_inner(
@@ -120,6 +143,7 @@ fn spawn_inner(
     token: Option<String>,
     limits: Limits,
     tls: Option<Arc<TlsConfig>>,
+    events: broadcast::Receiver<CsmsEvent>,
 ) -> Api {
     let tls = tls.map(|config| {
         let mut config = (*config).clone();
@@ -142,6 +166,7 @@ fn spawn_inner(
     };
     spawn_pump(
         &state.handle,
+        events,
         Arc::clone(&state.log),
         Arc::clone(&state.metrics),
         stopped.clone(),

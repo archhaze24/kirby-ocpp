@@ -1804,3 +1804,97 @@ async fn forget_if_disconnected_is_atomic_and_history_tail_is_bounded() {
     assert_eq!(csms.forget_if_disconnected("CP-TAIL"), Some(true));
     assert!(csms.station("CP-TAIL").is_none());
 }
+
+/// A station that connects while `init` still runs waits in the accept backlog: its first
+/// CALL meets the rules and faults of `init`, and the events of the receivers `init` took
+/// include its connection.
+#[tokio::test]
+async fn start_initialized_serves_the_first_connection_after_init() {
+    let (csms, _, (early, mut events)) = CsmsServer::start_initialized(
+        CsmsConfig::new("127.0.0.1:0".parse().unwrap()),
+        kirby_csms_core::StartOptions::default(),
+        |csms| {
+            // Connected, but not accepted yet: the kernel queues the socket.
+            let early = std::net::TcpStream::connect_timeout(&csms.local_addr(), STEP)
+                .map_err(|e| e.to_string())?;
+            early.set_nonblocking(true).map_err(|e| e.to_string())?;
+            csms.inject_scoped(
+                Fault::call_error("BootNotification"),
+                Scope::station("CP-EARLY"),
+            );
+            csms.respond_scoped(
+                &Scope::station("CP-EARLY"),
+                "Heartbeat",
+                json!({"currentTime": "init"}),
+            )?;
+            Ok::<_, String>((early, csms.subscribe()))
+        },
+    )
+    .await
+    .expect("starts");
+    let early = tokio::net::TcpStream::from_std(early).unwrap();
+    let request = format!("{}/ocpp/CP-EARLY", csms.url())
+        .into_client_request()
+        .map(|mut request| {
+            request
+                .headers_mut()
+                .insert("Sec-WebSocket-Protocol", "ocpp1.6".parse().unwrap());
+            request
+        })
+        .unwrap();
+    let early = tokio_tungstenite::MaybeTlsStream::Plain(early);
+    let (mut socket, _) = timeout(STEP, tokio_tungstenite::client_async(request, early))
+        .await
+        .expect("handshake in time")
+        .expect("handshake");
+    raw_send(
+        &mut socket,
+        r#"[2,"b","BootNotification",{"chargePointVendor":"v","chargePointModel":"m"}]"#,
+    )
+    .await;
+    assert!(matches!(
+        raw_recv(&mut socket).await,
+        Frame::CallError { .. }
+    ));
+    raw_send(&mut socket, r#"[2,"h","Heartbeat",{}]"#).await;
+    assert_eq!(
+        result_payload(raw_recv(&mut socket).await)["currentTime"],
+        "init"
+    );
+    wait_event(&mut events, "connect", connected("CP-EARLY")).await;
+    csms.shutdown().await;
+}
+
+/// A failing `init` leaves nothing running: queued sockets are closed, the port is free.
+#[tokio::test]
+async fn start_initialized_that_fails_accepts_nothing() {
+    let mut waiting = None;
+    let result = CsmsServer::start_initialized(
+        CsmsConfig::new("127.0.0.1:0".parse().unwrap()),
+        kirby_csms_core::StartOptions::default(),
+        |csms| {
+            let socket = std::net::TcpStream::connect_timeout(&csms.local_addr(), STEP).unwrap();
+            waiting = Some((socket, csms.local_addr()));
+            Err::<(), _>("bad rule".to_owned())
+        },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(kirby_csms_core::InitError::Init(ref error)) if error == "bad rule"
+    ));
+    let (socket, addr) = waiting.unwrap();
+    socket.set_nonblocking(true).unwrap();
+    let mut socket = tokio::net::TcpStream::from_std(socket).unwrap();
+    let mut buf = [0_u8; 1];
+    let read = timeout(STEP, tokio::io::AsyncReadExt::read(&mut socket, &mut buf))
+        .await
+        .expect("closed in time");
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+    assert!(
+        timeout(STEP, tokio::net::TcpStream::connect(addr))
+            .await
+            .expect("connection attempt completed")
+            .is_err()
+    );
+}

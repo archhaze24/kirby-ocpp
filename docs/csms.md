@@ -201,7 +201,7 @@ A rule or fault with a `protocol` applies only to stations that negotiated it; a
 
 Scripts, stdin and the HTTP API check faults the same way: the action name is 1 to 128 bytes without control characters, `times` is 1 to 1 000 000, a station id is 1 to 128 bytes, and at most 1000 faults (100 for one station, 8 MiB of text in all) and 1000 scoped rules (rules of stations and global rules that carry a protocol; 64 for one station, 8 MiB of text in all) are stored at once.
 
-Rules and faults can also be installed at start from `[[rule]]` blocks of a [configuration file](configuration.md#blocks) (`behavior = "respond"` or a fault kind). Without `station` they apply to all stations; all are in place before the first station connects.
+Rules and faults can also be installed at start from `[[rule]]` blocks of a [configuration file](configuration.md#blocks) (`behavior = "respond"` or a fault kind). Without `station` they apply to all stations. They are installed before the first connection is accepted; clients connecting during initialization wait in the listener's backlog. A refused rule exits with code 2 without accepting stations. Script and API rules apply at runtime.
 
 In scripts the same exist as the `respond`, `clear_respond` and `inject_fault` steps (with optional `station` and `protocol`), plus `remove_fault`, `faults` and `rules`, see [scenarios.md](scenarios.md#steps). The emulator has the mirror feature for CSMS commands ([emulator.md](emulator.md)).
 
@@ -269,6 +269,7 @@ Exit codes: 0 when every CALL was answered as recorded (a CALLRESULT where the r
 | `stations()`, `station(id)`, `history(id)`, `state(id)` | read model (`StationInfo`, `FrameEntry`, `StationState`) |
 | `respond(action, closure)`, `clear_responder`, `inject(Fault)`, `clear_faults`, `faults_remaining` | response rules and faults |
 | `forget(id)`, `shutdown()`, `url()`, `local_addr()` | housekeeping |
+| `CsmsServer::start_initialized(config, StartOptions, init)` | like `start_with`, and runs `init(&CsmsHandle)` before the first connection is accepted: install rules and faults and take `subscribe()` receivers there. An `Err` of `init` closes the listener (`InitError::Init`) |
 
 ```rust
 use kirby_csms_core::{CsmsConfig, CsmsError, CsmsEvent, CsmsServer};

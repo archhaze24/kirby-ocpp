@@ -957,6 +957,24 @@ payload = '{"idTagInfo":{"status":"Blocked"}}'
     let _ = station.shutdown().await;
 }
 
+/// A rule the engine refuses stops the start with exit code 2, before anything is announced.
+#[test]
+fn a_refused_rule_block_fails_the_start_before_listening() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut text = String::from("[listener]\nlisten = \"127.0.0.1:0\"\n");
+    // The engine keeps at most 100 faults for one station.
+    for _ in 0..=100 {
+        text.push_str(
+            "[[rule]]\naction = \"Heartbeat\"\nbehavior = \"call_error\"\nstation = \"CP-1\"\n",
+        );
+    }
+    let file = write(dir.path(), "csms.toml", &text);
+    let output = run(&["--config", &file, "--json"], &[]);
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(stderr(&output).contains("rule for Heartbeat"));
+    assert!(!stdout(&output).contains("listening"));
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rule_blocks_with_a_station_answer_only_that_station() {
     let dir = tempfile::tempdir().unwrap();
