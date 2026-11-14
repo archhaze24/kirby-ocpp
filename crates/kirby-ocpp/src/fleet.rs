@@ -15,6 +15,7 @@ use kirby_ocpp_core::scenario::{
     CancelToken, JunitRun, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, ScenarioReport, TOOL_VERSION,
     now_rfc3339,
 };
+use kirby_ocpp_core::station::Snapshot;
 use kirby_ocpp_core::{Clock, StationConfig, SystemClock};
 use kirby_ocpp_tui::TuiError;
 use kirby_ocpp_tui::text::sanitize;
@@ -48,7 +49,7 @@ pub async fn interactive(
     // One watcher per station, subscribed before anything connects (also before the terminal UI
     // does). When every station has given up reconnecting the headless run ends with code 1
     // instead of idling.
-    let mut watches: Vec<(String, LinkWatch)> = fleet
+    let mut watches: Vec<(String, LinkWatch<Snapshot>)> = fleet
         .stations()
         .iter()
         .map(|(id, handle)| (id.clone(), LinkWatch::new(handle)))

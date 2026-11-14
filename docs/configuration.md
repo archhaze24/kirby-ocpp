@@ -21,17 +21,18 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 | --- | --- | --- | --- |
 | `-u, --url <URL>` | `OCPP_URL` | none (required) | Central System WebSocket URL, `ws://` or `wss://`, e.g. `ws://localhost:9000/ocpp` |
 | `-i, --id <ID>` | `OCPP_CHARGE_POINT_ID` | `CP-001` | Charge point id (non-empty, not `.` or `..`, no control or invisible characters such as newlines, zero-width spaces or bidirectional marks; otherwise exit 2); with `--count` above 1 it is the id template unless `--id-template` is given |
-| `--vendor <VENDOR>` | `OCPP_VENDOR` | `archhaze24` | BootNotification vendor (non-empty, at most 20 characters; longer exits 2) |
+| `--protocol <PROTOCOL>` | `OCPP_PROTOCOL` | `ocpp1.6` | OCPP version the station speaks: `ocpp1.6` or `ocpp2.0.1`. `ocpp2.1` exits 2 with `OCPP 2.1 is not supported by this build`. Also the top-level `protocol` key of the [configuration file](#configuration-file). Decides the default of `--ws-subprotocol`, the limits below and which flags apply, see [Emulator](emulator.md#ocpp-201) |
+| `--vendor <VENDOR>` | `OCPP_VENDOR` | `archhaze24` | BootNotification vendor (non-empty, at most 20 characters, 50 with `ocpp2.0.1`; longer exits 2) |
 | `--model <MODEL>` | `OCPP_MODEL` | `kirby-ocpp` | BootNotification model (non-empty, at most 20 characters; longer exits 2) |
 | `--serial <SERIAL>` | `OCPP_SERIAL` | none | Serial number in BootNotification, BootNotification schema limit: 25 characters (longer exits 2) |
 | `--firmware-version <VERSION>` | `OCPP_FIRMWARE_VERSION` | none | Firmware version in BootNotification, BootNotification schema limit: 50 characters (longer exits 2) |
 | `-c, --connector <ID>` | | `1` | Initial connector id (at least 1) |
-| `--connectors <COUNT>` | | `1` | Number of connectors (at least 1; raised to `--connector` if smaller) |
+| `--connectors <COUNT>` | | `1` | Number of connectors (at least 1; raised to `--connector` if smaller; at most 64 with `ocpp2.0.1`, where it is the number of EVSEs, each with one connector) |
 | `--heartbeat <SECONDS>` | | `30` | Fallback heartbeat interval (at least 1); the CSMS value from BootNotification wins |
 | `--nominal-power-w <WATTS>` | | `7200` | Nominal charging power per connector (at least 1); charging profiles can only lower it |
 | `--voltage-v <VOLTS>` | | `230` | Voltage per phase (at least 1), used for A to W conversion and the `Voltage` reading |
 | `--phases <COUNT>` | | `1` | Number of phases, 1 to 3 |
-| `--ws-subprotocol <PROTOCOL>` | `OCPP_WS_SUBPROTOCOL` | `ocpp1.6` | Requested WebSocket subprotocol (RFC 6455 token characters only) |
+| `--ws-subprotocol <PROTOCOL>` | `OCPP_WS_SUBPROTOCOL` | the token of `--protocol` | Requested WebSocket subprotocol (RFC 6455 token characters only). A value other than the token of `--protocol` is offered as given and prints `note: offering NAME while behaving as PROTOCOL` on stderr; the messages still follow `--protocol` |
 | `--ws-ping <SECONDS>` | `OCPP_WS_PING_INTERVAL` | `30` | WebSocket ping interval; `0` disables pings |
 | `--call-timeout-ms <MILLISECONDS>` | `OCPP_CALL_TIMEOUT_MS` | `30000` | CALL response timeout, 1 to 86400000 |
 
@@ -55,9 +56,9 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 | `--tls-server-name <NAME>` | `OCPP_TLS_SERVER_NAME` | URL host | SNI and verification name override |
 | `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Disable certificate verification (local or self-signed testing only) |
 | `--show-secrets` | `OCPP_SHOW_SECRETS` | off | Show `AuthorizationKey` values in frame logs; by default they are replaced by `***` |
-| `--security-profile-fallback <BOOL>` | `OCPP_SECURITY_PROFILE_FALLBACK` | `true` | Go back to the previous `SecurityProfile` after 3 profile-attributable connection failures (HTTP 401/403, or a TLS alert rejecting the client certificate) with a newly set one, before it ever connected (`A05.FR.08`); see [Security](security.md#emulator-side) |
-| `--authorization-key-encoding <ENCODING>` | `OCPP_AUTHORIZATION_KEY_ENCODING` | `literal` | How the `AuthorizationKey` becomes the Basic Auth password (OCPP 1.6J): `literal` sends the key text, `hex` sends the bytes of the hexadecimal key as OCPP-J 1.6 section 6.2.2 defines and makes the key accept only hex digits; never applies to a password in the URL; see [Security](security.md#basic-auth-and-authorizationkey) |
-| `--additional-root-certificate-check` | `OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK` | off | Value of the read-only `AdditionalRootCertificateCheck` key: a new Central System root must be signed by the installed one |
+| `--security-profile-fallback <BOOL>` | `OCPP_SECURITY_PROFILE_FALLBACK` | `true` | OCPP 1.6 only. Go back to the previous `SecurityProfile` after 3 profile-attributable connection failures (HTTP 401/403, or a TLS alert rejecting the client certificate) with a newly set one, before it ever connected (`A05.FR.08`); see [Security](security.md#emulator-side) |
+| `--authorization-key-encoding <ENCODING>` | `OCPP_AUTHORIZATION_KEY_ENCODING` | `literal` | OCPP 1.6 only. How the `AuthorizationKey` becomes the Basic Auth password (OCPP 1.6J): `literal` sends the key text, `hex` sends the bytes of the hexadecimal key as OCPP-J 1.6 section 6.2.2 defines and makes the key accept only hex digits; never applies to a password in the URL; see [Security](security.md#basic-auth-and-authorizationkey) |
+| `--additional-root-certificate-check` | `OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK` | off | OCPP 1.6 only. Value of the read-only `AdditionalRootCertificateCheck` key: a new Central System root must be signed by the installed one |
 
 Profiles and certificates are explained in [Security](security.md).
 
@@ -76,7 +77,7 @@ Profiles and certificates are explained in [Security](security.md).
 | --- | --- | --- | --- |
 | `--no-persist` | `KIRBY_OCPP_NO_PERSIST` | off | Do not load or save station state. `run` and `suite` never persist unless `run --persist` is given |
 | `--state-dir <PATH>` | `KIRBY_OCPP_STATE_DIR` | `~/.kirby-ocpp/stations` (`%USERPROFILE%` on Windows) | Directory for persisted state, see [State directory](#state-directory-and-files) |
-| `--rule <ACTION=BEHAVIOR>` | `KIRBY_OCPP_RULES` | none | Response rule, repeatable; in the variable separate rules with `;`. See [Response rules](#response-rules---rule) |
+| `--rule <ACTION=BEHAVIOR>` | `KIRBY_OCPP_RULES` | none | OCPP 1.6 only. Response rule, repeatable; in the variable separate rules with `;`. See [Response rules](#response-rules---rule) |
 
 ### Output
 
@@ -118,7 +119,7 @@ Plain headless mode (no subcommand) prints every event at any level. `--log-file
 
 ## kirby-ocpp subcommands
 
-`kirby-ocpp run --scenario <FILE|NAME>` connects, waits for an accepted BootNotification, runs the scenario and prints the report. A `run` is ephemeral: it neither reads nor writes a state file, so a scenario starts from a clean station every time (`--state-dir` has no effect without `--persist`; `run` prints a note when one is given). It accepts every option above plus:
+`kirby-ocpp run --scenario <FILE|NAME>` connects, waits for an accepted BootNotification, runs the scenario and prints the report. Scenarios are written for OCPP 1.6: with `--protocol ocpp2.0.1` it exits 2 with `scenario NAME is for OCPP 1.6; this station speaks ocpp2.0.1`. `suite`, `replay` and a fleet (`--count` above 1) exit 2 with `ocpp2.0.1` too. A `run` is ephemeral: it neither reads nor writes a state file, so a scenario starts from a clean station every time (`--state-dir` has no effect without `--persist`; `run` prints a note when one is given). It accepts every option above plus:
 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
@@ -165,7 +166,7 @@ None of the `replay` flags is a configuration file key. Exit codes: [Exit codes]
 
 None of the `suite` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-suite). Details: [Scenarios](scenarios.md#suite-runs).
 
-`kirby-ocpp check` tests the way to the Central System one step at a time and prints a checklist. It reads the same connection options as a station: `--url` (required), `--id`, `--ws-subprotocol`, `--call-timeout-ms`, the TLS flags (`--tls-ca`, `--tls-cert`, `--tls-key`, `--tls-server-name`, `--tls-skip-verify`), the identity flags that go into the BootNotification (`--vendor`, `--model`, `--serial`, `--firmware-version`), `--json` and `--color`; Basic Auth is taken from `user:password@` in the URL. It opens one connection, sends exactly one BootNotification and closes; it never reads or writes the station state. A fleet (`--count` above 1) exits 2. Plus:
+`kirby-ocpp check` tests the way to the Central System one step at a time and prints a checklist. It reads the same connection options as a station: `--url` (required), `--id`, `--protocol` (with `ocpp2.0.1` the `websocket` step offers `ocpp2.0.1`, the `boot` step sends a 2.0.1 BootNotification and the report names `ocpp_version` `2.0.1`), `--ws-subprotocol`, `--call-timeout-ms`, the TLS flags (`--tls-ca`, `--tls-cert`, `--tls-key`, `--tls-server-name`, `--tls-skip-verify`), the identity flags that go into the BootNotification (`--vendor`, `--model`, `--serial`, `--firmware-version`), `--json` and `--color`; Basic Auth is taken from `user:password@` in the URL. It opens one connection, sends exactly one BootNotification and closes; it never reads or writes the station state. A fleet (`--count` above 1) exits 2. Plus:
 
 | Flag | Env | Default | Meaning |
 | --- | --- | --- | --- |
@@ -191,7 +192,7 @@ New keys may be added to these objects; none is renamed or removed. None of the 
 | Command | Meaning |
 | --- | --- |
 | `state path [--id ID]` | Print the state directory; with `--id` the state file of that station. Nothing is created or read. `--json`: `{"schema": 1, "dir", "station", "file", "secrets_file"}` (`station`, `file` and `secrets_file` are `null` without `--id`) |
-| `state show --id ID` | Print what the state file holds: store version, availability, connectors with their transaction, local list, authorization cache, charging profiles, offline queue, certificates, queued security events and the configuration keys. The secrets file is never read: only its presence is reported, and configuration values whose key name contains `AuthorizationKey`, `password`, `secret` or `privateKey` print as `***`. A file that cannot be used (corrupt, or of another station) is reported and left where it is. `--json`: `{"schema": 1, "station", "file", "status", "store_version", "supported_store_version", "secrets_file" (boolean), "state"}` with `status` `found`, `missing` or `unusable` (`unusable` adds `reason`; `state` is `null` unless found). The content of `state` is specific to the protocol of the station (OCPP 1.6 today): do not rely on its keys across protocols |
+| `state show --id ID` | Print what the state file holds: store version, availability, connectors with their transaction, local list, authorization cache, charging profiles, offline queue, certificates, queued security events and the configuration keys. The secrets file is never read: only its presence is reported, and configuration values whose key name contains `AuthorizationKey`, `password`, `secret` or `privateKey` print as `***`. A file that cannot be used (corrupt, or of another station) is reported and left where it is. `--json`: `{"schema": 1, "protocol", "station", "file", "status", "store_version", "supported_store_version", "secrets_file" (boolean), "state"}` with `status` `found`, `missing` or `unusable` (`unusable` adds `reason`; `state` is `null` unless found). With `--protocol ocpp2.0.1` the command reads the `<id>.station2.json` file instead (availability per EVSE, active transactions, queued events, authorization cache entries, device-model values; values of password and key variables print as `***`) and never touches the OCPP 1.6 files; `state path` and `state reset` select the files the same way, and `state path --json` adds `protocol`. The content of `state` is specific to the protocol: do not rely on its keys across protocols |
 | `state reset --id ID [--yes]` | Delete the state file, the secrets file and their `.bak` copies of that station, nothing else and nothing outside the state directory. Asks `Delete? [y/N]` on a terminal; without a terminal it needs `-y, --yes` (exit 2 without it). Nothing to delete is not an error. `--json`: `{"schema": 1, "station", "deleted": [paths]}` |
 
 `state show` and `state reset` need the id to be given (`--id`, `OCPP_CHARGE_POINT_ID` or the `id` key of the configuration file); the default id `CP-001` is not assumed. A state or secrets file, or a `.bak` copy of either, written by a newer version is refused by `show` and `reset` and stays untouched (`reset` deletes nothing then). None of the `state` flags is a configuration file key. Exit codes: [Exit codes](#kirby-ocpp-state).
@@ -208,7 +209,7 @@ New keys may be added to these objects; none is renamed or removed. None of the 
 | `-o, --output <PATH>` | Write the scenario to this file instead of stdout. An existing file is an error (exit 2) unless `--overwrite` is given; the recording itself is never replaced |
 | `--overwrite` | Replace the `--output` file when it exists; needs `--output` |
 
-`kirby-ocpp version` prints the tool version, the git commit, the build date, the target triple and the supported protocols (`OCPP 1.6J`); with `--json` one JSON object with the keys `name`, `version`, `commit`, `build_date`, `target`, `protocols` (display names such as `OCPP 1.6J`) and `protocol_tokens` (the WebSocket subprotocol tokens such as `ocpp1.6`, in the same order). The commit is `unknown` in a build without git. `kirby-ocpp --version` stays a single line.
+`kirby-ocpp version` prints the tool version, the git commit, the build date, the target triple and the supported protocols (`OCPP 1.6J`, `OCPP 2.0.1`); with `--json` one JSON object with the keys `name`, `version`, `commit`, `build_date`, `target`, `protocols` (display names such as `OCPP 1.6J`) and `protocol_tokens` (the WebSocket subprotocol tokens such as `ocpp1.6`, in the same order). The commit is `unknown` in a build without git. `kirby-ocpp --version` stays a single line.
 
 `kirby-ocpp completions <bash|zsh|fish|powershell|elvish>` prints a shell completion script to stdout; installation hints are in [emulator.md](emulator.md#shell-completions).
 
@@ -233,11 +234,11 @@ For every setting: command-line flag, then environment variable, then the select
 ### Format
 
 * TOML, at most 1 MiB. A file that cannot be read, is too large, is not valid TOML or breaks any rule below exits 2 with a message that names the file and, where it applies, the key path (`connection.url`, `profile.lab.tls.tls_ca`).
-* Top-level `schema = 1` is optional; no other value is accepted. Top-level `protocol = "ocpp1.6"` is optional; no other value is accepted. The name `protocol` is reserved for the OCPP version of the file; synonyms such as `ocpp_version` are rejected as unknown keys. Both keys are accepted only at the top level.
+* Top-level `schema = 1` is optional; no other value is accepted. Top-level `protocol` is optional and is `"ocpp1.6"` or `"ocpp2.0.1"`; no other value is accepted. It sets `--protocol` unless the flag or `OCPP_PROTOCOL` is given, and `--print-config=toml` writes the effective one. The name `protocol` is reserved for the OCPP version of the file; synonyms such as `ocpp_version` are rejected as unknown keys. Both keys are accepted only at the top level.
 * Settings sit in tables. The tables match the headings of `kirby-ocpp --help`, in lower case: `[connection]`, `[identity]`, `[station]`, `[tls]`, `[reconnect]`, `[fleet]`, `[faults]` and `[output]`.
 * The key of a setting is the long flag name with `-` replaced by `_`: `--tls-ca` is `tls_ca`, `--reconnect-max-ms` is `reconnect_max_ms`. The key keeps its table even when the table name repeats a prefix (`[tls]` holds `tls_ca`). Values have the type of the flag: text, integer, boolean (`true` or `false`), or an array of text for `rule`. Text values are not trimmed or parsed any differently from the same flag; a value that the flag would refuse (out of range, empty, wrong form) is refused with the same message.
 * Unknown tables and unknown keys are errors, never ignored. A key in the wrong table is an unknown key.
-* Settings that exist for one OCPP version only belong to a version table below the section, such as `[station.v16]`. No setting needs one today; the table name is reserved and holds no keys yet.
+* Settings that exist for one OCPP version only belong to a version table below the section, such as `[station.v16]` or `[station.v201]`. No setting needs one today; the table names are reserved and hold no keys yet. A file that sets a 1.6-only key (`rule`, `authorization_key_encoding`, `security_profile_fallback`, `additional_root_certificate_check`) is refused with `ocpp2.0.1`, like the flag.
 * Not file keys: `--config`, `--profile`, `--print-config`, `--licenses`, `--record`, `--record-overwrite` and the arguments of `run`, `replay`, `suite`, `check`, `state` and `scenarios` (`--scenario`, `--report`, `--junit`, `--var`, `--yes`, ...). They describe one invocation, not a station.
 * Relative paths in the file (`tls_ca`, `tls_cert`, `tls_key`, `state_dir`, `log_file`) resolve against the directory of the configuration file, not against the working directory. Paths given by flag or variable keep resolving against the working directory.
 

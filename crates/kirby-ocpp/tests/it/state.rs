@@ -442,3 +442,228 @@ fn state_arguments_have_no_configuration_keys() {
         );
     }
 }
+
+// OCPP 2.x state files. The `--protocol` flag is needed by the tests named `v201_*`.
+
+const PASSWORD: &str = "S3NTINEL-BASIC-PASSWORD";
+
+/// Writes a 2.x state file (and a secrets file holding `PASSWORD`) next to nothing else.
+fn write_v201(dir: &Path, id: &str) {
+    use kirby_ocpp_core::store::{FileKind, PersistedStation2, StationSecrets2, StationStore};
+    let store = StationStore::new_for(FileKind::V2, dir, id);
+    let mut state = PersistedStation2::new(id);
+    state.boot_count = 4;
+    state.station_operative = false;
+    state
+        .device_model
+        .values
+        .insert("OCPPCommCtrlr.HeartbeatInterval".to_owned(), "9".to_owned());
+    state.device_model.values.insert(
+        "SecurityCtrlr.BasicAuthPassword".to_owned(),
+        PASSWORD.to_owned(),
+    );
+    store.save2(&state).unwrap();
+    store
+        .save_secrets2(&StationSecrets2 {
+            version: 0,
+            basic_auth_password: Some(PASSWORD.to_owned()),
+        })
+        .unwrap();
+}
+
+#[test]
+fn path_and_show_json_name_the_protocol() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().to_str().unwrap();
+    let output = run(&[
+        "state",
+        "path",
+        "--state-dir",
+        state,
+        "--id",
+        "CP-9",
+        "--json",
+    ]);
+    assert_eq!(json(&output)["protocol"], "ocpp1.6");
+    let output = run(&[
+        "state",
+        "show",
+        "--state-dir",
+        state,
+        "--id",
+        "CP-9",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    let value = json(&output);
+    assert_eq!(value["protocol"], "ocpp1.6");
+    assert_eq!(value["status"], "missing");
+}
+
+#[test]
+fn v201_path_prints_both_names_of_the_2_x_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().to_str().unwrap();
+    let args = ["state", "path", "--state-dir", state, "--id", "CP-9"];
+    let output = run(&[&args[..], &["--protocol", "ocpp2.0.1"]].concat());
+    assert!(text(&output.stdout).trim().ends_with("CP-9.station2.json"));
+    let output = run(&[&args[..], &["--protocol", "ocpp2.0.1", "--json"]].concat());
+    let value = json(&output);
+    assert_eq!(value["protocol"], "ocpp2.0.1");
+    assert!(
+        value["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("CP-9.station2.json")
+    );
+    assert!(
+        value["secrets_file"]
+            .as_str()
+            .unwrap()
+            .ends_with("CP-9.station2.secrets.json")
+    );
+}
+
+#[test]
+fn v201_show_reads_the_2_x_file_and_never_prints_secrets() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().to_str().unwrap();
+    write_v201(dir.path(), "CP-9");
+    let base = [
+        "state",
+        "show",
+        "--state-dir",
+        state,
+        "--id",
+        "CP-9",
+        "--protocol",
+        "ocpp2.0.1",
+    ];
+    let output = run(&base);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let printed = text(&output.stdout);
+    assert!(printed.contains("ocpp2.0.1"), "{printed}");
+    assert!(printed.contains("Boots:          4"), "{printed}");
+    assert!(printed.contains("Inoperative"), "{printed}");
+    assert!(printed.contains("Secrets file:   present (not read, not shown)"));
+    assert!(
+        printed.contains("OCPPCommCtrlr.HeartbeatInterval = 9"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("SecurityCtrlr.BasicAuthPassword = ***"),
+        "{printed}"
+    );
+    assert!(!printed.contains(PASSWORD));
+
+    let output = run(&[&base[..], &["--json"]].concat());
+    let value = json(&output);
+    assert_eq!(value["protocol"], "ocpp2.0.1");
+    assert_eq!(value["status"], "found");
+    assert_eq!(value["secrets_file"], true);
+    assert_eq!(value["supported_store_version"], 1);
+    assert_eq!(value["state"]["boot_count"], 4);
+    assert_eq!(
+        value["state"]["device_model"]["SecurityCtrlr.BasicAuthPassword"],
+        "***"
+    );
+    assert!(!text(&output.stdout).contains(PASSWORD));
+}
+
+#[test]
+fn v201_show_and_reset_never_touch_the_1_6_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().to_str().unwrap();
+    let v16 = file_of(dir.path(), "CP-9");
+    std::fs::write(&v16, "not the 2.x file").unwrap();
+    let secrets16 = add_secrets(dir.path(), "CP-9");
+
+    // Only the 1.6 files exist: the 2.x commands see nothing.
+    let args = |action: &'static str| {
+        [
+            "state",
+            action,
+            "--state-dir",
+            state,
+            "--id",
+            "CP-9",
+            "--protocol",
+            "ocpp2.0.1",
+        ]
+    };
+    let output = run(&args("show"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        text(&output.stderr).contains("no saved state"),
+        "{}",
+        text(&output.stderr)
+    );
+    let output = run(&[&args("reset")[..], &["--yes"]].concat());
+    assert_eq!(output.status.code(), Some(0));
+    assert!(text(&output.stdout).contains("nothing to delete"));
+    assert_eq!(std::fs::read_to_string(&v16).unwrap(), "not the 2.x file");
+    assert!(secrets16.exists());
+
+    // Both kinds exist: `reset` removes the 2.x files only.
+    write_v201(dir.path(), "CP-9");
+    let output = run(&[&args("reset")[..], &["--yes"]].concat());
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(!dir.path().join("CP-9.station2.json").exists());
+    assert!(!dir.path().join("CP-9.station2.secrets.json").exists());
+    assert!(v16.exists());
+    assert!(secrets16.exists());
+
+    // And the other way round: a default `reset` leaves the 2.x files alone.
+    write_v201(dir.path(), "CP-9");
+    let output = run(&[
+        "state",
+        "reset",
+        "--state-dir",
+        state,
+        "--id",
+        "CP-9",
+        "--yes",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(!v16.exists());
+    assert!(dir.path().join("CP-9.station2.json").exists());
+    assert!(dir.path().join("CP-9.station2.secrets.json").exists());
+}
+
+#[test]
+fn v201_show_refuses_a_newer_file_and_leaves_it_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().to_str().unwrap();
+    let file = dir.path().join("CP-9.station2.json");
+    let newer = r#"{"version": 99, "charge_point_id": "CP-9"}"#;
+    std::fs::write(&file, newer).unwrap();
+    let output = run(&[
+        "state",
+        "show",
+        "--state-dir",
+        state,
+        "--id",
+        "CP-9",
+        "--protocol",
+        "ocpp2.0.1",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        text(&output.stderr).contains("format version 99"),
+        "{}",
+        text(&output.stderr)
+    );
+    let output = run(&[
+        "state",
+        "reset",
+        "--state-dir",
+        state,
+        "--id",
+        "CP-9",
+        "--protocol",
+        "ocpp2.0.1",
+        "--yes",
+    ]);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), newer);
+}

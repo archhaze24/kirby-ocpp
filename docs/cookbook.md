@@ -2,7 +2,7 @@
 
 Short, copy-pasteable recipes for the most common jobs. Each one states the goal, the commands, what you should see and where the details live. Commands assume `kirby-ocpp` and `kirby-csms` are on your `PATH` ([install](../README.md#install)) and use `127.0.0.1` with port 9000. Recipes that use `suite` need version 0.5.0 or newer.
 
-Contents: [First run](#first-run) · [Check a CSMS with the built-in scenarios](#check-a-csms-with-the-built-in-scenarios) · [Test a rejected tag](#test-a-rejected-tag) · [Answer a CSMS command with a scripted reply](#answer-a-csms-command-with-a-scripted-reply) · [Record a session, turn it into a scenario, replay it](#record-a-session-turn-it-into-a-scenario-replay-it) · [Lost connection and reconnect](#lost-connection-and-reconnect) · [Load test with a fleet](#load-test-with-a-fleet) · [Keep a test setup in a configuration file](#keep-a-test-setup-in-a-configuration-file) · [Keep a CSMS setup in a configuration file](#keep-a-csms-setup-in-a-configuration-file) · [Script the central system](#script-the-central-system) · [Export traffic and scrape metrics](#export-traffic-and-scrape-metrics) · [TLS and mutual TLS](#tls-and-mutual-tls) · [Variables, captures and loops](#variables-captures-and-loops) · [Debug a connection](#debug-a-connection) · [Look at or reset a station's state](#look-at-or-reset-a-stations-state) · [Related pages](#related-pages)
+Contents: [First run](#first-run) · [Check a CSMS with the built-in scenarios](#check-a-csms-with-the-built-in-scenarios) · [Test a rejected tag](#test-a-rejected-tag) · [Answer a CSMS command with a scripted reply](#answer-a-csms-command-with-a-scripted-reply) · [Record a session, turn it into a scenario, replay it](#record-a-session-turn-it-into-a-scenario-replay-it) · [Lost connection and reconnect](#lost-connection-and-reconnect) · [Load test with a fleet](#load-test-with-a-fleet) · [Keep a test setup in a configuration file](#keep-a-test-setup-in-a-configuration-file) · [Keep a CSMS setup in a configuration file](#keep-a-csms-setup-in-a-configuration-file) · [Script the central system](#script-the-central-system) · [Export traffic and scrape metrics](#export-traffic-and-scrape-metrics) · [TLS and mutual TLS](#tls-and-mutual-tls) · [Variables, captures and loops](#variables-captures-and-loops) · [Debug a connection](#debug-a-connection) · [Connect an OCPP 2.0.1 station](#connect-an-ocpp-201-station) · [Look at or reset a station's state](#look-at-or-reset-a-stations-state) · [Related pages](#related-pages)
 
 ## First run
 
@@ -458,6 +458,17 @@ kirby-ocpp check --url wss://csms.example/ocpp --id CP-1 --json | jq -r '.steps[
 ```
 
 Reference: [Connection check](emulator.md#connection-check), [Configuration](configuration.md#kirby-ocpp-subcommands), [Connection errors](emulator.md#connection-errors).
+
+## Connect an OCPP 2.0.1 station
+
+Goal: point a 2.0.1 charge station at a CSMS, or check that a CSMS accepts the 2.0.1 subprotocol.
+
+```bash
+kirby-ocpp check --url ws://localhost:9000/ocpp --id CP-1 --protocol ocpp2.0.1
+kirby-ocpp --url ws://localhost:9000/ocpp --id CP-1 --protocol ocpp2.0.1 --no-tui
+```
+
+`check` offers `ocpp2.0.1`, sends a 2.0.1 BootNotification and names `ocpp_version` `2.0.1` in its report. The station prints the same event lines as the 1.6 one and exits 0 on SIGINT or SIGTERM. To keep the choice in a file, put `protocol = "ocpp2.0.1"` at the top of the configuration file; `--print-config=toml --protocol ocpp2.0.1` writes such a file. Flags that exist for 1.6 only (`--rule` and the security profile flags) exit 2 with 2.0.1; the list is in [Emulator](emulator.md#ocpp-201).
 
 ## Look at or reset a station's state
 

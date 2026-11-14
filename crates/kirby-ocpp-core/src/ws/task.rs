@@ -28,10 +28,20 @@ use uuid::Uuid;
 
 use super::{ConnectOptions, ConnectionEvent, EVENT_CAPACITY, IncomingCall, SchemaSet};
 use crate::error::CallError;
+use crate::ocpp::Protocol;
 use crate::ocpp::frame::{
     Direction, ErrorCode, Frame, FrameRecord, redact_malformed_text, redact_secrets,
 };
 use crate::ocpp::responder::ReplyHandle;
+
+/// The name of `protocol` in protocol warnings.
+const fn protocol_label(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::V16 => "OCPP 1.6J",
+        Protocol::V201 => "OCPP 2.0.1",
+        Protocol::V21 => "OCPP 2.1",
+    }
+}
 
 /// Close code reported when the connection ended without a close handshake.
 const ABNORMAL_CLOSE: u16 = 1006;
@@ -291,8 +301,9 @@ impl Task {
                 match self.schemas.registry().validate_response(&action, &payload) {
                     Ok(()) => Frame::CallResult { id, payload },
                     Err(violation) => {
+                        let label = protocol_label(self.schemas.registry().protocol());
                         self.warn(format!(
-                            "reply to {action} violates the OCPP 1.6J schema, InternalError sent instead: {violation}"
+                            "reply to {action} violates the {label} schema, InternalError sent instead: {violation}"
                         ))
                         .await?;
                         Frame::call_error(id, ErrorCode::InternalError, violation.errors.join("; "))
@@ -420,7 +431,10 @@ impl Task {
         } else {
             Some((
                 ErrorCode::NotImplemented,
-                format!("{action} is not an OCPP 1.6J action"),
+                format!(
+                    "{action} is not an {} action",
+                    protocol_label(schemas.protocol())
+                ),
             ))
         };
         if let Some((code, description)) = rejection {
@@ -458,8 +472,9 @@ impl Task {
         {
             Ok(()) => Ok(payload),
             Err(violation) => {
+                let label = protocol_label(self.schemas.registry().protocol());
                 self.warn(format!(
-                    "CALLRESULT for {} violates the OCPP 1.6J schema: {violation}",
+                    "CALLRESULT for {} violates the {label} schema: {violation}",
                     pending.action
                 ))
                 .await?;
@@ -848,6 +863,150 @@ mod tests {
         for protocol in [Protocol::V201, Protocol::V21] {
             let mut v2 = rig(ping_schemas(protocol)).await;
             assert_eq!(v2.error_code_for(broken).await, "FormatViolation");
+        }
+    }
+
+    /// A task over an in-memory socket that keeps the command channel in reach, to read the
+    /// protocol warnings it emits.
+    struct WarnRig {
+        peer: WebSocketStream<tokio::io::DuplexStream>,
+        events: mpsc::Receiver<ConnectionEvent>,
+        commands: mpsc::UnboundedSender<Command>,
+    }
+
+    /// Accepts any `Ping` request and wants an `ok` field in its response.
+    fn strict_ping_schemas(protocol: Protocol) -> SchemaSet {
+        const TABLE: crate::ocpp::schema::SchemaTable = &[(
+            "Ping",
+            r#"{"type":"object"}"#,
+            r#"{"type":"object","required":["ok"]}"#,
+        )];
+        SchemaSet::new(Arc::new(
+            crate::ocpp::SchemaRegistry::build(protocol, TABLE).unwrap(),
+        ))
+    }
+
+    async fn warn_rig(protocol: Protocol) -> WarnRig {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let ws = WebSocketStream::from_raw_socket(ours, Role::Client, None).await;
+        let peer = WebSocketStream::from_raw_socket(theirs, Role::Server, None).await;
+        let options = ConnectOptions {
+            ping_interval: None,
+            ..ConnectOptions::default()
+        }
+        .with_schemas(strict_ping_schemas(protocol));
+        let (_open, commands, events) = spawn(ws, &options);
+        WarnRig {
+            peer,
+            events,
+            commands,
+        }
+    }
+
+    impl WarnRig {
+        /// The next event matching `pick`, within the deadline.
+        async fn next<T>(&mut self, mut pick: impl FnMut(ConnectionEvent) -> Option<T>) -> T {
+            timeout(DEADLINE, async {
+                loop {
+                    match self.events.recv().await {
+                        Some(event) => {
+                            if let Some(found) = pick(event) {
+                                break found;
+                            }
+                        }
+                        None => panic!("the task ended"),
+                    }
+                }
+            })
+            .await
+            .expect("the event within the deadline")
+        }
+
+        async fn next_warning(&mut self) -> String {
+            self.next(|event| match event {
+                ConnectionEvent::ProtocolWarning(text) => Some(text),
+                _ => None,
+            })
+            .await
+        }
+    }
+
+    #[test]
+    fn protocol_labels_are_pinned() {
+        assert_eq!(protocol_label(Protocol::V16), "OCPP 1.6J");
+        assert_eq!(protocol_label(Protocol::V201), "OCPP 2.0.1");
+        assert_eq!(protocol_label(Protocol::V21), "OCPP 2.1");
+    }
+
+    #[tokio::test]
+    async fn unknown_action_warning_names_the_protocol() {
+        for (protocol, label) in [(Protocol::V16, "OCPP 1.6J"), (Protocol::V201, "OCPP 2.0.1")] {
+            let mut rig = warn_rig(protocol).await;
+            rig.peer
+                .send(Message::Text(r#"[2,"1","Nope",{}]"#.into()))
+                .await
+                .unwrap();
+            assert_eq!(
+                rig.next_warning().await,
+                format!(
+                    "rejected CALL 1 (Nope) with NotImplemented: Nope is not an {label} action"
+                )
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_reply_warning_names_the_protocol() {
+        for (protocol, label) in [(Protocol::V16, "OCPP 1.6J"), (Protocol::V201, "OCPP 2.0.1")] {
+            let mut rig = warn_rig(protocol).await;
+            rig.peer
+                .send(Message::Text(r#"[2,"2","Ping",{}]"#.into()))
+                .await
+                .unwrap();
+            let call = rig
+                .next(|event| match event {
+                    ConnectionEvent::Call(call) => Some(call),
+                    _ => None,
+                })
+                .await;
+            call.reply.accept_value(serde_json::json!({})).unwrap();
+            let warning = rig.next_warning().await;
+            let expected =
+                format!("reply to Ping violates the {label} schema, InternalError sent instead: ");
+            assert!(warning.starts_with(&expected), "{warning}");
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_callresult_warning_names_the_protocol() {
+        for (protocol, label) in [(Protocol::V16, "OCPP 1.6J"), (Protocol::V201, "OCPP 2.0.1")] {
+            let mut rig = warn_rig(protocol).await;
+            let (reply, answer) = oneshot::channel();
+            rig.commands
+                .send(Command::Call(OutboundCall {
+                    action: "Ping".to_owned(),
+                    payload: serde_json::json!({}),
+                    timeout: DEADLINE,
+                    reply,
+                }))
+                .unwrap();
+            let sent = timeout(DEADLINE, rig.peer.next())
+                .await
+                .expect("the CALL within the deadline");
+            let Some(Ok(Message::Text(sent))) = sent else {
+                panic!("expected a text frame, got {sent:?}");
+            };
+            let frame: Value = serde_json::from_str(sent.as_str()).unwrap();
+            let id = frame[1].as_str().unwrap().to_owned();
+            rig.peer
+                .send(Message::Text(format!(r#"[3,"{id}",{{}}]"#).into()))
+                .await
+                .unwrap();
+            let warning = rig.next_warning().await;
+            let expected = format!("CALLRESULT for Ping violates the {label} schema: ");
+            assert!(warning.starts_with(&expected), "{warning}");
+            let result = timeout(DEADLINE, answer).await.unwrap().unwrap();
+            assert!(matches!(result, Err(CallError::Schema(_))));
         }
     }
 }

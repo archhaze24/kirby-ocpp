@@ -1,15 +1,8 @@
 //! The cloneable client side of a running OCPP 2.0.1 station.
 
-#![allow(
-    dead_code,
-    clippy::unused_async,
-    clippy::unused_async_trait_impl,
-    reason = "placeholder module; remove this allow when the module is implemented"
-)]
-
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
 use super::command::{Command2, Outcome2};
 use super::snapshot::Snapshot2;
@@ -62,13 +55,21 @@ impl Station2Handle {
 
     /// Submits `command` and waits until it has completed.
     ///
+    /// **Cancellation:** the command is queued before the future first yields, so dropping
+    /// the future afterwards does **not** cancel the command; it still runs and its outcome
+    /// is discarded. To abandon a long operation, send a command that undoes it (for
+    /// example `Disconnect`).
+    ///
     /// # Errors
     /// [`StationError::Stopped`] if the station is no longer running; otherwise whatever
     /// error the command itself produced.
     pub async fn send(&self, command: Command2) -> Result<Outcome2, StationError> {
-        Err(StationError::NotImplemented {
-            command: command.name(),
-        })
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Envelope2 { command, reply })
+            .await
+            .map_err(|_| StationError::Stopped)?;
+        answer.await.map_err(|_| StationError::Stopped)?
     }
 
     /// The latest snapshot (a cheap copy).

@@ -302,24 +302,113 @@ pub enum Inspection {
     },
 }
 
+/// Which protocol family a state file belongs to. Each family has its own file names and
+/// format version, so a station id used with both protocols keeps two independent files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FileKind {
+    /// OCPP 1.6: `<id>.station.json`, version [`STORE_VERSION`].
+    V16,
+    /// OCPP 2.x: `<id>.station2.json`, version [`STORE2_VERSION`].
+    V2,
+}
+
+impl FileKind {
+    /// The kind of state file a station of `protocol` uses.
+    #[must_use]
+    pub const fn for_protocol(protocol: Protocol) -> Self {
+        match protocol {
+            Protocol::V16 => Self::V16,
+            Protocol::V201 | Protocol::V21 => Self::V2,
+        }
+    }
+
+    /// Suffix of the state file name.
+    #[must_use]
+    pub const fn state_suffix(self) -> &'static str {
+        match self {
+            Self::V16 => ".station.json",
+            Self::V2 => ".station2.json",
+        }
+    }
+
+    /// Suffix of the secrets file name.
+    #[must_use]
+    pub const fn secrets_suffix(self) -> &'static str {
+        match self {
+            Self::V16 => ".station.secrets.json",
+            Self::V2 => ".station2.secrets.json",
+        }
+    }
+
+    /// The newest format version this build reads and writes for the kind.
+    #[must_use]
+    pub const fn version(self) -> u32 {
+        match self {
+            Self::V16 => STORE_VERSION,
+            Self::V2 => STORE2_VERSION,
+        }
+    }
+}
+
+/// Result of [`StationStore::load2`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum LoadOutcome2 {
+    /// No file yet.
+    Missing,
+    Loaded(Box<PersistedStation2>),
+    /// The file was unusable and has been moved to `backup`; start from scratch.
+    Quarantined {
+        backup: PathBuf,
+        reason: String,
+    },
+}
+
+/// Result of [`StationStore::inspect2`]: like [`LoadOutcome2`], but nothing is moved aside.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Inspection2 {
+    /// No file.
+    Missing,
+    Loaded(Box<PersistedStation2>),
+    /// The file cannot be used (corrupt, or it belongs to another charge point).
+    Unusable {
+        reason: String,
+    },
+}
+
 /// Handle to the state file of one charge point.
 #[derive(Debug, Clone)]
 pub struct StationStore {
     path: PathBuf,
     charge_point_id: String,
+    kind: FileKind,
 }
 
 impl StationStore {
-    /// The store for `charge_point_id` inside `dir` (nothing is touched until used).
+    /// The OCPP 1.6 store for `charge_point_id` inside `dir` (nothing is touched until used).
     pub fn new(dir: impl AsRef<Path>, charge_point_id: &str) -> Self {
+        Self::new_for(FileKind::V16, dir, charge_point_id)
+    }
+
+    /// The store of the given file kind for `charge_point_id` inside `dir`. Use the `*2`
+    /// methods ([`StationStore::load2`], [`StationStore::save2`], ...) with [`FileKind::V2`].
+    pub fn new_for(kind: FileKind, dir: impl AsRef<Path>, charge_point_id: &str) -> Self {
         Self {
-            path: dir.as_ref().join(file_name(charge_point_id)),
+            path: dir.as_ref().join(file_name(kind, charge_point_id)),
             charge_point_id: charge_point_id.to_owned(),
+            kind,
         }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The file kind of this store.
+    #[must_use]
+    pub fn kind(&self) -> FileKind {
+        self.kind
     }
 
     /// Reads the state file. See the module docs for the recovery rules.
@@ -404,16 +493,17 @@ impl StationStore {
     /// ([`StoreError::UnsupportedVersion`]).
     pub fn remove(&self) -> Result<Vec<PathBuf>, StoreError> {
         let files = self.owned_files();
+        let supported = self.kind.version();
         for path in &files {
             let Ok(bytes) = fs::read(path) else { continue };
             let found = serde_json::from_slice::<Value>(&bytes)
                 .ok()
                 .and_then(|value| value.get("version").and_then(Value::as_u64));
-            if let Some(found) = found.filter(|found| *found > u64::from(STORE_VERSION)) {
+            if let Some(found) = found.filter(|found| *found > u64::from(supported)) {
                 return Err(StoreError::UnsupportedVersion {
                     path: path.clone(),
                     found,
-                    supported: STORE_VERSION,
+                    supported,
                 });
             }
         }
@@ -431,8 +521,132 @@ impl StationStore {
     /// Path of the secrets file next to the state file.
     pub fn secrets_path(&self) -> PathBuf {
         let text = self.path.to_string_lossy();
-        let base = text.strip_suffix(".station.json").unwrap_or(&text);
-        PathBuf::from(format!("{base}.station.secrets.json"))
+        let base = text.strip_suffix(self.kind.state_suffix()).unwrap_or(&text);
+        PathBuf::from(format!("{base}{}", self.kind.secrets_suffix()))
+    }
+
+    /// Reads the state file of a [`FileKind::V2`] store. Same recovery rules as
+    /// [`StationStore::load`]: a corrupt file or one of another charge point is moved to
+    /// `<file>.bak`; a newer version is an error and the file is left alone.
+    pub fn load2(&self) -> Result<LoadOutcome2, StoreError> {
+        match self.read_state2()? {
+            Inspection2::Missing => Ok(LoadOutcome2::Missing),
+            Inspection2::Loaded(state) => Ok(LoadOutcome2::Loaded(state)),
+            Inspection2::Unusable { reason } => {
+                let backup = move_aside(&self.path)?;
+                Ok(LoadOutcome2::Quarantined { backup, reason })
+            }
+        }
+    }
+
+    /// Like [`StationStore::load2`], but nothing is moved aside.
+    pub fn inspect2(&self) -> Result<Inspection2, StoreError> {
+        self.read_state2()
+    }
+
+    fn read_state2(&self) -> Result<Inspection2, StoreError> {
+        let bytes = match fs::read(&self.path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Inspection2::Missing),
+            Err(source) => return Err(self.io_error(source)),
+        };
+        let unusable = |reason: String| Ok(Inspection2::Unusable { reason });
+        let value: Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(e) => return unusable(format!("not valid JSON: {e}")),
+        };
+        match value.get("version").and_then(Value::as_u64) {
+            Some(found) if found > u64::from(STORE2_VERSION) => {
+                return Err(StoreError::UnsupportedVersion {
+                    path: self.path.clone(),
+                    found,
+                    supported: STORE2_VERSION,
+                });
+            }
+            Some(_) => {}
+            None => return unusable("missing format version".to_owned()),
+        }
+        let state: PersistedStation2 = match serde_json::from_value(value) {
+            Ok(state) => state,
+            Err(e) => return unusable(format!("unexpected structure: {e}")),
+        };
+        if state.charge_point_id != self.charge_point_id {
+            return unusable(format!(
+                "belongs to charge point `{}`, expected `{}`",
+                state.charge_point_id, self.charge_point_id
+            ));
+        }
+        Ok(Inspection2::Loaded(Box::new(state)))
+    }
+
+    /// Atomically replaces the state file of a [`FileKind::V2`] store. The version and the
+    /// charge point id are always the store's own.
+    pub fn save2(&self, state: &PersistedStation2) -> Result<(), StoreError> {
+        let mut copy = state.clone();
+        copy.version = STORE2_VERSION;
+        copy.charge_point_id.clone_from(&self.charge_point_id);
+        let json = serde_json::to_vec_pretty(&copy).map_err(StoreError::Serialize)?;
+        Self::write_atomic(&self.path, &json)
+    }
+
+    /// Reads the secrets file of a [`FileKind::V2`] store; a missing one is "no secrets".
+    /// A corrupt file is moved aside (reported as `InvalidData`); a newer one is left untouched
+    /// ([`StoreError::UnsupportedVersion`]).
+    pub fn load_secrets2(&self) -> Result<StationSecrets2, StoreError> {
+        let path = self.secrets_path();
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                return Ok(StationSecrets2::default());
+            }
+            Err(source) => return Err(StoreError::Io { path, source }),
+        };
+        let parsed = serde_json::from_slice::<Value>(&bytes)
+            .map_err(|e| e.to_string())
+            .and_then(|value| {
+                let found = value.get("version").and_then(Value::as_u64).unwrap_or(0);
+                if found > u64::from(STORE2_VERSION) {
+                    return Ok(Err(found));
+                }
+                serde_json::from_value::<StationSecrets2>(value)
+                    .map(Ok)
+                    .map_err(|e| e.to_string())
+            });
+        match parsed {
+            Ok(Ok(secrets)) => Ok(secrets),
+            Ok(Err(found)) => Err(StoreError::UnsupportedVersion {
+                path,
+                found,
+                supported: STORE2_VERSION,
+            }),
+            Err(e) => {
+                let backup = move_aside(&path)?;
+                Err(StoreError::Io {
+                    path,
+                    source: io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{e}; the file was moved to {}", backup.display()),
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Atomically replaces the secrets file of a [`FileKind::V2`] store (removes it when
+    /// there is no secret to keep).
+    pub fn save_secrets2(&self, secrets: &StationSecrets2) -> Result<(), StoreError> {
+        let path = self.secrets_path();
+        if secrets.basic_auth_password.is_none() {
+            return match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(source) => Err(StoreError::Io { path, source }),
+            };
+        }
+        let mut copy = secrets.clone();
+        copy.version = STORE2_VERSION;
+        let json = serde_json::to_vec_pretty(&copy).map_err(StoreError::Serialize)?;
+        Self::write_atomic(&path, &json)
     }
 
     /// Reads the secrets file; a missing or unreadable one is "no secrets".
@@ -544,9 +758,10 @@ fn move_aside(path: &Path) -> Result<PathBuf, StoreError> {
     Ok(backup)
 }
 
-/// Longest escaped id kept verbatim. With `.station.json` (13 bytes), the `.bak` suffix and the
-/// `~<16 hex>` hash tail the name stays well below the 255-byte file name limit, and short enough
-/// for the 260-character path limit of Windows with a typical state directory.
+/// Longest escaped id kept verbatim. With the longest suffix (`.station2.secrets.json`, 23
+/// bytes), the `.bak` suffix and the `~<16 hex>` hash tail the name stays well below the
+/// 255-byte file name limit, and short enough for the 260-character path limit of Windows with
+/// a typical state directory. Both file kinds share the limit, so 1.6 names never change.
 const MAX_ESCAPED_LEN: usize = 100;
 
 /// File name for a charge point id: `[A-Za-z0-9_-]` and non-leading `.` are kept, every
@@ -555,7 +770,7 @@ const MAX_ESCAPED_LEN: usize = 100;
 /// An escaped id longer than [`MAX_ESCAPED_LEN`] is cut at an escape boundary and followed by
 /// `~` plus the FNV-1a hash of the whole id. `~` is always escaped in plain names, so a
 /// shortened name cannot collide with an unshortened one.
-fn file_name(charge_point_id: &str) -> String {
+fn file_name(kind: FileKind, charge_point_id: &str) -> String {
     let mut name = String::with_capacity(charge_point_id.len().min(MAX_ESCAPED_LEN) + 32);
     let mut kept = 0;
     let mut truncated = false;
@@ -584,7 +799,7 @@ fn file_name(charge_point_id: &str) -> String {
     if name.is_empty() {
         name.push_str("%00empty");
     }
-    name.push_str(".station.json");
+    name.push_str(kind.state_suffix());
     name
 }
 
@@ -603,6 +818,40 @@ mod tests {
     use crate::fs_util::dir_sync_unsupported;
     use crate::ids::TxId;
     use crate::station::transaction::ActiveTransaction;
+
+    /// The 1.6 file name; the tests below predate the file kinds.
+    fn file_name(charge_point_id: &str) -> String {
+        super::file_name(FileKind::V16, charge_point_id)
+    }
+
+    #[test]
+    fn v2_names_fit_the_budget_with_the_longest_suffix_and_backup() {
+        let long = "x".repeat(300);
+        for id in ["CP-1", "", "a b", long.as_str(), "é".repeat(80).as_str()] {
+            let store = StationStore::new_for(FileKind::V2, "/state", id);
+            for path in store.owned_files() {
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                assert!(name.len() <= 150, "{} bytes: {name}", name.len());
+            }
+            assert!(
+                store
+                    .path()
+                    .to_string_lossy()
+                    .ends_with(FileKind::V2.state_suffix())
+            );
+            assert!(
+                store
+                    .secrets_path()
+                    .to_string_lossy()
+                    .ends_with(FileKind::V2.secrets_suffix())
+            );
+        }
+        assert_eq!(super::file_name(FileKind::V2, "CP-1"), "CP-1.station2.json");
+        assert_eq!(
+            StationStore::new(Path::new("/s"), "CP-1").path(),
+            StationStore::new_for(FileKind::V16, "/s", "CP-1").path()
+        );
+    }
 
     #[test]
     fn unsupported_directory_sync_is_not_a_save_failure() {

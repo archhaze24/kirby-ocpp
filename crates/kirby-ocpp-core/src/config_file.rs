@@ -223,9 +223,15 @@ impl Block {
 pub struct Settings {
     values: BTreeMap<&'static str, Value>,
     blocks: BTreeMap<&'static str, Vec<Block>>,
+    protocol: Option<String>,
 }
 
 impl Settings {
+    /// The top-level `protocol` key, if the file has one (a profile cannot carry it).
+    pub fn protocol(&self) -> Option<&str> {
+        self.protocol.as_deref()
+    }
+
     /// The elements of the array of tables `name` (empty when the file has none). A selected
     /// profile that defines the array replaces the one of the top level as a whole.
     pub fn blocks(&self, name: &str) -> &[Block] {
@@ -244,7 +250,7 @@ impl Settings {
 
     /// Whether no key is set.
     pub fn is_empty(&self) -> bool {
-        self.values.is_empty() && self.blocks.is_empty()
+        self.values.is_empty() && self.blocks.is_empty() && self.protocol.is_none()
     }
 }
 
@@ -325,6 +331,7 @@ pub fn parse_str(
     };
 
     let mut top = BTreeMap::new();
+    let mut protocol = None;
     let mut top_blocks: BTreeMap<&'static str, Vec<Block>> = BTreeMap::new();
     let mut profiles: BTreeMap<String, Profile> = BTreeMap::new();
     let mut top_tables = toml::Table::new();
@@ -340,7 +347,9 @@ pub fn parse_str(
                 None => return Err(fail(type_error("schema", "an integer", value))),
             },
             "protocol" => match value.as_str() {
-                Some(name) if schema.protocols.contains(&name) => {}
+                Some(name) if schema.protocols.contains(&name) => {
+                    protocol = Some(name.to_owned());
+                }
                 Some(other) => {
                     return Err(fail(format!(
                         "key `protocol`: `{other}` is not supported, expected one of {}",
@@ -398,6 +407,7 @@ pub fn parse_str(
     Ok(Settings {
         values: top,
         blocks: top_blocks,
+        protocol,
     })
 }
 
@@ -640,6 +650,17 @@ pub fn render(schema: &Schema, values: &[(&str, Value)], comments: &[String]) ->
     render_with_blocks(schema, values, &[], comments)
 }
 
+/// Like [`render`], with `protocol` written as the top-level `protocol` key instead of the
+/// schema default. The caller passes one of `schema.protocols`.
+pub fn render_with_protocol(
+    schema: &Schema,
+    protocol: &str,
+    values: &[(&str, Value)],
+    comments: &[String],
+) -> String {
+    render_blocks_with_protocol(schema, protocol, values, &[], comments)
+}
+
 /// One element of an array of tables to render: key name and value, in any order.
 pub type BlockValues<'a> = Vec<(&'a str, Value)>;
 
@@ -647,6 +668,17 @@ pub type BlockValues<'a> = Vec<(&'a str, Value)>;
 /// elements. Each element is written as `[[name]]` with its keys in schema order.
 pub fn render_with_blocks(
     schema: &Schema,
+    values: &[(&str, Value)],
+    blocks: &[(&str, Vec<BlockValues<'_>>)],
+    comments: &[String],
+) -> String {
+    render_blocks_with_protocol(schema, default_protocol(schema), values, blocks, comments)
+}
+
+/// [`render_with_blocks`] with an explicit top-level `protocol`.
+pub fn render_blocks_with_protocol(
+    schema: &Schema,
+    protocol: &str,
     values: &[(&str, Value)],
     blocks: &[(&str, Vec<BlockValues<'_>>)],
     comments: &[String],
@@ -659,7 +691,7 @@ pub fn render_with_blocks(
         out.push('\n');
     }
     let _ = writeln!(out, "schema = {SCHEMA_VERSION}");
-    let _ = writeln!(out, "protocol = {}", toml_string(default_protocol(schema)));
+    let _ = writeln!(out, "protocol = {}", toml_string(protocol));
     for section in schema.sections {
         let lines: Vec<String> = section
             .keys
@@ -700,6 +732,16 @@ pub fn render_json(
     values: &[(&str, Value)],
     blocks: &[(&str, Vec<BlockValues<'_>>)],
 ) -> serde_json::Value {
+    render_json_with_protocol(schema, default_protocol(schema), values, blocks)
+}
+
+/// [`render_json`] with an explicit `protocol` value.
+pub fn render_json_with_protocol(
+    schema: &Schema,
+    protocol: &str,
+    values: &[(&str, Value)],
+    blocks: &[(&str, Vec<BlockValues<'_>>)],
+) -> serde_json::Value {
     let json_value = |value: &Value| match value {
         Value::Text(text) => serde_json::Value::from(text.as_str()),
         Value::Integer(number) => serde_json::Value::from(*number),
@@ -708,7 +750,7 @@ pub fn render_json(
     };
     let mut root = serde_json::Map::new();
     root.insert("schema".to_owned(), SCHEMA_VERSION.into());
-    root.insert("protocol".to_owned(), default_protocol(schema).into());
+    root.insert("protocol".to_owned(), protocol.into());
     for section in schema.sections {
         let mut table = serde_json::Map::new();
         for spec in section.keys {
@@ -1246,6 +1288,68 @@ mod tests {
         assert_eq!(json["connection"]["ws_ping"], 5);
         assert_eq!(json["entry"][1]["count"], 3);
         assert_eq!(json["protocol"], "ocpp1.6");
+    }
+
+    /// `SCHEMA` with a second accepted protocol and the version tables of the emulator.
+    const TWO_PROTOCOLS: Schema = Schema {
+        protocols: &["ocpp1.6", "ocpp2.0.1"],
+        sections: SCHEMA.sections,
+        blocks: SCHEMA.blocks,
+    };
+
+    #[test]
+    fn the_protocol_key_is_kept_and_a_profile_cannot_carry_it() {
+        let path = Path::new("/etc/k/cfg.toml");
+        let load = |text: &str| parse_str(text, path, &TWO_PROTOCOLS, None);
+        assert_eq!(
+            load("protocol = \"ocpp2.0.1\"\n").unwrap().protocol(),
+            Some("ocpp2.0.1")
+        );
+        assert_eq!(load("schema = 1\n").unwrap().protocol(), None);
+        assert!(!load("protocol = \"ocpp1.6\"\n").unwrap().is_empty());
+        let message = load("protocol = \"ocpp2.1\"\n").unwrap_err().to_string();
+        assert!(
+            message.contains("`ocpp2.1` is not supported")
+                && message.contains("ocpp1.6, ocpp2.0.1"),
+            "{message}"
+        );
+        // The one-protocol schema still rejects the second.
+        assert!(err("protocol = \"ocpp2.0.1\"\n").contains("`ocpp2.0.1` is not supported"));
+        assert!(
+            load("[profile.x]\nprotocol = \"ocpp2.0.1\"\n")
+                .unwrap_err()
+                .to_string()
+                .contains("only valid at the top level")
+        );
+    }
+
+    #[test]
+    fn the_protocol_variants_write_the_given_protocol_and_the_old_ones_the_default() {
+        let values = vec![("ws_ping", Value::Integer(5))];
+        let text = render_with_protocol(&TWO_PROTOCOLS, "ocpp2.0.1", &values, &[]);
+        assert!(
+            text.starts_with("schema = 1\nprotocol = \"ocpp2.0.1\"\n"),
+            "{text}"
+        );
+        let parsed = parse_str(&text, Path::new("/x.toml"), &TWO_PROTOCOLS, None).unwrap();
+        assert_eq!(parsed.protocol(), Some("ocpp2.0.1"));
+        assert_eq!(parsed.get("ws_ping"), Some(&Value::Integer(5)));
+        // The old functions are the new ones at the schema default, byte for byte.
+        assert_eq!(
+            render(&TWO_PROTOCOLS, &values, &["c".to_owned()]),
+            render_with_protocol(&TWO_PROTOCOLS, "ocpp1.6", &values, &["c".to_owned()])
+        );
+        assert_eq!(
+            render_with_blocks(&TWO_PROTOCOLS, &values, &[], &[]),
+            render_blocks_with_protocol(&TWO_PROTOCOLS, "ocpp1.6", &values, &[], &[])
+        );
+        assert_eq!(
+            render_json(&TWO_PROTOCOLS, &values, &[]),
+            render_json_with_protocol(&TWO_PROTOCOLS, "ocpp1.6", &values, &[])
+        );
+        let json = render_json_with_protocol(&TWO_PROTOCOLS, "ocpp2.0.1", &values, &[]);
+        assert_eq!(json["protocol"], "ocpp2.0.1");
+        assert_eq!(json["connection"]["ws_ping"], 5);
     }
 
     #[test]

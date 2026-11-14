@@ -29,12 +29,16 @@ use std::time::Duration;
 
 use kirby_ocpp_core::fleet::Fleet;
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
+use kirby_ocpp_core::link_view::{LinkSnapshot, StationLike};
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::recording::RecordSink;
 use kirby_ocpp_core::scenario::{
     CancelToken, JunitRun, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin,
     junit_xml_runs, run_scenario_subscribed,
 };
-use kirby_ocpp_core::{Station, StationConfig, StationHandle, SystemClock};
+use kirby_ocpp_core::{
+    Station, Station2, Station2Handle, StationConfig, StationHandle, SystemClock,
+};
 use kirby_ocpp_tui::TuiError;
 use kirby_ocpp_tui::stdout_pump::print_lossy;
 use tokio::task::JoinHandle;
@@ -91,17 +95,45 @@ async fn real_main() -> ExitCode {
         Some(Cmd::Scenarios { action }) => return scenarios(action),
         Some(Cmd::Version) => return print_version(cli.json),
         Some(Cmd::Completions { shell }) => return print_completions(*shell),
-        Some(Cmd::State { action }) => {
-            let options = state::StateOptions {
-                id: cli.id.clone(),
-                id_given: cli.id_explicit,
-                dir: cli.state_dir.clone(),
-                json: cli.json,
-                protocol: kirby_ocpp_core::ocpp::Protocol::V16,
-            };
-            return state::run(action, &options);
-        }
         _ => {}
+    }
+    let protocol = cli.protocol.protocol();
+    if !protocol.is_station_implemented() {
+        return usage_error(&format!(
+            "OCPP {} is not supported by this build",
+            protocol.ocpp_version()
+        ));
+    }
+    if let Some(Cmd::State { action }) = &command {
+        let options = state::StateOptions {
+            id: cli.id.clone(),
+            id_given: cli.id_explicit,
+            dir: cli.state_dir.clone(),
+            json: cli.json,
+            protocol,
+        };
+        return state::run(action, &options);
+    }
+    if protocol != Protocol::V16 && !cli.v16_only_given.is_empty() {
+        return usage_error(&format!(
+            "{} only exist{} for ocpp1.6 and cannot be used with {}",
+            cli.v16_only_given.join(", "),
+            if cli.v16_only_given.len() == 1 {
+                "s"
+            } else {
+                ""
+            },
+            protocol.token()
+        ));
+    }
+    if let Some(offered) = &cli.ws_subprotocol
+        && offered != protocol.token()
+    {
+        eprintln!(
+            "note: offering {} while behaving as {}",
+            kirby_ocpp_tui::text::sanitize(offered),
+            protocol.token()
+        );
     }
     let (print_config, no_tui, json) = (cli.print_config, cli.no_tui, cli.json);
     let config_toml = (print_config == Some(PrintFormat::Toml)).then(|| cli.config_toml());
@@ -146,6 +178,9 @@ async fn real_main() -> ExitCode {
     config.normalize();
     if let Err(error) = config.validate() {
         return usage_error(&error.to_string());
+    }
+    if let Some(note) = station_id_note(&config) {
+        eprintln!("note: {note}");
     }
     headless::init_connect_context(&config.url, &config.ws_subprotocol);
     if is_fleet && let Err(error) = Fleet::configs(&config, &spec) {
@@ -213,6 +248,9 @@ async fn real_main() -> ExitCode {
         );
     }
 
+    if let Some(reason) = mode_gate(command.as_ref(), is_fleet, config.protocol) {
+        return usage_error(&reason);
+    }
     match command {
         Some(Cmd::Run(args)) if is_fleet => {
             fleet::run(config, spec, &args, connector, json, log_file.as_deref()).await
@@ -251,7 +289,11 @@ async fn real_main() -> ExitCode {
         }
         None => {
             // `--json` is for machines: it never opens the terminal UI.
-            let tui = !no_tui && !json && std::io::stdout().is_terminal();
+            let mut tui = !no_tui && !json && std::io::stdout().is_terminal();
+            if tui && let Some(note) = tui_note(config.protocol) {
+                eprintln!("{note}");
+                tui = false;
+            }
             if is_fleet {
                 return fleet::interactive(config, spec, tui, json, log_file.as_deref()).await;
             }
@@ -263,6 +305,67 @@ async fn real_main() -> ExitCode {
 pub(crate) fn usage_error(error: &str) -> ExitCode {
     eprintln!("error: {error}");
     ExitCode::from(EXIT_USAGE)
+}
+
+/// The note that replaces the terminal UI by the headless run, when `protocol` has no UI.
+fn tui_note(protocol: Protocol) -> Option<String> {
+    (protocol != Protocol::V16).then(|| {
+        format!(
+            "note: the terminal UI is not available for {} yet; running headless (pass --no-tui to hide this)",
+            protocol.token()
+        )
+    })
+}
+
+/// The reason a mode cannot run with `protocol`: fleets, `suite` and `replay` drive the 1.6
+/// station only. `None` when the mode is available.
+fn mode_gate(command: Option<&Cmd>, is_fleet: bool, protocol: Protocol) -> Option<String> {
+    if protocol == Protocol::V16 {
+        return None;
+    }
+    let token = protocol.token();
+    match command {
+        Some(Cmd::Suite(_)) => Some(format!("`suite` is not available for {token} yet")),
+        Some(Cmd::Replay(_)) => Some(format!("`replay` is not available for {token} yet")),
+        Some(Cmd::Check(_)) => None,
+        _ if is_fleet => Some(format!(
+            "fleet mode (--count > 1) is not available for {token} yet"
+        )),
+        _ => None,
+    }
+}
+
+/// A note about a station id that OCPP 2.0.1 does not allow in the URL path: at most 48
+/// characters of `identifierString` and no colon (Part 4 section 3.1.1). The id is used as
+/// given.
+fn station_id_note(config: &StationConfig) -> Option<String> {
+    if config.protocol != Protocol::V201 {
+        return None;
+    }
+    let id = &config.charge_point_id;
+    let mut problems = Vec::new();
+    if id.chars().count() > 48 {
+        problems.push("is longer than 48 characters");
+    }
+    if id.contains(':') {
+        problems.push("contains a colon");
+    }
+    if id
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || "*-_=:+|@.".contains(c)))
+    {
+        problems.push("has characters outside identifierString");
+    }
+    if problems.is_empty() {
+        return None;
+    }
+    let shown: String = id.chars().take(64).collect();
+    let ellipsis = if id.chars().count() > 64 { "..." } else { "" };
+    Some(format!(
+        "station id `{}{ellipsis}` {} (OCPP 2.0.1 allows at most 48 identifierString characters and no colon); it is used as given",
+        kirby_ocpp_tui::text::sanitize(&shown),
+        problems.join(" and ")
+    ))
 }
 
 fn scenarios(action: &ScenariosCmd) -> ExitCode {
@@ -373,8 +476,8 @@ fn print_version(json: bool) -> ExitCode {
     let commit = env!("KIRBY_OCPP_GIT_COMMIT");
     let date = env!("KIRBY_OCPP_BUILD_DATE");
     let target = env!("KIRBY_OCPP_TARGET");
-    let protocols = ["OCPP 1.6J"];
-    let protocol_tokens = ["ocpp1.6"];
+    let protocols = ["OCPP 1.6J", "OCPP 2.0.1"];
+    let protocol_tokens = ["ocpp1.6", "ocpp2.0.1"];
     if json {
         let value = serde_json::json!({
             "name": "kirby-ocpp",
@@ -557,8 +660,8 @@ impl Shutdown {
     }
 }
 
-pub(crate) fn spawn_sink(
-    handle: &StationHandle,
+pub(crate) fn spawn_sink<H: StationLike>(
+    handle: &H,
     json: bool,
     log_file: Option<&Path>,
     stdout: bool,
@@ -570,10 +673,70 @@ pub(crate) fn spawn_sink(
 }
 
 /// Closes the connection (WebSocket Close) and waits for the station to end.
-pub(crate) async fn stop_station(handle: &StationHandle, join: JoinHandle<()>) {
+pub(crate) async fn stop_station<H: StationLike>(handle: &H, join: JoinHandle<()>) {
     // The station may already be gone; either way we are leaving.
     let _ = handle.shutdown().await;
     let _ = join.await;
+}
+
+/// A running station of either OCPP version. The 1.6 path stays a single variant.
+enum AnyStation {
+    V16(StationHandle, JoinHandle<()>),
+    V2(Station2Handle, JoinHandle<()>),
+}
+
+impl AnyStation {
+    /// Spawns the station of `config.protocol`, recording to `sink` when given.
+    fn spawn(config: StationConfig, sink: Option<RecordSink>) -> Self {
+        let clock = Arc::new(SystemClock);
+        if config.protocol == Protocol::V16 {
+            let (handle, join) = Station::spawn_recorded(config, clock, sink);
+            Self::V16(handle, join)
+        } else {
+            let (handle, join) = Station2::spawn_recorded(config, clock, sink);
+            Self::V2(handle, join)
+        }
+    }
+
+    fn spawn_sink(
+        &self,
+        json: bool,
+        log_file: Option<&Path>,
+        stdout: bool,
+    ) -> Result<Sink, ExitCode> {
+        match self {
+            Self::V16(handle, _) => spawn_sink(handle, json, log_file, stdout),
+            Self::V2(handle, _) => spawn_sink(handle, json, log_file, stdout),
+        }
+    }
+
+    /// Connects, waits for the boot and runs `scenario`. Scenarios exist for 1.6 only.
+    async fn run_scenario(
+        &self,
+        scenario: &Scenario,
+        cancel: &CancelToken,
+        overrides: &Vars,
+    ) -> Result<ScenarioReport, String> {
+        match self {
+            Self::V16(handle, _) => connect_and_run(handle, scenario, cancel, overrides, 1).await,
+            Self::V2(handle, _) => {
+                let mut link = LinkWatch::new(handle);
+                connect_and_wait_boot(handle, &mut link, cancel).await?;
+                Err(format!(
+                    "scenarios are not available for {} yet",
+                    handle.config().protocol.token()
+                ))
+            }
+        }
+    }
+
+    /// Closes the connection and waits for the station to end.
+    async fn stop(self) {
+        match self {
+            Self::V16(handle, join) => stop_station(&handle, join).await,
+            Self::V2(handle, join) => stop_station(&handle, join).await,
+        }
+    }
 }
 
 async fn interactive(
@@ -589,7 +752,8 @@ async fn interactive(
         return usage_error(&error);
     }
     let station = config.charge_point_id.clone();
-    record::scope(record, &station, |sink| {
+    let protocol = config.protocol;
+    record::scope(record, &station, protocol, |sink| {
         interactive_recorded(config, tui, json, log_file, sink)
     })
     .await
@@ -602,10 +766,28 @@ async fn interactive_recorded(
     log_file: Option<&Path>,
     sink: Option<RecordSink>,
 ) -> ExitCode {
-    let (handle, join) = Station::spawn_recorded(config, Arc::new(SystemClock), sink);
+    match AnyStation::spawn(config, sink) {
+        AnyStation::V16(handle, join) => interactive_v16(handle, join, tui, json, log_file).await,
+        // Callers turn the terminal UI off for 2.x before they get here.
+        AnyStation::V2(handle, join) => {
+            let link = LinkWatch::new(&handle);
+            headless_loop(&handle, join, link, None, false, json, log_file).await
+        }
+    }
+}
+
+/// The 1.6 station of an interactive run: terminal UI first, headless when it is off or cannot
+/// start.
+async fn interactive_v16(
+    handle: StationHandle,
+    join: JoinHandle<()>,
+    tui: bool,
+    json: bool,
+    log_file: Option<&Path>,
+) -> ExitCode {
     // Subscribed before anything connects (also before the terminal UI does), so a give-up that
     // happens early is not missed when the run falls back to headless.
-    let mut link = LinkWatch::new(&handle);
+    let link = LinkWatch::new(&handle);
     // Under the terminal UI the screen is the UI's: `--log-file` still gets the events, stdout
     // does not.
     let mut sink = None;
@@ -651,19 +833,34 @@ async fn interactive_recorded(
             }
         }
     }
+    headless_loop(&handle, join, link, sink, tui, json, log_file).await
+}
+
+/// Runs a station without the terminal UI until a signal arrives or the reconnect loop ends.
+/// `sink` is an existing event sink (the fallback from the UI), `connected` says that the
+/// station was connected already.
+async fn headless_loop<H: StationLike>(
+    handle: &H,
+    join: JoinHandle<()>,
+    mut link: LinkWatch<H::Snap>,
+    sink: Option<Sink>,
+    connected: bool,
+    json: bool,
+    log_file: Option<&Path>,
+) -> ExitCode {
     let sink = match sink {
         Some(sink) => sink,
-        None => match spawn_sink(&handle, json, log_file, true) {
+        None => match spawn_sink(handle, json, log_file, true) {
             Ok(sink) => sink,
             Err(code) => {
-                stop_station(&handle, join).await;
+                stop_station(handle, join).await;
                 return code;
             }
         },
     };
     // Signal streams exist before the connection starts, so an early signal is not lost.
     let mut shutdown = Shutdown::new();
-    if !tui && let Err(error) = handle.connect().await {
+    if !connected && let Err(error) = handle.connect().await {
         eprintln!(
             "error: {}",
             kirby_ocpp_tui::text::sanitize(&error.to_string())
@@ -674,7 +871,7 @@ async fn interactive_recorded(
         _ = shutdown.recv() => None,
         dead = link.dead() => Some(dead),
     };
-    stop_station(&handle, join).await;
+    stop_station(handle, join).await;
     sink.finish().await;
     if let Some(dead) = dead {
         eprintln!("error: {}", kirby_ocpp_tui::text::sanitize(&dead));
@@ -700,6 +897,15 @@ async fn run(
         Ok(scenario) => scenario,
         Err(error) => return usage_error(&error),
     };
+    // Scenarios are written for OCPP 1.6 (the loader rejects any other `ocpp_version`).
+    if config.protocol != Protocol::V16 {
+        return usage_error(&format!(
+            "scenario {} is for OCPP {}; this station speaks {}",
+            kirby_ocpp_tui::text::sanitize(&scenario.name),
+            kirby_ocpp_core::scenario::OCPP_VERSION,
+            config.protocol.token()
+        ));
+    }
     let outputs = RunOutputs {
         report: args.report.as_deref(),
         junit: args.junit.as_deref(),
@@ -744,7 +950,8 @@ pub(crate) async fn execute_scenario(
         return usage_error(&error);
     }
     let station = config.charge_point_id.clone();
-    record::scope(record, &station, |sink| {
+    let protocol = config.protocol;
+    record::scope(record, &station, protocol, |sink| {
         execute_recorded(config, scenario, outputs, json, log_file, sink)
     })
     .await
@@ -758,11 +965,11 @@ async fn execute_recorded(
     log_file: Option<&Path>,
     sink: Option<RecordSink>,
 ) -> ExitCode {
-    let (handle, join) = Station::spawn_recorded(config, Arc::new(SystemClock), sink);
-    let sink = match spawn_sink(&handle, json, log_file, headless::events_on_stdout(json)) {
+    let station = AnyStation::spawn(config, sink);
+    let sink = match station.spawn_sink(json, log_file, headless::events_on_stdout(json)) {
         Ok(sink) => sink,
         Err(code) => {
-            stop_station(&handle, join).await;
+            station.stop().await;
             return code;
         }
     };
@@ -782,7 +989,7 @@ async fn execute_recorded(
     let mut shutdown = Shutdown::new();
     let run_started = std::time::Instant::now();
     let outcome = tokio::select! {
-        outcome = connect_and_run(&handle, &scenario, &cancel, &overrides, 1) => outcome,
+        outcome = station.run_scenario(&scenario, &cancel, &overrides) => outcome,
         sigint = shutdown.recv() => {
             interrupted = sigint;
             cancel.cancel();
@@ -790,7 +997,7 @@ async fn execute_recorded(
         }
     };
     timer.abort();
-    stop_station(&handle, join).await;
+    station.stop().await;
     sink.finish().await;
 
     let (report, setup_error) = match outcome {
@@ -840,6 +1047,37 @@ async fn execute_recorded(
     }
 }
 
+/// Connects the station and waits until the central system accepted its boot. `link` was
+/// created before the connection, so a failure that happens at once is not missed.
+///
+/// # Errors
+/// The connection could not start, the station ended, the reconnect loop gave up, or `cancel`
+/// fired first (the message then carries the last connection error).
+async fn connect_and_wait_boot<H: StationLike>(
+    handle: &H,
+    link: &mut LinkWatch<H::Snap>,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    handle.connect().await.map_err(|e| e.to_string())?;
+    let mut snapshots = handle.watch_snapshot();
+    tokio::select! {
+        registered = snapshots.wait_for(H::Snap::booted) => {
+            registered.map(|_| ()).map_err(|_| "the station stopped".to_owned())
+        }
+        // No reconnect left (`--no-reconnect`, attempts used up): fail now, not at the timeout.
+        dead = link.dead() => Err(dead),
+        () = cancel.cancelled() => {
+            let mut message =
+                "timed out waiting for the central system to accept the BootNotification".to_owned();
+            if let Some(last) = link.last_error() {
+                message.push_str("; last error: ");
+                message.push_str(&last);
+            }
+            Err(message)
+        }
+    }
+}
+
 pub(crate) async fn connect_and_run(
     handle: &StationHandle,
     scenario: &Scenario,
@@ -852,24 +1090,7 @@ pub(crate) async fn connect_and_run(
     // The scenario's own subscription, also taken before connecting: a CSMS CALL that
     // arrives right after the boot must still be seen by `expect_call direction = "in"`.
     let events = handle.subscribe();
-    handle.connect().await.map_err(|e| e.to_string())?;
-    let mut snapshots = handle.watch_snapshot();
-    tokio::select! {
-        registered = snapshots.wait_for(kirby_ocpp_core::station::Snapshot::booted) => {
-            registered.map_err(|_| "the station stopped".to_owned())?;
-        }
-        // No reconnect left (`--no-reconnect`, attempts used up): fail now, not at the timeout.
-        dead = link.dead() => return Err(dead),
-        () = cancel.cancelled() => {
-            let mut message =
-                "timed out waiting for the central system to accept the BootNotification".to_owned();
-            if let Some(last) = link.last_error() {
-                message.push_str("; last error: ");
-                message.push_str(&last);
-            }
-            return Err(message);
-        }
-    }
+    connect_and_wait_boot(handle, &mut link, cancel).await?;
     // The link can also go away while the scenario runs: end the run with that reason.
     tokio::select! {
         report = run_scenario_subscribed(handle, scenario, cancel, None, overrides, index, events) => {
@@ -1068,4 +1289,178 @@ pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
         }
     }
     resolve(a) == resolve(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use kirby_ocpp_core::config::ReconnectConfig;
+    use kirby_ocpp_core::station::Event;
+    use kirby_ocpp_testkit::{CsmsOptions, MockCsms, SubprotocolPolicy};
+
+    use super::*;
+
+    const LIMIT: Duration = Duration::from_secs(20);
+
+    fn config_for(url: &str, protocol: Protocol, reconnect: bool) -> StationConfig {
+        let mut config = StationConfig::new(url)
+            .with_reconnect(ReconnectConfig {
+                enabled: reconnect,
+                initial_delay_ms: 20,
+                max_delay_ms: 50,
+                max_attempts: 0,
+            })
+            .with_call_timeout_ms(2_000)
+            .without_persistence();
+        config.ws_ping_interval_secs = 0;
+        config.protocol = protocol;
+        config.ws_subprotocol = protocol.token().to_owned();
+        config
+    }
+
+    async fn unused_url() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("ws://127.0.0.1:{port}/ocpp")
+    }
+
+    #[test]
+    fn only_a_2_x_station_loses_the_terminal_ui() {
+        assert_eq!(tui_note(Protocol::V16), None);
+        let note = tui_note(Protocol::V201).unwrap();
+        assert!(
+            note.starts_with(
+                "note: the terminal UI is not available for ocpp2.0.1 yet; running headless"
+            ),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn fleets_suites_and_replays_are_gated_for_2_x_only() {
+        let suite = Some(Cmd::Suite(SuiteArgs::for_sources(Vec::new())));
+        assert_eq!(mode_gate(suite.as_ref(), false, Protocol::V16), None);
+        assert!(
+            mode_gate(suite.as_ref(), false, Protocol::V201)
+                .unwrap()
+                .contains("`suite` is not available for ocpp2.0.1")
+        );
+        assert_eq!(mode_gate(None, true, Protocol::V16), None);
+        assert!(
+            mode_gate(None, true, Protocol::V201)
+                .unwrap()
+                .contains("fleet mode")
+        );
+        assert_eq!(mode_gate(None, false, Protocol::V201), None);
+    }
+
+    #[test]
+    fn the_station_id_note_covers_length_characters_and_colons() {
+        let note = |id: &str, protocol: Protocol| {
+            let mut config = StationConfig::new("ws://h/ocpp").with_charge_point_id(id);
+            config.protocol = protocol;
+            station_id_note(&config)
+        };
+        assert_eq!(note("CP-001_a.b*=+|@", Protocol::V201), None);
+        assert_eq!(note(&"A".repeat(48), Protocol::V201), None);
+        assert!(
+            note(&"A".repeat(49), Protocol::V201)
+                .unwrap()
+                .contains("longer than 48")
+        );
+        assert!(note("CP:1", Protocol::V201).unwrap().contains("a colon"));
+        assert!(
+            note("CP 1", Protocol::V201)
+                .unwrap()
+                .contains("outside identifierString")
+        );
+        // The shown id is bounded and free of control characters.
+        let shown = note(&format!("{}\u{1b}[2J", "A".repeat(100)), Protocol::V201).unwrap();
+        assert!(!shown.contains('\u{1b}') && shown.len() < 400, "{shown}");
+        assert_eq!(note("CP:1", Protocol::V16), None);
+    }
+
+    // The boot wait is generic: these run it with a 2.0.1 station (needs a 2.0.1 station).
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_boot_wait_returns_once_a_2_0_1_station_is_accepted() {
+        let csms = MockCsms::start(CsmsOptions {
+            subprotocol: SubprotocolPolicy::Require("ocpp2.0.1".to_owned()),
+            ..CsmsOptions::default()
+        })
+        .await
+        .unwrap();
+        let (handle, join) = Station2::spawn(
+            config_for(csms.url(), Protocol::V201, true),
+            Arc::new(SystemClock),
+        );
+        let mut link = LinkWatch::new(&handle);
+        let cancel = CancelToken::new();
+        let result =
+            tokio::time::timeout(LIMIT, connect_and_wait_boot(&handle, &mut link, &cancel))
+                .await
+                .expect("the station boots in time");
+        assert_eq!(result, Ok(()));
+        stop_station(&handle, join).await;
+        csms.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_boot_wait_fails_at_once_when_no_reconnect_is_left() {
+        let url = unused_url().await;
+        let (handle, join) = Station2::spawn(
+            config_for(&url, Protocol::V201, false),
+            Arc::new(SystemClock),
+        );
+        let mut link = LinkWatch::new(&handle);
+        let cancel = CancelToken::new();
+        let result =
+            tokio::time::timeout(LIMIT, connect_and_wait_boot(&handle, &mut link, &cancel))
+                .await
+                .expect("the wait ends without the cancel token");
+        let message = result.unwrap_err();
+        assert!(message.starts_with("reconnect stopped"), "{message}");
+        assert!(message.contains("last error"), "{message}");
+        stop_station(&handle, join).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_boot_wait_timeout_names_the_last_connection_error() {
+        let url = unused_url().await;
+        let (handle, join) = Station2::spawn(
+            config_for(&url, Protocol::V201, true),
+            Arc::new(SystemClock),
+        );
+        let mut link = LinkWatch::new(&handle);
+        let cancel = CancelToken::new();
+        // The deadline fires after the first failed attempt was logged.
+        let mut events = handle.subscribe();
+        let trigger = cancel.clone();
+        let watcher = tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                if let Event::Log(record) = event
+                    && record.text.starts_with("connection failed: ")
+                {
+                    trigger.cancel();
+                    return;
+                }
+            }
+        });
+        let result =
+            tokio::time::timeout(LIMIT, connect_and_wait_boot(&handle, &mut link, &cancel))
+                .await
+                .expect("the wait ends at the deadline");
+        let message = result.unwrap_err();
+        assert!(
+            message.starts_with(
+                "timed out waiting for the central system to accept the BootNotification"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("; last error: "), "{message}");
+        watcher.abort();
+        stop_station(&handle, join).await;
+    }
 }

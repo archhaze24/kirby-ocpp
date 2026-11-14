@@ -29,9 +29,11 @@ use super::{
 };
 use crate::config::{StationConfig, TlsConfig};
 use crate::error::CallError;
+use crate::ocpp::Protocol;
 use crate::ocpp::messages::{BootNotification, BootNotificationRequest};
 use crate::ocpp::types::RegistrationStatus;
-use crate::scenario::{OCPP_VERSION, SCHEMA_VERSION, TOOL_VERSION};
+use crate::ocpp::v2;
+use crate::scenario::{SCHEMA_VERSION, TOOL_VERSION};
 use crate::text::is_unsafe_char;
 
 /// Names of the steps, in order.
@@ -110,6 +112,9 @@ pub struct ProbeOptions {
     pub url: String,
     pub charge_point_id: String,
     pub subprotocol: String,
+    /// The OCPP version: it decides the `BootNotification` that is sent and the version the
+    /// report names.
+    pub protocol: Protocol,
     pub tls: TlsConfig,
     pub vendor: String,
     pub model: String,
@@ -131,6 +136,7 @@ impl ProbeOptions {
             url: config.url.clone(),
             charge_point_id: config.charge_point_id.clone(),
             subprotocol: config.ws_subprotocol.clone(),
+            protocol: config.protocol,
             tls: config.tls.clone(),
             vendor: config.vendor.clone(),
             model: config.model.clone(),
@@ -159,6 +165,8 @@ struct Recorder<'a> {
     step_timeout: Duration,
     /// The first failed step.
     failed: Option<&'static str>,
+    /// The `ocpp_version` of the report.
+    ocpp_version: &'static str,
 }
 
 impl Recorder<'_> {
@@ -225,7 +233,7 @@ impl Recorder<'_> {
         let failed = self.steps.iter().any(|s| s.status == StepStatus::Failed);
         Report {
             schema: SCHEMA_VERSION,
-            ocpp_version: OCPP_VERSION,
+            ocpp_version: self.ocpp_version,
             tool_version: TOOL_VERSION,
             url,
             status: if failed { "failed" } else { "passed" },
@@ -242,6 +250,7 @@ pub async fn run(options: &ProbeOptions, on_step: &mut dyn FnMut(&Step)) -> Repo
         deadline: Instant::now() + options.timeout,
         step_timeout: options.step_timeout,
         failed: None,
+        ocpp_version: options.protocol.ocpp_version(),
     };
     let shown = run_steps(options, &mut recorder).await;
     recorder.finish(shown)
@@ -512,7 +521,7 @@ where
         serialize_calls: true,
         show_secrets: false,
         write_timeout: DEFAULT_WRITE_TIMEOUT,
-        schemas: SchemaSet::default(),
+        schemas: SchemaSet::for_protocol(o.protocol).unwrap_or_default(),
     };
     let (open, commands, mut events) = task::spawn(ws, &options);
     let connection = Connection {
@@ -532,25 +541,11 @@ where
             }
         }
     });
-    let request = BootNotificationRequest {
-        charge_point_vendor: o.vendor.clone(),
-        charge_point_model: o.model.clone(),
-        charge_point_serial_number: o.serial_number.clone(),
-        charge_box_serial_number: None,
-        firmware_version: o.firmware_version.clone(),
-        iccid: None,
-        imsi: None,
-        meter_type: None,
-        meter_serial_number: None,
-    };
     let wait = rec.cap().min(o.call_timeout);
-    match connection
-        .call_typed::<BootNotification>(&request, Some(wait))
-        .await
-    {
-        Ok(response) => {
-            let skew = (response.current_time - Utc::now()).num_seconds();
-            let (status, detail, hint) = classify_boot(response.status, response.interval, skew);
+    match send_boot(&connection, o, wait).await {
+        Ok((status, interval, current_time)) => {
+            let skew = (current_time - Utc::now()).num_seconds();
+            let (status, detail, hint) = classify_boot(status, interval, skew);
             rec.push("boot", started, status, detail, hint);
         }
         Err(error) => {
@@ -603,6 +598,53 @@ where
             None,
         ),
     }
+}
+
+/// Sends the `BootNotification` of the protocol and returns the registration status, the
+/// interval and the server time of the answer.
+async fn send_boot(
+    connection: &Connection,
+    o: &ProbeOptions,
+    wait: Duration,
+) -> Result<(RegistrationStatus, i32, DateTime<Utc>), CallError> {
+    if o.protocol == Protocol::V201 {
+        let request = v2::messages::BootNotificationRequest {
+            charging_station: v2::types::ChargingStation {
+                serial_number: o.serial_number.clone(),
+                model: o.model.clone(),
+                modem: None,
+                vendor_name: o.vendor.clone(),
+                firmware_version: o.firmware_version.clone(),
+                custom_data: None,
+            },
+            reason: v2::messages::BootReason::PowerUp,
+            custom_data: None,
+        };
+        let response = connection
+            .call_typed::<v2::messages::BootNotification>(&request, Some(wait))
+            .await?;
+        let status = match response.status {
+            v2::messages::RegistrationStatus::Accepted => RegistrationStatus::Accepted,
+            v2::messages::RegistrationStatus::Pending => RegistrationStatus::Pending,
+            v2::messages::RegistrationStatus::Rejected => RegistrationStatus::Rejected,
+        };
+        return Ok((status, response.interval, response.current_time));
+    }
+    let request = BootNotificationRequest {
+        charge_point_vendor: o.vendor.clone(),
+        charge_point_model: o.model.clone(),
+        charge_point_serial_number: o.serial_number.clone(),
+        charge_box_serial_number: None,
+        firmware_version: o.firmware_version.clone(),
+        iccid: None,
+        imsi: None,
+        meter_type: None,
+        meter_serial_number: None,
+    };
+    let response = connection
+        .call_typed::<BootNotification>(&request, Some(wait))
+        .await?;
+    Ok((response.status, response.interval, response.current_time))
 }
 
 fn list_addresses(addrs: &[SocketAddr]) -> String {
@@ -689,7 +731,7 @@ fn upgrade_failure(
                 clean(expected, 100)
             ),
             Some(
-                "set --ws-subprotocol to a value the server accepts; OCPP 1.6J uses ocpp1.6"
+                "set --ws-subprotocol to a value the server accepts; OCPP 1.6J uses ocpp1.6 and OCPP 2.0.1 uses ocpp2.0.1"
                     .to_owned(),
             ),
         ),
@@ -1036,7 +1078,7 @@ mod tests {
     fn report_json_has_a_fixed_key_set() {
         let report = Report {
             schema: SCHEMA_VERSION,
-            ocpp_version: OCPP_VERSION,
+            ocpp_version: Protocol::V16.ocpp_version(),
             tool_version: TOOL_VERSION,
             url: "ws://h/ocpp/CP".to_owned(),
             status: "passed",

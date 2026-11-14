@@ -7,8 +7,9 @@ use serde::{Deserialize, Serialize};
 /// An OCPP version that travels over OCPP-J (JSON over WebSocket).
 ///
 /// Each version has a WebSocket subprotocol token (`ocpp1.6`) and a bare version string
-/// (`1.6`) that report, scenario and recording files carry. Only [`Protocol::V16`] is
-/// implemented; the others exist so version-dependent code has one type to switch on.
+/// (`1.6`) that report, scenario and recording files carry. [`Protocol::V16`] and
+/// [`Protocol::V201`] are implemented; [`Protocol::V21`] exists so version-dependent code has
+/// one type to switch on.
 /// Serialized as the token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -56,10 +57,16 @@ impl Protocol {
         Self::ALL.into_iter().find(|p| p.token() == token)
     }
 
-    /// Whether this build can act as a station or central system for the version.
+    /// Whether this build can act as a charge station for the version.
     #[must_use]
-    pub const fn is_implemented(self) -> bool {
-        matches!(self, Self::V16)
+    pub const fn is_station_implemented(self) -> bool {
+        matches!(self, Self::V16 | Self::V201)
+    }
+
+    /// Whether this build can act as a central system for the version.
+    #[must_use]
+    pub const fn is_csms_implemented(self) -> bool {
+        matches!(self, Self::V16 | Self::V201)
     }
 }
 
@@ -134,9 +141,12 @@ mod tests {
     }
 
     #[test]
-    fn only_1_6_is_implemented() {
-        assert!(Protocol::V16.is_implemented());
-        assert!(!Protocol::V201.is_implemented());
-        assert!(!Protocol::V21.is_implemented());
+    fn station_and_csms_implement_1_6_and_2_0_1_only() {
+        for protocol in [Protocol::V16, Protocol::V201] {
+            assert!(protocol.is_station_implemented());
+            assert!(protocol.is_csms_implemented());
+        }
+        assert!(!Protocol::V21.is_station_implemented());
+        assert!(!Protocol::V21.is_csms_implemented());
     }
 }

@@ -508,6 +508,105 @@ async fn usage_errors_exit_2() {
     assert!(text(&output.stderr).contains("one station"));
 }
 
+async fn v201_csms() -> MockCsms {
+    MockCsms::start(CsmsOptions {
+        subprotocol: SubprotocolPolicy::Require("ocpp2.0.1".to_owned()),
+        ..CsmsOptions::default()
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn protocol_2_0_1_offers_its_subprotocol_and_sends_a_2_0_1_boot() {
+    let csms = v201_csms().await;
+    let output = check(&[
+        "check",
+        "--url",
+        csms.url(),
+        "--id",
+        "CP-V2",
+        "--protocol",
+        "ocpp2.0.1",
+        "--json",
+    ])
+    .await;
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let report = parsed(&output);
+    assert_eq!(report["ocpp_version"], "2.0.1");
+    assert_eq!(report["status"], "passed");
+    assert!(
+        step(&report, "websocket")["detail"]
+            .as_str()
+            .unwrap()
+            .contains("subprotocol `ocpp2.0.1`"),
+        "{report}"
+    );
+    assert!(
+        step(&report, "boot")["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("Accepted, heartbeat interval 5 s"),
+        "{report}"
+    );
+    let boots: Vec<_> = csms
+        .received()
+        .into_iter()
+        .filter(|r| r.action == "BootNotification")
+        .collect();
+    assert_eq!(boots.len(), 1);
+    let payload = &boots[0].payload;
+    assert_eq!(payload["reason"], "PowerUp");
+    assert_eq!(payload["chargingStation"]["vendorName"], "archhaze24");
+    assert_eq!(payload["chargingStation"]["model"], "kirby-ocpp");
+    assert!(payload.get("chargePointVendor").is_none(), "{payload}");
+    assert_eq!(boots[0].subprotocol.as_deref(), Some("ocpp2.0.1"));
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn protocol_2_0_1_fails_the_upgrade_against_a_1_6_only_csms() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let output = check(&[
+        "check",
+        "--url",
+        csms.url(),
+        "--protocol",
+        "ocpp2.0.1",
+        "--json",
+    ])
+    .await;
+    assert_eq!(output.status.code(), Some(1), "{}", text(&output.stderr));
+    let report = parsed(&output);
+    assert_eq!(report["ocpp_version"], "2.0.1");
+    assert_eq!(step(&report, "websocket")["status"], "failed", "{report}");
+    assert_eq!(step(&report, "boot")["status"], "skipped", "{report}");
+    assert_eq!(boot_calls(&csms), 0);
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_1_6_report_still_names_1_6_and_a_different_subprotocol_prints_a_note() {
+    let csms = v201_csms().await;
+    // 1.6 messages over an explicit 2.0.1 subprotocol: the note says so, the server accepts.
+    let output = check(&[
+        "check",
+        "--url",
+        csms.url(),
+        "--ws-subprotocol",
+        "ocpp2.0.1",
+        "--json",
+    ])
+    .await;
+    assert!(
+        text(&output.stderr).contains("note: offering ocpp2.0.1 while behaving as ocpp1.6"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert_eq!(parsed(&output)["ocpp_version"], "1.6");
+    csms.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_whole_check_respects_its_timeout() {
     // A server that accepts the TCP connection and never answers.

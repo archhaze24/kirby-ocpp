@@ -18,10 +18,11 @@ use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::station::ResponseRule;
 use kirby_ocpp_core::{AuthorizationKeyEncoding, StationConfig};
 
-/// Terminal OCPP 1.6J charge point emulator for CSMS testing.
+/// Terminal OCPP 1.6J and 2.0.1 charge point emulator for CSMS testing.
 ///
 /// Without a subcommand it opens an interactive terminal UI (or, when stdout is not a
 /// terminal or with --no-tui, connects and logs events to stdout until interrupted).
+/// The OCPP version is chosen with --protocol (default ocpp1.6).
 /// Precedence: command-line flag, then environment variable, then configuration file (--config), then default.
 #[derive(Debug, Parser)]
 #[command(
@@ -174,12 +175,23 @@ pub struct Cli {
     #[arg(help_heading = "Station", global = true, long, env = "KIRBY_OCPP_STATE_DIR", value_name = "PATH", value_parser = non_empty_path)]
     pub state_dir: Option<PathBuf>,
 
-    /// WebSocket subprotocol to request
-    #[arg(help_heading = "Connection", global = true,
-        long, env = "OCPP_WS_SUBPROTOCOL", value_name = "PROTOCOL",
-        default_value = defaults::WS_SUBPROTOCOL, value_parser = non_empty
+    /// OCPP version the station speaks: ocpp1.6, ocpp2.0.1 or ocpp2.1 (not supported by this build)
+    #[arg(
+        help_heading = "Connection",
+        global = true,
+        long,
+        env = "OCPP_PROTOCOL",
+        value_name = "PROTOCOL",
+        value_enum,
+        default_value = "ocpp1.6"
     )]
-    pub ws_subprotocol: String,
+    pub protocol: ProtocolChoice,
+
+    /// WebSocket subprotocol to request (default: the token of --protocol)
+    #[arg(help_heading = "Connection", global = true,
+        long, env = "OCPP_WS_SUBPROTOCOL", value_name = "PROTOCOL", value_parser = non_empty
+    )]
+    pub ws_subprotocol: Option<String>,
 
     /// WebSocket ping interval in seconds, 0 disables pings
     #[arg(help_heading = "Connection", global = true,
@@ -411,6 +423,48 @@ must not contain `;`. Examples: --rule Reset=reject --rule GetConfiguration=dela
     /// rather than the default (`state` needs to know).
     #[arg(skip)]
     pub id_explicit: bool,
+
+    /// Names of the 1.6-only flags that came from the command line, an environment variable or
+    /// a configuration file (they are refused with OCPP 2.x).
+    #[arg(skip)]
+    pub v16_only_given: Vec<&'static str>,
+}
+
+/// Flags that exist for OCPP 1.6 only, with their argument ids.
+const V16_ONLY_FLAGS: &[(&str, &str)] = &[
+    ("rule", "--rule"),
+    ("authorization_key_encoding", "--authorization-key-encoding"),
+    ("security_profile_fallback", "--security-profile-fallback"),
+    (
+        "additional_root_certificate_check",
+        "--additional-root-certificate-check",
+    ),
+];
+
+/// `--protocol` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ProtocolChoice {
+    /// OCPP 1.6J (the default).
+    #[value(name = "ocpp1.6")]
+    V16,
+    /// OCPP 2.0.1.
+    #[value(name = "ocpp2.0.1")]
+    V201,
+    /// OCPP 2.1 (not supported by this build).
+    #[value(name = "ocpp2.1")]
+    V21,
+}
+
+impl ProtocolChoice {
+    /// The core protocol.
+    #[must_use]
+    pub fn protocol(self) -> Protocol {
+        match self {
+            Self::V16 => Protocol::V16,
+            Self::V201 => Protocol::V201,
+            Self::V21 => Protocol::V21,
+        }
+    }
 }
 
 /// `--print-config` formats.
@@ -919,16 +973,31 @@ impl Cli {
             matches.value_source("id"),
             Some(clap::parser::ValueSource::CommandLine | clap::parser::ValueSource::EnvVariable)
         );
+        let v16_only_given = V16_ONLY_FLAGS
+            .iter()
+            .filter(|(id, _)| {
+                matches!(
+                    matches.value_source(id),
+                    Some(
+                        clap::parser::ValueSource::CommandLine
+                            | clap::parser::ValueSource::EnvVariable
+                    )
+                )
+            })
+            .map(|(_, flag)| *flag)
+            .collect();
         let mut cli = Self::from_arg_matches_mut(&mut matches).unwrap_or_else(|error| error.exit());
         cli.id_explicit = id_explicit;
+        cli.v16_only_given = v16_only_given;
         cli
     }
 
     /// The effective settings as a configuration file (`--print-config=toml`): every
     /// setting that has a value, paths absolute, the URL without its password, no secrets.
+    #[allow(clippy::too_many_lines, reason = "one line per setting")]
     pub fn config_toml(&self) -> String {
         use crate::settings::{SCHEMA, absolute_text};
-        use kirby_ocpp_core::config_file::{Value, render, strip_url_password};
+        use kirby_ocpp_core::config_file::{Value, render_with_protocol, strip_url_password};
         let text = |value: &str| Value::Text(value.to_owned());
         let int = |value: u64| Value::Integer(i64::try_from(value).unwrap_or(i64::MAX));
         let path = |value: &Path| Value::Text(absolute_text(value));
@@ -945,7 +1014,11 @@ impl Cli {
             }
             values.push(("url", Value::Text(shown)));
         }
-        values.push(("ws_subprotocol", text(&self.ws_subprotocol)));
+        let protocol = self.protocol.protocol();
+        values.push((
+            "ws_subprotocol",
+            text(self.ws_subprotocol.as_deref().unwrap_or(protocol.token())),
+        ));
         values.push(("ws_ping", int(u64::from(self.ws_ping))));
         values.push(("call_timeout_ms", int(self.call_timeout_ms)));
         values.push(("id", text(&self.id)));
@@ -980,18 +1053,22 @@ impl Cli {
             values.push(("tls_server_name", text(name)));
         }
         values.push(("tls_skip_verify", Value::Bool(self.tls_skip_verify)));
-        values.push((
-            "additional_root_certificate_check",
-            Value::Bool(self.additional_root_certificate_check),
-        ));
-        values.push((
-            "security_profile_fallback",
-            Value::Bool(self.security_profile_fallback),
-        ));
-        values.push((
-            "authorization_key_encoding",
-            text(self.authorization_key_encoding.encoding().name()),
-        ));
+        // The 1.6-only settings stay out of a 2.x file: --config would refuse them.
+        let v16 = protocol == Protocol::V16;
+        if v16 {
+            values.push((
+                "additional_root_certificate_check",
+                Value::Bool(self.additional_root_certificate_check),
+            ));
+            values.push((
+                "security_profile_fallback",
+                Value::Bool(self.security_profile_fallback),
+            ));
+            values.push((
+                "authorization_key_encoding",
+                text(self.authorization_key_encoding.encoding().name()),
+            ));
+        }
         values.push(("reconnect", Value::Bool(self.reconnect)));
         values.push(("no_reconnect", Value::Bool(self.no_reconnect)));
         values.push(("reconnect_initial_ms", int(self.reconnect_initial_ms)));
@@ -1006,10 +1083,12 @@ impl Cli {
         }
         values.push(("first_index", int(u64::from(self.first_index))));
         values.push(("stagger_ms", int(self.stagger_ms)));
-        values.push((
-            "rule",
-            Value::List(self.rule.iter().map(ToString::to_string).collect()),
-        ));
+        if v16 {
+            values.push((
+                "rule",
+                Value::List(self.rule.iter().map(ToString::to_string).collect()),
+            ));
+        }
         values.push(("show_secrets", Value::Bool(self.show_secrets)));
         values.push(("no_tui", Value::Bool(self.no_tui)));
         values.push(("json", Value::Bool(self.json)));
@@ -1024,7 +1103,7 @@ impl Cli {
             .map_or_else(|| "auto".to_owned(), |value| value.get_name().to_owned());
         values.push(("color", text(&color)));
         values.push(("time", text(self.time.mode().name())));
-        render(&SCHEMA, &values, &comments)
+        render_with_protocol(&SCHEMA, protocol.token(), &values, &comments)
     }
 
     /// The fleet this command line describes: the id template (`--id-template`, else
@@ -1050,6 +1129,10 @@ impl Cli {
              `kirby-csms --listen 127.0.0.1:9000`"
                 .to_owned()
         })?;
+        let protocol = self.protocol.protocol();
+        let ws_subprotocol = self
+            .ws_subprotocol
+            .unwrap_or_else(|| protocol.token().to_owned());
         Ok(StationConfig {
             url,
             charge_point_id: self.id,
@@ -1060,7 +1143,7 @@ impl Cli {
             initial_connector: ConnectorId::new(self.connector),
             connector_count: self.connectors,
             heartbeat_interval_secs: self.heartbeat,
-            ws_subprotocol: self.ws_subprotocol,
+            ws_subprotocol,
             ws_ping_interval_secs: self.ws_ping,
             reconnect: ReconnectConfig {
                 enabled: self.reconnect && !self.no_reconnect,
@@ -1087,7 +1170,7 @@ impl Cli {
             additional_root_certificate_check: self.additional_root_certificate_check,
             security_profile_fallback: self.security_profile_fallback,
             authorization_key_encoding: self.authorization_key_encoding.encoding(),
-            protocol: Protocol::V16,
+            protocol,
         })
     }
 }

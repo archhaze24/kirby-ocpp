@@ -24,6 +24,11 @@ const BOOT_MODEL_MAX: usize = 20;
 const BOOT_SERIAL_MAX: usize = 25;
 /// Longest `firmwareVersion` of `BootNotification`.
 const BOOT_FIRMWARE_MAX: usize = 50;
+/// Longest `vendorName` of the OCPP 2.0.1 `BootNotification` (model 20, serial 25 and
+/// firmware 50 are as in 1.6).
+const BOOT_VENDOR_MAX_V201: usize = 50;
+/// Most EVSEs a 2.x station models (`--connectors`); its device model grows with the count.
+pub const MAX_EVSES_V201: u32 = 64;
 
 /// Upper bound of `call_timeout_ms`: 24 hours.
 pub const MAX_CALL_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
@@ -303,6 +308,14 @@ pub enum ConfigError {
     TlsCertKeyMismatch,
     #[error("{flag} must be at most {max} characters")]
     TooLong { flag: &'static str, max: usize },
+    #[error("{flag} must be at most {max} characters for {protocol}")]
+    TooLongFor {
+        flag: &'static str,
+        max: usize,
+        protocol: &'static str,
+    },
+    #[error("--connectors must be at most {max} for {protocol}")]
+    TooManyEvses { max: u32, protocol: &'static str },
     #[error("--id `{0}` contains control or invisible characters")]
     UnsafeChargePointId(String),
     #[error("{flag} {}: {reason}", path.display())]
@@ -428,20 +441,7 @@ impl StationConfig {
                 crate::text::escape_unsafe(&self.charge_point_id),
             ));
         }
-        for (flag, value, max) in [
-            ("--vendor", Some(&self.vendor), BOOT_VENDOR_MAX),
-            ("--model", Some(&self.model), BOOT_MODEL_MAX),
-            ("--serial", self.serial_number.as_ref(), BOOT_SERIAL_MAX),
-            (
-                "--firmware-version",
-                self.firmware_version.as_ref(),
-                BOOT_FIRMWARE_MAX,
-            ),
-        ] {
-            if value.is_some_and(|text| text.chars().count() > max) {
-                return Err(ConfigError::TooLong { flag, max });
-            }
-        }
+        self.check_identity_limits()?;
         if !is_http_token(&self.ws_subprotocol) {
             return Err(ConfigError::InvalidSubprotocol(self.ws_subprotocol.clone()));
         }
@@ -460,6 +460,48 @@ impl StationConfig {
                 return Err(ConfigError::NotPositive { field });
             }
         }
+        self.validate_rest()
+    }
+
+    /// Length limits of the `BootNotification` identity fields and the EVSE count, which
+    /// depend on the protocol.
+    fn check_identity_limits(&self) -> Result<(), ConfigError> {
+        let vendor_max = match self.protocol {
+            Protocol::V16 => BOOT_VENDOR_MAX,
+            _ => BOOT_VENDOR_MAX_V201,
+        };
+        for (flag, value, max) in [
+            ("--vendor", Some(&self.vendor), vendor_max),
+            ("--model", Some(&self.model), BOOT_MODEL_MAX),
+            ("--serial", self.serial_number.as_ref(), BOOT_SERIAL_MAX),
+            (
+                "--firmware-version",
+                self.firmware_version.as_ref(),
+                BOOT_FIRMWARE_MAX,
+            ),
+        ] {
+            if value.is_some_and(|text| text.chars().count() > max) {
+                return Err(match self.protocol {
+                    Protocol::V16 => ConfigError::TooLong { flag, max },
+                    protocol => ConfigError::TooLongFor {
+                        flag,
+                        max,
+                        protocol: protocol.token(),
+                    },
+                });
+            }
+        }
+        if self.protocol != Protocol::V16 && self.connector_count > MAX_EVSES_V201 {
+            return Err(ConfigError::TooManyEvses {
+                max: MAX_EVSES_V201,
+                protocol: self.protocol.token(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The checks of [`StationConfig::validate`] that do not depend on the protocol.
+    fn validate_rest(&self) -> Result<(), ConfigError> {
         if self.call_timeout_ms > MAX_CALL_TIMEOUT_MS {
             return Err(ConfigError::TooLarge {
                 field: "call_timeout_ms",
@@ -848,6 +890,66 @@ mod tests {
         c.vendor = "v".to_owned();
         c.model = "m".repeat(21);
         assert_eq!(c.validate(), limit("--model", 20));
+    }
+
+    #[test]
+    fn the_2_0_1_limits_differ_in_the_vendor_and_name_the_protocol() {
+        let limit = |flag, max| {
+            Err(ConfigError::TooLongFor {
+                flag,
+                max,
+                protocol: "ocpp2.0.1",
+            })
+        };
+        let mut c = valid();
+        c.protocol = Protocol::V201;
+        c.vendor = "v".repeat(50);
+        assert_eq!(c.validate(), Ok(()));
+        c.vendor = "v".repeat(51);
+        assert_eq!(c.validate(), limit("--vendor", 50));
+        c.vendor = "v".to_owned();
+        c.model = "m".repeat(21);
+        assert_eq!(c.validate(), limit("--model", 20));
+        c.model = "m".to_owned();
+        c.serial_number = Some("s".repeat(26));
+        assert_eq!(c.validate(), limit("--serial", 25));
+        c.serial_number = None;
+        c.firmware_version = Some("f".repeat(51));
+        assert_eq!(c.validate(), limit("--firmware-version", 50));
+        assert_eq!(
+            limit("--vendor", 50).unwrap_err().to_string(),
+            "--vendor must be at most 50 characters for ocpp2.0.1"
+        );
+        // 1.6 keeps its own wording and limit.
+        let mut c = valid();
+        c.vendor = "v".repeat(21);
+        assert_eq!(
+            c.validate().unwrap_err().to_string(),
+            "--vendor must be at most 20 characters"
+        );
+    }
+
+    #[test]
+    fn a_2_x_station_has_at_most_64_evses_and_1_6_has_no_cap() {
+        let mut c = valid();
+        c.connector_count = 100;
+        assert_eq!(c.validate(), Ok(()));
+        c.protocol = Protocol::V201;
+        c.connector_count = 64;
+        assert_eq!(c.validate(), Ok(()));
+        c.connector_count = 65;
+        let error = c.validate().unwrap_err();
+        assert_eq!(
+            error,
+            ConfigError::TooManyEvses {
+                max: 64,
+                protocol: "ocpp2.0.1"
+            }
+        );
+        assert_eq!(
+            error.to_string(),
+            "--connectors must be at most 64 for ocpp2.0.1"
+        );
     }
 
     #[test]

@@ -6,9 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::Duration;
 
-use kirby_ocpp_core::StationHandle;
 use kirby_ocpp_core::fleet::{FleetEvents, FleetItem};
-use kirby_ocpp_core::station::{Direction, Event, Snapshot};
+use kirby_ocpp_core::link_view::{LinkSnapshot, StationLike};
+use kirby_ocpp_core::station::{Direction, Event};
 use kirby_ocpp_core::timefmt::TimeMode;
 use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file, print_lossy};
 use kirby_ocpp_tui::text::{escape_json_unsafe, sanitize};
@@ -297,9 +297,9 @@ pub fn with_hint(error: &str) -> String {
 /// idling forever. The end is read from the snapshot (`reconnect_stopped`), which a lagging
 /// event stream cannot lose; the log only supplies the last connection error for messages.
 #[derive(Debug)]
-pub struct LinkWatch {
+pub struct LinkWatch<S> {
     rx: broadcast::Receiver<Event>,
-    state: watch::Receiver<Snapshot>,
+    state: watch::Receiver<S>,
     last_error: Option<String>,
 }
 
@@ -310,13 +310,13 @@ enum Step {
     Event(Result<Event, broadcast::error::RecvError>),
 }
 
-impl LinkWatch {
+impl<S: LinkSnapshot + Clone + Send + Sync + 'static> LinkWatch<S> {
     /// Subscribes now: create it before the station connects, or the first failure is missed.
-    pub fn new(handle: &StationHandle) -> Self {
+    pub fn new<H: StationLike<Snap = S>>(handle: &H) -> Self {
         Self::from_parts(handle.subscribe(), handle.watch_snapshot())
     }
 
-    fn from_parts(rx: broadcast::Receiver<Event>, state: watch::Receiver<Snapshot>) -> Self {
+    fn from_parts(rx: broadcast::Receiver<Event>, state: watch::Receiver<S>) -> Self {
         Self {
             rx,
             state,
@@ -346,8 +346,8 @@ impl LinkWatch {
         loop {
             let step = tokio::select! {
                 biased;
-                state = self.state.wait_for(|s| s.reconnect_stopped.is_some()) => {
-                    Step::Stopped(state.ok().and_then(|s| s.reconnect_stopped.clone()))
+                state = self.state.wait_for(|s| s.reconnect_stopped().is_some()) => {
+                    Step::Stopped(state.ok().and_then(|s| s.reconnect_stopped().map(str::to_owned)))
                 }
                 event = self.rx.recv(), if events_open => Step::Event(event),
             };
@@ -496,8 +496,8 @@ pub struct Sink {
 
 impl Sink {
     /// Subscribes to the station now (so nothing after this call is missed).
-    pub fn spawn(
-        handle: &StationHandle,
+    pub fn spawn<H: StationLike>(
+        handle: &H,
         json: bool,
         log_file: Option<&Path>,
         stdout: bool,
@@ -800,6 +800,8 @@ mod tests {
         );
         assert_eq!(hint("connection attempt timed out", &plain), None);
     }
+
+    use kirby_ocpp_core::station::Snapshot;
 
     fn log_event(text: &str) -> Event {
         Event::Log(kirby_ocpp_core::station::LogRecord {

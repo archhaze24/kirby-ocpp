@@ -530,6 +530,57 @@ fn header(role: &str, schema: u32, version: &str) -> Value {
     json!({"type": "header", "schema": schema, "ocpp_version": version, "tool_version": "1", "role": role, "station": "X", "started_at": "2026-01-01T00:00:00Z"})
 }
 
+// A recording of a 2.0.1 session names `2.0.1` in its header and keeps the 2.0.1 frames
+// (needs a 2.0.1 station). It cannot be converted or replayed.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_2_0_1_recording_carries_its_version_and_is_not_convertible() {
+    use kirby_ocpp_testkit::SubprotocolPolicy;
+
+    let csms = MockCsms::start(CsmsOptions {
+        subprotocol: SubprotocolPolicy::Require("ocpp2.0.1".to_owned()),
+        ..CsmsOptions::default()
+    })
+    .await
+    .expect("mock csms");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("v201.jsonl");
+    let args = [
+        "--url",
+        csms.url(),
+        "--id",
+        "REC-V2",
+        "--protocol",
+        "ocpp2.0.1",
+        "--no-persist",
+        "--no-tui",
+        "--record",
+        path(&file),
+    ];
+    let child = ChildGuard::spawn(command(&args).stdout(Stdio::piped()).stderr(Stdio::piped()));
+    let pid = child.id().to_string();
+    csms.wait_for_call("BootNotification", WAIT).await.unwrap();
+    let status = Command::new("kill").args(["-TERM", &pid]).status().unwrap();
+    assert!(status.success());
+    let output = finish(child).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    csms.shutdown().await;
+
+    let recording = Recording::read(&file).unwrap();
+    assert_eq!(recording.header.ocpp_version, "2.0.1");
+    assert_eq!(recording.header.station, "REC-V2");
+    assert!(
+        recording
+            .entries
+            .iter()
+            .any(|entry| matches!(entry, Entry::Frame(frame)
+            if frame.action.as_deref() == Some("BootNotification")))
+    );
+    let converted = run(strings(&["scenarios", "from-recording", path(&file)])).await;
+    assert_eq!(converted.status.code(), Some(2), "{}", stderr(&converted));
+    assert!(stderr(&converted).contains("1.6 recordings only"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn replay_and_conversion_refuse_what_they_cannot_use() {
     let dir = tempfile::tempdir().unwrap();

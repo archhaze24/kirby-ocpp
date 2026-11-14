@@ -21,7 +21,7 @@ use crate::cli;
 
 /// Settings of the configuration file of `kirby-ocpp`: one table per `--help` heading.
 pub const SCHEMA: Schema = Schema {
-    protocols: &["ocpp1.6"],
+    protocols: &["ocpp1.6", "ocpp2.0.1"],
     sections: &[
         Section {
             path: &["connection"],
@@ -55,9 +55,13 @@ pub const SCHEMA: Schema = Schema {
                 KeySpec::new("state_dir", Kind::Path),
             ],
         },
-        // Reserved for settings that exist in OCPP 1.6 only; none yet.
+        // Reserved for settings that exist in one OCPP version only; none yet.
         Section {
             path: &["station", "v16"],
+            keys: &[],
+        },
+        Section {
+            path: &["station", "v201"],
             keys: &[],
         },
         Section {
@@ -198,8 +202,17 @@ fn synthesize(
     let persist_flag = matches
         .subcommand_matches("run")
         .is_some_and(|run| run.get_flag("persist"));
-    let mut args = Vec::new();
+    let mut args: Vec<OsString> = Vec::new();
     let mut synthesized = Vec::new();
+    if let Some(protocol) = settings.protocol()
+        && !explicit(matches, "protocol")
+    {
+        args.push(format!("--protocol={protocol}").into());
+        synthesized.push(Synthesized {
+            flag: "protocol".to_owned(),
+            key: "protocol",
+        });
+    }
     for (key, value) in settings.iter() {
         if explicit(matches, key) {
             continue;
