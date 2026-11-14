@@ -256,10 +256,6 @@ impl Station2Actor {
 
     /// A simulated reboot: closes the connection and opens a new one right away (even with
     /// automatic reconnect disabled). The registration is cleared, so the new link boots.
-    #[allow(
-        dead_code,
-        reason = "called by the reset module when a reset reboots the station"
-    )]
     pub(super) fn reconnect_for_reset(&mut self) {
         let connection = self.link.conn.clone();
         let mut events = self.link.events.take();
@@ -353,12 +349,12 @@ impl Station2Actor {
             self.resume_after_reconnect();
             return;
         }
-        let reason = self
-            .reset
-            .as_ref()
-            .map(|plan| plan.reason)
-            .or(self.link.retry_reason)
-            .unwrap_or(BootReason::PowerUp);
+        if rebooting && let Some(plan) = self.reset.take() {
+            // The reboot is over once its boot goes out; retries keep the reason.
+            self.link.retry_reason = Some(plan.reason);
+            self.log(LogLevel::Info, "reset finished".to_owned());
+        }
+        let reason = self.link.retry_reason.unwrap_or(BootReason::PowerUp);
         self.send_boot(reason, None);
     }
 

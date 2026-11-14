@@ -65,6 +65,8 @@ fn queued(tx: &str, seq_no: i32, kind: TransactionEventKind) -> QueuedEvent {
     QueuedEvent {
         payload: json!({
             "eventType": kind,
+            "timestamp": "2026-01-01T00:00:00.000Z",
+            "triggerReason": "Trigger",
             "seqNo": seq_no,
             "offline": false,
             "transactionInfo": {"transactionId": tx},
@@ -427,9 +429,7 @@ async fn every_start_counts_as_one_boot_in_the_state_file() {
 }
 
 #[tokio::test]
-#[ignore = "needs the station2 transaction engine"]
 async fn a_restored_transaction_ends_with_power_loss_and_seq_no_continues() {
-    // Needs the transaction engine (S4).
     let csms = v201_csms().await;
     let dir = tempfile::tempdir().unwrap();
     let tx = "11111111-1111-4111-8111-111111111111";
@@ -455,9 +455,7 @@ async fn a_restored_transaction_ends_with_power_loss_and_seq_no_continues() {
 }
 
 #[tokio::test]
-#[ignore = "needs the station2 transaction engine"]
 async fn queued_events_survive_flagged_offline_and_arrive_in_order_after_boot() {
-    // Needs the transaction queue (S4).
     let csms = v201_csms().await;
     let dir = tempfile::tempdir().unwrap();
     let tx = "33333333-3333-4333-8333-333333333333";

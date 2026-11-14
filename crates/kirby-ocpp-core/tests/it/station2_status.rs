@@ -422,7 +422,6 @@ async fn faulted_connector_stays_faulted_when_made_inoperative() {
 }
 
 #[tokio::test]
-#[ignore = "needs the station2 transaction engine"]
 async fn inoperative_during_a_transaction_is_scheduled_and_applied_when_it_ends() {
     let rig = Rig::new().await;
     rig.start_transaction().await;
@@ -445,7 +444,6 @@ async fn inoperative_during_a_transaction_is_scheduled_and_applied_when_it_ends(
 }
 
 #[tokio::test]
-#[ignore = "needs the station2 transaction engine"]
 async fn station_inoperative_during_a_transaction_waits_for_it() {
     let rig = Rig::new().await;
     rig.start_transaction().await;
