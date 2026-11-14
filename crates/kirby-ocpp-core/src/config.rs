@@ -33,7 +33,7 @@ pub mod defaults {
     pub const VENDOR: &str = "archhaze24";
     pub const MODEL: &str = "kirby-ocpp";
     pub const HEARTBEAT_INTERVAL_SECS: u32 = 30;
-    pub const WS_SUBPROTOCOL: &str = "ocpp1.6";
+    pub const WS_SUBPROTOCOL: &str = crate::ocpp::Protocol::V16.token();
     pub const WS_PING_INTERVAL_SECS: u32 = 30;
     pub const RECONNECT_INITIAL_MS: u64 = 1_000;
     pub const RECONNECT_MAX_MS: u64 = 30_000;

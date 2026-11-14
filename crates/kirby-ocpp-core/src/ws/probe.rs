@@ -24,7 +24,8 @@ use url::{Host, Url};
 
 use super::handshake::{self, UpgradeInfo};
 use super::{
-    ConnectError, ConnectOptions, Connection, ConnectionEvent, DEFAULT_WRITE_TIMEOUT, task, tls,
+    ConnectError, ConnectOptions, Connection, ConnectionEvent, DEFAULT_WRITE_TIMEOUT, SchemaSet,
+    task, tls,
 };
 use crate::config::{StationConfig, TlsConfig};
 use crate::error::CallError;
@@ -511,12 +512,14 @@ where
         serialize_calls: true,
         show_secrets: false,
         write_timeout: DEFAULT_WRITE_TIMEOUT,
+        schemas: SchemaSet::default(),
     };
     let (open, commands, mut events) = task::spawn(ws, &options);
     let connection = Connection {
         commands,
         open,
         default_timeout: o.call_timeout,
+        schemas: options.schemas.clone(),
     };
     // Nobody answers CSMS calls here: a dropped call gets a CALLERROR. The task only
     // reports when the socket is gone.

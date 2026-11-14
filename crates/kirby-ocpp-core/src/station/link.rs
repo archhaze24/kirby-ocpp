@@ -57,6 +57,7 @@ impl StationActor {
             serialize_calls: true,
             show_secrets: self.config.show_secrets,
             write_timeout: crate::ws::DEFAULT_WRITE_TIMEOUT,
+            schemas: crate::ws::SchemaSet::default(),
         }
     }
 

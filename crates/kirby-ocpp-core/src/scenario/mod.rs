@@ -66,7 +66,7 @@ fn location(line: Option<usize>, column: Option<usize>) -> String {
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// The OCPP version scenarios and reports speak (the only one this build supports).
-pub const OCPP_VERSION: &str = "1.6";
+pub const OCPP_VERSION: &str = crate::ocpp::Protocol::V16.ocpp_version();
 
 /// Version of this crate (and, by workspace versioning, of the tools built on it).
 pub const TOOL_VERSION: &str = env!("CARGO_PKG_VERSION");

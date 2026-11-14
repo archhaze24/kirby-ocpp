@@ -26,7 +26,7 @@ use tokio_tungstenite::tungstenite::{Bytes, Error as WsError, Message};
 use tracing::debug;
 use uuid::Uuid;
 
-use super::{ConnectOptions, ConnectionEvent, EVENT_CAPACITY, IncomingCall, schemas};
+use super::{ConnectOptions, ConnectionEvent, EVENT_CAPACITY, IncomingCall, SchemaSet};
 use crate::error::CallError;
 use crate::ocpp::frame::{Direction, ErrorCode, Frame, FrameRecord, redact_secrets};
 use crate::ocpp::responder::ReplyHandle;
@@ -104,6 +104,7 @@ where
         show_secrets: options.show_secrets,
         write_timeout: options.write_timeout,
         ping_interval: options.ping_interval,
+        schemas: options.schemas.clone(),
         open: Arc::clone(&open),
         events: events_tx,
         replies: replies_tx,
@@ -122,6 +123,7 @@ struct Task {
     show_secrets: bool,
     write_timeout: Duration,
     ping_interval: Option<Duration>,
+    schemas: SchemaSet,
     open: Arc<AtomicBool>,
     events: mpsc::Sender<ConnectionEvent>,
     /// Cloned into every [`ReplyHandle`]; replies come back through `replies`.
@@ -284,7 +286,7 @@ impl Task {
         };
         let frame = match frame {
             Frame::CallResult { id, payload } => {
-                match schemas().validate_response(&action, &payload) {
+                match self.schemas.registry().validate_response(&action, &payload) {
                     Ok(()) => Frame::CallResult { id, payload },
                     Err(violation) => {
                         self.warn(format!(
@@ -343,7 +345,7 @@ impl Task {
                 };
                 self.emit(ConnectionEvent::Frame(record)).await?;
                 self.warn(format!("invalid OCPP-J frame: {error}")).await?;
-                return match error.reply() {
+                return match error.reply_for(self.schemas.registry().protocol()) {
                     Some(reply) => self.write(reply, None, sink).await,
                     None => Ok(()),
                 };
@@ -402,11 +404,17 @@ impl Task {
                 ))
                 .await;
         }
-        let rejection = if schemas().knows_action(&action) {
-            schemas()
+        let schemas = self.schemas.registry();
+        let rejection = if schemas.knows_action(&action) {
+            schemas
                 .validate_request(&action, &payload)
                 .err()
-                .map(|violation| (violation.error_code(), violation.errors.join("; ")))
+                .map(|violation| {
+                    (
+                        violation.error_code_for(schemas.protocol()),
+                        violation.errors.join("; "),
+                    )
+                })
         } else {
             Some((
                 ErrorCode::NotImplemented,
@@ -441,7 +449,11 @@ impl Task {
             debug!(message_id = %id, "CALLRESULT for an unknown or expired CALL ignored");
             return Ok(());
         };
-        let result = match schemas().validate_response(&pending.action, &payload) {
+        let result = match self
+            .schemas
+            .registry()
+            .validate_response(&pending.action, &payload)
+        {
             Ok(()) => Ok(payload),
             Err(violation) => {
                 self.warn(format!(
@@ -696,5 +708,116 @@ async fn tick(ping: &mut Option<Interval>) {
             interval.tick().await;
         }
         None => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio_tungstenite::tungstenite::protocol::Role;
+
+    use super::super::tests::ping_schemas;
+    use super::*;
+    use crate::ocpp::Protocol;
+
+    const DEADLINE: Duration = Duration::from_secs(5);
+
+    /// A running task over an in-memory socket, with `schemas` in its options, and the peer's end.
+    struct Rig {
+        peer: WebSocketStream<tokio::io::DuplexStream>,
+        events: mpsc::Receiver<ConnectionEvent>,
+        // Dropping the last command sender stops the task.
+        _commands: mpsc::UnboundedSender<Command>,
+    }
+
+    async fn rig(schemas: SchemaSet) -> Rig {
+        let (ours, theirs) = tokio::io::duplex(64 * 1024);
+        let ws = WebSocketStream::from_raw_socket(ours, Role::Client, None).await;
+        let peer = WebSocketStream::from_raw_socket(theirs, Role::Server, None).await;
+        let options = ConnectOptions {
+            ping_interval: None,
+            ..ConnectOptions::default()
+        }
+        .with_schemas(schemas);
+        let (_open, commands, events) = spawn(ws, &options);
+        Rig {
+            peer,
+            events,
+            _commands: commands,
+        }
+    }
+
+    impl Rig {
+        /// Sends `text` from the peer and returns the code of the CALLERROR it gets back.
+        async fn error_code_for(&mut self, text: &str) -> String {
+            self.peer.send(Message::Text(text.into())).await.unwrap();
+            let events = &mut self.events;
+            let peer = &mut self.peer;
+            let reply = timeout(DEADLINE, async {
+                loop {
+                    tokio::select! {
+                        _ = events.recv() => {}
+                        message = peer.next() => break message,
+                    }
+                }
+            })
+            .await
+            .expect("a reply within the deadline");
+            let Some(Ok(Message::Text(reply))) = reply else {
+                panic!("expected a text frame, got {reply:?}");
+            };
+            let frame: Value = serde_json::from_str(reply.as_str()).unwrap();
+            assert_eq!(frame[0], 4, "a CALLERROR: {frame}");
+            frame[2].as_str().unwrap().to_owned()
+        }
+    }
+
+    #[tokio::test]
+    async fn incoming_calls_are_validated_against_the_set_in_the_options() {
+        let call = r#"[2,"1","Ping",{}]"#;
+        let mut v16 = rig(ping_schemas(Protocol::V16)).await;
+        assert_eq!(
+            v16.error_code_for(call).await,
+            "OccurenceConstraintViolation"
+        );
+        let mut v201 = rig(ping_schemas(Protocol::V201)).await;
+        assert_eq!(
+            v201.error_code_for(call).await,
+            "OccurrenceConstraintViolation"
+        );
+        // The default 1.6 set does not know Ping at all.
+        let mut default = rig(SchemaSet::default()).await;
+        assert_eq!(default.error_code_for(call).await, "NotImplemented");
+    }
+
+    #[tokio::test]
+    async fn a_valid_call_reaches_the_owner_through_a_custom_set() {
+        let mut rig = rig(ping_schemas(Protocol::V201)).await;
+        rig.peer
+            .send(Message::Text(r#"[2,"7","Ping",{"n":1}]"#.into()))
+            .await
+            .unwrap();
+        let call = timeout(DEADLINE, async {
+            loop {
+                match rig.events.recv().await {
+                    Some(ConnectionEvent::Call(call)) => break call,
+                    Some(_) => {}
+                    None => panic!("the task ended"),
+                }
+            }
+        })
+        .await
+        .expect("the call within the deadline");
+        assert_eq!((call.id.as_str(), call.action.as_str()), ("7", "Ping"));
+    }
+
+    #[tokio::test]
+    async fn broken_frames_are_answered_in_the_spelling_of_the_set() {
+        let broken = r#"[2,"2","Ping",[]]"#;
+        let mut v16 = rig(ping_schemas(Protocol::V16)).await;
+        assert_eq!(v16.error_code_for(broken).await, "FormationViolation");
+        for protocol in [Protocol::V201, Protocol::V21] {
+            let mut v2 = rig(ping_schemas(protocol)).await;
+            assert_eq!(v2.error_code_for(broken).await, "FormatViolation");
+        }
     }
 }

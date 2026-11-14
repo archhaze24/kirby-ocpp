@@ -43,8 +43,8 @@ mod tls;
 pub(crate) use tls::WILDCARD_REFUSED;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -58,20 +58,65 @@ use url::Url;
 
 use crate::config::TlsConfig;
 use crate::error::CallError;
-use crate::ocpp::SchemaRegistry;
 use crate::ocpp::action::OutboundAction;
 use crate::ocpp::frame::FrameRecord;
 use crate::ocpp::responder::ReplyHandle;
+use crate::ocpp::{Protocol, SchemaError, SchemaRegistry};
 
 /// Bounded capacity of the event channel.
 const EVENT_CAPACITY: usize = 64;
 
-/// The bundled OCPP schemas, compiled once for the whole process.
-static SCHEMAS: LazyLock<SchemaRegistry> =
-    LazyLock::new(|| SchemaRegistry::new().expect("bundled OCPP 1.6J schemas compile"));
+/// The schema registry a connection validates against, shared by pointer.
+///
+/// Two sets are equal when they are the same registry (not merely equal contents), which
+/// keeps [`ConnectOptions`] `Eq`. The default is the OCPP 1.6J set.
+#[derive(Clone)]
+pub struct SchemaSet(Arc<SchemaRegistry>);
 
-fn schemas() -> &'static SchemaRegistry {
-    &SCHEMAS
+impl SchemaSet {
+    /// Wraps a registry.
+    pub fn new(registry: Arc<SchemaRegistry>) -> Self {
+        Self(registry)
+    }
+
+    /// The shared set of `protocol` ([`SchemaRegistry::for_protocol`]).
+    ///
+    /// # Errors
+    /// [`SchemaError`] when this build has no schemas for the version.
+    pub fn for_protocol(protocol: Protocol) -> Result<Self, SchemaError> {
+        SchemaRegistry::for_protocol(protocol).map(Self)
+    }
+
+    /// The registry.
+    pub fn registry(&self) -> &SchemaRegistry {
+        &self.0
+    }
+}
+
+impl Default for SchemaSet {
+    /// The OCPP 1.6J set.
+    ///
+    /// # Panics
+    /// If a bundled schema does not compile (a build-time bug, covered by tests).
+    fn default() -> Self {
+        Self::for_protocol(Protocol::V16).expect("bundled OCPP 1.6J schemas compile")
+    }
+}
+
+impl PartialEq for SchemaSet {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for SchemaSet {}
+
+impl std::fmt::Debug for SchemaSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SchemaSet")
+            .field(&self.0.protocol().token())
+            .finish()
+    }
 }
 
 /// State of the link to the CSMS, as shown in snapshots.
@@ -109,6 +154,18 @@ pub struct ConnectOptions {
     /// frame) may take. A peer that stops reading is treated as a lost connection when it
     /// expires. Default 10 seconds.
     pub write_timeout: Duration,
+    /// The schemas payloads are validated against, and the version whose error code
+    /// spellings the connection answers with. Default: OCPP 1.6J.
+    pub schemas: SchemaSet,
+}
+
+impl ConnectOptions {
+    /// These options with `schemas` as the validation set.
+    #[must_use]
+    pub fn with_schemas(mut self, schemas: SchemaSet) -> Self {
+        self.schemas = schemas;
+        self
+    }
 }
 
 impl Default for ConnectOptions {
@@ -119,6 +176,7 @@ impl Default for ConnectOptions {
             serialize_calls: true,
             show_secrets: false,
             write_timeout: DEFAULT_WRITE_TIMEOUT,
+            schemas: SchemaSet::default(),
         }
     }
 }
@@ -200,6 +258,7 @@ pub struct Connection {
     commands: mpsc::UnboundedSender<task::Command>,
     open: Arc<AtomicBool>,
     default_timeout: Duration,
+    schemas: SchemaSet,
 }
 
 /// The answer of a CALL queued with [`Connection::enqueue`].
@@ -222,11 +281,23 @@ impl Connection {
         Self,
         impl FnMut() -> oneshot::Sender<Result<Value, CallError>>,
     ) {
+        Self::test_reply_channel_with(SchemaSet::default())
+    }
+
+    /// [`Connection::test_reply_channel`] validating against `schemas`.
+    #[cfg(test)]
+    pub(crate) fn test_reply_channel_with(
+        schemas: SchemaSet,
+    ) -> (
+        Self,
+        impl FnMut() -> oneshot::Sender<Result<Value, CallError>>,
+    ) {
         let (commands, mut receiver) = mpsc::unbounded_channel();
         let connection = Self {
             commands,
             open: Arc::new(AtomicBool::new(true)),
             default_timeout: Duration::from_secs(10),
+            schemas,
         };
         (connection, move || match receiver.try_recv().unwrap() {
             task::Command::Call(call) => call.reply,
@@ -248,6 +319,7 @@ impl Connection {
         let url = charge_point_url(url, charge_point_id)?;
         let attempt = options.call_timeout;
         let default_timeout = options.call_timeout;
+        let schemas = options.schemas.clone();
 
         let (open, commands, events) = if url.scheme() == "wss" {
             let config = tls::client_config(tls).await?;
@@ -278,6 +350,7 @@ impl Connection {
                 commands,
                 open,
                 default_timeout,
+                schemas,
             },
             events,
         ))
@@ -342,7 +415,7 @@ impl Connection {
             return Err(CallError::NotConnected);
         }
         if validate {
-            schemas().validate_request(action, &payload)?;
+            self.schemas.registry().validate_request(action, &payload)?;
         }
 
         let (reply, response) = oneshot::channel();
@@ -518,6 +591,89 @@ mod tests {
         assert!(
             !scheme_error.to_string().contains("secret"),
             "{scheme_error}"
+        );
+    }
+
+    /// A set that knows one action, `Ping`, whose request must carry an integer `n`.
+    pub(super) fn ping_schemas(protocol: Protocol) -> SchemaSet {
+        const TABLE: crate::ocpp::schema::SchemaTable = &[(
+            "Ping",
+            r#"{"type":"object","required":["n"],"properties":{"n":{"type":"integer"}}}"#,
+            r#"{"type":"object"}"#,
+        )];
+        SchemaSet::new(Arc::new(SchemaRegistry::build(protocol, TABLE).unwrap()))
+    }
+
+    #[test]
+    fn the_default_schema_set_is_the_shared_1_6_registry() {
+        let default = SchemaSet::default();
+        assert_eq!(default, SchemaSet::default());
+        assert_eq!(default, SchemaSet::for_protocol(Protocol::V16).unwrap());
+        assert_eq!(default.registry().protocol(), Protocol::V16);
+        assert_eq!(format!("{default:?}"), r#"SchemaSet("ocpp1.6")"#);
+        assert!(matches!(
+            SchemaSet::for_protocol(Protocol::V201),
+            Err(SchemaError::Unavailable(Protocol::V201))
+        ));
+    }
+
+    #[test]
+    fn schema_sets_compare_by_identity() {
+        let one = ping_schemas(Protocol::V201);
+        assert_eq!(one, one.clone());
+        assert_ne!(
+            one,
+            ping_schemas(Protocol::V201),
+            "equal content, other registry"
+        );
+        assert_ne!(one, SchemaSet::default());
+    }
+
+    #[test]
+    fn connect_options_default_to_1_6_and_compare_by_schema_identity() {
+        let options = ConnectOptions::default();
+        assert_eq!(options, ConnectOptions::default());
+        assert_eq!(options.schemas, SchemaSet::default());
+        let custom = ping_schemas(Protocol::V201);
+        let with_custom = options.clone().with_schemas(custom.clone());
+        assert_eq!(with_custom.schemas, custom);
+        assert_ne!(with_custom, options);
+        assert_eq!(with_custom, options.with_schemas(custom));
+    }
+
+    #[test]
+    fn a_connection_validates_requests_against_the_schemas_of_its_options() {
+        let valid = serde_json::json!({"n": 1});
+        let invalid = serde_json::json!({});
+
+        let (default_connection, _) = Connection::test_reply_channel();
+        let error = default_connection
+            .enqueue("Ping", valid.clone(), None, true)
+            .unwrap_err();
+        assert!(
+            matches!(&error, CallError::Schema(v) if v.error_code() == crate::ocpp::ErrorCode::NotImplemented),
+            "the 1.6 set does not know Ping: {error:?}"
+        );
+
+        // The closure owns the command receiver; dropping it would make every send fail.
+        let (connection, _queued) =
+            Connection::test_reply_channel_with(ping_schemas(Protocol::V201));
+        assert!(
+            connection
+                .enqueue("Ping", valid.clone(), None, true)
+                .is_ok()
+        );
+        let error = connection
+            .enqueue("Ping", invalid.clone(), None, true)
+            .unwrap_err();
+        assert!(matches!(error, CallError::Schema(_)), "{error:?}");
+        // Without validation the payload goes out regardless of the set.
+        assert!(connection.enqueue("Ping", invalid, None, false).is_ok());
+        // And the 1.6 actions are unknown to this set.
+        assert!(
+            connection
+                .enqueue("Heartbeat", serde_json::json!({}), None, true)
+                .is_err()
         );
     }
 

@@ -16,12 +16,14 @@
 //! `javaType` are ignored.
 
 use std::collections::HashMap;
+use std::sync::{Arc, OnceLock};
 
 use jsonschema::Validator;
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::ocpp::frame::ErrorCode;
+use crate::ocpp::protocol::Protocol;
 
 /// Which payload of an action a schema describes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -186,11 +188,19 @@ impl SchemaViolation {
     ///   `additionalProperties`/`enum`/`maxLength`/`minLength`/`minimum`/`maximum`/
     ///   `multipleOf`/`format` -> `PropertyConstraintViolation`; else `FormationViolation`.
     pub fn error_code(&self) -> ErrorCode {
+        self.error_code_for(Protocol::V16)
+    }
+
+    /// Like [`SchemaViolation::error_code`] with the spellings of `protocol`: 2.x answers
+    /// `OccurrenceConstraintViolation` and `FormatViolation` where 1.6 says
+    /// `OccurenceConstraintViolation` (sic) and `FormationViolation`. The other codes do not
+    /// change.
+    pub fn error_code_for(&self, protocol: Protocol) -> ErrorCode {
         let ViolationCause::Keywords(keywords) = &self.cause else {
             return ErrorCode::NotImplemented;
         };
         if keywords.contains(&SchemaKeyword::Required) {
-            ErrorCode::OccurenceConstraintViolation
+            ErrorCode::occurrence_constraint_violation(protocol)
         } else if keywords.contains(&SchemaKeyword::Type) {
             ErrorCode::TypeConstraintViolation
         } else if keywords.iter().any(|k| {
@@ -208,7 +218,7 @@ impl SchemaViolation {
         }) {
             ErrorCode::PropertyConstraintViolation
         } else {
-            ErrorCode::FormationViolation
+            ErrorCode::formation_violation(protocol)
         }
     }
 }
@@ -225,7 +235,7 @@ macro_rules! embedded_schemas {
 }
 
 /// Every OCPP 1.6J action with its embedded request and response schema source.
-const EMBEDDED: &[(&str, &str, &str)] = embedded_schemas![
+const EMBEDDED: SchemaTable = embedded_schemas![
     "Authorize",
     "BootNotification",
     "CancelReservation",
@@ -276,19 +286,37 @@ struct Entry {
     response_source: &'static str,
 }
 
-/// The compiled set of OCPP 1.6J schemas. Build once, share (`Arc`) freely.
+/// The embedded schema table of one OCPP version: `(action, request json, response json)`.
+pub(crate) type SchemaTable = &'static [(&'static str, &'static str, &'static str)];
+
+/// The compiled set of the schemas of one OCPP version. Build once, share (`Arc`) freely;
+/// [`SchemaRegistry::for_protocol`] hands out the shared instance.
 #[derive(Debug)]
 pub struct SchemaRegistry {
+    protocol: Protocol,
+    table: SchemaTable,
     actions: HashMap<&'static str, Entry>,
 }
 
 /// A bundled schema could not be compiled (a build-time bug, not a runtime condition).
-#[derive(Debug, Error)]
+#[derive(Debug, Clone, Error)]
 #[error("cannot compile the {kind} schema of {action}: {message}")]
 pub struct SchemaLoadError {
     pub action: String,
     pub kind: PayloadKind,
     pub message: String,
+}
+
+/// Why [`SchemaRegistry::for_protocol`] returned no registry.
+#[derive(Debug, Clone, Error)]
+#[non_exhaustive]
+pub enum SchemaError {
+    /// This build embeds no schemas for the version.
+    #[error("this build has no OCPP schemas for {}", .0.token())]
+    Unavailable(Protocol),
+    /// A bundled schema failed to compile.
+    #[error(transparent)]
+    Load(#[from] SchemaLoadError),
 }
 
 fn compile(
@@ -314,10 +342,36 @@ fn compile(
 }
 
 impl SchemaRegistry {
-    /// Compiles all bundled schemas.
+    /// Compiles all bundled OCPP 1.6J schemas. Prefer [`SchemaRegistry::for_protocol`], which
+    /// shares one compiled set per process.
     pub fn new() -> Result<Self, SchemaLoadError> {
-        let mut actions = HashMap::with_capacity(EMBEDDED.len());
-        for &(action, request_source, response_source) in EMBEDDED {
+        Self::build(Protocol::V16, EMBEDDED)
+    }
+
+    /// The shared registry of `protocol`, compiled on first use.
+    ///
+    /// # Errors
+    /// [`SchemaError::Unavailable`] for a version this build embeds no schemas for (every
+    /// one but 1.6 today); [`SchemaError::Load`] if a bundled schema does not compile.
+    pub fn for_protocol(protocol: Protocol) -> Result<Arc<Self>, SchemaError> {
+        static V16: OnceLock<Result<Arc<SchemaRegistry>, SchemaLoadError>> = OnceLock::new();
+        match protocol {
+            Protocol::V16 => V16
+                .get_or_init(|| Self::new().map(Arc::new))
+                .clone()
+                .map_err(SchemaError::Load),
+            other => Err(SchemaError::Unavailable(other)),
+        }
+    }
+
+    /// The version these schemas belong to.
+    pub fn protocol(&self) -> Protocol {
+        self.protocol
+    }
+
+    pub(crate) fn build(protocol: Protocol, table: SchemaTable) -> Result<Self, SchemaLoadError> {
+        let mut actions = HashMap::with_capacity(table.len());
+        for &(action, request_source, response_source) in table {
             actions.insert(
                 action,
                 Entry {
@@ -328,7 +382,11 @@ impl SchemaRegistry {
                 },
             );
         }
-        Ok(Self { actions })
+        Ok(Self {
+            protocol,
+            table,
+            actions,
+        })
     }
 
     /// `true` if `action` is one of the 39 known actions (28 core + 11 security extensions).
@@ -338,7 +396,7 @@ impl SchemaRegistry {
 
     /// The 39 action names: the 28 core ones in alphabetical order, then the 11 security ones.
     pub fn action_names(&self) -> impl Iterator<Item = &'static str> {
-        EMBEDDED.iter().map(|&(name, _, _)| name)
+        self.table.iter().map(|&(name, _, _)| name)
     }
 
     /// The embedded (unmodified) schema source for one payload of `action`.
@@ -789,6 +847,84 @@ mod tests {
             registry
                 .validate_request("SetChargingProfile", &payload)
                 .unwrap_or_else(|e| panic!("limit {limit}: {e}"));
+        }
+    }
+
+    #[test]
+    fn for_protocol_shares_the_1_6_set() {
+        let first = SchemaRegistry::for_protocol(Protocol::V16).unwrap();
+        let second = SchemaRegistry::for_protocol(Protocol::V16).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.protocol(), Protocol::V16);
+        assert!(first.knows_action("Heartbeat"));
+        assert_eq!(first.action_names().count(), 39);
+        assert_eq!(SchemaRegistry::new().unwrap().protocol(), Protocol::V16);
+    }
+
+    #[test]
+    fn for_protocol_refuses_versions_without_schemas() {
+        for protocol in [Protocol::V201, Protocol::V21] {
+            let error = SchemaRegistry::for_protocol(protocol).unwrap_err();
+            assert!(
+                matches!(error, SchemaError::Unavailable(p) if p == protocol),
+                "{error:?}"
+            );
+            assert_eq!(
+                error.to_string(),
+                format!("this build has no OCPP schemas for {}", protocol.token())
+            );
+        }
+    }
+
+    #[test]
+    fn a_registry_can_be_built_from_a_custom_table() {
+        const TABLE: SchemaTable = &[(
+            "Ping",
+            r#"{"type":"object","required":["n"],"properties":{"n":{"type":"integer"}}}"#,
+            r#"{"type":"object"}"#,
+        )];
+        let registry = SchemaRegistry::build(Protocol::V201, TABLE).unwrap();
+        assert_eq!(registry.protocol(), Protocol::V201);
+        assert_eq!(registry.action_names().collect::<Vec<_>>(), ["Ping"]);
+        assert!(!registry.knows_action("Heartbeat"));
+        registry.validate_request("Ping", &json!({"n": 1})).unwrap();
+        assert!(registry.validate_request("Ping", &json!({})).is_err());
+    }
+
+    #[test]
+    fn error_codes_follow_the_protocol_spelling() {
+        let wire = |keywords: &[&str], protocol| {
+            violation(keywords)
+                .error_code_for(protocol)
+                .as_str()
+                .to_owned()
+        };
+        for (keywords, v16, v2) in [
+            (
+                &["required"][..],
+                "OccurenceConstraintViolation",
+                "OccurrenceConstraintViolation",
+            ),
+            (
+                &["type"][..],
+                "TypeConstraintViolation",
+                "TypeConstraintViolation",
+            ),
+            (
+                &["enum"][..],
+                "PropertyConstraintViolation",
+                "PropertyConstraintViolation",
+            ),
+            (&["pattern"][..], "FormationViolation", "FormatViolation"),
+        ] {
+            assert_eq!(wire(keywords, Protocol::V16), v16);
+            assert_eq!(violation(keywords).error_code().as_str(), v16);
+            assert_eq!(wire(keywords, Protocol::V201), v2);
+            assert_eq!(wire(keywords, Protocol::V21), v2);
+        }
+        let unknown = SchemaViolation::unknown_action("Nope", PayloadKind::Request);
+        for protocol in Protocol::ALL {
+            assert_eq!(unknown.error_code_for(protocol), ErrorCode::NotImplemented);
         }
     }
 }

@@ -5,6 +5,7 @@
 pub mod action;
 pub mod frame;
 pub mod messages;
+pub mod protocol;
 pub mod responder;
 pub mod schema;
 pub mod types;
@@ -14,5 +15,9 @@ pub use frame::{
     Direction, ErrorCode, Frame, FrameError, FrameRecord, MessageId, REDACTED, redact_payload,
     redact_secrets,
 };
+pub use protocol::Protocol;
 pub use responder::{ReplyError, ReplyHandle, Responder};
-pub use schema::{PayloadKind, SchemaIssue, SchemaKeyword, SchemaRegistry, SchemaViolation};
+pub use schema::{
+    PayloadKind, SchemaError, SchemaIssue, SchemaKeyword, SchemaLoadError, SchemaRegistry,
+    SchemaViolation,
+};

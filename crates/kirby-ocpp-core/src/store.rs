@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -416,34 +416,20 @@ impl StationStore {
         let mut copy = secrets.clone();
         copy.version = STORE_VERSION;
         let json = serde_json::to_vec_pretty(&copy).map_err(StoreError::Serialize)?;
-        self.write_atomic(&path, &json)
+        Self::write_atomic(&path, &json)
     }
 
     /// Atomically replaces the state file (creating the directory if needed).
     pub fn save(&self, state: &PersistedStation) -> Result<(), StoreError> {
         let json = serde_json::to_vec_pretty(state).map_err(StoreError::Serialize)?;
-        self.write_atomic(&self.path, &json)
+        Self::write_atomic(&self.path, &json)
     }
 
-    fn write_atomic(&self, path: &Path, json: &[u8]) -> Result<(), StoreError> {
-        let dir = path.parent().unwrap_or_else(|| Path::new("."));
-        fs::create_dir_all(dir).map_err(|e| StoreError::Io {
-            path: dir.to_owned(),
-            source: e,
-        })?;
-        let mut temp = tempfile::NamedTempFile::new_in(dir).map_err(|e| self.io_error(e))?;
-        temp.write_all(json).map_err(|e| self.io_error(e))?;
-        temp.as_file().sync_all().map_err(|e| self.io_error(e))?;
-        temp.persist(path).map_err(|e| self.io_error(e.error))?;
-        match sync_dir(dir) {
-            Ok(()) => Ok(()),
-            // The rename already happened; some filesystems cannot sync a directory.
-            Err(e) if dir_sync_unsupported(&e) => Ok(()),
-            Err(e) => Err(StoreError::Io {
-                path: dir.to_owned(),
-                source: e,
-            }),
-        }
+    fn write_atomic(path: &Path, json: &[u8]) -> Result<(), StoreError> {
+        crate::fs_util::write_atomic(path, json).map_err(|e| StoreError::Io {
+            path: e.path,
+            source: e.source,
+        })
     }
 
     fn quarantine(&self, reason: String) -> Result<LoadOutcome, StoreError> {
@@ -485,30 +471,6 @@ fn move_aside(path: &Path) -> Result<PathBuf, StoreError> {
         let _ = fs::set_permissions(&backup, fs::Permissions::from_mode(0o600));
     }
     Ok(backup)
-}
-
-/// Whether a directory `fsync` failed only because the filesystem does not support it.
-fn dir_sync_unsupported(error: &io::Error) -> bool {
-    matches!(
-        error.kind(),
-        io::ErrorKind::Unsupported | io::ErrorKind::InvalidInput
-    )
-}
-
-/// Makes the rename durable. Directories cannot be opened and synced on Windows (and NTFS
-/// journals the rename), so it is a no-op there.
-#[cfg(unix)]
-fn sync_dir(dir: &Path) -> io::Result<()> {
-    fs::File::open(dir)?.sync_all()
-}
-
-#[cfg(not(unix))]
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "same signature as the unix version"
-)]
-fn sync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 /// Longest escaped id kept verbatim. With `.station.json` (13 bytes), the `.bak` suffix and the
@@ -567,6 +529,7 @@ mod tests {
     use chrono::{DateTime, Utc};
 
     use super::*;
+    use crate::fs_util::dir_sync_unsupported;
     use crate::ids::TxId;
     use crate::station::transaction::ActiveTransaction;
 

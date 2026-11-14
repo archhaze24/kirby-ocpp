@@ -228,6 +228,7 @@ pub fn options() -> ConnectOptions {
         serialize_calls: true,
         show_secrets: false,
         write_timeout: Duration::from_secs(10),
+        ..ConnectOptions::default()
     }
 }
 

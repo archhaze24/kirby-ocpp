@@ -14,6 +14,7 @@ use super::read::{CommandLine, Entry, FrameLine, Recording};
 use super::redact::holds_redacted;
 use super::toml_out::{escape_placeholders, step, string};
 use super::{RecordError, Role, at_text, clean, frame_parts};
+use crate::ocpp::Protocol;
 use crate::ocpp::frame::Direction;
 use crate::scenario::Scenario;
 
@@ -42,7 +43,7 @@ pub fn to_scenario(recording: &Recording) -> Result<ScenarioConversion, RecordEr
             "only a recording made by the emulator can become a scenario (this one was written by another role)",
         ));
     }
-    if recording.header.ocpp_version != "1.6" {
+    if recording.header.ocpp_version != Protocol::V16.ocpp_version() {
         return Err(RecordError::invalid(format!(
             "this build converts OCPP 1.6 recordings only (the recording says `{}`)",
             clean(&recording.header.ocpp_version, 20)

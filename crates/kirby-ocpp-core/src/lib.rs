@@ -11,6 +11,7 @@ pub mod config;
 pub mod config_file;
 pub mod error;
 pub mod fleet;
+pub mod fs_util;
 pub mod ids;
 pub mod ocpp;
 pub mod recording;
@@ -19,6 +20,7 @@ pub mod station;
 pub mod store;
 pub mod text;
 pub mod timefmt;
+pub mod timers;
 pub mod ws;
 
 pub use clock::{Clock, ManualClock, SystemClock};

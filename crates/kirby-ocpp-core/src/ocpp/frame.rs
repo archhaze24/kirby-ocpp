@@ -20,6 +20,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 use thiserror::Error;
 
+use super::protocol::Protocol;
+
 /// OCPP-J message id (a string of at most 36 characters per the spec; not enforced on receive).
 pub type MessageId = String;
 
@@ -125,6 +127,24 @@ impl ErrorCode {
     /// `true` for the ten codes defined by OCPP 1.6.
     pub fn is_standard(&self) -> bool {
         !matches!(self, Self::Other(_))
+    }
+
+    /// The code for a payload with a missing required property: 1.6 spells it
+    /// `OccurenceConstraintViolation` (sic), 2.x `OccurrenceConstraintViolation`.
+    pub(crate) fn occurrence_constraint_violation(protocol: Protocol) -> Self {
+        match protocol {
+            Protocol::V16 => Self::OccurenceConstraintViolation,
+            _ => Self::Other("OccurrenceConstraintViolation".to_owned()),
+        }
+    }
+
+    /// The code for a payload that is broken in no more specific way: 1.6 calls it
+    /// `FormationViolation`, 2.x `FormatViolation`.
+    pub(crate) fn formation_violation(protocol: Protocol) -> Self {
+        match protocol {
+            Protocol::V16 => Self::FormationViolation,
+            _ => Self::Other("FormatViolation".to_owned()),
+        }
     }
 }
 
@@ -428,10 +448,16 @@ impl FrameError {
     /// CALL whose id could be read. Broken CALLRESULT/CALLERROR frames and frames
     /// without a readable id get no reply (same as the TS client).
     pub fn reply(&self) -> Option<Frame> {
+        self.reply_for(Protocol::V16)
+    }
+
+    /// Like [`FrameError::reply`] with the spelling of `protocol`: `FormationViolation`
+    /// for 1.6, `FormatViolation` for 2.x.
+    pub fn reply_for(&self, protocol: Protocol) -> Option<Frame> {
         match (self.message_type, &self.message_id) {
             (Some(MESSAGE_TYPE_CALL), Some(id)) => Some(Frame::call_error(
                 id.clone(),
-                ErrorCode::FormationViolation,
+                ErrorCode::formation_violation(protocol),
                 self.kind.to_string(),
             )),
             _ => None,
@@ -786,6 +812,45 @@ mod tests {
         };
         assert_eq!(id, "id-9");
         assert_eq!(code, ErrorCode::FormationViolation);
+    }
+
+    #[test]
+    fn the_reply_spelling_follows_the_protocol() {
+        let err = parse_err(r#"[2,"id-9","Heartbeat",[]]"#);
+        let code = |reply: Option<Frame>| match reply {
+            Some(Frame::CallError { code, .. }) => code,
+            other => panic!("expected a CALLERROR, got {other:?}"),
+        };
+        assert_eq!(
+            code(err.reply_for(Protocol::V16)),
+            ErrorCode::FormationViolation
+        );
+        assert_eq!(code(err.reply()), ErrorCode::FormationViolation);
+        for protocol in [Protocol::V201, Protocol::V21] {
+            let code = code(err.reply_for(protocol));
+            assert_eq!(code.as_str(), "FormatViolation");
+            assert_eq!(code, ErrorCode::from_wire("FormatViolation"));
+        }
+        assert!(
+            parse_err(r"[2]").reply_for(Protocol::V201).is_none(),
+            "no readable id, no reply"
+        );
+    }
+
+    #[test]
+    fn occurrence_spelling_follows_the_protocol() {
+        assert_eq!(
+            ErrorCode::occurrence_constraint_violation(Protocol::V16).as_str(),
+            "OccurenceConstraintViolation"
+        );
+        assert_eq!(
+            ErrorCode::occurrence_constraint_violation(Protocol::V201).as_str(),
+            "OccurrenceConstraintViolation"
+        );
+        assert_eq!(
+            ErrorCode::occurrence_constraint_violation(Protocol::V21),
+            ErrorCode::from_name("OccurrenceConstraintViolation").unwrap()
+        );
     }
 
     #[test]
