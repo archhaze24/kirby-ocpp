@@ -330,7 +330,7 @@ kirby_csms_calls_received_total{action="StatusNotification"} 4
 kirby_csms_calls_sent_total{action="RemoteStartTransaction"} 1
 kirby_csms_api_requests_total{class="2xx"} 12
 kirby_csms_api_requests_total{class="4xx"} 1
-kirby_csms_build_info{version="0.6.0"} 1
+kirby_csms_build_info{version="0.7.0-dev"} 1
 ```
 
 With a token, give the scraper the bearer token (`authorization` in the Prometheus scrape config, see [cookbook.md](cookbook.md)).
