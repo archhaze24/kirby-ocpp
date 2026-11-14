@@ -59,6 +59,8 @@ struct Csms {
     lines: Receiver<String>,
     seen: Vec<String>,
     stderr: Arc<Mutex<String>>,
+    /// Ends when the process closed stderr; `finish` joins it so no line is missed.
+    stderr_reader: Option<thread::JoinHandle<()>>,
     addr: String,
 }
 
@@ -86,7 +88,7 @@ impl Csms {
         let stderr = Arc::new(Mutex::new(String::new()));
         let sink = Arc::clone(&stderr);
         let pipe = child.stderr.take().unwrap();
-        thread::spawn(move || {
+        let stderr_reader = thread::spawn(move || {
             for line in BufReader::new(pipe).lines().map_while(Result::ok) {
                 if let Ok(mut text) = sink.lock() {
                     text.push_str(&line);
@@ -100,6 +102,7 @@ impl Csms {
             lines,
             seen: Vec::new(),
             stderr,
+            stderr_reader: Some(stderr_reader),
             addr: String::new(),
         };
         let listening = csms.wait(|v| v["type"] == "listening");
@@ -154,6 +157,9 @@ impl Csms {
             }
         }
         let status = self.child.wait().unwrap();
+        if let Some(reader) = self.stderr_reader.take() {
+            reader.join().unwrap();
+        }
         let stderr = self.stderr.lock().unwrap().clone();
         (status.code().unwrap_or(-1), self.seen.clone(), stderr)
     }

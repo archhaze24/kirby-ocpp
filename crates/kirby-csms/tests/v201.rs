@@ -126,6 +126,24 @@ impl Csms {
         stdin.flush().unwrap();
     }
 
+    /// Waits until a `connected` line was printed for every station in `ids`, including lines
+    /// read by earlier waits. A client handshake can finish before the server registers it.
+    fn wait_connected(&mut self, ids: &[&str]) {
+        let connected = |line: &str, id: &str| {
+            serde_json::from_str::<Value>(line)
+                .is_ok_and(|v| v["type"] == "connected" && v["station"] == id)
+        };
+        let mut missing: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| !self.seen.iter().any(|line| connected(line, id)))
+            .collect();
+        while !missing.is_empty() {
+            let line = self.wait(|v| v["type"] == "connected");
+            missing.retain(|id| line["station"] != *id);
+        }
+    }
+
     /// The `stations` stdin answer, as a list.
     fn stations(&mut self) -> Vec<Value> {
         self.send(r#"{"cmd":"stations"}"#);
@@ -412,6 +430,7 @@ async fn the_offer_decides_between_ocpp_1_6_and_2_0_1() {
     assert_eq!(legacy.negotiated, "ocpp1.6");
     let new = Raw::connect(&csms, "CP-new", "ocpp2.0.1").await;
     assert_eq!(new.negotiated, "ocpp2.0.1");
+    csms.wait_connected(&["CP-dual", "CP-old", "CP-new"]);
     let list = csms.stations();
     let protocol = |id: &str| {
         list.iter().find(|s| s["id"] == id).unwrap()["protocol"]
