@@ -224,6 +224,9 @@ pub struct IncomingCall {
 pub enum ConnectError {
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
+    /// The Basic Auth credentials could not be built; the attempt made no request.
+    #[error("invalid credentials: {0}")]
+    InvalidCredentials(String),
     /// A TLS setting is inconsistent or the TLS handshake failed (for example the server
     /// certificate is not trusted).
     #[error("TLS error: {0}")]

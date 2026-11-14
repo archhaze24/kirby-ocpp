@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use crate::station_support::{Rig, STEP, t0, test_config};
 use kirby_ocpp_core::Station;
 use kirby_ocpp_core::station::Command;
-use kirby_ocpp_testkit::Reply;
+use kirby_ocpp_testkit::{CsmsOptions, Reply};
 use rcgen::{BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair};
 use ring::digest;
 use serde_json::json;
@@ -523,6 +523,229 @@ async fn profile_one_sends_basic_auth_with_the_authorization_key_and_401_is_repo
     );
     station.shutdown().await.unwrap();
     join.await.unwrap();
+}
+
+/// A TCP server that records the request head of every upgrade attempt and answers 401.
+struct HeadCatcher {
+    url: String,
+    heads: tokio::sync::mpsc::UnboundedReceiver<String>,
+}
+
+async fn head_catcher() -> HeadCatcher {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, heads) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                let mut head = Vec::new();
+                let mut buf = [0_u8; 1024];
+                while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 16 * 1024 {
+                    match tokio::time::timeout(STEP, socket.read(&mut buf)).await {
+                        Ok(Ok(n)) if n > 0 => head.extend_from_slice(&buf[..n]),
+                        _ => break,
+                    }
+                }
+                let _ = sender.send(String::from_utf8_lossy(&head).into_owned());
+                let _ = socket
+                    .write_all(b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            });
+        }
+    });
+    HeadCatcher {
+        url: format!("ws://127.0.0.1:{port}/ocpp"),
+        heads,
+    }
+}
+
+impl HeadCatcher {
+    /// The `Authorization` header line of the next upgrade attempt.
+    async fn next_authorization(&mut self) -> String {
+        let head = tokio::time::timeout(STEP, self.heads.recv())
+            .await
+            .expect("an upgrade attempt arrives")
+            .expect("the catcher runs");
+        head.lines()
+            .find(|line| line.starts_with("Authorization: "))
+            .unwrap_or_else(|| panic!("no Authorization header in {head}"))
+            .to_owned()
+    }
+}
+
+fn basic_header(credentials: &[u8]) -> String {
+    use base64::Engine as _;
+    format!(
+        "Authorization: Basic {}",
+        base64::engine::general_purpose::STANDARD.encode(credentials)
+    )
+}
+
+/// A disconnected profile 1 station that opens one connection once told to; the first attempt
+/// is its only one (no reconnect).
+async fn profile_one_station(
+    url: &str,
+    dir: &tempfile::TempDir,
+    id: &str,
+    key: &str,
+    encoding: kirby_ocpp_core::AuthorizationKeyEncoding,
+) -> (
+    kirby_ocpp_core::station::StationHandle,
+    tokio::task::JoinHandle<()>,
+) {
+    let mut config = test_config(url, dir).with_charge_point_id(id);
+    config.reconnect.enabled = false;
+    config.authorization_key_encoding = encoding;
+    let (station, join) = Station::spawn(config, Arc::new(kirby_ocpp_core::ManualClock::new(t0())));
+    for (name, value) in [("AuthorizationKey", key), ("SecurityProfile", "1")] {
+        station
+            .send(Command::SetConfiguration {
+                key: name.into(),
+                value: value.into(),
+            })
+            .await
+            .unwrap();
+    }
+    (station, join)
+}
+
+#[tokio::test]
+async fn percent_sequences_in_the_id_and_key_reach_the_wire_literally() {
+    use kirby_ocpp_core::AuthorizationKeyEncoding::Literal;
+    let mut catcher = head_catcher().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = "abc%41abcdefabcdef%25x";
+    let (station, join) = profile_one_station(&catcher.url, &dir, "CP%41", key, Literal).await;
+    station.connect().await.unwrap();
+    assert_eq!(
+        catcher.next_authorization().await,
+        basic_header(format!("CP%41:{key}").as_bytes())
+    );
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+}
+
+#[tokio::test]
+async fn hex_encoding_sends_the_bytes_of_the_oca_example_key() {
+    use kirby_ocpp_core::AuthorizationKeyEncoding::Hex;
+    let mut catcher = head_catcher().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = "0001020304050607FFFFFFFFFFFFFFFFFFFFFFFF";
+    let (station, join) = profile_one_station(&catcher.url, &dir, "AL1000", key, Hex).await;
+    station.connect().await.unwrap();
+    // OCPP-J 1.6 section 6.2.2: the example header, the password being the 20 decoded bytes.
+    assert_eq!(
+        catcher.next_authorization().await,
+        "Authorization: Basic QUwxMDAwOgABAgMEBQYH////////////////"
+    );
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+}
+
+#[tokio::test]
+async fn hex_encoding_leaves_the_password_of_the_url_alone() {
+    use kirby_ocpp_core::AuthorizationKeyEncoding::Hex;
+    let mut catcher = head_catcher().await;
+    let dir = tempfile::tempdir().unwrap();
+    let url = catcher.url.replacen("ws://", "ws://user:p%00ss%41@", 1);
+    let (station, join) = profile_one_station(&url, &dir, "CP-001", "0123456789abcdef", Hex).await;
+    station.connect().await.unwrap();
+    assert_eq!(
+        catcher.next_authorization().await,
+        basic_header(b"user:p\0ssA")
+    );
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+}
+
+#[tokio::test]
+async fn hex_encoding_rejects_keys_that_are_not_hex_and_keeps_the_old_key() {
+    let mut rig = Rig::with(CsmsOptions::default(), |mut config| {
+        config.authorization_key_encoding = kirby_ocpp_core::AuthorizationKeyEncoding::Hex;
+        config
+    })
+    .await;
+    ok_event_reply(&rig);
+    rig.connect_booted().await;
+    let secret = "0123456789abcdeg";
+    for value in [
+        secret,
+        "0123456789abcdef0",
+        "0123456789abcdé0",
+        "0123456789abcd e",
+    ] {
+        rig.csms
+            .expect_status(
+                "ChangeConfiguration",
+                json!({"key": "AuthorizationKey", "value": value}),
+                "Rejected",
+            )
+            .await
+            .unwrap();
+        let error = rig
+            .station
+            .send(Command::SetConfiguration {
+                key: "AuthorizationKey".into(),
+                value: value.into(),
+            })
+            .await
+            .expect_err("a key that is not hex is refused locally too");
+        assert!(!error.to_string().contains(value), "{error}");
+    }
+    // Neither refusal reconnected the station; the first accepted key does, in either case.
+    assert_eq!(rig.csms.connections(), 1);
+    rig.cfg("AuthorizationKey", "0123456789ABCDEF").await;
+    rig.csms
+        .wait_for_connection_count(2, STEP)
+        .await
+        .expect("reconnect after the accepted key");
+    rig.observed.drain();
+    assert!(rig.observed.logs.iter().all(|l| !l.contains(secret)));
+    rig.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_stored_key_that_is_not_hex_fails_the_attempt_without_leaking_or_rewriting_it() {
+    use kirby_ocpp_core::AuthorizationKeyEncoding::{Hex, Literal};
+    let mut catcher = head_catcher().await;
+    let dir = tempfile::tempdir().unwrap();
+    let key = "NOT-HEX-STORED-KEY-0123";
+    let (station, join) = profile_one_station(&catcher.url, &dir, "CP-001", key, Literal).await;
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    let secrets_path = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.to_string_lossy().ends_with(".station.secrets.json"))
+        .expect("the key was stored");
+    let before = std::fs::read(&secrets_path).unwrap();
+
+    let mut config = test_config(&catcher.url, &dir);
+    config.authorization_key_encoding = Hex;
+    config.reconnect.initial_delay_ms = 10;
+    config.reconnect.max_delay_ms = 20;
+    let (station, join) = Station::spawn(config, Arc::new(kirby_ocpp_core::ManualClock::new(t0())));
+    let mut observed = crate::station_support::Observed::new(station.subscribe());
+    station.connect().await.unwrap();
+    // Every attempt fails before any request is made; the normal backoff schedules the next.
+    let first = observed.wait_log("connection failed").await;
+    observed.wait_log("connection failed").await;
+    assert!(first.contains("AuthorizationKey"), "{first}");
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    observed.drain();
+    assert!(
+        observed.logs.iter().all(|l| !l.contains(key)),
+        "{:#?}",
+        observed.logs
+    );
+    assert!(catcher.heads.try_recv().is_err(), "a request was sent");
+    assert_eq!(std::fs::read(&secrets_path).unwrap(), before);
 }
 
 #[tokio::test]

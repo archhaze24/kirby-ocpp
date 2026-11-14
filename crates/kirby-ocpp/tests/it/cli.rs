@@ -25,6 +25,7 @@ const ENV_VARS: &[&str] = &[
     "OCPP_TLS_SKIP_VERIFY",
     "OCPP_SHOW_SECRETS",
     "OCPP_SECURITY_PROFILE_FALLBACK",
+    "OCPP_AUTHORIZATION_KEY_ENCODING",
     "KIRBY_OCPP_NO_PERSIST",
     "KIRBY_OCPP_STATE_DIR",
     "KIRBY_OCPP_RULES",
@@ -491,6 +492,42 @@ fn security_profile_fallback_is_on_by_default_and_parsed_strictly() {
     assert_eq!(output.status.code(), Some(2));
     let help = run(&["--help"], &[]);
     assert!(String::from_utf8_lossy(&help.stdout).contains("--security-profile-fallback <BOOL>"));
+}
+
+#[test]
+fn authorization_key_encoding_is_literal_by_default_and_parsed_strictly() {
+    assert_eq!(config(URL, &[])["authorization_key_encoding"], "literal");
+    assert_eq!(
+        config(&with_url(&["--authorization-key-encoding", "hex"]), &[])["authorization_key_encoding"],
+        "hex"
+    );
+    assert_eq!(
+        config(URL, &[("OCPP_AUTHORIZATION_KEY_ENCODING", "hex")])["authorization_key_encoding"],
+        "hex"
+    );
+    // The flag beats the environment.
+    assert_eq!(
+        config(
+            &with_url(&["--authorization-key-encoding", "literal"]),
+            &[("OCPP_AUTHORIZATION_KEY_ENCODING", "hex")]
+        )["authorization_key_encoding"],
+        "literal"
+    );
+    for bad in [
+        &with_url(&["--print-config", "--authorization-key-encoding", "base64"])[..],
+        &with_url(&["--print-config", "--authorization-key-encoding", "HEX"])[..],
+    ] {
+        assert_eq!(run(bad, &[]).status.code(), Some(2));
+    }
+    let output = run(
+        &with_url(&["--print-config"]),
+        &[("OCPP_AUTHORIZATION_KEY_ENCODING", "bogus")],
+    );
+    assert_eq!(output.status.code(), Some(2));
+    let help = run(&["--help"], &[]);
+    assert!(
+        String::from_utf8_lossy(&help.stdout).contains("--authorization-key-encoding <ENCODING>")
+    );
 }
 
 #[test]

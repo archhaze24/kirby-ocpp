@@ -42,6 +42,13 @@ use crate::station::certificates::generate_csr;
 use crate::station::config_registry::{AUTHORIZATION_KEY, SECURITY_PROFILE};
 use crate::ws::{ConnectError, WILDCARD_REFUSED};
 
+/// `bytes` percent-encoded so that nothing but ASCII letters and digits is left as is: the URL
+/// userinfo is percent-decoded when the handshake builds the `Authorization` header, and the
+/// `url` crate itself leaves `%` unescaped in a userinfo.
+fn userinfo_escape(bytes: &[u8]) -> String {
+    percent_encoding::percent_encode(bytes, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
 /// Which stored charge point certificate a connection attempt presents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StoredIdentity {
@@ -540,8 +547,12 @@ impl StationActor {
     }
 
     /// Applies the security profile to the config used to open a connection. Returns which
-    /// stored client certificate the connection presents.
-    pub(super) fn apply_security_transport(&self, config: &mut StationConfig) -> StoredIdentity {
+    /// stored client certificate the connection presents. Fails without a request when the
+    /// stored `AuthorizationKey` cannot be turned into a password.
+    pub(super) fn apply_security_transport(
+        &self,
+        config: &mut StationConfig,
+    ) -> Result<StoredIdentity, ConnectError> {
         let profile = self.registry.security_profile();
         config.tls.allow_wildcard_certificates = self.registry.allow_central_system_tls_wildcards();
         if matches!(profile, 1 | 2)
@@ -549,8 +560,16 @@ impl StationActor {
             && let Ok(mut url) = url::Url::parse(&config.url)
             && url.password().is_none()
         {
-            let _ = url.set_username(&config.charge_point_id);
-            let _ = url.set_password(Some(key));
+            let Some(password) = config.authorization_key_encoding.password_bytes(key) else {
+                return Err(ConnectError::InvalidCredentials(
+                    "the stored AuthorizationKey is not valid hexadecimal text, which \
+                     the hex key encoding requires; set a new key"
+                        .to_owned(),
+                ));
+            };
+            // The handshake percent-decodes the userinfo, so a literal `%` must be escaped.
+            let _ = url.set_username(&userinfo_escape(config.charge_point_id.as_bytes()));
+            let _ = url.set_password(Some(&userinfo_escape(&password)));
             config.url = url.to_string();
         }
         let mut identity = StoredIdentity::None;
@@ -582,7 +601,7 @@ impl StationActor {
             self.certs
                 .root_pems(CertificateUse::CentralSystemRootCertificate)
         };
-        identity
+        Ok(identity)
     }
 
     /// `A02.FR.28`: while a renewed client certificate waits for its first successful

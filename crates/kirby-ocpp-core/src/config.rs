@@ -131,6 +131,65 @@ impl std::fmt::Debug for IdentityPem {
     }
 }
 
+/// How the `AuthorizationKey` configuration value becomes the Basic Auth password (OCPP 1.6J
+/// registry key only; a password written in the URL is always sent as the URL says).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthorizationKeyEncoding {
+    /// The key text is the password (the OCPP 2.0.1 A00.FR.205 form).
+    #[default]
+    Literal,
+    /// The key is hexadecimal text and the password is the bytes it encodes (OCPP-J 1.6 section
+    /// 6.2.2).
+    Hex,
+}
+
+impl AuthorizationKeyEncoding {
+    /// The configuration value spelled as the flag, environment variable and file key do.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Literal => "literal",
+            Self::Hex => "hex",
+        }
+    }
+
+    /// Whether `key` is a valid `AuthorizationKey` value for this encoding.
+    #[must_use]
+    pub fn accepts(self, key: &str) -> bool {
+        match self {
+            Self::Literal => true,
+            Self::Hex => decode_hex(key).is_some(),
+        }
+    }
+
+    /// The Basic Auth password bytes for `key`; `None` when a hex key is not valid hex.
+    #[must_use]
+    pub fn password_bytes(self, key: &str) -> Option<Vec<u8>> {
+        match self {
+            Self::Literal => Some(key.as_bytes().to_vec()),
+            Self::Hex => decode_hex(key),
+        }
+    }
+}
+
+/// Decodes a nonempty, even-length string of hexadecimal digits (either case).
+fn decode_hex(text: &str) -> Option<Vec<u8>> {
+    let raw = text.as_bytes();
+    if raw.is_empty() || !raw.len().is_multiple_of(2) || !raw.iter().all(u8::is_ascii_hexdigit) {
+        return None;
+    }
+    raw.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&[high, low]| {
+            let high = char::from(high).to_digit(16)?;
+            let low = char::from(low).to_digit(16)?;
+            u8::try_from(high * 16 + low).ok()
+        })
+        .collect()
+}
+
 /// Everything needed to run one emulated charge point.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -185,6 +244,9 @@ pub struct StationConfig {
     /// System does not accept (repeated profile-attributable connection failures before the
     /// first successful connection) the station goes back to the previous profile.
     pub security_profile_fallback: bool,
+    /// How the `AuthorizationKey` registry value is turned into the Basic Auth password
+    /// (OCPP 1.6J); `hex` also makes the key accept only hexadecimal digits.
+    pub authorization_key_encoding: AuthorizationKeyEncoding,
 }
 
 impl Default for StationConfig {
@@ -213,6 +275,7 @@ impl Default for StationConfig {
             show_secrets: false,
             additional_root_certificate_check: false,
             security_profile_fallback: true,
+            authorization_key_encoding: AuthorizationKeyEncoding::Literal,
         }
     }
 }
@@ -556,6 +619,38 @@ mod tests {
         assert!(c.persist);
         assert!(c.reconnect.enabled);
         assert!(!c.tls.skip_verify);
+    }
+
+    #[test]
+    fn the_authorization_key_encoding_turns_a_key_into_password_bytes() {
+        use AuthorizationKeyEncoding::{Hex, Literal};
+        assert_eq!(AuthorizationKeyEncoding::default(), Literal);
+        assert_eq!(Literal.password_bytes("zz%41"), Some(b"zz%41".to_vec()));
+        assert_eq!(
+            Hex.password_bytes("00ff7Fa0"),
+            Some(vec![0x00, 0xff, 0x7f, 0xa0])
+        );
+        for invalid in [
+            "",
+            "abc",
+            "zz",
+            "0g",
+            "é1",
+            "00 0",
+            "00é",
+            "00000000000000é",
+        ] {
+            assert_eq!(Hex.password_bytes(invalid), None, "{invalid:?}");
+            assert!(!Hex.accepts(invalid), "{invalid:?}");
+            assert!(Literal.accepts(invalid));
+        }
+        assert_eq!(
+            serde_json::to_string(&Hex).unwrap(),
+            "\"hex\"",
+            "the JSON form is the flag value"
+        );
+        let config: StationConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(config.authorization_key_encoding, Literal);
     }
 
     #[test]

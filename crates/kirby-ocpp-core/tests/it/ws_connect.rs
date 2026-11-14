@@ -422,6 +422,16 @@ async fn non_utf8_userinfo_is_sent_as_raw_bytes() {
 }
 
 #[tokio::test]
+async fn url_userinfo_is_percent_decoded_once_so_a_literal_percent_is_written_as_25() {
+    let mut server = RawServer::start(Negotiate::Select("ocpp1.6".into())).await;
+    let url = format!("ws://cp%41:a%2541%25@{}/ocpp", server.addr);
+    let (_connection, _events) = connect(&url, options()).await;
+    let peer = server.next_peer().await;
+    let expected = format!("Basic {}", STANDARD.encode("cpA:a%41%"));
+    assert_eq!(peer.authorization.as_deref(), Some(expected.as_str()));
+}
+
+#[tokio::test]
 async fn the_status_line_in_an_http_error_is_sanitised_and_truncated() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
     let addr = listener.local_addr().expect("addr");

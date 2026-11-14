@@ -23,6 +23,7 @@ const ENV_VARS: &[&str] = &[
     "OCPP_TLS_SKIP_VERIFY",
     "OCPP_SHOW_SECRETS",
     "OCPP_SECURITY_PROFILE_FALLBACK",
+    "OCPP_AUTHORIZATION_KEY_ENCODING",
     "OCPP_COUNT",
     "OCPP_ID_TEMPLATE",
     "OCPP_FIRST_INDEX",
@@ -138,6 +139,47 @@ fn flag_beats_env_beats_file_beats_default() {
         &[("KIRBY_OCPP_RULES", "UnlockConnector=drop")],
     );
     assert!(text.contains("rule = [\"Reset=drop\"]"), "{text}");
+}
+
+#[test]
+fn authorization_key_encoding_follows_the_precedence_and_is_validated() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        dir.path(),
+        "c.toml",
+        "[connection]\nurl = \"ws://file:1/x\"\n[tls]\nauthorization_key_encoding = \"hex\"\n",
+    );
+    let text = print(&["--config", &file], &[]);
+    assert!(
+        text.contains("authorization_key_encoding = \"hex\""),
+        "{text}"
+    );
+    let env = [("OCPP_AUTHORIZATION_KEY_ENCODING", "literal")];
+    let text = print(&["--config", &file], &env);
+    assert!(
+        text.contains("authorization_key_encoding = \"literal\""),
+        "{text}"
+    );
+    let text = print(
+        &["--config", &file, "--authorization-key-encoding", "hex"],
+        &env,
+    );
+    assert!(
+        text.contains("authorization_key_encoding = \"hex\""),
+        "{text}"
+    );
+    let text = print(&["--url", "ws://h:1/x"], &[]);
+    assert!(
+        text.contains("authorization_key_encoding = \"literal\""),
+        "{text}"
+    );
+    let bad = write(
+        dir.path(),
+        "bad.toml",
+        "[connection]\nurl = \"ws://file:1/x\"\n[tls]\nauthorization_key_encoding = \"base64\"\n",
+    );
+    let error = rejected(&["--config", &bad], &[]);
+    assert!(error.contains("authorization-key-encoding"), "{error}");
 }
 
 #[test]

@@ -11,11 +11,11 @@ use std::path::{Path, PathBuf};
 
 use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
-use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults};
 use kirby_ocpp_core::fleet::{FleetSpec, MAX_COUNT};
 use kirby_ocpp_core::ids::ConnectorId;
 use kirby_ocpp_core::station::ResponseRule;
+use kirby_ocpp_core::{AuthorizationKeyEncoding, StationConfig};
 
 /// Terminal OCPP 1.6J charge point emulator for CSMS testing.
 ///
@@ -275,6 +275,18 @@ pub struct Cli {
     )]
     pub security_profile_fallback: bool,
 
+    /// How the AuthorizationKey becomes the Basic Auth password (OCPP 1.6J): literal (the text as written) or hex (the bytes the hexadecimal key encodes, as OCPP-J 1.6 section 6.2.2 specifies)
+    #[arg(
+        help_heading = "TLS",
+        global = true,
+        long,
+        env = "OCPP_AUTHORIZATION_KEY_ENCODING",
+        value_name = "ENCODING",
+        value_enum,
+        default_value = "literal"
+    )]
+    pub authorization_key_encoding: KeyEncodingChoice,
+
     /// Misbehave on purpose when the CSMS sends a command: ACTION=BEHAVIOR[*COUNT]. Repeatable
     #[arg(
         help_heading = "Faults",
@@ -407,6 +419,26 @@ pub enum PrintFormat {
     Json,
     /// A configuration file that `--config` accepts.
     Toml,
+}
+
+/// `--authorization-key-encoding` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum KeyEncodingChoice {
+    /// The key text is the password (the default).
+    Literal,
+    /// The password is the bytes the hexadecimal key encodes.
+    Hex,
+}
+
+impl KeyEncodingChoice {
+    /// The setting the station uses.
+    #[must_use]
+    pub fn encoding(self) -> AuthorizationKeyEncoding {
+        match self {
+            Self::Literal => AuthorizationKeyEncoding::Literal,
+            Self::Hex => AuthorizationKeyEncoding::Hex,
+        }
+    }
 }
 
 /// `--time` values.
@@ -955,6 +987,10 @@ impl Cli {
             "security_profile_fallback",
             Value::Bool(self.security_profile_fallback),
         ));
+        values.push((
+            "authorization_key_encoding",
+            text(self.authorization_key_encoding.encoding().name()),
+        ));
         values.push(("reconnect", Value::Bool(self.reconnect)));
         values.push(("no_reconnect", Value::Bool(self.no_reconnect)));
         values.push(("reconnect_initial_ms", int(self.reconnect_initial_ms)));
@@ -1049,6 +1085,7 @@ impl Cli {
             show_secrets: self.show_secrets,
             additional_root_certificate_check: self.additional_root_certificate_check,
             security_profile_fallback: self.security_profile_fallback,
+            authorization_key_encoding: self.authorization_key_encoding.encoding(),
         })
     }
 }

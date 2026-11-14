@@ -116,9 +116,22 @@ impl StationActor {
             format!("connecting to {}", redact_url(&self.config.url)),
         );
         let mut config = self.config.clone();
-        self.connect_identity = self.apply_security_transport(&mut config);
-        let options = self.connect_options();
         let internal = self.internal_tx.clone();
+        match self.apply_security_transport(&mut config) {
+            Ok(identity) => self.connect_identity = identity,
+            Err(error) => {
+                // No request is made; the failure follows the normal retry path.
+                self.connect_identity = super::secure::StoredIdentity::None;
+                self.link.connecting = Some(tokio::spawn(async move {
+                    let _ = internal.send(Internal::Connected {
+                        generation,
+                        result: Err(error),
+                    });
+                }));
+                return;
+            }
+        }
+        let options = self.connect_options();
         self.link.connecting = Some(tokio::spawn(async move {
             let result = Connection::connect(
                 &config.url,

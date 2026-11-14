@@ -56,6 +56,7 @@ Contents: [Precedence and booleans](#precedence-and-booleans) · [kirby-ocpp](#k
 | `--tls-skip-verify` | `OCPP_TLS_SKIP_VERIFY` | off | Disable certificate verification (local or self-signed testing only) |
 | `--show-secrets` | `OCPP_SHOW_SECRETS` | off | Show `AuthorizationKey` values in frame logs; by default they are replaced by `***` |
 | `--security-profile-fallback <BOOL>` | `OCPP_SECURITY_PROFILE_FALLBACK` | `true` | Go back to the previous `SecurityProfile` after 3 profile-attributable connection failures (HTTP 401/403, or a TLS alert rejecting the client certificate) with a newly set one, before it ever connected (`A05.FR.08`); see [Security](security.md#emulator-side) |
+| `--authorization-key-encoding <ENCODING>` | `OCPP_AUTHORIZATION_KEY_ENCODING` | `literal` | How the `AuthorizationKey` becomes the Basic Auth password (OCPP 1.6J): `literal` sends the key text, `hex` sends the bytes of the hexadecimal key as OCPP-J 1.6 section 6.2.2 defines and makes the key accept only hex digits; never applies to a password in the URL; see [Security](security.md#basic-auth-and-authorizationkey) |
 | `--additional-root-certificate-check` | `OCPP_ADDITIONAL_ROOT_CERTIFICATE_CHECK` | off | Value of the read-only `AdditionalRootCertificateCheck` key: a new Central System root must be signed by the installed one |
 
 Profiles and certificates are explained in [Security](security.md).
@@ -245,7 +246,7 @@ For every setting: command-line flag, then environment variable, then the select
 | `[connection]` | `url`, `ws_subprotocol`, `ws_ping`, `call_timeout_ms` |
 | `[identity]` | `id`, `vendor`, `model`, `serial`, `firmware_version` |
 | `[station]` | `connector`, `connectors`, `heartbeat`, `nominal_power_w`, `voltage_v`, `phases`, `no_persist`, `state_dir` |
-| `[tls]` | `tls_ca`, `tls_cert`, `tls_key`, `tls_server_name`, `tls_skip_verify`, `additional_root_certificate_check`, `security_profile_fallback` |
+| `[tls]` | `tls_ca`, `tls_cert`, `tls_key`, `tls_server_name`, `tls_skip_verify`, `additional_root_certificate_check`, `security_profile_fallback`, `authorization_key_encoding` |
 | `[reconnect]` | `reconnect`, `no_reconnect`, `reconnect_initial_ms`, `reconnect_max_ms`, `reconnect_max_attempts` |
 | `[fleet]` | `count`, `id_template`, `first_index`, `stagger_ms` |
 | `[faults]` | `rule` (array of `ACTION=BEHAVIOR[*COUNT]` strings, see [Response rules](#response-rules---rule)) |

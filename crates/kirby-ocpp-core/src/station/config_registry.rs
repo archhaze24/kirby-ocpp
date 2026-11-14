@@ -32,7 +32,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::config::StationConfig;
+use crate::config::{AuthorizationKeyEncoding, StationConfig};
 use crate::ocpp::types::{ChargingRateUnitType, ConfigurationStatus, Measurand};
 
 // Canonical spelling of every registry key.
@@ -152,6 +152,9 @@ enum Kind {
     SecurityProfile,
     /// Write-only secret, 16..=40 printable ASCII characters (`AuthorizationKey`).
     Secret,
+    /// Write-only secret like [`Self::Secret`] that must be hexadecimal with an even digit
+    /// count (`AuthorizationKey` with `AuthorizationKeyEncoding::Hex`).
+    HexSecret,
     /// Free text of at most 50 characters (`CpoName`).
     Name,
 }
@@ -168,6 +171,7 @@ impl Kind {
             Self::PhaseRotations => "comma-separated phase rotations (RST, 1.RST, ...)",
             Self::SecurityProfile => "0, 1, 2 or 3; can only be raised",
             Self::Secret => "write-only; 16 to 40 printable ASCII characters",
+            Self::HexSecret => "write-only; 16 to 40 hexadecimal digits, an even number",
             Self::Name => "text, at most 50 characters",
         }
     }
@@ -189,6 +193,9 @@ impl Kind {
             Self::SecurityProfile => parse_int(value).is_some_and(|n| (0..=3).contains(&n)),
             Self::Secret => {
                 (16..=40).contains(&value.len()) && value.bytes().all(|b| b.is_ascii_graphic())
+            }
+            Self::HexSecret => {
+                (16..=40).contains(&value.len()) && AuthorizationKeyEncoding::Hex.accepts(value)
             }
             Self::Name => value.chars().count() <= 50,
         }
@@ -224,7 +231,7 @@ impl ConfigEntry {
     /// `true` for write-only keys (`AuthorizationKey`): the value must never be shown,
     /// logged or persisted in the state file.
     pub fn secret(&self) -> bool {
-        self.kind == Kind::Secret
+        matches!(self.kind, Kind::Secret | Kind::HexSecret)
     }
 
     /// The value as it may be shown: secrets are masked (`""` when unset).
@@ -750,7 +757,14 @@ fn first_half_entries(config: &StationConfig, connectors: u32) -> Vec<ConfigEntr
             config.additional_root_certificate_check.to_string(),
         ),
         writable(AUTHORIZATION_CACHE_ENABLED, Kind::Boolean, "true"),
-        writable(AUTHORIZATION_KEY, Kind::Secret, ""),
+        writable(
+            AUTHORIZATION_KEY,
+            match config.authorization_key_encoding {
+                AuthorizationKeyEncoding::Literal => Kind::Secret,
+                AuthorizationKeyEncoding::Hex => Kind::HexSecret,
+            },
+            "",
+        ),
         writable(AUTHORIZE_REMOTE_TX_REQUESTS, Kind::Boolean, "false"),
         writable(BLINK_REPEAT, Kind::NonNegativeInt, "0"),
         read_only(CERTIFICATE_SIGNED_MAX_CHAIN_SIZE, "10000"),
@@ -1223,6 +1237,40 @@ mod tests {
                 .count()
         );
         assert!(!snapshot.values.contains_key("AuthorizationKey"));
+    }
+
+    #[test]
+    fn a_hex_authorization_key_takes_even_hex_digits_only_and_stays_secret() {
+        let mut config = StationConfig::new("ws://localhost:9000/ocpp");
+        config.authorization_key_encoding = AuthorizationKeyEncoding::Hex;
+        let mut registry = ConfigRegistry::new(&config);
+        for rejected in [
+            "0123456789abcdef0",
+            "0123456789abcdeg",
+            "0123456789abcdé0",
+            "short0123456789 ",
+            "0123456789abcde",
+            &"ab".repeat(21),
+        ] {
+            assert_eq!(
+                registry.change("AuthorizationKey", rejected),
+                ConfigurationStatus::Rejected,
+                "{rejected}"
+            );
+        }
+        assert_eq!(registry.authorization_key(), None);
+        for accepted in ["0123456789abcdef", "0123456789ABCDEF", &"aB".repeat(20)] {
+            assert_eq!(
+                registry.change("AuthorizationKey", accepted),
+                ConfigurationStatus::Accepted,
+                "{accepted}"
+            );
+        }
+        let entry = registry.get("AuthorizationKey").unwrap();
+        assert!(entry.secret());
+        assert_eq!(entry.display_value(), "********");
+        assert!(!registry.snapshot().values.contains_key("AuthorizationKey"));
+        assert!(!format!("{registry:?}").contains(&"aB".repeat(20)));
     }
 
     #[test]

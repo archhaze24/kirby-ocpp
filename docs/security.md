@@ -27,7 +27,7 @@ Contents: [Profiles](#profiles) · [CSMS side](#csms-side) · [Emulator side](#e
 Invalid combinations exit with code 2 before the server binds.
 
 - Keys: `--auth-key` is visible in `ps` and shell history; prefer `KIRBY_CSMS_AUTH_KEY` (`ID=KEY;ID=KEY`, used only when no `--auth-key` is given) or `--auth-keys-file` (lines `ID=KEY`, `#` comments; keep it `0600`; a startup warning is printed on Unix when group or others can read it). `--default-auth-key` covers stations without an entry. A station without any key is refused.
-- Profiles 1 and 2: the user name must equal the station id from the URL and the password must equal that station's key, compared byte for byte (constant time).
+- Profiles 1 and 2: the user name must equal the station id from the URL and the password must equal that station's key, compared byte for byte (constant time). In an OCPP 1.6J session a password equal to the bytes of a hexadecimal key is accepted too, see [Basic Auth and AuthorizationKey](#basic-auth-and-authorizationkey).
 - Profile 3: TLS with a client certificate that chains to `--tls-client-ca` and whose subject Common Name equals the station id. A station without a valid certificate fails the TLS handshake.
 - Refusals answer HTTP 401 with a `WWW-Authenticate: Basic` challenge for credentials, 403 for certificate problems and `TLS required` on a plain socket. The body never says why. Each refusal prints an `auth_failed` event with a fixed reason (`missing or malformed credentials`, `no key configured for the station`, `invalid credentials`, `TLS required`, `client certificate required`, `client certificate does not match the station id`); keys are never printed. A failed TLS handshake under profile 3 is reported with `"station":null`.
 - The TUI shows a `security profile N` chip and an `N auth failures` chip in the header.
@@ -47,7 +47,7 @@ The HTTP control API has its own listener and its own certificate, separate from
 
 `kirby-ocpp check` tests a connection with the TLS flags and the URL credentials only (certificate verification, `--tls-ca`, `--tls-cert`/`--tls-key`, `--tls-skip-verify`, a wildcard certificate is refused as above). It prints the subject, issuer and expiry of the server certificate and never the password of the URL; see [Connection check](emulator.md#connection-check).
 
-There is no flag that sets the security profile (`--security-profile-fallback` only controls the fallback, below). The station follows the registry keys `SecurityProfile` and `AuthorizationKey`, which a CSMS sets with `ChangeConfiguration` as the whitepaper describes.
+There is no flag that sets the security profile (`--security-profile-fallback` only controls the fallback, below, and `--authorization-key-encoding` only how the key becomes the password). The station follows the registry keys `SecurityProfile` and `AuthorizationKey`, which a CSMS sets with `ChangeConfiguration` as the whitepaper describes.
 
 **Profile fallback (`A05.FR.08`, SHOULD).** After an accepted change of `SecurityProfile` the station remembers the profile that was in force (and the previous `AuthorizationKey` in the secrets file when the key changed in the meantime). If it then fails 3 times in a row to connect with the new profile before its first successful connection, it goes back to the previous profile (and key). It logs a warning, queues a `ReconfigurationOfSecurityParameters` security event whose `techInfo` names the fallback, and reconnects at once.
 
@@ -62,7 +62,7 @@ There is no flag that sets the security profile (`--security-profile-fallback` o
 * The record is persisted (state file format 9), so a restart in the middle does not lose it.
 * `--security-profile-fallback false` (`OCPP_SECURITY_PROFILE_FALLBACK`) turns the fallback off: the station then keeps retrying with the new profile.
 
-- Profile 1 or 2: the station sends Basic Auth with user = charge point id and password = `AuthorizationKey`, unless the `--url` already carries a password (`wss://user:pass@host/path`; the userinfo becomes the `Authorization` header and never appears in the request line, `Host` or error messages).
+- Profile 1 or 2: the station sends Basic Auth with user = charge point id and password = `AuthorizationKey` (as text or decoded from hex, see [Basic Auth and AuthorizationKey](#basic-auth-and-authorizationkey)), unless the `--url` already carries a password (`wss://user:pass@host/path`; the percent-decoded userinfo becomes the `Authorization` header and never appears in the request line, `Host` or error messages).
 - Profile 3: the station presents the stored charge point certificate (from `CertificateSigned`) as the TLS client identity, unless `--tls-cert` / `--tls-key` are given.
 - `SecurityProfile` can only be raised. Exception: with `AllowSecurityProfileDowngrade` set to `true`, 3 may be lowered to 2. Lowering to 1 or 0 is never possible. Setting the current value is `Rejected` for 2 and 3 and a no-op `Accepted` for 0 and 1.
 - Prerequisites when changing: 1 needs credentials (an `AuthorizationKey` or a URL password), 2 needs a `wss://` URL as well, 3 additionally a client certificate (`--tls-cert` or a stored one).
@@ -73,7 +73,11 @@ There is no flag that sets the security profile (`--security-profile-fallback` o
 ## Basic Auth and AuthorizationKey
 
 - `AuthorizationKey` is a write-only configuration key: 16 to 40 printable ASCII characters. `GetConfiguration` lists it without a value.
-- Whitepaper requirement A00.FR.205 says the key is hexadecimal (up to 40 hex digits) but never says the Basic Auth password is the decoded bytes. Both tools use the string as given, so non-hex printable keys also work. The CSMS compares the password byte for byte with the configured key; the emulator sends the key as the password. A peer that hex-decodes the key will not interoperate; the whitepaper leaves this open, so it is a known limitation, not a bug.
+- OCPP-J 1.6 section 6.2.2 defines the Basic Auth password as the bytes the hexadecimal `AuthorizationKey` encodes: for the charge point `AL1000` and the key `0001020304050607FFFFFFFFFFFFFFFFFFFFFFFF` the header is `Authorization: Basic QUwxMDAwOgABAgMEBQYH////////////////`. OCPP 2.0.1 (A00.FR.205, A00.FR.304) sends the password as literal UTF-8 text instead.
+- `--authorization-key-encoding literal|hex` (`OCPP_AUTHORIZATION_KEY_ENCODING`, key `authorization_key_encoding` in the `[tls]` table of a configuration file) selects the emulator's form. `literal` is the default and sends the key text as the password, so it deviates from OCPP-J 1.6 for hexadecimal keys; use `hex` to interoperate with a Central System that follows the 1.6 text.
+- With `hex` the registry key accepts only an even number of hexadecimal digits (either case, 16 to 40 characters, so 8 to 20 bytes); any other value is `Rejected` for `ChangeConfiguration` and refused for the local `SetConfiguration`, and the old key stays. A stored key that is not valid hex (for example saved under `literal`) makes every connection attempt fail with an error that does not show the key, retried with the usual backoff; the secrets file is left unchanged. `hex` applies to the `AuthorizationKey` of OCPP 1.6J only, never to a password written in the URL.
+- The key is percent-encoded when it is placed into the connection URL, so a `%` in the charge point id or the key reaches the wire as typed. A password in the `--url` userinfo is different: it is percent-decoded, so write a literal `%` as `%25` there, and `%XX` gives one raw byte.
+- The CSMS accepts both forms for OCPP 1.6J sessions, without a switch: the password equal to the configured key text, or equal to the bytes of that key when it is nonempty, even-length hexadecimal text. Sessions of other OCPP versions accept only the literal text. Both comparisons are byte for byte and constant time.
 - Changing the key with `ChangeConfiguration` reconnects the station, so the CSMS-side key must be updated in step with it.
 - The key comes from the station's secrets file after a restart, see [Secrets storage](#secrets-storage). With `--no-persist` it is not kept.
 
@@ -190,7 +194,7 @@ Intentional or open points; see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE
 
 | Item | Behavior |
 | --- | --- |
-| A00.FR.205 hex key | The `AuthorizationKey` is used as given, not hex-decoded; non-hex printable keys are accepted |
+| OCPP-J 1.6 section 6.2.2 hex key | The emulator sends the `AuthorizationKey` text as the password by default (the OCPP 2.0.1 form) and non-hex printable keys are accepted; `--authorization-key-encoding hex` sends the decoded bytes the 1.6 text defines |
 | A05.FR.03 | An installed Central System root is not required for profile 2 or 3 (public CA setups are legitimate) |
 | Leaf CN | No Common Name check on the `CertificateSigned` leaf (the whitepaper CN is the serial number, the CSR uses the station id) |
 | A02.FR.28 and neighbours | Old/new certificate alternation: refusals switch at once, other failures after 3 in a row; a server that accepts both certificates keeps both until the new one is refused once; the refusal flag is not persisted, so after a restart a success with the old certificate keeps both |

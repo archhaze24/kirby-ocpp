@@ -70,6 +70,7 @@ pub const SCHEMA: Schema = Schema {
                 KeySpec::new("tls_skip_verify", Kind::Switch),
                 KeySpec::new("additional_root_certificate_check", Kind::Switch),
                 KeySpec::new("security_profile_fallback", Kind::Bool),
+                KeySpec::new("authorization_key_encoding", Kind::Text),
             ],
         },
         Section {

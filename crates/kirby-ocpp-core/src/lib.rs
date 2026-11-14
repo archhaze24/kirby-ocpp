@@ -24,7 +24,7 @@ pub mod timers;
 pub mod ws;
 
 pub use clock::{Clock, ManualClock, SystemClock};
-pub use config::StationConfig;
+pub use config::{AuthorizationKeyEncoding, StationConfig};
 pub use error::{CallError, StationError};
 pub use station::{Station, StationHandle};
 
