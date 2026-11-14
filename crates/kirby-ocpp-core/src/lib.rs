@@ -13,10 +13,12 @@ pub mod error;
 pub mod fleet;
 pub mod fs_util;
 pub mod ids;
+pub mod link_view;
 pub mod ocpp;
 pub mod recording;
 pub mod scenario;
 pub mod station;
+pub mod station2;
 pub mod store;
 pub mod text;
 pub mod timefmt;
@@ -27,6 +29,7 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use config::{AuthorizationKeyEncoding, StationConfig};
 pub use error::{CallError, StationError};
 pub use station::{Station, StationHandle};
+pub use station2::{Command2, Outcome2, Snapshot2, Station2, Station2Handle};
 
 /// Version of this crate (equal to the workspace version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

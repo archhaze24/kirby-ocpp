@@ -14,6 +14,7 @@ use thiserror::Error;
 use url::Url;
 
 use crate::ids::ConnectorId;
+use crate::ocpp::Protocol;
 use crate::station::response_rules::{ResponseRule, canonical_action};
 
 /// Longest `chargePointVendor` and `chargePointModel` of `BootNotification` (OCPP 1.6 schema).
@@ -247,6 +248,8 @@ pub struct StationConfig {
     /// How the `AuthorizationKey` registry value is turned into the Basic Auth password
     /// (OCPP 1.6J); `hex` also makes the key accept only hexadecimal digits.
     pub authorization_key_encoding: AuthorizationKeyEncoding,
+    /// The OCPP version the station speaks. The WebSocket subprotocol is `ws_subprotocol`.
+    pub protocol: Protocol,
 }
 
 impl Default for StationConfig {
@@ -276,6 +279,7 @@ impl Default for StationConfig {
             additional_root_certificate_check: false,
             security_profile_fallback: true,
             authorization_key_encoding: AuthorizationKeyEncoding::Literal,
+            protocol: Protocol::V16,
         }
     }
 }

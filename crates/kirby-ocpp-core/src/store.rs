@@ -29,6 +29,7 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::ids::{ConnectorId, IdTag};
+use crate::ocpp::Protocol;
 use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
 use crate::station::authorization::AuthorizationCache;
 use crate::station::certificates::CertificateStore;
@@ -38,6 +39,7 @@ use crate::station::offline::{OfflineQueue, SampleQueue};
 use crate::station::reservation::Reservation;
 use crate::station::security::PendingSecurityEvent;
 use crate::station::transaction::TransactionState;
+use crate::station2::{AuthCachePersist, DeviceModelPersist, EvseAvail, QueuePersist, TxPersist};
 
 /// Current on-disk format version.
 /// Version 3 added the install time of charging profiles (`StoredProfile::installed_at`).
@@ -128,6 +130,75 @@ impl Default for PersistedStation {
             security_events: Vec::new(),
             pending_profile_switch: None,
         }
+    }
+}
+
+/// Current on-disk format version of the OCPP 2.0.1 station state and its secrets file.
+pub const STORE2_VERSION: u32 = 1;
+
+/// Everything an OCPP 2.0.1 station keeps across a restart. It has its own file kind and
+/// version, independent of [`PersistedStation`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PersistedStation2 {
+    pub version: u32,
+    pub charge_point_id: String,
+    /// The subprotocol token of the station that wrote the file: `ocpp2.0.1`.
+    pub protocol: String,
+    /// Availability of the whole station.
+    pub station_operative: bool,
+    pub evse_availability: Vec<EvseAvail>,
+    /// Device-model values that differ from their defaults; never secrets.
+    pub device_model: DeviceModelPersist,
+    pub auth_cache: AuthCachePersist,
+    /// Transactions in progress and the ids of the last stopped ones.
+    pub tx: TxPersist,
+    /// Transaction events waiting for delivery.
+    pub queue: QueuePersist,
+    /// How many times the station booted.
+    pub boot_count: u64,
+}
+
+impl PersistedStation2 {
+    /// An empty state for `charge_point_id` at the current version.
+    pub fn new(charge_point_id: impl Into<String>) -> Self {
+        Self {
+            charge_point_id: charge_point_id.into(),
+            ..Self::default()
+        }
+    }
+}
+
+impl Default for PersistedStation2 {
+    fn default() -> Self {
+        Self {
+            version: STORE2_VERSION,
+            charge_point_id: String::new(),
+            protocol: Protocol::V201.token().to_owned(),
+            station_operative: true,
+            evse_availability: Vec::new(),
+            device_model: DeviceModelPersist::default(),
+            auth_cache: AuthCachePersist::default(),
+            tx: TxPersist::default(),
+            queue: QueuePersist::default(),
+            boot_count: 0,
+        }
+    }
+}
+
+/// Secrets of one OCPP 2.0.1 charge point, kept out of the main state file, written atomically
+/// with mode `0600` on Unix.
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StationSecrets2 {
+    pub version: u32,
+    /// `SecurityCtrlr.BasicAuthPassword`.
+    pub basic_auth_password: Option<String>,
+}
+
+impl std::fmt::Debug for StationSecrets2 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StationSecrets2").finish_non_exhaustive()
     }
 }
 

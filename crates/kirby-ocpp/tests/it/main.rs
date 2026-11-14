@@ -7,6 +7,7 @@ mod config_file;
 mod fleet;
 mod hardening;
 mod headless;
+mod protocol2;
 mod record;
 mod state;
 mod suite;

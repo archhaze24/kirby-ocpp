@@ -4,6 +4,15 @@
 mod fleet;
 mod scenario_reply;
 mod scenario_runner;
+mod station2_auth;
+mod station2_device_model;
+mod station2_lifecycle;
+mod station2_persistence;
+mod station2_remote;
+mod station2_status;
+mod station2_support;
+mod station2_transactions;
+mod station2_tx_queue;
 mod station_cancel_call;
 mod station_csms_calls;
 mod station_features;

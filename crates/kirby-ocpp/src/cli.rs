@@ -14,6 +14,7 @@ use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 use kirby_ocpp_core::config::{ReconnectConfig, TlsConfig, defaults};
 use kirby_ocpp_core::fleet::{FleetSpec, MAX_COUNT};
 use kirby_ocpp_core::ids::ConnectorId;
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::station::ResponseRule;
 use kirby_ocpp_core::{AuthorizationKeyEncoding, StationConfig};
 
@@ -1086,6 +1087,7 @@ impl Cli {
             additional_root_certificate_check: self.additional_root_certificate_check,
             security_profile_fallback: self.security_profile_fallback,
             authorization_key_encoding: self.authorization_key_encoding.encoding(),
+            protocol: Protocol::V16,
         })
     }
 }

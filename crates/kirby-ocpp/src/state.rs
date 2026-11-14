@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use kirby_ocpp_core::config::default_state_dir;
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::scenario::SCHEMA_VERSION;
 use kirby_ocpp_core::store::{
     Inspection, PersistedConnector, PersistedStation, STORE_VERSION, StationStore, StoreError,
@@ -29,6 +30,12 @@ pub struct StateOptions {
     pub id_given: bool,
     pub dir: Option<PathBuf>,
     pub json: bool,
+    /// The protocol whose state file the command works on.
+    #[allow(
+        dead_code,
+        reason = "not read until `state` selects the file by protocol"
+    )]
+    pub protocol: Protocol,
 }
 
 pub fn run(action: &StateCmd, options: &StateOptions) -> ExitCode {

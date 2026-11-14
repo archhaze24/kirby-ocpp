@@ -2,19 +2,25 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
+
 /// An OCPP version that travels over OCPP-J (JSON over WebSocket).
 ///
 /// Each version has a WebSocket subprotocol token (`ocpp1.6`) and a bare version string
 /// (`1.6`) that report, scenario and recording files carry. Only [`Protocol::V16`] is
 /// implemented; the others exist so version-dependent code has one type to switch on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Serialized as the token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum Protocol {
     /// OCPP 1.6J.
+    #[serde(rename = "ocpp1.6")]
     V16,
     /// OCPP 2.0.1.
+    #[serde(rename = "ocpp2.0.1")]
     V201,
     /// OCPP 2.1.
+    #[serde(rename = "ocpp2.1")]
     V21,
 }
 
@@ -115,6 +121,16 @@ mod tests {
         ] {
             assert_eq!(Protocol::from_token(text), None, "{text:?}");
         }
+    }
+
+    #[test]
+    fn serde_uses_the_token() {
+        for protocol in Protocol::ALL {
+            let json = serde_json::to_value(protocol).unwrap();
+            assert_eq!(json, serde_json::Value::from(protocol.token()));
+            assert_eq!(serde_json::from_value::<Protocol>(json).unwrap(), protocol);
+        }
+        assert!(serde_json::from_value::<Protocol>(serde_json::json!("1.6")).is_err());
     }
 
     #[test]

@@ -97,6 +97,7 @@ async fn real_main() -> ExitCode {
                 id_given: cli.id_explicit,
                 dir: cli.state_dir.clone(),
                 json: cli.json,
+                protocol: kirby_ocpp_core::ocpp::Protocol::V16,
             };
             return state::run(action, &options);
         }
