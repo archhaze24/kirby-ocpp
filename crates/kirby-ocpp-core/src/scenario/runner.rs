@@ -597,26 +597,46 @@ impl Ctx<'_> {
         }
     }
 
+    /// Awaits `work` while recording station events, so a long wait (sleep, condition, command)
+    /// cannot let the subscription overflow and lose frames a later `expect_call` needs.
+    async fn with_events<T>(&mut self, work: impl Future<Output = T>) -> T {
+        tokio::pin!(work);
+        let mut open = true;
+        loop {
+            tokio::select! {
+                out = &mut work => return out,
+                event = self.events.recv(), if open => match event {
+                    Ok(event) => self.record(event),
+                    Err(broadcast::error::RecvError::Lagged(missed)) => self.note_lost(missed),
+                    // `expect_call` reports a stopped station; other steps do not read events.
+                    Err(broadcast::error::RecvError::Closed) => open = false,
+                },
+            }
+        }
+    }
+
     async fn run_step(&mut self, step: &Step) -> Result<(), String> {
         self.pump();
         self.evidence.params = step_params(step);
         let step = &substitute_step(step, &self.vars)?;
         self.evidence.params = step_params(step);
+        let handle = self.handle;
         let answer = match &step.action {
             Action::Sleep { ms } => {
-                sleep(Duration::from_millis(*ms)).await;
+                self.with_events(sleep(Duration::from_millis(*ms))).await;
                 None
             }
             Action::WaitFor {
                 condition,
                 timeout_ms,
             } => {
-                let mut rx = self.handle.watch_snapshot();
-                match timeout(
-                    Duration::from_millis(*timeout_ms),
-                    rx.wait_for(|s| condition.holds(s)),
-                )
-                .await
+                let mut rx = handle.watch_snapshot();
+                match self
+                    .with_events(timeout(
+                        Duration::from_millis(*timeout_ms),
+                        rx.wait_for(|s| condition.holds(s)),
+                    ))
+                    .await
                 {
                     Ok(Ok(_)) => None,
                     Ok(Err(_)) => return Err("station stopped".to_owned()),
@@ -653,15 +673,14 @@ impl Ctx<'_> {
                     *times,
                     *delay_ms,
                 )?;
-                self.handle
-                    .send(command)
+                self.with_events(handle.send(command))
                     .await
                     .map_err(|error| format!("reply: {error}"))?;
                 None
             }
             action => {
                 let command = to_command(action)?;
-                let result = self.handle.send(command).await;
+                let result = self.with_events(handle.send(command)).await;
                 check(step, action, result, &mut self.evidence)?
             }
         };
@@ -1123,6 +1142,34 @@ mod tests {
             );
             // The report cleared the loss: later expectations work again.
             ctx.record(call_event("Heartbeat", "3"));
+            ctx.expect_call("Heartbeat", None, None, 50).await.unwrap();
+        });
+    }
+
+    #[test]
+    fn a_pending_command_does_not_let_the_subscription_overflow() {
+        with_ctx(async |ctx| {
+            let (tx, rx) = broadcast::channel(2);
+            ctx.events = rx;
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+            let work = async {
+                tx.send(call_event("Heartbeat", "1")).unwrap();
+                // Stands in for a command in flight: the queue is read meanwhile.
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    while !tx.is_empty() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("queue drained");
+                for _ in 0..5 {
+                    tx.send(Event::StateChanged).unwrap();
+                }
+                drop(done_tx);
+                let _ = done_rx.await;
+            };
+            ctx.with_events(work).await;
+            assert_eq!(ctx.frames.len(), 1);
             ctx.expect_call("Heartbeat", None, None, 50).await.unwrap();
         });
     }

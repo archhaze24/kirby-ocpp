@@ -220,7 +220,7 @@ Steps that send a CALL (`start_tx`, `send_raw`, ...) finish when the CSMS has an
 
 Waits for a CALL frame, sent (`direction = "out"`) or received (`"in"`), whose action is `call` and whose payload contains `match` (a subset: objects match by key, arrays element by element with equal length, everything else by equality). Without `direction` either direction matches.
 
-The CALLs it considers are those seen since the previous matched `expect_call` (or the scenario start), so a CALL sent before the step still counts. A match consumes everything up to it; later `expect_call` steps cannot match the same CALL. The runner remembers only CALLs some `expect_call` names, and keeps a payload only if some step uses `match`. At most 10 000 unmatched CALLs (about 16 MiB) are kept.
+The CALLs it considers are those seen since the previous matched `expect_call` (or the scenario start), so a CALL sent before the step still counts. A match consumes everything up to it; later `expect_call` steps cannot match the same CALL. The runner remembers only CALLs some `expect_call` names, and keeps a payload only if some step uses `match`. At most 10 000 unmatched CALLs (about 16 MiB) are kept. The runner records CALLs while any step is running, including `sleep`, `wait_for` and commands in flight, so a long step does not hide frames from a later `expect_call`.
 
 If events were lost because the runner fell behind and the wanted CALL is not among the frames seen before the loss, the step fails with "the scenario runner fell behind"; it reports the loss once, so it does not poison later `expect_call` steps.
 

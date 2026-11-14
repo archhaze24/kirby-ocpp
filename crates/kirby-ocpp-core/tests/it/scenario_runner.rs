@@ -361,6 +361,80 @@ timeout_ms = 60000
 }
 
 #[tokio::test]
+async fn events_are_drained_while_a_step_waits() {
+    use kirby_ocpp_core::scenario::{ScenarioProgress, run_scenario_with_events};
+    use kirby_ocpp_core::station::{Direction, Event, FrameRecord};
+    use tokio::sync::{broadcast, mpsc};
+
+    let rig = booted_rig().await;
+    // Room for 2 events: a frame followed by a burst of noise overflows it unless the runner
+    // reads the frame while the condition step is still waiting.
+    let (tx, rx) = broadcast::channel(2);
+    let s = scenario(
+        r#"
+[[steps]]
+action = "wait_for"
+condition = { kind = "connector_status", connector = 1, status = "Preparing" }
+timeout_ms = 10000
+[[steps]]
+action = "expect_call"
+call = "Heartbeat"
+timeout_ms = 3000
+"#,
+    );
+    let (progress, mut started) = mpsc::unbounded_channel();
+    let cancel = CancelToken::new();
+    let (report, ()) = tokio::join!(
+        run_scenario_with_events(&rig.station, &s, &cancel, Some(&progress), rx),
+        async {
+            tokio::time::timeout(crate::station_support::STEP, async {
+                loop {
+                    match started.recv().await {
+                        Some(ScenarioProgress::StepStarted { index: 0, .. }) => break,
+                        Some(_) => {}
+                        None => panic!("scenario progress channel closed"),
+                    }
+                }
+            })
+            .await
+            .expect("the condition step started");
+            tx.send(Event::Frame(FrameRecord {
+                ts: chrono::Utc::now(),
+                direction: Direction::Out,
+                msg_id: Some("hb".to_owned()),
+                action: Some("Heartbeat".to_owned()),
+                frame: serde_json::json!([2, "hb", "Heartbeat", {}]),
+            }))
+            .unwrap();
+            // The runner empties the queue before the condition can become true.
+            let drained = tokio::time::timeout(crate::station_support::STEP, async {
+                while !tx.is_empty() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await;
+            for _ in 0..5 {
+                tx.send(Event::StateChanged).unwrap();
+            }
+            assert!(
+                drained.is_ok(),
+                "the queue was not drained while waiting for the condition"
+            );
+            tokio::time::timeout(
+                crate::station_support::STEP,
+                rig.station
+                    .plug_in(kirby_ocpp_core::ids::ConnectorId::new(1)),
+            )
+            .await
+            .expect("plug command completed")
+            .unwrap();
+        }
+    );
+    assert!(report.passed, "{report:#?}");
+    rig.shutdown().await;
+}
+
+#[tokio::test]
 async fn set_rule_and_clear_rules_steps_drive_response_rules() {
     let rig = booted_rig().await;
     let s = scenario(

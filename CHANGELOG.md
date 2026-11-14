@@ -9,6 +9,7 @@ tag as the GitHub release notes.
 
 ### Fixed
 
+- Scenario `expect_call` keeps collecting events during other steps, so long waits do not cause false event-loss failures.
 - Both tools redact `AuthorizationKey` in malformed inbound frame logs, including escaped property names. Invalid JSON is omitted unless `--show-secrets` is enabled.
 
 ### Added
