@@ -13,8 +13,12 @@ tag as the GitHub release notes.
 - Scenario `expect_call` keeps collecting events during other steps, so long waits do not cause false event-loss failures.
 - Both tools redact `AuthorizationKey` in malformed inbound frame logs, including escaped property names. Invalid JSON is omitted unless `--show-secrets` is enabled.
 
+- The emulator percent-encodes the station id and the `AuthorizationKey` taken from the configuration registry before they reach the connection URL, so `%` sequences in either reach the wire literally. A password given in the URL is still percent-decoded once.
+- `kirby-csms` accepts, for OCPP 1.6 sessions, a Basic Auth password that holds the decoded bytes of a hexadecimal `AuthorizationKey` as OCPP-J 1.6 section 6.2.2 specifies, besides the literal key. Sessions on other subprotocols accept only the literal key.
+
 ### Added
 
+- `--authorization-key-encoding literal|hex` (`OCPP_AUTHORIZATION_KEY_ENCODING`, `[tls].authorization_key_encoding`) selects how the emulator turns the 1.6 `AuthorizationKey` into the Basic Auth password. `literal` (default) sends the key text; `hex` sends the decoded bytes and accepts only hexadecimal keys.
 - `kirby-csms --subprotocol require:NAME,NAME` accepts a list: the first subprotocol the client offers (in the client's order) that is on the list is selected, and a client that offers none of them is refused with HTTP 400. `kirby-csms-core` has the matching `SubprotocolPolicy::RequireAny`.
 
 ## [0.6.0] - 2026-11-14
