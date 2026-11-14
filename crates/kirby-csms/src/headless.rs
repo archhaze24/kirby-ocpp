@@ -11,7 +11,6 @@ use std::time::Duration;
 use chrono::{SecondsFormat, Utc};
 use kirby_csms_core::{
     CsmsEvent, CsmsHandle, Direction, DisconnectReason, Frame, StationInfo, StationState,
-    TransactionStatus,
 };
 use kirby_ocpp_core::timefmt::TimeMode;
 use kirby_ocpp_tui::stdout_pump::{LinePump, StdoutPump, open_log_file};
@@ -148,15 +147,15 @@ pub fn announce_api(out: &Output, addr: std::net::SocketAddr, tls: bool) {
 /// `connectors` and `active_transactions` are empty and `security_events` is `0` before the
 /// engine has state for the station.
 pub fn station_summary(info: &StationInfo, state: Option<&StationState>) -> Value {
-    let boot = state.and_then(|state| state.boot.as_ref());
+    let boot = state.and_then(StationState::vendor_model);
     json!({
         "id": info.id,
         "connected": info.connected,
         "protocol": info.subprotocol,
         "received_calls": info.received_calls,
         "remote_addr": info.remote_addr.map(|addr| addr.to_string()),
-        "vendor": boot.map(|boot| boot.vendor.clone()),
-        "model": boot.map(|boot| boot.model.clone()),
+        "vendor": boot.map(|(vendor, _)| vendor),
+        "model": boot.map(|(_, model)| model),
         "connectors": state.map_or_else(|| json!({}), connector_statuses),
         "active_transactions": state.map_or_else(|| json!([]), active_transactions),
         "security_events": state.map_or(0, |state| state.security_events_total),
@@ -165,22 +164,21 @@ pub fn station_summary(info: &StationInfo, state: Option<&StationState>) -> Valu
 
 fn connector_statuses(state: &StationState) -> Value {
     let map = state
-        .connectors
-        .iter()
-        .map(|(id, connector)| {
-            let status = serde_json::to_value(connector.status).unwrap_or(Value::Null);
-            (id.to_string(), status)
-        })
+        .connector_statuses()
+        .into_iter()
+        .map(|(id, status)| (id, Value::String(status)))
         .collect::<serde_json::Map<_, _>>();
     Value::Object(map)
 }
 
+/// `[{"id", "connector", "evse"}]`: `id` is a number in OCPP 1.6 and a string in 2.0.1,
+/// `connector` is `null` while a 2.0.1 transaction has not reported one, `evse` is `null`
+/// in 1.6.
 fn active_transactions(state: &StationState) -> Value {
     state
-        .transactions
+        .active_transactions()
         .iter()
-        .filter(|tx| tx.status == TransactionStatus::Active)
-        .map(|tx| json!({"id": tx.id, "connector": tx.connector, "evse": Value::Null}))
+        .map(|tx| serde_json::to_value(tx).unwrap_or(Value::Null))
         .collect()
 }
 
@@ -389,16 +387,21 @@ impl Renderer {
             .as_object()
             .map(|map| {
                 map.iter()
-                    .map(|(id, status)| format!("{id}={}", status.as_str().unwrap_or("?")))
+                    .map(|(id, status)| {
+                        format!(
+                            "{}={}",
+                            sanitize(id),
+                            sanitize(status.as_str().unwrap_or("?"))
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join(" ")
             })
             .unwrap_or_default();
         let active = state
-            .transactions
+            .active_transactions()
             .iter()
-            .filter(|tx| tx.status == TransactionStatus::Active)
-            .map(|tx| tx.id.to_string())
+            .map(|tx| sanitize(&tx.id.to_string()))
             .collect::<Vec<_>>()
             .join(" ");
         let human = format!(

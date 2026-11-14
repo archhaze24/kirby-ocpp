@@ -49,6 +49,7 @@ const TRANSACTION_COLUMNS: &[&str] = &[
     "energy_wh",
     "power_w",
     "last_meter_at",
+    "evse",
 ];
 
 /// Transactions in one answer when `limit` is not given, and the most `limit` may ask for.
@@ -413,8 +414,6 @@ pub(super) async fn transactions(State(state): State<ApiState>, uri: Uri) -> Res
                 Ok(Value::Object(object)) => object,
                 _ => Map::new(),
             };
-            // `evse` joins the documented shape together with the 2.0.1 API surface.
-            object.remove("evse");
             object.insert("station".to_owned(), station.into());
             object.insert("id".to_owned(), record.id.to_string().into());
             Value::Object(object)

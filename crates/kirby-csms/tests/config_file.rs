@@ -389,6 +389,32 @@ fn a_subprotocol_list_round_trips_through_print_config() {
 }
 
 #[test]
+fn the_default_subprotocol_policy_serves_both_protocols() {
+    let printed = print(&[], &[]);
+    assert!(
+        printed.contains("subprotocol = \"require:ocpp1.6,ocpp2.0.1\""),
+        "{printed}"
+    );
+}
+
+#[test]
+fn both_protocols_are_accepted_at_top_level_and_in_blocks() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "schema = 1\nprotocol = \"ocpp2.0.1\"\n\
+[[station]]\nid = \"A\"\nprotocol = \"ocpp2.0.1\"\n\
+[[rule]]\naction = \"Heartbeat\"\nbehavior = \"respond\"\npayload = \"{}\"\n\
+station = \"CP-1\"\nprotocol = \"ocpp2.0.1\"\n";
+    let file = write(dir.path(), "v201.toml", text);
+    let output = check(&["--config", &file], &[]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let printed = print(&["--config", &file], &[]);
+    assert!(
+        printed.contains("station = \"CP-1\"\nprotocol = \"ocpp2.0.1\""),
+        "{printed}"
+    );
+}
+
+#[test]
 fn print_config_json_is_the_default_format() {
     let dir = tempfile::tempdir().unwrap();
     let file = write(
@@ -490,7 +516,10 @@ fn file_errors_exit_2_with_the_file_and_the_key_path() {
             &["unknown key `history_cap`", "station"],
         ),
         ("schema = 2\n", &["key `schema`", "not supported"]),
-        ("protocol = \"ocpp2.0.1\"\n", &["key `protocol`", "ocpp1.6"]),
+        (
+            "protocol = \"ocpp9.9\"\n",
+            &["key `protocol`", "expected one of ocpp1.6, ocpp2.0.1"],
+        ),
         (
             "[behavior]\nhistory_cap = \"x\"\n",
             &["key `behavior.history_cap`", "expected an integer"],
@@ -598,8 +627,8 @@ fn block_errors_name_the_element() {
             &["`station[0]`", "patterns are not supported"],
         ),
         (
-            "[[station]]\nid = \"A\"\nprotocol = \"ocpp2.0.1\"\n",
-            &["station[0].protocol", "ocpp1.6"],
+            "[[station]]\nid = \"A\"\nprotocol = \"ocpp9.9\"\n",
+            &["station[0].protocol", "expected one of ocpp1.6, ocpp2.0.1"],
         ),
         (
             "[[station]]\nid = \"A\"\nrole = \"x\"\n",
@@ -650,8 +679,11 @@ fn block_errors_name_the_element() {
             &["`rule[0]`", "`station` must not be empty"],
         ),
         (
-            "[[rule]]\naction = \"Heartbeat\"\nbehavior = \"respond\"\npayload = \"{}\"\nstation = \"CP-1\"\nprotocol = \"ocpp2.0.1\"\n",
-            &["key `rule[0].protocol`"],
+            "[[rule]]\naction = \"Heartbeat\"\nbehavior = \"respond\"\npayload = \"{}\"\nstation = \"CP-1\"\nprotocol = \"ocpp9.9\"\n",
+            &[
+                "key `rule[0].protocol`",
+                "expected one of ocpp1.6, ocpp2.0.1",
+            ],
         ),
         (
             "[[rule]]\naction = \"Reset\"\nbehavior = \"respond\"\npayload = \"{}\"\nstation = \"CP-1\"\n",

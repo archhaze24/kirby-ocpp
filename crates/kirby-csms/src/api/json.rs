@@ -18,13 +18,17 @@ use super::limits::{BODY_TIMEOUT, MAX_BODY_BYTES};
 
 /// Turns the integer `id` of every transaction object into a string: transaction ids are
 /// integers in OCPP 1.6 and strings in 2.x, and the API serves strings for both. Applies to
-/// a station object (`active_transactions`, `state.transactions`) and a `state` event.
+/// a station object (`active_transactions`, `state.transactions`, `state.v2.transactions`) and
+/// a `state` event.
 pub(super) fn stringify_transaction_ids(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;
     };
     if let Some(Value::Object(state)) = object.get_mut("state") {
         state.get_mut("transactions").map(stringify_list);
+        if let Some(Value::Object(v2)) = state.get_mut("v2") {
+            v2.get_mut("transactions").map(stringify_list);
+        }
     }
     object.get_mut("active_transactions").map(stringify_list);
 }

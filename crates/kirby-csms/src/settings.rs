@@ -28,7 +28,7 @@ use crate::commands::{self, FaultKind, MAX_FAULT_ACTION_LEN, MAX_FAULT_TIMES};
 /// Settings of the configuration file of `kirby-csms`: one table per `--help` heading, plus
 /// the `[[station]]` and `[[rule]]` blocks.
 pub const SCHEMA: Schema = Schema {
-    protocol: "ocpp1.6",
+    protocols: &["ocpp1.6", "ocpp2.0.1"],
     sections: &[
         Section {
             path: &["listener"],
@@ -165,14 +165,13 @@ fn check_command(block: &Block) -> Result<(), String> {
 }
 
 fn check_protocol(value: &str) -> Result<(), String> {
-    if value == SCHEMA.protocol {
-        Ok(())
-    } else {
-        Err(format!(
-            "`{value}` is not supported, only `{}`",
-            SCHEMA.protocol
-        ))
-    }
+    commands::check_protocol(value).map_err(|error| {
+        let known = error.strip_prefix("unsupported protocol; supported: ");
+        format!(
+            "`{value}` is not supported, expected one of {}",
+            known.unwrap_or_default()
+        )
+    })
 }
 
 fn check_station(block: &Block) -> Result<(), String> {
@@ -705,5 +704,16 @@ impl Cli {
             &self.effective_values(),
             &self.blocks.render_values(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_protocols_match_the_registry() {
+        let registry: Vec<&str> = kirby_csms_core::registry::protocols().collect();
+        assert_eq!(SCHEMA.protocols, registry.as_slice());
     }
 }

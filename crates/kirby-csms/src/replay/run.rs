@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use kirby_csms_core::{ConnectedSession, CsmsHandle, Frame, Observation, Observer};
+use kirby_csms_core::{ConnectedSession, CsmsHandle, Frame, Observation, Observer, Protocol};
 use tokio::time::{Instant, sleep_until, timeout_at};
 
 use super::plan::{MAX_LIVE_STARTS, Plan, Step};
@@ -67,6 +67,13 @@ impl Tracker<'_> {
                 let station = token.station().to_owned();
                 if !self.plan.stations.contains_key(&station) {
                     return Ok(());
+                }
+                if let Some(protocol @ (Protocol::V201 | Protocol::V21)) = token.protocol_kind() {
+                    return Err(format!(
+                        "station {} negotiated {}; only ocpp1.6 stations can be replayed",
+                        sanitize(&station),
+                        protocol.token()
+                    ));
                 }
                 if self.live.get(&station).is_some_and(|live| live.used) && !self.finished(&station)
                 {

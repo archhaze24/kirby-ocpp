@@ -993,6 +993,26 @@ async fn protocol_scoped_global_rules_are_listed_set_and_removed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn ocpp_2_0_1_scoped_global_rules_are_listed_set_and_removed() {
+    let csms = Csms::start(&[]);
+    let addr = &csms.api_addr;
+    let path = "/v1/rules/Heartbeat?protocol=ocpp2.0.1";
+    let body = json!({"currentTime": "2031-02-03T04:05:06Z"}).to_string();
+    let put = http(addr, "PUT", path, &[], Some(&body)).await;
+    assert_eq!(put.0, 200, "{}", put.1);
+    assert_eq!(
+        csms.get("/v1/rules").await.1,
+        json!({"rules": [], "protocol_rules": [{"action": "Heartbeat", "protocol": "ocpp2.0.1"}]})
+    );
+    let (status, body) = http(addr, "DELETE", path, &[], None).await;
+    assert_eq!((status, body["cleared"].as_bool()), (200, Some(true)));
+    assert_eq!(
+        csms.get("/v1/rules").await.1,
+        json!({"rules": [], "protocol_rules": []})
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn faults_round_trip() {
     use kirby_ocpp_core::station::Command;
     let csms = Csms::start(&[]);
@@ -2752,11 +2772,13 @@ async fn the_transaction_list_filters_and_exports() {
     assert_eq!(tx["status"], "active");
     assert_eq!(tx["connector"], 1);
     assert_eq!(tx["id_tag"], "TAG");
+    assert_eq!(tx["evse"], Value::Null);
     assert_eq!(
         keys(tx),
         [
             "connector",
             "energy_wh",
+            "evse",
             "id",
             "id_tag",
             "id_tag_status",
@@ -2858,7 +2880,7 @@ async fn a_stopped_transaction_changes_state_and_exports_as_csv() {
     assert_eq!(
         rows[0],
         "station,id,connector,id_tag,id_tag_status,meter_start,started_at,status,meter_stop,\
-         stopped_at,stop_reason,energy_wh,power_w,last_meter_at"
+         stopped_at,stop_reason,energy_wh,power_w,last_meter_at,evse"
     );
     assert!(rows[1].starts_with("CP-1,"), "{}", rows[1]);
     assert!(rows[1].contains(&started), "{}", rows[1]);

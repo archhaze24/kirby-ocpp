@@ -112,11 +112,16 @@ pub struct BlockSpec {
     pub check: Option<BlockCheck>,
 }
 
+/// The protocol rendered at the top of a file: the first accepted one.
+fn default_protocol(schema: &Schema) -> &'static str {
+    schema.protocols.first().copied().unwrap_or_default()
+}
+
 /// All sections of one binary's configuration file.
 #[derive(Debug, Clone, Copy)]
 pub struct Schema {
-    /// The accepted `protocol` value.
-    pub protocol: &'static str,
+    /// The accepted top-level `protocol` values; the first is the rendered default.
+    pub protocols: &'static [&'static str],
     /// Sections in rendering order.
     pub sections: &'static [Section],
     /// Arrays of tables in rendering order, after the sections.
@@ -335,11 +340,11 @@ pub fn parse_str(
                 None => return Err(fail(type_error("schema", "an integer", value))),
             },
             "protocol" => match value.as_str() {
-                Some(name) if name == schema.protocol => {}
+                Some(name) if schema.protocols.contains(&name) => {}
                 Some(other) => {
                     return Err(fail(format!(
-                        "key `protocol`: `{other}` is not supported, only `{}`",
-                        schema.protocol
+                        "key `protocol`: `{other}` is not supported, expected one of {}",
+                        schema.protocols.join(", ")
                     )));
                 }
                 None => return Err(fail(type_error("protocol", "a string", value))),
@@ -654,7 +659,7 @@ pub fn render_with_blocks(
         out.push('\n');
     }
     let _ = writeln!(out, "schema = {SCHEMA_VERSION}");
-    let _ = writeln!(out, "protocol = {}", toml_string(schema.protocol));
+    let _ = writeln!(out, "protocol = {}", toml_string(default_protocol(schema)));
     for section in schema.sections {
         let lines: Vec<String> = section
             .keys
@@ -703,7 +708,7 @@ pub fn render_json(
     };
     let mut root = serde_json::Map::new();
     root.insert("schema".to_owned(), SCHEMA_VERSION.into());
-    root.insert("protocol".to_owned(), schema.protocol.into());
+    root.insert("protocol".to_owned(), default_protocol(schema).into());
     for section in schema.sections {
         let mut table = serde_json::Map::new();
         for spec in section.keys {
@@ -848,7 +853,7 @@ mod tests {
     use super::*;
 
     const SCHEMA: Schema = Schema {
-        protocol: "ocpp1.6",
+        protocols: &["ocpp1.6"],
         sections: &[
             Section {
                 path: &["connection"],
@@ -967,7 +972,10 @@ mod tests {
     fn schema_and_protocol_are_checked() {
         assert!(err("schema = 2\n").contains("version 2 is not supported"));
         assert!(err("schema = \"1\"\n").contains("key `schema`"));
-        assert!(err("protocol = \"ocpp2.0.1\"\n").contains("`ocpp2.0.1` is not supported"));
+        assert!(
+            err("protocol = \"ocpp2.0.1\"\n")
+                .contains("`ocpp2.0.1` is not supported, expected one of ocpp1.6")
+        );
         assert!(err("protocol = 16\n").contains("key `protocol`: expected a string"));
         assert!(parse("schema = 1\nprotocol = \"ocpp1.6\"\n", None).is_ok());
     }

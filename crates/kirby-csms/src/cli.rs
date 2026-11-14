@@ -143,10 +143,11 @@ pub struct Cli {
 
     /// WebSocket subprotocol policy: require:NAME (refuse clients that do not offer it), require:A,B
     /// (select the first offered name that is listed, refuse if none), select:NAME (always select
-    /// it), omit (select nothing), reject (refuse every upgrade)
+    /// it), omit (select nothing), reject (refuse every upgrade). The default serves OCPP 1.6 and
+    /// 2.0.1; a client that offers both gets the one it lists first
     #[arg(
         long, env = "KIRBY_CSMS_SUBPROTOCOL", value_name = "POLICY",
-        default_value = "require:ocpp1.6", value_parser = parse_policy
+        default_value = "require:ocpp1.6,ocpp2.0.1", value_parser = parse_policy
     )]
     pub subprotocol: SubprotocolPolicy,
 
@@ -1007,6 +1008,19 @@ mod tests {
             .is_ok()
         );
         assert!(check(&["--tls-cert", "c", "--tls-key", "k", "--tls-client-ca", "ca"]).is_err());
+    }
+
+    #[test]
+    fn default_policy_serves_both_protocols() {
+        let cli = Cli::parse_from(["kirby-csms"]);
+        assert_eq!(
+            cli.subprotocol,
+            SubprotocolPolicy::RequireAny(vec!["ocpp1.6".to_owned(), "ocpp2.0.1".to_owned()])
+        );
+        assert_eq!(
+            parse_policy("require:ocpp1.6,ocpp2.0.1"),
+            Ok(cli.subprotocol)
+        );
     }
 
     #[test]

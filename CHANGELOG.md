@@ -7,6 +7,17 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- `kirby-csms` serves OCPP 2.0.1 stations next to 1.6 stations on the same listener. A 2.0.1 session gets default replies for the 25 actions a station sends (magic id tokens as in 1.6), validates payloads against the official 2.0.1 schemas, and tracks boot data, EVSE and connector status, and transactions keyed by station and transaction id (`TransactionEvent` sequence numbers, duplicates, late events and meter readings; `state.v2` in the API). CSMS-originated 2.0.1 calls use the existing stdin, script and HTTP paths with any action name. Station ids on 2.0.1 sessions are limited to 48 characters from `identifierString` without a colon. The terminal UI shows boot data only for 2.0.1 stations; connector and transaction views follow.
+- `kirby-ocpp-core` embeds the 128 official OCPP 2.0.1 JSON schemas (`SchemaRegistry::for_protocol(Protocol::V201)`, draft-06) and provides the 2.0.1 payload layer in `ocpp::v2`: 20 typed actions, a catalog of all 64 actions with their direction, and `RawAction`. Device-model secrets (`BasicAuthPassword`, `VpnPassword`, `VpnKey`, `ApnPassword`, `WebPaymentsCtrlr.SharedSecret`) are redacted in recordings, logs, reports and schema diagnostics.
+
+### Changed
+
+- The default `--subprotocol` of `kirby-csms` is `require:ocpp1.6,ocpp2.0.1`. A station that offers `ocpp2.0.1, ocpp1.6` now gets 2.0.1; use `--subprotocol require:ocpp1.6` to keep serving 1.6 only.
+- Transaction rows carry an `evse` key (`null` for 1.6) and `connector` may be `null` for a 2.0.1 transaction that has not reported one. Block-level `protocol` keys in configuration files accept `ocpp2.0.1`.
+- Library API: `CsmsHandle::transactions` returns `TransactionRow` values, `SchemaViolation` has a `protocol` field, and `SchemaRegistry::for_protocol(Protocol::V201)` is available.
+
 ### Fixed
 
 - CSMS startup installs configured rules and event subscriptions before accepting stations. Replaced sessions keep their own protocol when matching rules and faults.
