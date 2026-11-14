@@ -56,6 +56,18 @@ impl Station2Actor {
     ) {
     }
 
+    /// An `idTokenInfo` arrived in a `TransactionEventResponse` for the transaction
+    /// `transaction_id` on `evse`: updates the cache and applies `StopTxOnInvalidId`.
+    pub(super) fn on_id_token_info(&mut self, _evse: u32, _transaction_id: &str, _info: &Value) {}
+
+    /// The authorization cache, for the state file.
+    pub(super) fn auth_cache_persist(&self) -> AuthCachePersist {
+        AuthCachePersist::default()
+    }
+
+    /// Takes back the persisted authorization cache at start.
+    pub(super) fn auth_cache_restore(&mut self, _cache: AuthCachePersist) {}
+
     /// `Command2::PresentToken`.
     pub(super) fn cmd_present_token(
         &mut self,

@@ -328,22 +328,20 @@ impl Station2Actor {
 /// Adapters between the state file and the parts that own the data.
 ///
 /// Each part owns one slice of the persisted state and must give it out and take it back; the
-/// bodies below are placeholders until the owner fills them in its own file (S2 device model,
-/// S4 transactions and queue, S5 authorization cache; S3 already provides
-/// `availability_snapshot` and `restore_availability`). Restoring transactions
-/// includes ending each restored active transaction with `PowerLoss` / `AbnormalCondition` as
-/// the first queued event after an accepted boot.
-#[allow(
-    clippy::unused_self,
-    clippy::needless_pass_by_value,
-    reason = "placeholders until the owning parts implement them"
-)]
+/// bodies forward to the owner's file (`device_model.rs`, `transactions.rs`, `tx_queue.rs`,
+/// `authorization.rs`; `evse.rs` provides `availability_snapshot` and `restore_availability`).
+/// Restoring transactions includes ending each restored active transaction with `PowerLoss` /
+/// `AbnormalCondition` as the first queued event after an accepted boot.
 impl Station2Actor {
     /// S2: device-model values that differ from their defaults, never secrets.
     fn persist_device_model(&self) -> DeviceModelPersist {
         self.dm.persist()
     }
 
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "every restore adapter takes its part by value"
+    )]
     fn restore_device_model(&mut self, values: DeviceModelPersist) {
         self.dm.restore(&values);
     }
@@ -355,24 +353,30 @@ impl Station2Actor {
 
     /// S5: the authorization cache.
     fn persist_auth_cache(&self) -> AuthCachePersist {
-        AuthCachePersist::default()
+        self.auth_cache_persist()
     }
 
-    fn restore_auth_cache(&mut self, _cache: AuthCachePersist) {}
+    fn restore_auth_cache(&mut self, cache: AuthCachePersist) {
+        self.auth_cache_restore(cache);
+    }
 
     /// S4: active transactions and the ids of the last stopped ones.
     fn persist_transactions(&self) -> TxPersist {
-        TxPersist::default()
+        self.tx_persist()
     }
 
-    fn restore_transactions(&mut self, _tx: TxPersist) {}
+    fn restore_transactions(&mut self, tx: TxPersist) {
+        self.tx_restore(tx);
+    }
 
     /// S4: the queued transaction events.
     fn persist_queue(&self) -> QueuePersist {
-        QueuePersist::default()
+        self.queue_persist()
     }
 
-    fn restore_queue(&mut self, _queue: QueuePersist) {}
+    fn restore_queue(&mut self, queue: QueuePersist) {
+        self.queue_restore(queue);
+    }
 }
 
 #[cfg(test)]

@@ -37,4 +37,7 @@ impl Station2Actor {
 
     /// The reset delay elapsed.
     pub(super) fn on_reset_timer(&mut self) {}
+
+    /// A transaction ended on `evse`; an `OnIdle` reset may proceed now.
+    pub(super) fn reset_on_transaction_ended(&mut self, _evse: u32) {}
 }

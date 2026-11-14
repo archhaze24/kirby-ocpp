@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::actor::Station2Actor;
 use super::commands::not_implemented;
-use super::types::{IdTokenRef, Reply2, TxId2};
+use super::types::{IdTokenRef, Origin2, Reply2, TxId2};
 use crate::error::StationError;
 use crate::ocpp::v2::messages::{TransactionEventKind, TriggerReason};
 use crate::ocpp::v2::types::{ChargingState, MeterValue, StopReason};
@@ -168,4 +168,64 @@ impl Station2Actor {
 
     /// Adds the energy of the time that passed to every running meter.
     pub(super) fn settle_tx_meters(&mut self) {}
+
+    /// Authorization decided `token` is valid on `evse`. Starts the transaction when this
+    /// reaches a start point, adds the token to the running one (an event with `idToken`), or
+    /// keeps the authorization until the EV connects and arms `EvConnectTimeout`. The
+    /// authorization module never evaluates start or stop points itself.
+    pub(super) fn on_authorized(
+        &mut self,
+        _evse: u32,
+        _token: IdTokenRef,
+        _remote_start_id: Option<i32>,
+        _trigger: TriggerReason,
+    ) -> Result<(), StationError> {
+        Err(StationError::NotImplemented {
+            command: "on_authorized",
+        })
+    }
+
+    /// Authorization on `evse` ended (the token was presented again, or the CSMS reported it
+    /// invalid). Ends the transaction when a stop point ends, otherwise sends an event with the
+    /// token once more; drops a pending authorization that has no transaction yet.
+    pub(super) fn on_deauthorized(
+        &mut self,
+        _evse: u32,
+        _trigger: TriggerReason,
+        _reason: StopReason,
+    ) {
+    }
+
+    /// `RequestStopTransaction` accepted for the transaction on `evse`: `Ended` when a stop
+    /// point ends, otherwise `Updated` with `RemoteStop` and energy delivery stops.
+    pub(super) fn remote_stop(&mut self, _evse: u32) {}
+
+    /// Changes the charging state of the transaction on `evse` from inside the station and
+    /// sends the event.
+    pub(super) fn set_charging_state_internal(
+        &mut self,
+        _evse: u32,
+        _state: ChargingState,
+        _trigger: TriggerReason,
+    ) {
+    }
+
+    /// The token that authorizes `evse` now: of the running transaction, or of an
+    /// authorization waiting for the EV.
+    pub(super) fn authorized_token(&self, _evse: u32) -> Option<&IdTokenRef> {
+        None
+    }
+
+    /// Sends `MeterValues` outside a transaction for `evse` (every EVSE for `None`); never
+    /// queued offline. Used by `Command2::AdvanceMeter` without a transaction and by
+    /// `TriggerMessage(MeterValues)`.
+    pub(super) fn send_meter_values(&mut self, _evse: Option<u32>, _origin: Origin2) {}
+
+    /// Active transactions and the ids of the last stopped ones, for the state file.
+    pub(super) fn tx_persist(&self) -> TxPersist {
+        TxPersist::default()
+    }
+
+    /// Takes back the persisted transactions at start.
+    pub(super) fn tx_restore(&mut self, _tx: TxPersist) {}
 }

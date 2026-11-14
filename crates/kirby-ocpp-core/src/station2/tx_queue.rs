@@ -53,4 +53,12 @@ impl Station2Actor {
 
     /// The retry delay of the event at the head of the queue elapsed.
     pub(super) fn on_tx_retry_timer(&mut self) {}
+
+    /// The queued events, for the state file.
+    pub(super) fn queue_persist(&self) -> QueuePersist {
+        QueuePersist::default()
+    }
+
+    /// Takes back the persisted queue at start.
+    pub(super) fn queue_restore(&mut self, _queue: QueuePersist) {}
 }
