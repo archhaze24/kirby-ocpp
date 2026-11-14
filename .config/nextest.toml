@@ -10,6 +10,16 @@ retries = 0
 slow-timeout = { period = "20s", terminate-after = 3 }
 
 [[profile.ci.overrides]]
+# Tests that take several seconds start first, so they do not stretch the end of the run.
+filter = """
+test(head_timer_only_stops_for_a_real_request) | test(slow_clients_and_connection_flood_are_cut)
+| test(the_family_passes_against_the_scripted_csms) | test(queue_limit_holds_while_the_session_is_stuck_in_a_write)
+| test(/event_tail/) | test(headless_2_0_1_boots_sends_heartbeats_and_stops_on_sigterm)
+| test(a_silent_csms_cannot_make_samples_pile_up) | test(a_file_larger_than_a_recorder_writes_is_refused_before_it_fills_memory)
+"""
+priority = 50
+
+[[profile.ci.overrides]]
 # These two tests wait for the HTTP API head timeout (10 s) on purpose.
 filter = "binary_id(kirby-csms::api) & (test(slow_clients_and_connection_flood_are_cut) | test(head_timer_only_stops_for_a_real_request))"
 slow-timeout = { period = "45s", terminate-after = 2 }
