@@ -5,11 +5,15 @@
 
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+#[cfg(unix)]
 use std::time::Duration;
 
-use kirby_ocpp_testkit::{CsmsOptions, MockCsms, SubprotocolPolicy};
+#[cfg(unix)]
+use kirby_ocpp_testkit::SubprotocolPolicy;
+use kirby_ocpp_testkit::{CsmsOptions, MockCsms};
 use serde_json::{Value, json};
 
+#[cfg(unix)]
 const STEP: Duration = Duration::from_secs(10);
 const URL: &str = "ws://127.0.0.1:9/ocpp";
 
@@ -77,6 +81,7 @@ fn write(dir: &Path, name: &str, text: &str) -> String {
     path.to_str().unwrap().to_owned()
 }
 
+#[cfg(unix)]
 async fn v201_csms() -> MockCsms {
     MockCsms::start(CsmsOptions {
         subprotocol: SubprotocolPolicy::Require("ocpp2.0.1".to_owned()),
@@ -630,6 +635,7 @@ fn state_takes_the_protocol_without_complaint_about_1_6_flags() {
 
 // The checks below connect a real 2.0.1 station (needs a 2.0.1 station).
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn headless_2_0_1_boots_sends_heartbeats_and_stops_on_sigterm() {
     let csms = v201_csms().await;
