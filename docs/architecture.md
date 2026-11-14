@@ -1,6 +1,6 @@
 # Architecture
 
-This page is self-contained: read it first, then open only the topic page or source directory you need. It describes the code as of 0.5 (OCPP 1.6J plus the Security Whitepaper).
+This page is self-contained: read it first, then open only the topic page or source directory you need. It describes the code of the 0.7 development line (OCPP 1.6J plus the Security Whitepaper; the engine already negotiates and tracks the protocol of each session).
 
 Contents: [Crate map](#crate-map) · [Layer contracts](#layer-contracts) · [Emulator internals](#emulator-internals) · [CSMS internals](#csms-internals) · [Data flow](#data-flow) · [Invariants](#invariants) · [Where each concern lives](#where-each-concern-lives) · [Tests](#tests) · [Related pages](#related-pages)
 
@@ -43,7 +43,7 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 ### Binaries
 
 * `kirby-ocpp/src`: `cli.rs` (flags and env, CLI > env > default, strict booleans), `main.rs` (config, spawn, choose UI or headless, the `run` scenario runner, reports, exit codes), `headless.rs` (event printer, stdout and log-file helpers), `fleet.rs` (`--count`, fleet runs), `suite.rs` (`kirby-ocpp suite`: sources, fresh station per scenario, summary report), `record.rs` (`--record`: opens the recording around a run, reports an incomplete one) and `replay.rs` (`replay` and `scenarios from-recording`).
-* `kirby-csms/src`: `cli.rs`, `main.rs`, `headless.rs` (event printer, stdout/log-file helper threads), `stdin_cmd.rs` (JSON-lines commands), `commands.rs` (call execution, result objects and the in-flight limit shared by stdin and the API), `api/` (HTTP control API on `axum`: `mod.rs` router and server start, `server.rs` connection layer, `limits.rs`, `auth.rs`, `meta.rs` route table, `error.rs`/`json.rs` helpers, `routes_stations.rs`, `routes_calls.rs`, `routes_rules.rs` for rules and faults, `sse.rs`), `script.rs` (TOML scripts, report, JUnit), `replay/` (`--replay`: `plan.rs` validates a recording and ties stops to starts, `run.rs` sends the CALLs and follows the live stations).
+* `kirby-csms/src`: `cli.rs`, `settings.rs` (configuration file schema and merge into the command line), `main.rs`, `headless.rs` (event printer, stdout/log-file helper threads), `record.rs` (`--record`: opens the recording around a run, checks the path against the other outputs), `automation.rs` (configured calls: scheduled commands and connection hooks), `ctl/` (`kirby-csms ctl`, the command-line client of the HTTP API), `stdin_cmd.rs` (JSON-lines commands), `commands.rs` (call execution, result objects and the in-flight limit shared by stdin and the API), `api/` (HTTP control API on `axum`: `mod.rs` router and server start, `server.rs` connection layer, `limits.rs`, `auth.rs`, `meta.rs` route table, `error.rs`/`json.rs` helpers, `routes_stations.rs`, `routes_calls.rs`, `routes_rules.rs` for rules and faults, `routes_history.rs`, `event_log.rs`, `export.rs`, `metrics.rs`, `sse.rs`), `script.rs` (TOML scripts, report, JUnit), `replay/` (`--replay`: `plan.rs` validates a recording and ties stops to starts, `run.rs` sends the CALLs and follows the live stations).
 
 ## Layer contracts
 
@@ -139,7 +139,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 * **No `unsafe`; no `unwrap`/`expect`/indexing on external data** (clippy pedantic is on).
 * **Bounded memory** everywhere external input grows: log buffers, frame history, scenario CALL backlog (10 000 / ~16 MiB), stdin lines (1 MiB), stdout/log-file helper threads drop lines instead of blocking. The one known exception: CSMS station records are never evicted (`forget()` only), bounded per station and by `max_stations` (see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md)).
 * **Spec wins over TS parity.** Intentional deviations are listed in [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md).
-* Keep public shapes (docs, scenarios, the HTTP API) free of 1.6J-only assumptions where it is cheap. OCPP 2.0.1 and 2.1 are not supported in 0.5.
+* Keep public shapes (docs, scenarios, the HTTP API) free of 1.6J-only assumptions where it is cheap. OCPP 2.0.1 and 2.1 are not supported yet: the protocol enum, per-protocol registries and error spellings exist, the message sets do not.
 
 ## Where each concern lives
 
@@ -169,10 +169,10 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 ## Tests
 
 * Pure logic: unit tests next to the code. Time goes through `Clock`; timers use `tokio::time`. Never `tokio::time::pause` together with real sockets; socket tests use short real timeouts.
-* Integration tests: **one binary per crate**, `crates/<crate>/tests/it/main.rs` (target `it`) with one `mod <name>;` per file `tests/it/<name>.rs` plus shared helper modules (`station_support/`, `ws_support/`, `common/`) used as `crate::station_support::...`. To add a test file: create it and add `mod <name>;` to `main.rs`. `kirby-csms` has a single `tests/cli.rs`.
+* Integration tests: **one binary per crate**, `crates/<crate>/tests/it/main.rs` (target `it`) with one `mod <name>;` per file `tests/it/<name>.rs` plus shared helper modules (`station_support/`, `ws_support/`, `common/`) used as `crate::station_support::...`. To add a test file: create it and add `mod <name>;` to `main.rs`. `kirby-csms` is the exception: it keeps one test binary per file in `crates/kirby-csms/tests/` (`cli.rs`, `api.rs`, `api_tls.rs`, `config_file.rs`, `conformance.rs`, `ctl.rs`).
 * Each scenario owns its station, mock CSMS (`kirby-ocpp-testkit`) and `tempfile` dir. No fixed sleeps: wait on snapshots, events or `wait_for_call`. Tests share one process under `cargo test`: no globals, cwd or env changes (env vars cannot be set in edition 2024; CLI tests spawn the binary with `CARGO_BIN_EXE_*`).
 * TUI: `ratatui::backend::TestBackend` snapshot tests and pure `update` tests.
-* Done criterion: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`. CI runs it on ubuntu, macos and windows with `RUSTFLAGS=-D warnings`.
+* Gate: `cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo nextest run --workspace --profile ci --no-fail-fast && cargo test --workspace --doc`. CI runs it on ubuntu, macos and windows with `RUSTFLAGS=-D warnings`, plus plain `cargo test --workspace --tests` once on Linux. Details: [testing.md](testing.md).
 
 ## Related pages
 
