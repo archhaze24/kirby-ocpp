@@ -1,0 +1,294 @@
+name = "conformance-v201-change-availability"
+ocpp_version = "2.0.1"
+description = "ChangeAvailability for an EVSE, the whole station and a connector, to the status it already has and to the other one, and with a running transaction (Scheduled, applied when the transaction ends)"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends a ChangeAvailability command, checks the answer and waits for the
+# scenario's ready message before it sends the next one, so every StatusNotification the
+# scenario expects belongs to the command before it.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:change-availability" }
+
+# EVSE 1 to Inoperative and, again, to Inoperative
+
+[[steps]]
+name = "ChangeAvailability (EVSE 1, Inoperative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Inoperative", evse = { id = 1 } }
+
+[[steps]]
+name = "the connector of EVSE 1 is reported Unavailable"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Unavailable" }
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-1"
+
+[[steps]]
+name = "ChangeAvailability (EVSE 1, Inoperative) arrives again"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Inoperative", evse = { id = 1 } }
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-2"
+
+# EVSE 1 to Operative and, again, to Operative
+
+[[steps]]
+name = "ChangeAvailability (EVSE 1, Operative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Operative", evse = { id = 1 } }
+
+[[steps]]
+name = "the connector of EVSE 1 is reported Available"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-3"
+
+[[steps]]
+name = "ChangeAvailability (EVSE 1, Operative) arrives again"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Operative", evse = { id = 1 } }
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-4"
+
+# The whole station
+
+[[steps]]
+name = "ChangeAvailability (station, Inoperative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Inoperative" }
+
+[[steps]]
+name = "the connector is reported Unavailable"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Unavailable" }
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-5"
+
+[[steps]]
+name = "ChangeAvailability (station, Operative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Operative" }
+
+[[steps]]
+name = "the connector is reported Available"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-6"
+
+# One connector
+
+[[steps]]
+name = "ChangeAvailability (connector, Inoperative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Inoperative", evse = { id = 1, connectorId = 1 } }
+
+[[steps]]
+name = "the connector is reported Unavailable"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Unavailable" }
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-7"
+
+[[steps]]
+name = "ChangeAvailability (connector, Operative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Operative", evse = { id = 1, connectorId = 1 } }
+
+[[steps]]
+name = "the connector is reported Available"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+# A running transaction: the EVSE goes Unavailable when the transaction ends
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "the transaction starts"
+action = "start_tx"
+evse = 1
+id_token = "CONF-TAG"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-evse-tx"
+
+[[steps]]
+name = "ChangeAvailability (EVSE 1, Inoperative) arrives during the transaction"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Inoperative", evse = { id = 1 } }
+
+[[steps]]
+name = "the CSMS has seen the answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:change-availability-evse-tx" }
+
+[[steps]]
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "the connector is reported Unavailable after the transaction"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Unavailable" }
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-8"
+
+[[steps]]
+name = "ChangeAvailability (EVSE 1, Operative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Operative", evse = { id = 1 } }
+
+[[steps]]
+name = "the connector is reported Occupied, the cable is still plugged in"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Occupied" }
+timeout_ms = 5000
+
+# The same for the whole station
+
+[[steps]]
+name = "the transaction starts again"
+action = "start_tx"
+evse = 1
+id_token = "CONF-TAG"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:change-availability-station-tx"
+
+[[steps]]
+name = "ChangeAvailability (station, Inoperative) arrives during the transaction"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Inoperative" }
+
+[[steps]]
+name = "the CSMS has seen the answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:change-availability-station-tx" }
+
+[[steps]]
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "the connector is reported Unavailable after the transaction"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Unavailable" }
+timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:change-availability"

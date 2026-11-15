@@ -10,7 +10,7 @@ Legend: **full** = implemented as specified for emulator purposes; **partial** =
 
 Validation: the 128 official 2.0.1 schemas (JSON Schema draft-06) are embedded in the build. Outgoing and incoming CALL and CALLRESULT payloads are validated against them. An incoming CALL that fails validation, or that is schema-valid but does not decode into the typed request, gets a CALLERROR (`OccurrenceConstraintViolation`, `TypeConstraintViolation`, `PropertyConstraintViolation` or `FormatViolation`, the 2.0.1 spelling). Behavior is covered by the unit and integration tests in `crates/kirby-ocpp-core` and `crates/kirby-ocpp/tests`, driven by the in-process mock CSMS in `crates/kirby-ocpp-testkit`.
 
-Contents: [Profiles](#profiles) · [Station to CSMS](#station-to-csms) · [CSMS to station](#csms-to-station) · [Device model](#device-model) · [Transactions](#transactions) · [Testing aids](#testing-aids-deliberate-non-conformance) · [Known deviations](#known-deviations) · [Known limits](#known-limits) · [CSMS side](#csms-side-kirby-csms)
+Contents: [Profiles](#profiles) · [Station to CSMS](#station-to-csms) · [CSMS to station](#csms-to-station) · [Device model](#device-model) · [Transactions](#transactions) · [Testing aids](#testing-aids-deliberate-non-conformance) · [Known deviations](#known-deviations) · [Known limits](#known-limits) · [Conformance scenarios](#conformance-scenarios) · [CSMS side](#csms-side-kirby-csms)
 
 ## Profiles
 
@@ -156,6 +156,34 @@ The specification wins over 1.6 parity. Each entry is either backed by a require
 - `--count` above 1, `replay` and `scenarios from-recording` are not available for 2.0.1; `run` and `suite` are. The 1.6 response rules (`--rule`, `set_rule`, `clear_rules`) and `request_certificate` do not exist for 2.0.1.
 - No state is shared with 1.6: a station id used with both protocols keeps two independent file sets (`<id>.station2.json`, `<id>.station2.secrets.json`, own format version 1).
 - OCPP 2.1 is not supported (`--protocol ocpp2.1` exits 2).
+
+## Conformance scenarios
+
+The twelve scenarios in `conformance/v201/` exercise the station through a scripted `kirby-csms`; how to run them is in [Scenarios](scenarios.md#ocpp-201-conformance-family). The table maps them to the test cases of OCPP 2.0.1 Part 6 (edition 4, the `_CS` cases for a charging station). The runs are not a certification: a scenario follows a test case where the station supports it and says in the last column where it does not.
+
+| Scenario | Test cases | Covers | Differences from the test case |
+| --- | --- | --- | --- |
+| `boot-pending` | `TC_B_02_CS` | all steps | The connector state is checked through `StatusNotification` only (the station sends no `NotifyEvent` for it); the content of the report is not inspected |
+| `boot-rejected` | `TC_B_03_CS`, `TC_B_30_CS` | all steps | That the station sends nothing while rejected is not asserted; the `SecurityError` code of the refused command is checked in the Rust test, the script checks that it is a CALLERROR |
+| `reset` | `TC_B_20_CS`, `TC_B_22_CS` | all steps | The `Ended` event is checked for trigger, reason and charging state, not for the absence of `idToken`; the connector is `Occupied` after the immediate reset because the cable stays plugged in |
+| `remote-start-stop` | `TC_F_01_CS`, `TC_F_02_CS`, `TC_F_08_CS`, `TC_F_09_CS` | the remote start (cable first and remote start first), the remote stop and the rejected stop | The `EnergyTransferStarted` and `StopAuthorized` sub-steps of the reusable states are reduced to the `TransactionEvent` of the start (trigger `RemoteStart`) and of the stop (`Ended`, trigger `RemoteStop`, reason `Remote`); the charging state is not asserted |
+| `unlock-connector` | `TC_F_06_CS`, `TC_F_07_CS`, `TC_F_10_CS` | all steps | None |
+| `trigger-message` | `TC_F_11_CS`, `TC_F_13_CS`, `TC_F_20_CS`, `TC_F_23_CS`, `TC_F_24_CS`, `TC_F_26_CS`, `TC_F_27_CS` | all steps | The connector state is checked through `StatusNotification` only; the `meterValue` of the `TC_F_13_CS` event is not inspected |
+| `device-model` | `TC_B_06_CS`, `TC_B_07_CS`, `TC_B_09_CS`, `TC_B_10_CS`, `TC_B_32_CS` to `TC_B_37_CS`, `TC_B_12_CS`, `TC_B_13_CS` | all steps for the variable cases; the base report cases only in part | A base report is checked for the answer and for the first `NotifyReport` of its `requestId`, not for its items. The read-only case uses `SecurityCtrlr.SecurityProfile` instead of `TC_B_39_CS`, which sets `OCPPCommCtrlr.MessageTimeout`: the station accepts that value |
+| `change-availability` | `TC_G_03_CS`, `TC_G_04_CS`, `TC_G_05_CS`, `TC_G_07_CS`, `TC_G_09_CS`, `TC_G_11_CS`, `TC_G_14_CS`, and by title `TC_G_06_CS`, `TC_G_08_CS`, `TC_G_10_CS` | the commands, the answers and the `StatusNotification` of each change | The connector state is checked through `StatusNotification` only. With a transaction, the connector is reported `Unavailable` once the transaction ended; the later cable and parking states of `TC_G_11_CS` and `TC_G_14_CS` are not stepped through. With a cable plugged in the connector is `Occupied`, not `Available`, after the EVSE is operative again |
+| `transaction-status` | `TC_E_28_CS`, `TC_E_30_CS`, `TC_E_32_CS`, `TC_E_34_CS`; `TC_E_29_CS`, `TC_E_31_CS`, `TC_E_33_CS` in part | all steps of the first four | The three cases with a queued message build the queue from a delivery the CSMS refuses with a CALLERROR (the event waits for its retry), not from a closed connection: the flags `ongoingIndicator` and `messagesInQueue` are checked, the `offline` flag and the delivery after reconnecting are not |
+| `transaction-retry` | `TC_E_50_CS`, `TC_E_51_CS` | the number of attempts | The wait between attempts is not asserted (a scenario sees no timestamps); the station sends the event `MessageAttempts` times and no more, which the script proves by the unused refusal |
+| `meter-values` | `TC_J_07_CS`, `TC_J_09_CS`, `TC_J_10_CS` | one sample per configured measurand with the contexts `Transaction.Begin`, `Sample.Periodic` and `Transaction.End` | The interval of the updates is not asserted; `TxEndedInterval` stays 0, so the periodic samples of the `Ended` event are not checked (a match compares arrays at their full length); no sample is checked for `location` |
+| `scripted-replies` | none | the [`reply`](scenarios.md#reply) step | Scenario feature, not a test case |
+
+Test cases listed by title (`TC_G_06_CS`, `TC_G_08_CS`, `TC_G_10_CS`) follow the title only; the other cases were compared with their steps and validations.
+
+Not in the family:
+
+- `TC_B_21_CS` (reset on idle with a transaction): the station reboots with boot reason `RemoteReset` where the test case expects `ScheduledReset`, and sends no `SecurityEventNotification` after the reboot.
+- `TC_B_39_CS`: see the `device-model` row.
+- `TC_E_41_CS`, `TC_E_42_CS`: the CSMS does not answer, so each attempt waits for the call timeout (30 s by default); `TC_E_50_CS` and `TC_E_51_CS` cover the same retry rule with CALLERROR answers.
+- Authorization cache and Local Authorization List cases (parts C and D), custom reports (`GetReport`), certificates, firmware, monitoring, reservation, smart charging and display messages: the station answers `NotSupported` or does not send the message.
 
 ## CSMS side (`kirby-csms`)
 

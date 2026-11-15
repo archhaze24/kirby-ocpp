@@ -1,0 +1,1190 @@
+name = "conformance-v201"
+ocpp_version = "2.0.1"
+description = "Drives the scenarios of conformance/v201/scenarios against an OCPP 2.0.1 station: waits for the station's ready message, prepares answers, sends the CSMS commands and checks the replies"
+tags = ["conformance", "ocpp2.0.1"]
+
+# Run it next to the scenarios (see docs/ci.md):
+#
+#   kirby-csms --listen 127.0.0.1:9000 --no-tui --subprotocol require:ocpp2.0.1 \
+#     --script conformance/v201/csms-script.toml --timeout 180 &
+#   kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-CONF --protocol ocpp2.0.1 --no-tui \
+#     suite conformance/v201/scenarios --tag conformance
+#
+# Every scenario opens with a DataTransfer from vendor "kirby-ocpp.conformance" whose
+# messageId is "ready:<topic>". The section of this script for that topic waits for it,
+# prepares what the scenario needs, and sends "go:<topic>" when the scenario must wait for
+# the preparation. Every scenario ends with "done:<topic>" and the section ends by waiting
+# for it: the station has then answered every command of the section before it is torn down.
+# The sections run in the order of the scenario file names; a run of a subset of the
+# scenarios needs a script with only their sections.
+
+[vars]
+station = "CP-CONF"
+vendor = "kirby-ocpp.conformance"
+
+# ---------------------------------------------------------------------------------------
+# 01 conformance-v201-boot-pending
+
+[[steps]]
+name = "boot-pending: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:boot-pending" }
+timeout_ms = 30000
+
+# The first Pending answer asks for a quick retry. The CSMS sees that retry only after the
+# station has taken the first answer, so every command below meets a station that is pending.
+# The second Pending answer has a long interval, so no retry interrupts the commands.
+
+[[steps]]
+name = "boot-pending: the next BootNotification is Pending, retry after one second"
+action = "inject_fault"
+call = "BootNotification"
+station = "${station}"
+kind = "invalid_payload"
+payload = { status = "Pending", interval = 1, currentTime = "2026-01-01T00:00:00Z" }
+times = 1
+
+[[steps]]
+name = "boot-pending: the one after it is Pending, retry after 300 seconds"
+action = "inject_fault"
+call = "BootNotification"
+station = "${station}"
+kind = "invalid_payload"
+payload = { status = "Pending", interval = 300, currentTime = "2026-01-01T00:00:00Z" }
+times = 1
+
+[[steps]]
+name = "boot-pending: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:boot-pending" }
+
+[[steps]]
+name = "boot-pending: the station sends its new BootNotification"
+action = "wait_call"
+call = "BootNotification"
+station = "${station}"
+payload_contains = { reason = "Unknown" }
+timeout_ms = 10000
+
+[[steps]]
+name = "boot-pending: the station repeats the BootNotification after the interval"
+action = "wait_call"
+call = "BootNotification"
+station = "${station}"
+payload_contains = { reason = "Unknown" }
+timeout_ms = 10000
+
+[[steps]]
+name = "boot-pending: SetVariables is accepted while pending"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "300", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "boot-pending: GetVariables returns the new value while pending"
+action = "call"
+station = "${station}"
+call = "GetVariables"
+payload = { getVariableData = [{ component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+expect_payload = { getVariableResult = [{ attributeStatus = "Accepted", attributeValue = "300", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "boot-pending: GetBaseReport is accepted while pending"
+action = "call"
+station = "${station}"
+call = "GetBaseReport"
+payload = { requestId = 1, reportBase = "FullInventory" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "boot-pending: the report starts"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 1, seqNo = 0 }
+timeout_ms = 10000
+
+[[steps]]
+name = "boot-pending: RequestStartTransaction is rejected while pending"
+action = "call"
+station = "${station}"
+call = "RequestStartTransaction"
+payload = { remoteStartId = 1, evseId = 1, idToken = { idToken = "CONF-TAG", type = "ISO14443" } }
+expect_status = "Rejected"
+
+[[steps]]
+name = "boot-pending: TriggerMessage(BootNotification) is accepted while pending"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "BootNotification" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "boot-pending: the triggered BootNotification"
+action = "wait_call"
+call = "BootNotification"
+station = "${station}"
+payload_contains = { reason = "Triggered" }
+timeout_ms = 10000
+
+[[steps]]
+name = "boot-pending: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:boot-pending" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 02 conformance-v201-boot-rejected
+
+[[steps]]
+name = "boot-rejected: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:boot-rejected" }
+timeout_ms = 30000
+
+# Two Rejected answers: the CSMS sees the station's repeat only after the station has taken the
+# first answer, so the command below meets a station that is rejected. The third BootNotification
+# gets the normal Accepted answer.
+
+[[steps]]
+name = "boot-rejected: the next two BootNotification CALLs are Rejected"
+action = "inject_fault"
+call = "BootNotification"
+station = "${station}"
+kind = "invalid_payload"
+payload = { status = "Rejected", interval = 1, currentTime = "2026-01-01T00:00:00Z" }
+times = 2
+
+[[steps]]
+name = "boot-rejected: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:boot-rejected" }
+
+[[steps]]
+name = "boot-rejected: the station sends its new BootNotification"
+action = "wait_call"
+call = "BootNotification"
+station = "${station}"
+payload_contains = { reason = "Unknown" }
+timeout_ms = 10000
+
+[[steps]]
+name = "boot-rejected: the station repeats the BootNotification after the interval"
+action = "wait_call"
+call = "BootNotification"
+station = "${station}"
+payload_contains = { reason = "Unknown" }
+timeout_ms = 10000
+
+[[steps]]
+name = "boot-rejected: GetBaseReport is refused with a CALLERROR"
+action = "call"
+station = "${station}"
+call = "GetBaseReport"
+payload = { requestId = 2, reportBase = "FullInventory" }
+expect_error = true
+
+[[steps]]
+name = "boot-rejected: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:boot-rejected" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 03 conformance-v201-reset
+
+[[steps]]
+name = "reset: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reset" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reset: Reset OnIdle is accepted on an idle station"
+action = "call"
+station = "${station}"
+call = "Reset"
+payload = { type = "OnIdle" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reset: the transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reset-immediate" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reset: Reset Immediate is accepted"
+action = "call"
+station = "${station}"
+call = "Reset"
+payload = { type = "Immediate" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reset: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:reset" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 04 conformance-v201-remote-start-stop
+
+[[steps]]
+name = "remote-start: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:remote-start" }
+timeout_ms = 30000
+
+[[steps]]
+name = "remote-start: RequestStartTransaction is accepted"
+action = "call"
+station = "${station}"
+call = "RequestStartTransaction"
+payload = { remoteStartId = 7, evseId = 1, idToken = { idToken = "CONF-TAG", type = "ISO14443" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "remote-start: the transaction started"
+action = "wait_call"
+call = "TransactionEvent"
+station = "${station}"
+payload_contains = { eventType = "Started", transactionInfo = { remoteStartId = 7 } }
+capture = { tx = "/transactionInfo/transactionId" }
+timeout_ms = 10000
+
+[[steps]]
+name = "remote-start: the transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:remote-stop" }
+timeout_ms = 30000
+
+[[steps]]
+name = "remote-start: RequestStopTransaction for an unknown id is rejected"
+action = "call"
+station = "${station}"
+call = "RequestStopTransaction"
+payload = { transactionId = "no-such-transaction" }
+expect_status = "Rejected"
+
+[[steps]]
+name = "remote-start: RequestStopTransaction for the running transaction is accepted"
+action = "call"
+station = "${station}"
+call = "RequestStopTransaction"
+payload = { transactionId = "${tx}" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "remote-start: the cable is out"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:remote-start-first" }
+timeout_ms = 30000
+
+[[steps]]
+name = "remote-start: RequestStartTransaction before the cable is accepted"
+action = "call"
+station = "${station}"
+call = "RequestStartTransaction"
+payload = { remoteStartId = 8, evseId = 1, idToken = { idToken = "CONF-TAG", type = "ISO14443" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "remote-start: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:remote-start-stop" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 05 conformance-v201-unlock-connector
+
+[[steps]]
+name = "unlock: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:unlock-connector" }
+timeout_ms = 30000
+
+[[steps]]
+name = "unlock: UnlockConnector with no cable is Unlocked"
+action = "call"
+station = "${station}"
+call = "UnlockConnector"
+payload = { evseId = 1, connectorId = 1 }
+expect_status = "Unlocked"
+
+[[steps]]
+name = "unlock: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:unlock-connector" }
+
+[[steps]]
+name = "unlock: the cable is plugged in"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:unlock-connector-plugged" }
+timeout_ms = 30000
+
+[[steps]]
+name = "unlock: UnlockConnector with the cable plugged in is Unlocked"
+action = "call"
+station = "${station}"
+call = "UnlockConnector"
+payload = { evseId = 1, connectorId = 1 }
+expect_status = "Unlocked"
+
+[[steps]]
+name = "unlock: UnlockConnector for connector 999 is UnknownConnector"
+action = "call"
+station = "${station}"
+call = "UnlockConnector"
+payload = { evseId = 1, connectorId = 999 }
+expect_status = "UnknownConnector"
+
+[[steps]]
+name = "unlock: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:unlock-connector" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 06 conformance-v201-trigger-message
+
+[[steps]]
+name = "trigger: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:trigger-message" }
+timeout_ms = 30000
+
+[[steps]]
+name = "trigger: Heartbeat is accepted"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "Heartbeat" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger: the Heartbeat arrived"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:trigger-message-1" }
+timeout_ms = 10000
+
+[[steps]]
+name = "trigger: StatusNotification is accepted"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "StatusNotification", evse = { id = 1, connectorId = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger: the StatusNotification arrived"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:trigger-message-2" }
+timeout_ms = 10000
+
+[[steps]]
+name = "trigger: MeterValues is accepted"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "MeterValues", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger: the MeterValues arrived"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:trigger-message-3" }
+timeout_ms = 10000
+
+[[steps]]
+name = "trigger: BootNotification is rejected after an accepted boot"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "BootNotification" }
+expect_status = "Rejected"
+
+[[steps]]
+name = "trigger: SignCombinedCertificate is not implemented"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "SignCombinedCertificate" }
+expect_status = "NotImplemented"
+
+[[steps]]
+name = "trigger: the cable is plugged in"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:trigger-message-plugged" }
+timeout_ms = 30000
+
+[[steps]]
+name = "trigger: StatusNotification with the cable plugged in is accepted"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "StatusNotification", evse = { id = 1, connectorId = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger: the transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:trigger-message-transaction" }
+timeout_ms = 30000
+
+[[steps]]
+name = "trigger: TransactionEvent is accepted"
+action = "call"
+station = "${station}"
+call = "TriggerMessage"
+payload = { requestedMessage = "TransactionEvent", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "trigger: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:trigger-message" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 07 conformance-v201-device-model
+
+[[steps]]
+name = "device-model: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:device-model" }
+timeout_ms = 30000
+
+[[steps]]
+name = "device-model: SetVariables with one variable"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "300", attributeType = "Actual", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted", attributeType = "Actual", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "device-model: GetVariables with one variable"
+action = "call"
+station = "${station}"
+call = "GetVariables"
+payload = { getVariableData = [{ attributeType = "Actual", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+expect_payload = { getVariableResult = [{ attributeStatus = "Accepted", attributeType = "Actual", attributeValue = "300", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "device-model: SetVariables with two variables"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "300", attributeType = "Actual", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }, { attributeValue = "true", attributeType = "Actual", component = { name = "AuthCtrlr" }, variable = { name = "LocalAuthorizeOffline" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }, { attributeStatus = "Accepted", component = { name = "AuthCtrlr" }, variable = { name = "LocalAuthorizeOffline" } }] }
+
+[[steps]]
+name = "device-model: GetVariables with two variables"
+action = "call"
+station = "${station}"
+call = "GetVariables"
+payload = { getVariableData = [{ attributeType = "Actual", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }, { attributeType = "Actual", component = { name = "AuthCtrlr" }, variable = { name = "LocalAuthorizeOffline" } }] }
+expect_payload = { getVariableResult = [{ attributeStatus = "Accepted", attributeValue = "300", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }, { attributeStatus = "Accepted", attributeValue = "true", component = { name = "AuthCtrlr" }, variable = { name = "LocalAuthorizeOffline" } }] }
+
+[[steps]]
+name = "device-model: GetVariables for an unknown component"
+action = "call"
+station = "${station}"
+call = "GetVariables"
+payload = { getVariableData = [{ component = { name = "UnknownComponent" }, variable = { name = "OfflineThreshold" } }] }
+expect_payload = { getVariableResult = [{ attributeStatus = "UnknownComponent", component = { name = "UnknownComponent" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "device-model: GetVariables for an unknown variable"
+action = "call"
+station = "${station}"
+call = "GetVariables"
+payload = { getVariableData = [{ component = { name = "OCPPCommCtrlr" }, variable = { name = "UnknownVariable" } }] }
+expect_payload = { getVariableResult = [{ attributeStatus = "UnknownVariable", component = { name = "OCPPCommCtrlr" }, variable = { name = "UnknownVariable" } }] }
+
+[[steps]]
+name = "device-model: GetVariables for the Target attribute"
+action = "call"
+station = "${station}"
+call = "GetVariables"
+payload = { getVariableData = [{ attributeType = "Target", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+expect_payload = { getVariableResult = [{ attributeStatus = "NotSupportedAttributeType", attributeType = "Target", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "device-model: SetVariables for an unknown component"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "300", component = { name = "UnknownComponent" }, variable = { name = "OfflineThreshold" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "UnknownComponent", component = { name = "UnknownComponent" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "device-model: SetVariables for an unknown variable"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "300", component = { name = "OCPPCommCtrlr" }, variable = { name = "UnknownVariable" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "UnknownVariable", component = { name = "OCPPCommCtrlr" }, variable = { name = "UnknownVariable" } }] }
+
+[[steps]]
+name = "device-model: SetVariables for the Target attribute"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "300", attributeType = "Target", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "NotSupportedAttributeType", attributeType = "Target", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "device-model: SetVariables for a read-only variable"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "1", component = { name = "SecurityCtrlr" }, variable = { name = "SecurityProfile" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Rejected", component = { name = "SecurityCtrlr" }, variable = { name = "SecurityProfile" } }] }
+
+[[steps]]
+name = "device-model: GetBaseReport with ConfigurationInventory"
+action = "call"
+station = "${station}"
+call = "GetBaseReport"
+payload = { requestId = 31, reportBase = "ConfigurationInventory" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "device-model: the configuration report arrives"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 31, seqNo = 0 }
+timeout_ms = 10000
+
+# The station refuses a second report request while it still sends the first one. Its next
+# message arrives after the CSMS has answered the report, so the answer reaches the station
+# before the next request does.
+
+[[steps]]
+name = "device-model: the station is done with the first report"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:device-model-report" }
+timeout_ms = 10000
+
+[[steps]]
+name = "device-model: GetBaseReport with FullInventory"
+action = "call"
+station = "${station}"
+call = "GetBaseReport"
+payload = { requestId = 32, reportBase = "FullInventory" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "device-model: the full report arrives"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 32, seqNo = 0 }
+timeout_ms = 10000
+
+[[steps]]
+name = "device-model: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:device-model" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 08 conformance-v201-change-availability
+
+[[steps]]
+name = "availability: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability" }
+timeout_ms = 30000
+
+[[steps]]
+name = "availability: EVSE 1 to Inoperative is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Inoperative", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: the connector was reported"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-1" }
+timeout_ms = 10000
+
+[[steps]]
+name = "availability: EVSE 1 to Inoperative again is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Inoperative", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: the second command arrived"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-2" }
+timeout_ms = 10000
+
+[[steps]]
+name = "availability: EVSE 1 to Operative is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Operative", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: the connector was reported"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-3" }
+timeout_ms = 10000
+
+[[steps]]
+name = "availability: EVSE 1 to Operative again is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Operative", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: the fourth command arrived"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-4" }
+timeout_ms = 10000
+
+[[steps]]
+name = "availability: the station to Inoperative is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Inoperative" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: the connector was reported"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-5" }
+timeout_ms = 10000
+
+[[steps]]
+name = "availability: the station to Operative is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Operative" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: the connector was reported"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-6" }
+timeout_ms = 10000
+
+[[steps]]
+name = "availability: the connector to Inoperative is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Inoperative", evse = { id = 1, connectorId = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: the connector was reported"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-7" }
+timeout_ms = 10000
+
+[[steps]]
+name = "availability: the connector to Operative is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Operative", evse = { id = 1, connectorId = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: a transaction runs on EVSE 1"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-evse-tx" }
+timeout_ms = 30000
+
+[[steps]]
+name = "availability: EVSE 1 to Inoperative during the transaction is Scheduled"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Inoperative", evse = { id = 1 } }
+expect_status = "Scheduled"
+
+[[steps]]
+name = "availability: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:change-availability-evse-tx" }
+
+[[steps]]
+name = "availability: the transaction ended and the connector was reported"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-8" }
+timeout_ms = 10000
+
+[[steps]]
+name = "availability: EVSE 1 to Operative is accepted"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Operative", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "availability: a transaction runs again"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:change-availability-station-tx" }
+timeout_ms = 30000
+
+[[steps]]
+name = "availability: the station to Inoperative during the transaction is Scheduled"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Inoperative" }
+expect_status = "Scheduled"
+
+[[steps]]
+name = "availability: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:change-availability-station-tx" }
+
+[[steps]]
+name = "availability: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:change-availability" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 09 conformance-v201-transaction-status
+
+[[steps]]
+name = "transaction-status: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:transaction-status" }
+timeout_ms = 30000
+
+[[steps]]
+name = "transaction-status: an unknown id is not ongoing and has no queued message"
+action = "call"
+station = "${station}"
+call = "GetTransactionStatus"
+payload = { transactionId = "00000000-0000-4000-8000-000000000000" }
+expect_payload = { ongoingIndicator = false, messagesInQueue = false }
+
+[[steps]]
+name = "transaction-status: no queued message without an id"
+action = "call"
+station = "${station}"
+call = "GetTransactionStatus"
+payload = {}
+expect_payload = { messagesInQueue = false }
+
+[[steps]]
+name = "transaction-status: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:transaction-status-1" }
+
+[[steps]]
+name = "transaction-status: the first transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:transaction-status-running" }
+timeout_ms = 30000
+
+[[steps]]
+name = "transaction-status: the id of the first transaction"
+action = "wait_call"
+call = "TransactionEvent"
+station = "${station}"
+payload_contains = { eventType = "Started", idToken = { idToken = "CONF-TX-STATUS-1" } }
+capture = { tx = "/transactionInfo/transactionId" }
+
+[[steps]]
+name = "transaction-status: the running transaction is ongoing with nothing queued"
+action = "call"
+station = "${station}"
+call = "GetTransactionStatus"
+payload = { transactionId = "${tx}" }
+expect_payload = { ongoingIndicator = true, messagesInQueue = false }
+
+[[steps]]
+name = "transaction-status: no queued message without an id"
+action = "call"
+station = "${station}"
+call = "GetTransactionStatus"
+payload = {}
+expect_payload = { messagesInQueue = false }
+
+[[steps]]
+name = "transaction-status: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:transaction-status-2" }
+
+[[steps]]
+name = "transaction-status: the first transaction ended"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:transaction-status-ended" }
+timeout_ms = 30000
+
+[[steps]]
+name = "transaction-status: the ended transaction is not ongoing and has nothing queued"
+action = "call"
+station = "${station}"
+call = "GetTransactionStatus"
+payload = { transactionId = "${tx}" }
+expect_payload = { ongoingIndicator = false, messagesInQueue = false }
+
+[[steps]]
+name = "transaction-status: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:transaction-status-3" }
+
+[[steps]]
+name = "transaction-status: the second transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:transaction-status-second" }
+timeout_ms = 30000
+
+[[steps]]
+name = "transaction-status: the id of the second transaction"
+action = "wait_call"
+call = "TransactionEvent"
+station = "${station}"
+payload_contains = { eventType = "Started", idToken = { idToken = "CONF-TX-STATUS-2" } }
+capture = { tx2 = "/transactionInfo/transactionId" }
+
+[[steps]]
+name = "transaction-status: the next TransactionEvent is refused"
+action = "inject_fault"
+call = "TransactionEvent"
+station = "${station}"
+kind = "call_error"
+times = 1
+
+[[steps]]
+name = "transaction-status: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:transaction-status-second" }
+
+[[steps]]
+name = "transaction-status: an event is waiting"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:transaction-status-queued" }
+timeout_ms = 10000
+
+[[steps]]
+name = "transaction-status: the running transaction has a queued message"
+action = "call"
+station = "${station}"
+call = "GetTransactionStatus"
+payload = { transactionId = "${tx2}" }
+expect_payload = { ongoingIndicator = true, messagesInQueue = true }
+
+[[steps]]
+name = "transaction-status: a queued message is reported without an id"
+action = "call"
+station = "${station}"
+call = "GetTransactionStatus"
+payload = {}
+expect_payload = { messagesInQueue = true }
+
+[[steps]]
+name = "transaction-status: the refusal was used up"
+action = "faults"
+station = "${station}"
+expect_count = 0
+
+[[steps]]
+name = "transaction-status: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:transaction-status-4" }
+
+[[steps]]
+name = "transaction-status: the second transaction ended"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:transaction-status-second-ended" }
+timeout_ms = 10000
+
+[[steps]]
+name = "transaction-status: the ended transaction still has queued messages"
+action = "call"
+station = "${station}"
+call = "GetTransactionStatus"
+payload = { transactionId = "${tx2}" }
+expect_payload = { ongoingIndicator = false, messagesInQueue = true }
+
+[[steps]]
+name = "transaction-status: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:transaction-status" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 10 conformance-v201-transaction-retry
+
+[[steps]]
+name = "retry: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:transaction-retry" }
+timeout_ms = 30000
+
+[[steps]]
+name = "retry: the next TransactionEvent is refused once"
+action = "inject_fault"
+call = "TransactionEvent"
+station = "${station}"
+kind = "call_error"
+times = 1
+
+[[steps]]
+name = "retry: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:transaction-retry-1" }
+
+[[steps]]
+name = "retry: the first part is over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:transaction-retry-2" }
+timeout_ms = 15000
+
+[[steps]]
+name = "retry: the refusal was used up by one attempt"
+action = "faults"
+station = "${station}"
+expect_count = 0
+
+[[steps]]
+name = "retry: the next four TransactionEvent CALLs are refused"
+action = "inject_fault"
+call = "TransactionEvent"
+station = "${station}"
+kind = "call_error"
+times = 4
+capture_id = "refusals"
+
+[[steps]]
+name = "retry: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:transaction-retry-2" }
+
+[[steps]]
+name = "retry: the second part is over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:transaction-retry" }
+timeout_ms = 30000
+
+[[steps]]
+name = "retry: three attempts used three refusals, the fourth is left"
+action = "faults"
+station = "${station}"
+expect_count = 1
+
+[[steps]]
+name = "retry: remove the refusal that is left"
+action = "remove_fault"
+id = "${refusals}"
+
+# ---------------------------------------------------------------------------------------
+# 11 conformance-v201-meter-values
+
+[[steps]]
+name = "meter-values: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:meter-values" }
+timeout_ms = 30000
+
+[[steps]]
+name = "meter-values: the measurands are set to energy and power"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "Energy.Active.Import.Register,Power.Active.Import", component = { name = "SampledDataCtrlr" }, variable = { name = "TxStartedMeasurands" } }, { attributeValue = "Energy.Active.Import.Register,Power.Active.Import", component = { name = "SampledDataCtrlr" }, variable = { name = "TxUpdatedMeasurands" } }, { attributeValue = "Energy.Active.Import.Register,Power.Active.Import", component = { name = "SampledDataCtrlr" }, variable = { name = "TxEndedMeasurands" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted" }, { attributeStatus = "Accepted" }, { attributeStatus = "Accepted" }] }
+
+[[steps]]
+name = "meter-values: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:meter-values" }
+
+[[steps]]
+name = "meter-values: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:meter-values" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 12 conformance-v201-scripted-replies
+
+[[steps]]
+name = "scripted-replies: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:scripted-replies" }
+timeout_ms = 30000
+
+[[steps]]
+name = "scripted-replies: the scripted Reset answer is Rejected"
+action = "call"
+station = "${station}"
+call = "Reset"
+payload = { type = "OnIdle" }
+expect_status = "Rejected"
+
+[[steps]]
+name = "scripted-replies: the scripted UnlockConnector answer is a CALLERROR"
+action = "call"
+station = "${station}"
+call = "UnlockConnector"
+payload = { evseId = 1, connectorId = 1 }
+expect_error = true
+
+[[steps]]
+name = "scripted-replies: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:scripted-replies" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# End: the station takes the answer to its last message before the connection closes.
+
+[[steps]]
+name = "end: let the station take the last answer"
+action = "sleep"
+ms = 1000

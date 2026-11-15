@@ -1,0 +1,158 @@
+name = "conformance-v201-trigger-message"
+ocpp_version = "2.0.1"
+description = "TriggerMessage for Heartbeat, StatusNotification (Available and Occupied), MeterValues and TransactionEvent, a BootNotification after an accepted boot and a message the station does not support"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends the TriggerMessage commands in the order below and checks the
+# answers; the scenario asserts the messages the station sends because of them.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:trigger-message"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:trigger-message" }
+
+[[steps]]
+name = "TriggerMessage(Heartbeat) arrives"
+action = "expect_call"
+call = "TriggerMessage"
+direction = "in"
+match = { requestedMessage = "Heartbeat" }
+
+[[steps]]
+name = "the station sends a Heartbeat"
+action = "expect_call"
+call = "Heartbeat"
+direction = "out"
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:trigger-message-1"
+
+[[steps]]
+name = "TriggerMessage(StatusNotification) arrives"
+action = "expect_call"
+call = "TriggerMessage"
+direction = "in"
+match = { requestedMessage = "StatusNotification", evse = { id = 1, connectorId = 1 } }
+
+[[steps]]
+name = "the station reports the connector as Available"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:trigger-message-2"
+
+[[steps]]
+name = "TriggerMessage(MeterValues) arrives"
+action = "expect_call"
+call = "TriggerMessage"
+direction = "in"
+match = { requestedMessage = "MeterValues", evse = { id = 1 } }
+
+[[steps]]
+name = "the station sends the MeterValues of EVSE 1 with context Trigger"
+action = "expect_call"
+call = "MeterValues"
+direction = "out"
+match = { evseId = 1, meterValue = [{ sampledValue = [{ context = "Trigger" }] }] }
+timeout_ms = 5000
+
+[[steps]]
+name = "let the CSMS send the next command"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:trigger-message-3"
+
+[[steps]]
+name = "TriggerMessage(BootNotification) arrives"
+action = "expect_call"
+call = "TriggerMessage"
+direction = "in"
+match = { requestedMessage = "BootNotification" }
+
+[[steps]]
+name = "TriggerMessage(SignCombinedCertificate) arrives"
+action = "expect_call"
+call = "TriggerMessage"
+direction = "in"
+match = { requestedMessage = "SignCombinedCertificate" }
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "tell the CSMS the cable is plugged in"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:trigger-message-plugged"
+
+[[steps]]
+name = "TriggerMessage(StatusNotification) arrives with the cable plugged in"
+action = "expect_call"
+call = "TriggerMessage"
+direction = "in"
+match = { requestedMessage = "StatusNotification", evse = { id = 1, connectorId = 1 } }
+
+[[steps]]
+name = "the station reports the connector as Occupied"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Occupied" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the transaction starts"
+action = "start_tx"
+evse = 1
+id_token = "CONF-TAG"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:trigger-message-transaction"
+
+[[steps]]
+name = "TriggerMessage(TransactionEvent) arrives"
+action = "expect_call"
+call = "TriggerMessage"
+direction = "in"
+match = { requestedMessage = "TransactionEvent", evse = { id = 1 } }
+
+[[steps]]
+name = "the station sends a TransactionEvent with trigger reason Trigger"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "Trigger", transactionInfo = { chargingState = "Charging" } }
+timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:trigger-message"

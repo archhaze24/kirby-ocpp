@@ -1921,12 +1921,14 @@ call = "Heartbeat"
     }
 
     #[test]
-    fn csms_scripts_still_check_for_1_6_only() {
+    fn csms_scripts_accept_1_6_and_2_0_1() {
         use crate::scenario::check_contract_keys;
         assert_eq!(check_contract_keys(Some("1.6"), Some(1)), Ok(()));
-        assert_eq!(
-            check_contract_keys(Some("2.0.1"), None).unwrap_err(),
-            "`ocpp_version = \"2.0.1\"`: this build supports OCPP 1.6 only"
+        assert_eq!(check_contract_keys(Some("2.0.1"), None), Ok(()));
+        assert!(
+            check_contract_keys(Some("2.1"), None)
+                .unwrap_err()
+                .contains("OCPP 1.6 and 2.0.1 only")
         );
         assert_eq!(
             check_contract_keys(None, Some(2)).unwrap_err(),

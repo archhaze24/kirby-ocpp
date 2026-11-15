@@ -1,0 +1,236 @@
+name = "conformance-v201-transaction-status"
+ocpp_version = "2.0.1"
+description = "GetTransactionStatus for an unknown, a running and an ended transaction and without an id, with and without a TransactionEvent waiting in the queue"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script asks GetTransactionStatus at the points the ready messages mark and checks
+# ongoingIndicator and messagesInQueue. For the queued cases it makes the next
+# TransactionEvent fail with a CALLERROR; MessageAttemptInterval is long, so the failed event
+# stays at the head of the queue for the rest of the scenario.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:transaction-status"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:transaction-status" }
+
+[[steps]]
+name = "GetTransactionStatus for an unknown id arrives"
+action = "expect_call"
+call = "GetTransactionStatus"
+direction = "in"
+match = { transactionId = "00000000-0000-4000-8000-000000000000" }
+
+[[steps]]
+name = "GetTransactionStatus without an id arrives"
+action = "expect_call"
+call = "GetTransactionStatus"
+direction = "in"
+
+[[steps]]
+name = "the CSMS has both answers"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:transaction-status-1" }
+
+# A running transaction, nothing queued
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "the transaction starts"
+action = "start_tx"
+evse = 1
+id_token = "CONF-TX-STATUS-1"
+capture = { tx = "/transaction_id" }
+
+[[steps]]
+name = "the energy offer starts, the station sends its follow-up event"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "ChargingStateChanged" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:transaction-status-running"
+
+[[steps]]
+name = "GetTransactionStatus for the running transaction arrives"
+action = "expect_call"
+call = "GetTransactionStatus"
+direction = "in"
+match = { transactionId = "${tx}" }
+
+[[steps]]
+name = "GetTransactionStatus without an id arrives"
+action = "expect_call"
+call = "GetTransactionStatus"
+direction = "in"
+
+[[steps]]
+name = "the CSMS has both answers"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:transaction-status-2" }
+
+# The transaction ended, nothing queued
+
+[[steps]]
+name = "the transaction ends"
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "the Ended event is sent"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+
+[[steps]]
+name = "tell the CSMS the transaction ended"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:transaction-status-ended"
+
+[[steps]]
+name = "GetTransactionStatus for the ended transaction arrives"
+action = "expect_call"
+call = "GetTransactionStatus"
+direction = "in"
+match = { transactionId = "${tx}" }
+
+[[steps]]
+name = "the CSMS has the answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:transaction-status-3" }
+
+# A second transaction with a TransactionEvent waiting in the queue
+
+[[steps]]
+name = "the second transaction starts"
+action = "start_tx"
+evse = 1
+id_token = "CONF-TX-STATUS-2"
+capture = { tx2 = "/transaction_id" }
+
+[[steps]]
+name = "the energy offer starts, the station sends its follow-up event"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "ChargingStateChanged" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+
+[[steps]]
+name = "the failed event is not sent again during the scenario"
+action = "set_variable"
+component = "OCPPCommCtrlr"
+variable = { name = "MessageAttemptInterval", instance = "TransactionEvent" }
+value = 60
+
+[[steps]]
+name = "tell the CSMS the second transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:transaction-status-second"
+
+[[steps]]
+name = "the CSMS has prepared the failure"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:transaction-status-second" }
+
+[[steps]]
+name = "a meter sample creates an event the CSMS refuses"
+action = "meter"
+evse = 1
+
+[[steps]]
+name = "the event is sent and refused"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "MeterValuePeriodic" }
+timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS an event is waiting"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:transaction-status-queued"
+
+[[steps]]
+name = "GetTransactionStatus for the second transaction arrives"
+action = "expect_call"
+call = "GetTransactionStatus"
+direction = "in"
+match = { transactionId = "${tx2}" }
+
+[[steps]]
+name = "GetTransactionStatus without an id arrives"
+action = "expect_call"
+call = "GetTransactionStatus"
+direction = "in"
+
+[[steps]]
+name = "the CSMS has both answers"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:transaction-status-4" }
+
+[[steps]]
+name = "the second transaction ends behind the waiting event"
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "tell the CSMS the second transaction ended"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:transaction-status-second-ended"
+
+[[steps]]
+name = "GetTransactionStatus for the ended second transaction arrives"
+action = "expect_call"
+call = "GetTransactionStatus"
+direction = "in"
+match = { transactionId = "${tx2}" }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:transaction-status"

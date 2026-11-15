@@ -153,6 +153,52 @@ The scenarios of the [conformance family](scenarios.md#conformance-family) run a
 
 The emulator and the script each exit non-zero when something failed, so the step needs both exit codes. Run the whole family in one go with `--jobs 1` (the default) and no `--retries`; the script waits for the scenarios in file order. A failure shows up in `junit.xml` (scenario and step) or in `csms-junit.xml` (the answer the station gave).
 
+The [OCPP 2.0.1 family](scenarios.md#ocpp-201-conformance-family) is a second job of the same shape. It has its own script and scenario directory; the central system accepts only `ocpp2.0.1` and the station speaks it:
+
+```yaml
+  conformance-v201:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Install kirby-ocpp and kirby-csms
+        run: npm install -g kirby-ocpp kirby-csms
+
+      - name: Run the OCPP 2.0.1 family
+        run: |
+          kirby-csms --listen 127.0.0.1:9000 --no-tui --subprotocol require:ocpp2.0.1 \
+            --script conformance/v201/csms-script.toml \
+            --timeout 180 --junit csms-junit.xml --report csms-report.json > csms.log 2>&1 &
+          CSMS=$!
+          for _ in $(seq 50); do
+            grep -q '^listening on' csms.log && break
+            sleep 0.2
+          done
+          kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-CONF --protocol ocpp2.0.1 --no-tui \
+            suite conformance/v201/scenarios --tag conformance \
+            --junit junit.xml --report suite.json --github-annotations
+          status=$?
+          wait $CSMS || status=1
+          exit $status
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: conformance-v201
+          path: |
+            junit.xml
+            suite.json
+            csms-junit.xml
+            csms-report.json
+```
+
+Run the two families one after the other, each against its own `kirby-csms` (they use the same station id and their scripts are ordered files). The 2.0.1 run takes about eight seconds; the retry scenario waits for the station's own retries, about four seconds of it.
+
 ## GitLab CI
 
 ```yaml

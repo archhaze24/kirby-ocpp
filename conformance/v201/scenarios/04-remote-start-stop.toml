@@ -1,0 +1,128 @@
+name = "conformance-v201-remote-start-stop"
+ocpp_version = "2.0.1"
+description = "RequestStartTransaction with the cable plugged in first and with the remote start first, RequestStopTransaction for a running and for an unknown transaction"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends RequestStartTransaction (remote id 7) once the cable is plugged in,
+# then a RequestStopTransaction for an unknown id (Rejected) and for the real one
+# (Accepted), then RequestStartTransaction (remote id 8) with the cable unplugged.
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:remote-start"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:remote-start" }
+
+[[steps]]
+name = "RequestStartTransaction arrives"
+action = "expect_call"
+call = "RequestStartTransaction"
+direction = "in"
+match = { remoteStartId = 7, evseId = 1, idToken = { idToken = "CONF-TAG", type = "ISO14443" } }
+
+[[steps]]
+name = "the station authorizes the token"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "CONF-TAG", type = "ISO14443" } }
+
+[[steps]]
+name = "the transaction starts because of the remote start"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", triggerReason = "RemoteStart", transactionInfo = { remoteStartId = 7 }, idToken = { idToken = "CONF-TAG", type = "ISO14443" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:remote-stop"
+
+[[steps]]
+name = "RequestStopTransaction for an unknown id arrives"
+action = "expect_call"
+call = "RequestStopTransaction"
+direction = "in"
+match = { transactionId = "no-such-transaction" }
+
+[[steps]]
+name = "RequestStopTransaction for the running transaction arrives"
+action = "expect_call"
+call = "RequestStopTransaction"
+direction = "in"
+
+[[steps]]
+name = "the transaction ends with reason Remote"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended", triggerReason = "RemoteStop", transactionInfo = { stoppedReason = "Remote" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+[[steps]]
+action = "unplug"
+evse = 1
+
+[[steps]]
+name = "tell the CSMS the cable is out"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:remote-start-first"
+
+[[steps]]
+name = "RequestStartTransaction arrives before the cable"
+action = "expect_call"
+call = "RequestStartTransaction"
+direction = "in"
+match = { remoteStartId = 8, evseId = 1 }
+
+[[steps]]
+name = "the station authorizes the token"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "CONF-TAG" } }
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "the transaction starts when the cable is plugged in"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", transactionInfo = { remoteStartId = 8 } }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:remote-start-stop"

@@ -1,0 +1,123 @@
+name = "conformance-v201-reset"
+ocpp_version = "2.0.1"
+description = "Reset OnIdle on an idle station, then Reset Immediate with a running transaction: the station reboots, registers with reason RemoteReset and reports its connector again; the immediate reset ends the transaction first"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends Reset (OnIdle) after the ready message and Reset (Immediate) after
+# the second one, once the transaction runs. Both must be answered Accepted.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reset"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:reset" }
+
+[[steps]]
+name = "Reset (OnIdle) arrives"
+action = "expect_call"
+call = "Reset"
+direction = "in"
+match = { type = "OnIdle" }
+
+[[steps]]
+name = "the station boots again after the reset"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+match = { reason = "RemoteReset" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the station reports the connector after the reboot"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connected" }
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+action = "start_tx"
+evse = 1
+id_token = "CONF-TAG"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reset-immediate"
+
+[[steps]]
+name = "Reset (Immediate) arrives"
+action = "expect_call"
+call = "Reset"
+direction = "in"
+match = { type = "Immediate" }
+
+[[steps]]
+name = "the transaction ends because of the reset"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended", triggerReason = "ResetCommand", transactionInfo = { chargingState = "EVConnected", stoppedReason = "ImmediateReset" } }
+timeout_ms = 10000
+
+[[steps]]
+name = "the station boots again after the reset"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+match = { reason = "RemoteReset" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the connector is still occupied by the cable"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Occupied" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connected" }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:reset"

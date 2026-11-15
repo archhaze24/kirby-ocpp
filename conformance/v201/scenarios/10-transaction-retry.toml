@@ -1,0 +1,151 @@
+name = "conformance-v201-transaction-retry"
+ocpp_version = "2.0.1"
+description = "A TransactionEvent the CSMS answers with a CALLERROR is sent again: it succeeds on the second attempt, or it is dropped after MessageAttempts attempts and the queue empties"
+tags = ["conformance", "ocpp2.0.1"]
+
+# MessageAttempts is 3 and MessageAttemptInterval 1 second for TransactionEvent, so a
+# failing event is sent at once, after 1 second and after 2 more seconds. The CSMS script
+# refuses the next event once (the second attempt succeeds), then refuses four events (one
+# more than the attempts: a fourth attempt would use the last refusal up, which the script
+# checks and removes).
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "the transaction starts"
+action = "start_tx"
+evse = 1
+id_token = "CONF-RETRY"
+
+[[steps]]
+name = "the energy offer starts, the station sends its follow-up event"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "ChargingStateChanged" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+
+[[steps]]
+name = "three attempts"
+action = "set_variable"
+component = "OCPPCommCtrlr"
+variable = { name = "MessageAttempts", instance = "TransactionEvent" }
+value = 3
+
+[[steps]]
+name = "one second between attempts"
+action = "set_variable"
+component = "OCPPCommCtrlr"
+variable = { name = "MessageAttemptInterval", instance = "TransactionEvent" }
+value = 1
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:transaction-retry"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:transaction-retry" }
+
+[[steps]]
+name = "the CSMS has prepared one refusal"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:transaction-retry-1" }
+
+# Success on the second attempt
+
+[[steps]]
+action = "meter"
+evse = 1
+
+[[steps]]
+name = "the first attempt is refused"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "MeterValuePeriodic" }
+capture = { seq = "/seqNo" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the same event is sent again and accepted"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", seqNo = "${seq}" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the queue is empty"
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+timeout_ms = 2000
+
+[[steps]]
+name = "tell the CSMS the first part is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:transaction-retry-2"
+
+[[steps]]
+name = "the CSMS has prepared four refusals"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:transaction-retry-2" }
+
+# Every attempt fails: the event is dropped after the third
+
+[[steps]]
+action = "meter"
+evse = 1
+
+[[steps]]
+name = "first attempt"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "MeterValuePeriodic" }
+capture = { seq = "/seqNo" }
+timeout_ms = 5000
+
+[[steps]]
+name = "second attempt after the interval"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { seqNo = "${seq}" }
+timeout_ms = 5000
+
+[[steps]]
+name = "third attempt after twice the interval"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { seqNo = "${seq}" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the event is dropped and the queue is empty"
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+timeout_ms = 2000
+
+[[steps]]
+name = "tell the CSMS the second part is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:transaction-retry"

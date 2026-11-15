@@ -1,0 +1,64 @@
+name = "conformance-v201-unlock-connector"
+ocpp_version = "2.0.1"
+description = "UnlockConnector with no cable, with a cable plugged in and for a connector the station does not have"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends UnlockConnector for EVSE 1 connector 1 (Unlocked) with no cable and
+# again with the cable plugged in (Unlocked), then for connector 999 (UnknownConnector).
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:unlock-connector"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:unlock-connector" }
+
+[[steps]]
+name = "UnlockConnector with no cable arrives"
+action = "expect_call"
+call = "UnlockConnector"
+direction = "in"
+match = { evseId = 1, connectorId = 1 }
+
+[[steps]]
+name = "the CSMS has the answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:unlock-connector" }
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "tell the CSMS the cable is plugged in"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:unlock-connector-plugged"
+
+[[steps]]
+name = "UnlockConnector with the cable plugged in arrives"
+action = "expect_call"
+call = "UnlockConnector"
+direction = "in"
+match = { evseId = 1, connectorId = 1 }
+
+[[steps]]
+name = "UnlockConnector for an unknown connector arrives"
+action = "expect_call"
+call = "UnlockConnector"
+direction = "in"
+match = { evseId = 1, connectorId = 999 }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:unlock-connector"

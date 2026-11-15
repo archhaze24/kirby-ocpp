@@ -19,11 +19,11 @@ The allowed top-level keys are `name`, `description`, `vars`, `steps` and three 
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `ocpp_version` | string | `"1.6"` | Protocol the file is written for: `"1.6"` or `"2.0.1"`. A scenario without the key is a 1.6 scenario. Any other value is a load error (`this build supports OCPP 1.6 and 2.0.1 only`, naming the value). A CSMS script still accepts `"1.6"` only. See [OCPP 2.0.1 scenarios](#ocpp-201-scenarios). |
+| `ocpp_version` | string | `"1.6"` | Protocol the file is written for: `"1.6"` or `"2.0.1"`. A scenario without the key is a 1.6 scenario. Any other value is a load error (`this build supports OCPP 1.6 and 2.0.1 only`, naming the value). A CSMS script accepts both values (its steps are protocol-neutral) and its report names the declared version; a script without the key reports `1.6`. See [OCPP 2.0.1 scenarios](#ocpp-201-scenarios). |
 | `schema` | integer | `1` | Version of the file format. Any other value is a load error (`unsupported schema N`). |
 | `tags` | array of strings | none | Free-form labels. Each entry must be a string (any other type is a load error); the text is not checked further. `suite --tag` and `--skip-tag` select on them (exact, case-sensitive match); built-in scenarios have none. |
 
-Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key. The version keys are read and checked before anything else, so a file written for a later version fails with `unsupported schema N` or `this build supports OCPP 1.6 and 2.0.1 only` (`1.6 only` for a CSMS script) even when it also uses keys this build does not know. A value of the wrong type fails with a plain message such as `` `schema` must be an integer``.
+Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key. The version keys are read and checked before anything else, so a file written for a later version fails with `unsupported schema N` or `this build supports OCPP 1.6 and 2.0.1 only` even when it also uses keys this build does not know. A value of the wrong type fails with a plain message such as `` `schema` must be an integer``.
 
 Reserved step keys: `evse` and `id_token` belong to OCPP 2.0.1 steps. In a 1.6 file (no `ocpp_version`, or `"1.6"`) any step that uses them fails to load with ``action `x`: `evse` is reserved for OCPP 2.x steps; not supported in this build (use `ocpp_version = "2.0.1"` for OCPP 2.0.1 scenarios)``. A CSMS script rejects them the same way.
 
@@ -586,6 +586,40 @@ Rules for a run:
 The scenarios stop at the first failing step like any scenario, with the step name in the report (`PASS conformance-reset-soft`, `FAIL conformance-reset-soft: Reset (Soft) arrives - timed out ...`). They appear in reports and JUnit like any other scenario; the scenario names are stable, and the family grows by new files and by new sections in the script.
 
 A test in the `kirby-csms` crate (`tests/conformance.rs`) runs the whole family against the real `kirby-csms` binary and the script.
+
+### OCPP 2.0.1 conformance family
+
+A second family checks an OCPP 2.0.1 station the same way: `conformance/v201/scenarios/` (`01-boot-pending.toml` to `12-scripted-replies.toml`, scenario names `conformance-v201-<topic>`, tags `conformance` and `ocpp2.0.1`) next to its own script, `conformance/v201/csms-script.toml`. The script declares `ocpp_version = "2.0.1"`, so its report does too (a script without the key reports `1.6`). The two families cannot share a script: its sections run in file order and both use station id `CP-CONF`. The handshake is the one above (`ready:`, `go:` and `done:` DataTransfer messages of vendor `kirby-ocpp.conformance`); where a scenario must not act before the script has seen the effect of a command, it sends further `ready:<topic>-<n>` messages. The commands are raw `call` payloads in the 2.0.1 shape.
+
+```bash
+kirby-csms --listen 127.0.0.1:9000 --no-tui --subprotocol require:ocpp2.0.1 \
+  --script conformance/v201/csms-script.toml --timeout 180 --junit csms-junit.xml &
+CSMS=$!
+kirby-ocpp --url ws://127.0.0.1:9000/ocpp --id CP-CONF --protocol ocpp2.0.1 --no-tui \
+  suite conformance/v201/scenarios --tag conformance --junit junit.xml --report suite.json
+status=$?
+wait $CSMS || status=1
+exit $status
+```
+
+The rules for a run are those of the OCPP 1.6 family: station id `CP-CONF`, the whole family in one go in file order, `--jobs 1`, no `--retries`. The 2.0.1 station, started with the default one EVSE, passes the family in about eight seconds. The script has one section per scenario, between the `# NN conformance-v201-...` comment lines.
+
+| Scenario | The script sends or prepares | The scenario asserts |
+| --- | --- | --- |
+| `conformance-v201-boot-pending` | Next BootNotification answered `Pending` (interval 1), its repeat `Pending` (interval 300); then SetVariables and GetVariables (`OfflineThreshold`, `Accepted`), GetBaseReport (`FullInventory`, `Accepted`), RequestStartTransaction (`Rejected`) and TriggerMessage(BootNotification) (`Accepted`) while the station is pending | Registration `Pending`; BootNotification again after the interval; the commands arrive; the station sends the report; a BootNotification with reason `Triggered`; registration `Accepted`; StatusNotification `Available` for the EVSE |
+| `conformance-v201-boot-rejected` | Next two BootNotification CALLs answered `Rejected` (interval 1); GetBaseReport, which must fail with a CALLERROR | Registration `Rejected`; BootNotification again after the interval; the command arrives; a third BootNotification; registration `Accepted`; StatusNotification `Available` |
+| `conformance-v201-reset` | Reset `OnIdle` on an idle station (`Accepted`); after a transaction started, Reset `Immediate` (`Accepted`) | Each reset: a BootNotification with reason `RemoteReset`, registration `Accepted`, StatusNotification for the connector (`Available`, then `Occupied` because the cable stays plugged in); the immediate reset first sends the `Ended` TransactionEvent (trigger `ResetCommand`, reason `ImmediateReset`, charging state `EVConnected`) |
+| `conformance-v201-remote-start-stop` | RequestStartTransaction with the cable plugged in (`Accepted`); RequestStopTransaction for an unknown id (`Rejected`) and for the running transaction (`Accepted`); RequestStartTransaction with the cable unplugged (`Accepted`) | Authorize for the token; `Started` TransactionEvent with trigger `RemoteStart` and the `remoteStartId`; `Ended` with trigger `RemoteStop` and reason `Remote`; after the second remote start the transaction starts when the cable is plugged in |
+| `conformance-v201-unlock-connector` | UnlockConnector for EVSE 1 connector 1 with no cable and with the cable plugged in (`Unlocked`), and for connector 999 (`UnknownConnector`) | The three commands arrive |
+| `conformance-v201-trigger-message` | TriggerMessage for Heartbeat, StatusNotification (`Available`, later `Occupied`), MeterValues and TransactionEvent (`Accepted`), BootNotification after an accepted boot (`Rejected`) and SignCombinedCertificate (`NotImplemented`) | The Heartbeat; StatusNotification `Available`, then `Occupied`; MeterValues of EVSE 1 with context `Trigger`; a TransactionEvent with trigger `Trigger` and charging state `Charging` |
+| `conformance-v201-device-model` | GetVariables and SetVariables for one and for two variables, an unknown component, an unknown variable, the attribute type `Target` and the read-only `SecurityProfile`; GetBaseReport `ConfigurationInventory` and `FullInventory` | Every command arrives, in that order; a NotifyReport for each report request |
+| `conformance-v201-change-availability` | ChangeAvailability for the EVSE, the whole station and the connector, to `Inoperative` and back, and to the status it already has (`Accepted`); for the EVSE and for the station during a transaction (`Scheduled`) | StatusNotification `Unavailable` and `Available` after each change; after a transaction the connector is reported `Unavailable` when the transaction ends, and `Occupied` when the EVSE is operative again with the cable plugged in |
+| `conformance-v201-transaction-status` | GetTransactionStatus for an unknown id, a running, an ended and a second transaction, and without an id; the next TransactionEvent refused with a CALLERROR (the event then waits in the queue) | Every query arrives; the script checks `ongoingIndicator` and `messagesInQueue` of each answer |
+| `conformance-v201-transaction-retry` | One TransactionEvent refused with a CALLERROR; then four refusals, with `MessageAttempts` 3 and `MessageAttemptInterval` 1 | The refused event is sent again and accepted; with every attempt refused it is sent three times (the same `seqNo`) and then dropped (the queue empties); the script finds one refusal unused |
+| `conformance-v201-meter-values` | SetVariables of `TxStartedMeasurands`, `TxUpdatedMeasurands` and `TxEndedMeasurands` to energy and power (`Accepted`) | One sample per measurand in the `Started` (`Transaction.Begin`), `Updated` (`Sample.Periodic`) and `Ended` (`Transaction.Begin` and `Transaction.End`) TransactionEvent |
+| `conformance-v201-scripted-replies` | Reset (`OnIdle`) and UnlockConnector, expecting a `Rejected` Reset answer and a CALLERROR | Two [`reply`](#reply) steps with `must_fire`; both commands arrive; the station stayed registered |
+
+The mapping of the scenarios to the test cases of OCPP 2.0.1 Part 6 is in [OCPP 2.0.1 conformance notes](OCPP_2.0.1_CONFORMANCE.md#conformance-scenarios). A test in the `kirby-csms` crate (`tests/conformance_v201.rs`) runs the whole family against the real `kirby-csms` binary and the script.
 
 ## Fleet runs
 

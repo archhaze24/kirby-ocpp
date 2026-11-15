@@ -1,0 +1,138 @@
+name = "conformance-v201-device-model"
+ocpp_version = "2.0.1"
+description = "GetVariables and SetVariables for known, unknown, read-only and unsupported-attribute variables, and GetBaseReport with ConfigurationInventory and FullInventory"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends the commands below one after the other and checks every answer
+# (statuses, values and the echoed component and variable). The scenario asserts that the
+# commands arrive in that order and that the station sends the two reports.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:device-model"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:device-model" }
+
+[[steps]]
+name = "SetVariables with one variable arrives"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ attributeValue = "300", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "GetVariables with one variable arrives"
+action = "expect_call"
+call = "GetVariables"
+direction = "in"
+match = { getVariableData = [{ component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "SetVariables with two variables arrives"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ component = { name = "OCPPCommCtrlr" } }, { component = { name = "AuthCtrlr" } }] }
+
+[[steps]]
+name = "GetVariables with two variables arrives"
+action = "expect_call"
+call = "GetVariables"
+direction = "in"
+match = { getVariableData = [{ component = { name = "OCPPCommCtrlr" } }, { component = { name = "AuthCtrlr" } }] }
+
+[[steps]]
+name = "GetVariables for an unknown component arrives"
+action = "expect_call"
+call = "GetVariables"
+direction = "in"
+match = { getVariableData = [{ component = { name = "UnknownComponent" } }] }
+
+[[steps]]
+name = "GetVariables for an unknown variable arrives"
+action = "expect_call"
+call = "GetVariables"
+direction = "in"
+match = { getVariableData = [{ variable = { name = "UnknownVariable" } }] }
+
+[[steps]]
+name = "GetVariables for the Target attribute arrives"
+action = "expect_call"
+call = "GetVariables"
+direction = "in"
+match = { getVariableData = [{ attributeType = "Target" }] }
+
+[[steps]]
+name = "SetVariables for an unknown component arrives"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ component = { name = "UnknownComponent" } }] }
+
+[[steps]]
+name = "SetVariables for an unknown variable arrives"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ variable = { name = "UnknownVariable" } }] }
+
+[[steps]]
+name = "SetVariables for the Target attribute arrives"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ attributeType = "Target" }] }
+
+[[steps]]
+name = "SetVariables for a read-only variable arrives"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ variable = { name = "SecurityProfile" } }] }
+
+[[steps]]
+name = "GetBaseReport (ConfigurationInventory) arrives"
+action = "expect_call"
+call = "GetBaseReport"
+direction = "in"
+match = { requestId = 31, reportBase = "ConfigurationInventory" }
+
+[[steps]]
+name = "the station sends the report of requestId 31"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { requestId = 31, seqNo = 0 }
+
+[[steps]]
+name = "let the CSMS send the next report request"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:device-model-report"
+
+[[steps]]
+name = "GetBaseReport (FullInventory) arrives"
+action = "expect_call"
+call = "GetBaseReport"
+direction = "in"
+match = { requestId = 32, reportBase = "FullInventory" }
+
+[[steps]]
+name = "the station sends the report of requestId 32"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { requestId = 32, seqNo = 0 }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:device-model"

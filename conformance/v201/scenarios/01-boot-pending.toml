@@ -1,0 +1,119 @@
+name = "conformance-v201-boot-pending"
+ocpp_version = "2.0.1"
+description = "BootNotification answered Pending: the station keeps answering the CSMS commands (variables, base report), reports every EVSE, and registers again after a triggered BootNotification"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script answers the next BootNotification with status Pending and a one second
+# interval, the repeat with status Pending and a long interval, so the station does not retry
+# again by itself. After the commands it sends TriggerMessage(BootNotification); that one gets
+# the normal Accepted answer.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:boot-pending"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:boot-pending" }
+
+[[steps]]
+name = "the CSMS has prepared its answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:boot-pending" }
+
+[[steps]]
+action = "boot"
+
+[[steps]]
+name = "the registration is pending"
+action = "wait_for"
+condition = { kind = "registration", status = "Pending" }
+
+[[steps]]
+name = "first BootNotification"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+
+[[steps]]
+name = "BootNotification again after the interval"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+timeout_ms = 5000
+
+[[steps]]
+name = "SetVariables arrives while pending"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ attributeValue = "300", component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "GetVariables arrives while pending"
+action = "expect_call"
+call = "GetVariables"
+direction = "in"
+match = { getVariableData = [{ component = { name = "OCPPCommCtrlr" }, variable = { name = "OfflineThreshold" } }] }
+
+[[steps]]
+name = "GetBaseReport arrives while pending"
+action = "expect_call"
+call = "GetBaseReport"
+direction = "in"
+match = { reportBase = "FullInventory" }
+
+[[steps]]
+name = "the station reports its inventory"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { seqNo = 0 }
+
+[[steps]]
+name = "RequestStartTransaction arrives while pending"
+action = "expect_call"
+call = "RequestStartTransaction"
+direction = "in"
+match = { evseId = 1 }
+
+[[steps]]
+name = "TriggerMessage arrives while pending"
+action = "expect_call"
+call = "TriggerMessage"
+direction = "in"
+match = { requestedMessage = "BootNotification" }
+
+[[steps]]
+name = "the station sends the triggered BootNotification"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+match = { reason = "Triggered" }
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the station reports the EVSE after the accepted boot"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:boot-pending"

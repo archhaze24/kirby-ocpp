@@ -44,10 +44,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Frame};
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::scenario::vars::{self, Vars};
 use kirby_ocpp_core::scenario::{
     ScenarioReport, StepReport, StepStatus, check_contract_keys, check_reserved_keys, line_col,
-    now_rfc3339, precheck_contract, read_scenario_file, redact_params, redacted, with_suggestion,
+    now_rfc3339, parse_contract_version, precheck_contract, read_scenario_file, redact_params,
+    redacted, with_suggestion,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -90,6 +92,9 @@ pub struct Script {
     pub steps: Vec<Step>,
     /// Labels from the reserved `tags` key (kept, not used for filtering yet).
     pub tags: Vec<String>,
+    /// The OCPP version the header declares (`ocpp_version`); the report names it. A script
+    /// without the key reports 1.6. The steps are protocol-neutral either way.
+    pub protocol: Protocol,
     /// The file the script was loaded from.
     pub source: Option<String>,
 }
@@ -281,6 +286,9 @@ impl Script {
             offset: e.span().map(|span| span.start),
         })?;
         check_contract_keys(raw.ocpp_version.as_deref(), raw.schema).map_err(Located::plain)?;
+        let protocol = parse_contract_version(raw.ocpp_version.as_deref())
+            .map_err(Located::plain)?
+            .unwrap_or(Protocol::V16);
         if raw.name.trim().is_empty() {
             return Err(Located::plain("`name` must not be empty"));
         }
@@ -312,6 +320,7 @@ impl Script {
             vars: script_vars,
             steps,
             tags: raw.tags,
+            protocol,
             source: None,
         })
     }
@@ -928,6 +937,7 @@ pub async fn run(
         millis(started.elapsed()),
     );
     env!("CARGO_PKG_VERSION").clone_into(&mut report.tool_version);
+    report.ocpp_version = String::from(script.protocol.ocpp_version());
     report.started_at = started_at;
     report.source.clone_from(&script.source);
     report
@@ -1681,8 +1691,17 @@ call = "Heartbeat"
         ))
         .unwrap();
         assert_eq!(script.tags, ["x"]);
+        assert_eq!(script.protocol, Protocol::V16);
+        let script =
+            Script::from_toml(&format!("name = \"t\"\nocpp_version = \"2.0.1\"\n{step}")).unwrap();
+        assert_eq!(script.protocol, Protocol::V201);
+        let script = Script::from_toml(&format!("name = \"t\"\n{step}")).unwrap();
+        assert_eq!(script.protocol, Protocol::V16);
         let e = err(&format!("name = \"t\"\nocpp_version = \"2.1\"\n{step}"));
-        assert!(e.contains("OCPP 1.6 only") && e.contains("2.1"), "{e}");
+        assert!(
+            e.contains("OCPP 1.6 and 2.0.1 only") && e.contains("2.1"),
+            "{e}"
+        );
         let e = err(&format!("name = \"t\"\nschema = 7\n{step}"));
         assert!(e.contains("unsupported schema 7"), "{e}");
         let e = err(&format!("name = \"t\"\ntimeout = 5\n{step}"));
@@ -1697,9 +1716,13 @@ call = "Heartbeat"
         let e = err(&format!("name = \"t\"\nschema = 2\nfuture = 1\n{step}"));
         assert!(e.contains("unsupported schema 2"), "{e}");
         let e = err(&format!(
+            "name = \"t\"\nocpp_version = \"2.1\"\nfuture = 1\n{step}"
+        ));
+        assert!(e.contains("OCPP 1.6 and 2.0.1 only"), "{e}");
+        let e = err(&format!(
             "name = \"t\"\nocpp_version = \"2.0.1\"\nfuture = 1\n{step}"
         ));
-        assert!(e.contains("OCPP 1.6 only"), "{e}");
+        assert!(e.contains("unknown field `future`"), "{e}");
         let e = err(&format!("name = \"t\"\nschema = \"1\"\n{step}"));
         assert!(e.contains("`schema` must be an integer"), "{e}");
         let e = err("name = \"t\"\n[[steps]]\naction = \"sleep\"\nms = 1\nevse = 1\n");

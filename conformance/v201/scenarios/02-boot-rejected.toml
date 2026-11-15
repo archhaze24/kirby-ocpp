@@ -1,0 +1,83 @@
+name = "conformance-v201-boot-rejected"
+ocpp_version = "2.0.1"
+description = "BootNotification answered Rejected: the station answers CSMS commands with SecurityError, sends BootNotification again after the interval and registers when it is accepted"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script answers the next two BootNotification CALLs with status Rejected and
+# interval 1, sends a GetBaseReport that the station must refuse with SecurityError, and
+# gives the third BootNotification the normal Accepted answer.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:boot-rejected"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:boot-rejected" }
+
+[[steps]]
+name = "the CSMS has prepared its answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:boot-rejected" }
+
+[[steps]]
+action = "boot"
+
+[[steps]]
+name = "the registration is rejected"
+action = "wait_for"
+condition = { kind = "registration", status = "Rejected" }
+
+[[steps]]
+name = "first BootNotification"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+
+[[steps]]
+name = "BootNotification again after the interval"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+timeout_ms = 5000
+
+[[steps]]
+name = "GetBaseReport arrives while rejected"
+action = "expect_call"
+call = "GetBaseReport"
+direction = "in"
+match = { reportBase = "FullInventory" }
+
+[[steps]]
+name = "BootNotification once more"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+timeout_ms = 5000
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the station reports the EVSE after the accepted boot"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:boot-rejected"

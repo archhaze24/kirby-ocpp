@@ -108,20 +108,14 @@ fn check_schema_key(schema: Option<i64>) -> Result<(), String> {
     Ok(())
 }
 
-/// Checks the optional `ocpp_version` and `schema` keys of a CSMS script file. Scripts speak
-/// OCPP 1.6 only for now, so this accepts `"1.6"` / `1` and nothing else; scenario files use
-/// [`parse_contract_version`].
+/// Checks the optional `ocpp_version` and `schema` keys of a CSMS script file. Scripts are
+/// protocol-neutral (raw payloads), so `"1.6"` and `"2.0.1"` are both accepted; the declared
+/// version is read with [`parse_contract_version`].
 ///
 /// # Errors
-/// A message for any value other than `"1.6"` / `1`.
+/// A message for any other version, or for a `schema` other than 1.
 pub fn check_contract_keys(ocpp_version: Option<&str>, schema: Option<i64>) -> Result<(), String> {
-    if let Some(version) = ocpp_version
-        && version != OCPP_VERSION
-    {
-        return Err(format!(
-            "`ocpp_version = {version:?}`: this build supports OCPP {OCPP_VERSION} only"
-        ));
-    }
+    parse_contract_version(ocpp_version)?;
     check_schema_key(schema)
 }
 
