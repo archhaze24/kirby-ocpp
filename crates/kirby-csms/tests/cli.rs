@@ -625,7 +625,8 @@ async fn stdin_history_rules_faults_and_forget() {
     let _ = station.shutdown().await;
     csms.wait(|v| v["type"] == "disconnected");
     csms.send(r#"{"cmd":"forget","station":"CP-1","id":"f"}"#);
-    let forgotten = csms.wait(|v| v["type"] == "forgotten");
+    // The engine's own `forgotten` event line has no `id` and may come first.
+    let forgotten = csms.wait(|v| v["type"] == "forgotten" && v["id"] == "f");
     assert_eq!(
         (&forgotten["forgotten"], &forgotten["id"]),
         (&json!(true), &json!("f"))
