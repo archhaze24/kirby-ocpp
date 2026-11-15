@@ -383,7 +383,20 @@ Semantics:
 | `security-event` | SecurityEventNotification `StartupOfTheDevice`, asserts the CALL went out |
 | `reconnect` | Disconnect, wait until down, connect, wait for an accepted registration, Heartbeat |
 
-The new built-ins need no prior state (connector 1 Available) and only assert CALLs sent by the station, so they pass against any CSMS that answers `Accepted` (or any status, for `data-transfer`).
+On an OCPP 2.0.1 station the same names resolve to the 2.0.1 set (`ocpp_version = "2.0.1"`, EVSE 1, token `KIRBY-OCPP-TAG`); `finish-session` has no 2.0.1 counterpart. They need an EVSE 1 that is Available and pass against any CSMS that answers `Accepted` (any status for `data-transfer`).
+
+| Name | What it does |
+| --- | --- |
+| `charge-session` | Plug in, present a token, meter sample; asserts the `Started` and `Updated` TransactionEvents. The transaction keeps running |
+| `offline-sync` | Authorize the token (fills the cache), go offline, run a whole session, reconnect, wait for the queue to drain; asserts the delivered `Started` and `Ended` events carry `offline = true` |
+| `fault-recovery` | Inject a fault on EVSE 1, assert the `Faulted` StatusNotification, clear it, assert `Available` |
+| `heartbeat-and-status` | Heartbeat, StatusNotification resend, plug and unplug; asserts `Available`, `Occupied`, `Available` |
+| `metering-burst` | Plug in, start a transaction, three meter samples (each asserted as `Updated`), stop, assert `Ended`, unplug |
+| `data-transfer` | DataTransfer with the variable `vendor_id` (default `kirby-ocpp`); any status passes |
+| `security-event` | SecurityEventNotification `StartupOfTheDevice`, asserts the CALL went out |
+| `reconnect` | Disconnect, reconnect, wait for an accepted registration (no new BootNotification), Heartbeat |
+
+The 1.6 built-ins above need no prior state (connector 1 Available) and only assert CALLs sent by the station, so they pass against any CSMS that answers `Accepted` (or any status, for `data-transfer`).
 
 Built-ins target connector 1; `--connector N` retargets every connector-bound step of a built-in (files are never retargeted). `--id-tag TAG` replaces the idTag of `authorize`, `start_tx` and `stop_tx` steps (the latter only where the step sets one) in built-ins and files alike. `offline-sync` works on a stock station: `LocalAuthorizeOffline` and `AllowOfflineTxForUnknownId` default to `true`; switch them off with `ChangeConfiguration` to test the CSMS-side rejection path (the offline start is then rejected and the scenario fails).
 
@@ -403,10 +416,14 @@ kirby-ocpp [station options] run --scenario NAME_OR_FILE [--report report.json] 
 | `--report PATH` | Write the report as JSON |
 | `--junit PATH` | Write a JUnit XML report |
 | `--timeout SECONDS` | Overall limit, connecting included (default 60). On expiry the running step fails with `cancelled` and the rest are skipped |
-| `--id-tag TAG` | Replace the idTag in the scenario |
+| `--id-tag TAG` | Replace the idTag in the scenario (the `id_token`, 1 to 36 characters, for OCPP 2.0.1) |
 | `--json` | Print events and the report as JSON lines |
 | `--persist` | Keep station state in the state file (a `run` is ephemeral by default) |
 | `-v`, `-q` | Also print the event lines / print only the verdict line |
+
+The scenario must be written for the OCPP version of the station (`--protocol`, default `ocpp1.6`): a file says so with the top-level key `ocpp_version` (see [OCPP 2.0.1 scenarios](#ocpp-201-scenarios)), and a file without it is a 1.6 scenario. A mismatch exits 2 before any connection with `scenario NAME is for OCPP 2.0.1; this station speaks ocpp1.6` (or the reverse). A built-in name resolves for the station's version, so `--protocol ocpp2.0.1 run --scenario charge-session` runs the 2.0.1 `charge-session`; `--connector` is then the EVSE and `--id-tag` the `id_token` of the built-in (a file keeps the EVSE and token it names, unless `--id-tag` is given). Reports and the JUnit file carry the station's version, also when the station never booted.
+
+`kirby-ocpp scenarios list` and `scenarios show NAME` follow `--protocol` the same way; `scenarios validate` accepts files of either version and names the version in its summary line only when it is not 1.6.
 
 A bad scenario file (parse error, unknown field) exits 2 before any connection. If the station cannot connect or the BootNotification is not accepted before `--timeout`, there is no step report: the error goes to stderr, no `--report` file is written, and the JUnit file (if requested) holds one errored `setup` case. The exit code is 1.
 
@@ -435,6 +452,7 @@ kirby-ocpp [station options] suite [SOURCE...] [--all-builtins] [--report suite.
 
 `suite` runs many scenarios, by default one after another, each on a fresh station (see [Suite mode](emulator.md#suite-mode)).
 - SOURCE is a file, a directory (`*.toml` directly inside, sorted by name; an empty directory is a usage error) or a built-in name (an existing path or an argument that looks like a path wins over a built-in of the same name); at least one SOURCE or `--all-builtins` is required.
+- Every scenario must be written for the OCPP version of the station (`--protocol`); a file for the other version, also one inside a directory, exits 2 before any connection with a message that names the file. Built-in names and `--all-builtins` select the built-ins of the station's version. The suite report and the JUnit file carry that version.
 - A file named twice, or a file plus its directory, runs once (by canonical path). A `--var` that a scenario does not use is ignored with a `warning:` line on stderr per scenario. `--all-builtins` skips `finish-session`, which needs a running transaction.
 - Scenario names that appear twice get their source appended in the output and the reports (`name (path)`). All scenarios are loaded first: a bad file exits 2 before any connection.
 

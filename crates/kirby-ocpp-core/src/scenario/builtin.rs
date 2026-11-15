@@ -44,8 +44,42 @@ pub const SOURCES: &[(&str, &str)] = &[
     ("reconnect", include_str!("../../scenarios/reconnect.toml")),
 ];
 
-/// `(name, TOML source)` of every OCPP 2.0.1 built-in. Empty until the 2.0.1 scenarios exist.
-pub const SOURCES_V201: &[(&str, &str)] = &[];
+/// `(name, TOML source)` of every OCPP 2.0.1 built-in. There is no `finish-session`: it needs a
+/// transaction that is already running.
+pub const SOURCES_V201: &[(&str, &str)] = &[
+    (
+        "charge-session",
+        include_str!("../../scenarios/v201/charge-session.toml"),
+    ),
+    (
+        "offline-sync",
+        include_str!("../../scenarios/v201/offline-sync.toml"),
+    ),
+    (
+        "fault-recovery",
+        include_str!("../../scenarios/v201/fault-recovery.toml"),
+    ),
+    (
+        "heartbeat-and-status",
+        include_str!("../../scenarios/v201/heartbeat-and-status.toml"),
+    ),
+    (
+        "metering-burst",
+        include_str!("../../scenarios/v201/metering-burst.toml"),
+    ),
+    (
+        "data-transfer",
+        include_str!("../../scenarios/v201/data-transfer.toml"),
+    ),
+    (
+        "security-event",
+        include_str!("../../scenarios/v201/security-event.toml"),
+    ),
+    (
+        "reconnect",
+        include_str!("../../scenarios/v201/reconnect.toml"),
+    ),
+];
 
 fn parse(name: &str, text: &str) -> Result<Scenario, super::ScenarioError> {
     let mut scenario = Scenario::from_toml(text)?;
@@ -140,9 +174,22 @@ mod tests {
             source_for("charge_session", Protocol::V16),
             source("charge-session")
         );
-        // No 2.0.1 built-ins yet; the lookups are empty rather than falling back to 1.6.
-        assert_eq!(all_for(Protocol::V201).len(), 0);
-        assert!(get_for("charge-session", Protocol::V201).is_none());
-        assert!(source_for("charge-session", Protocol::V201).is_none());
+        let v201 = all_for(Protocol::V201);
+        assert_eq!(v201.len(), 8);
+        for (scenario, (name, _)) in v201.iter().zip(SOURCES_V201) {
+            assert_eq!(scenario.name, *name);
+            assert_eq!(scenario.ocpp_version, Some(Protocol::V201));
+            assert_ne!(scenario.description, "");
+        }
+        assert_eq!(
+            get_for("charge_session", Protocol::V201).map(|s| s.source),
+            Some(Some("builtin:charge-session".to_owned()))
+        );
+        assert_ne!(
+            source_for("charge-session", Protocol::V201),
+            source("charge-session")
+        );
+        assert!(get_for("finish-session", Protocol::V201).is_none());
+        assert!(source_for("finish-session", Protocol::V201).is_none());
     }
 }

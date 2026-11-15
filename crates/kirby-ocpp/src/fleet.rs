@@ -173,6 +173,7 @@ pub async fn run(
 ) -> ExitCode {
     let scenario = match load_scenario(
         &args.scenario,
+        config.protocol,
         connector,
         args.id_tag.as_deref(),
         &args.vars,
@@ -312,6 +313,7 @@ pub async fn run(
     write_failed |= args.junit.as_ref().is_some_and(|path| {
         !write_fleet_junit(
             path,
+            config.protocol.ocpp_version(),
             &scenario.name,
             scenario.source.as_deref(),
             total_ms,
@@ -353,6 +355,7 @@ async fn wait_or_cancel(delay: Duration, cancel: &CancelToken) {
 /// Writes one JUnit file with a suite per station; `false` if it could not be written.
 fn write_fleet_junit(
     path: &Path,
+    ocpp_version: &str,
     scenario: &str,
     source: Option<&str>,
     duration_ms: u64,
@@ -372,7 +375,7 @@ fn write_fleet_junit(
             duration_ms,
         })
         .collect();
-    match write_junit(path, &suites) {
+    match write_junit(path, ocpp_version, &suites) {
         Ok(()) => true,
         Err(error) => {
             eprintln!("error: cannot write the JUnit report: {error}");

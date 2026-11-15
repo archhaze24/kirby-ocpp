@@ -470,6 +470,19 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id CP-1 --protocol ocpp2.0.1 --no-tu
 
 `check` offers `ocpp2.0.1`, sends a 2.0.1 BootNotification and names `ocpp_version` `2.0.1` in its report. The station prints the same event lines as the 1.6 one and exits 0 on SIGINT or SIGTERM. To keep the choice in a file, put `protocol = "ocpp2.0.1"` at the top of the configuration file; `--print-config=toml --protocol ocpp2.0.1` writes such a file. Flags that exist for 1.6 only (`--rule` and the security profile flags) exit 2 with 2.0.1; the list is in [Emulator](emulator.md#ocpp-201).
 
+## Run scenarios against an OCPP 2.0.1 CSMS
+
+Goal: run the built-in 2.0.1 scenarios, or your own, against a CSMS and keep the results for CI.
+
+```bash
+kirby-ocpp --url ws://localhost:9000/ocpp --protocol ocpp2.0.1 scenarios list
+kirby-ocpp --url ws://localhost:9000/ocpp --protocol ocpp2.0.1 run --scenario charge-session --id-tag MY-TOKEN
+kirby-ocpp --url ws://localhost:9000/ocpp --protocol ocpp2.0.1 suite --all-builtins --junit junit.xml --report suite.json
+kirby-ocpp --url ws://localhost:9000/ocpp --protocol ocpp2.0.1 suite my-scenarios/ --tag smoke
+```
+
+A built-in name resolves for the station's version, so `charge-session` is the 2.0.1 scenario here. A scenario file of your own starts with `ocpp_version = "2.0.1"`; mixing 1.6 and 2.0.1 files in one `suite` exits 2 and names the offending file. The reports carry `ocpp_version` `2.0.1` and the JUnit class names read `ocpp2.0.1.NAME`. The step reference is in [Scenarios](scenarios.md#ocpp-201-scenarios).
+
 ## Look at or reset a station's state
 
 Goal: see what a station remembers between runs, or start it from scratch.

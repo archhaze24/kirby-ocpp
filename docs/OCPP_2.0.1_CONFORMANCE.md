@@ -153,7 +153,7 @@ The specification wins over 1.6 parity. Each entry is either backed by a require
 ## Known limits
 
 - The terminal UI is not available for 2.0.1; the station runs headless.
-- `--count` above 1, `suite`, `replay`, `scenarios from-recording` of a 2.0.1 recording and `run --scenario` are not available for 2.0.1: scenario files are written for 1.6. The 1.6 response rules (`--rule`, `set_rule`, `clear_rules`) and `request_certificate` do not exist for 2.0.1.
+- `--count` above 1, `replay` and `scenarios from-recording` are not available for 2.0.1; `run` and `suite` are. The 1.6 response rules (`--rule`, `set_rule`, `clear_rules`) and `request_certificate` do not exist for 2.0.1.
 - No state is shared with 1.6: a station id used with both protocols keeps two independent file sets (`<id>.station2.json`, `<id>.station2.secrets.json`, own format version 1).
 - OCPP 2.1 is not supported (`--protocol ocpp2.1` exits 2).
 

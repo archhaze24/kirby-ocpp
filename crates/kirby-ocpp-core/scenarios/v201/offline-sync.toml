@@ -1,0 +1,55 @@
+name = "offline-sync"
+ocpp_version = "2.0.1"
+description = "Authorize a token online to fill the authorization cache, go offline, run a whole session with that token, reconnect, wait until the queued TransactionEvents are delivered and check they carry offline = true. Needs offline authorization: LocalAuthorizeOffline (true by default) with the token in the cache, or OfflineTxForUnknownIdEnabled; if both are off the offline start is rejected and the scenario fails."
+
+[[steps]]
+action = "authorize"
+id_token = "KIRBY-OCPP-TAG"
+
+[[steps]]
+action = "disconnect"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "disconnected" }
+timeout_ms = 3000
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+action = "start_tx"
+evse = 1
+id_token = "KIRBY-OCPP-TAG"
+
+[[steps]]
+action = "stop_tx"
+evse = 1
+reason = "Local"
+
+[[steps]]
+action = "connect"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+timeout_ms = 8000
+
+[[steps]]
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", offline = true }
+timeout_ms = 3000
+
+[[steps]]
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended", offline = true }
+timeout_ms = 3000
+
+[[steps]]
+action = "unplug"
+evse = 1

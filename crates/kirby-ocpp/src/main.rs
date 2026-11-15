@@ -34,7 +34,7 @@ use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::recording::RecordSink;
 use kirby_ocpp_core::scenario::{
     CancelToken, JunitRun, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin,
-    junit_xml_runs, run_scenario_subscribed,
+    junit_xml_runs_for, run_scenario_subscribed,
 };
 use kirby_ocpp_core::{
     Station, Station2, Station2Handle, StationConfig, StationHandle, SystemClock,
@@ -92,7 +92,6 @@ async fn real_main() -> ExitCode {
     );
     let command = cli.command.take();
     match &command {
-        Some(Cmd::Scenarios { action }) => return scenarios(action),
         Some(Cmd::Version) => return print_version(cli.json),
         Some(Cmd::Completions { shell }) => return print_completions(*shell),
         _ => {}
@@ -103,6 +102,9 @@ async fn real_main() -> ExitCode {
             "OCPP {} is not supported by this build",
             protocol.ocpp_version()
         ));
+    }
+    if let Some(Cmd::Scenarios { action }) = &command {
+        return scenarios(action, protocol);
     }
     if let Some(Cmd::State { action }) = &command {
         let options = state::StateOptions {
@@ -317,17 +319,16 @@ fn tui_note(protocol: Protocol) -> Option<String> {
     })
 }
 
-/// The reason a mode cannot run with `protocol`: fleets, `suite` and `replay` drive the 1.6
-/// station only. `None` when the mode is available.
+/// The reason a mode cannot run with `protocol`: fleets and `replay` drive the 1.6 station
+/// only. `None` when the mode is available.
 fn mode_gate(command: Option<&Cmd>, is_fleet: bool, protocol: Protocol) -> Option<String> {
     if protocol == Protocol::V16 {
         return None;
     }
     let token = protocol.token();
     match command {
-        Some(Cmd::Suite(_)) => Some(format!("`suite` is not available for {token} yet")),
         Some(Cmd::Replay(_)) => Some(format!("`replay` is not available for {token} yet")),
-        Some(Cmd::Check(_)) => None,
+        Some(Cmd::Check(_) | Cmd::Suite(_)) => None,
         _ if is_fleet => Some(format!(
             "fleet mode (--count > 1) is not available for {token} yet"
         )),
@@ -368,24 +369,35 @@ fn station_id_note(config: &StationConfig) -> Option<String> {
     ))
 }
 
-fn scenarios(action: &ScenariosCmd) -> ExitCode {
+/// `scenarios`: the built-ins of `protocol` (`list`, `show`), or files of any version
+/// (`validate`).
+fn scenarios(action: &ScenariosCmd, protocol: Protocol) -> ExitCode {
     match action {
         ScenariosCmd::List => {
-            for scenario in builtin::all() {
+            for scenario in builtin::all_for(protocol) {
                 print_lossy(&format!("{:<16} {}\n", scenario.name, scenario.description));
             }
             ExitCode::SUCCESS
         }
-        ScenariosCmd::Show { name } => match builtin::source(name) {
+        ScenariosCmd::Show { name } => match builtin::source_for(name, protocol) {
             Some(text) => {
                 print_lossy(text);
                 ExitCode::SUCCESS
             }
             None => usage_error(&format!(
-                "no built-in scenario `{name}` (try `kirby-ocpp scenarios list`)"
+                "no built-in scenario `{name}` (try `kirby-ocpp scenarios list{}`)",
+                if protocol == Protocol::V16 {
+                    String::new()
+                } else {
+                    format!(" --protocol {}", protocol.token())
+                }
             )),
         },
-        ScenariosCmd::Validate { paths } => validate_scenarios(paths),
+        ScenariosCmd::Validate { paths } => validate_scenarios(paths, protocol),
+        ScenariosCmd::FromRecording { .. } if protocol != Protocol::V16 => usage_error(&format!(
+            "`scenarios from-recording` is not available for {} yet",
+            protocol.token()
+        )),
         ScenariosCmd::FromRecording {
             recording,
             output,
@@ -394,8 +406,9 @@ fn scenarios(action: &ScenariosCmd) -> ExitCode {
     }
 }
 
-/// `scenarios validate`: parses every scenario without connecting.
-fn validate_scenarios(paths: &[String]) -> ExitCode {
+/// `scenarios validate`: parses every scenario without connecting. Files of any OCPP version
+/// are accepted; built-in names resolve for `protocol`.
+fn validate_scenarios(paths: &[String], protocol: Protocol) -> ExitCode {
     let mut failed = false;
     let mut fail = |message: &str| {
         eprintln!("error: {}", kirby_ocpp_tui::text::sanitize(message));
@@ -423,8 +436,8 @@ fn validate_scenarios(paths: &[String]) -> ExitCode {
                 }
                 Err(error) => fail(&error),
             }
-        } else if !names_a_path(spec) && builtin::get(spec).is_none() {
-            fail(&unknown_scenario_message(spec));
+        } else if !names_a_path(spec) && builtin::get_for(spec, protocol).is_none() {
+            fail(&unknown_scenario_message(spec, protocol));
         } else {
             sources.push(spec.clone());
         }
@@ -435,12 +448,17 @@ fn validate_scenarios(paths: &[String]) -> ExitCode {
                 continue;
             }
             let args = SuiteArgs::for_sources(vec![source.clone()]);
-            match suite::load_entries(&args, ConnectorId::new(1)) {
+            match suite::load_entries(&args, ConnectorId::new(1), protocol, false) {
                 Ok(entries) => {
                     for entry in entries {
+                        // The version is named only when it is not the default one.
+                        let version = match entry.scenario.protocol() {
+                            Protocol::V16 => String::new(),
+                            other => format!(", OCPP {}", other.ocpp_version()),
+                        };
                         headless::stdout_line(
                             &format!(
-                                "ok {} ({} steps)",
+                                "ok {} ({} steps{version})",
                                 entry.source,
                                 entry.scenario.expanded_len()
                             ),
@@ -513,11 +531,14 @@ fn print_completions(shell: clap_complete::Shell) -> ExitCode {
 
 /// The error for a scenario name that is neither a built-in nor an existing file, with the
 /// closest built-in name when one is near.
-pub(crate) fn unknown_scenario_message(name: &str) -> String {
+pub(crate) fn unknown_scenario_message(name: &str, protocol: Protocol) -> String {
     let mut message =
         format!("no built-in scenario `{name}` and no such file; see `kirby-ocpp scenarios list`");
+    if protocol != Protocol::V16 {
+        let _ = write!(message, " --protocol {}", protocol.token());
+    }
     let wanted = name.to_ascii_lowercase().replace('_', "-");
-    let closest = builtin::all()
+    let closest = builtin::all_for(protocol)
         .into_iter()
         .map(|scenario| {
             let distance = edit_distance(&wanted, &scenario.name.to_ascii_lowercase());
@@ -564,21 +585,18 @@ pub(crate) fn names_a_path(spec: &str) -> bool {
 /// built-in name.
 fn load_scenario(
     spec: &str,
+    protocol: Protocol,
     connector: ConnectorId,
     id_tag: Option<&str>,
     vars: &[ScenarioVar],
 ) -> Result<Scenario, String> {
-    let id_tag = id_tag
-        .map(IdTag::new)
-        .transpose()
-        .map_err(|e| e.to_string())?;
     let builtin = if names_a_path(spec) {
         None
     } else {
-        builtin::get(spec)
+        builtin::get_for(spec, protocol)
     };
     if builtin.is_none() && !names_a_path(spec) {
-        return Err(unknown_scenario_message(spec));
+        return Err(unknown_scenario_message(spec, protocol));
     }
     let (mut scenario, is_builtin) = match builtin {
         Some(scenario) => (scenario, true),
@@ -587,8 +605,11 @@ fn load_scenario(
             false,
         ),
     };
+    if let Some(error) = protocol_mismatch(&scenario, protocol) {
+        return Err(error);
+    }
     // Built-ins target connector 1; files say what they mean.
-    scenario.retarget(is_builtin.then_some(connector), id_tag.as_ref());
+    retarget_for(&mut scenario, is_builtin.then_some(connector), id_tag)?;
     if let Some((name, _, _)) = vars
         .iter()
         .find(|(name, _, _)| !scenario.uses_variable(name))
@@ -599,6 +620,45 @@ fn load_scenario(
         ));
     }
     Ok(scenario)
+}
+
+/// The error for a scenario written for another OCPP version than the station speaks.
+pub(crate) fn protocol_mismatch(scenario: &Scenario, station: Protocol) -> Option<String> {
+    (scenario.protocol() != station).then(|| {
+        format!(
+            "scenario {} is for OCPP {}; this station speaks {}",
+            kirby_ocpp_tui::text::sanitize(&scenario.name),
+            scenario.protocol().ocpp_version(),
+            station.token()
+        )
+    })
+}
+
+/// Points a scenario at `connector` (the EVSE for OCPP 2.0.1) and `id_tag` (the `id_token`
+/// for OCPP 2.0.1), as far as they are given.
+pub(crate) fn retarget_for(
+    scenario: &mut Scenario,
+    connector: Option<ConnectorId>,
+    id_tag: Option<&str>,
+) -> Result<(), String> {
+    if scenario.protocol() == Protocol::V16 {
+        let id_tag = id_tag
+            .map(IdTag::new)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        scenario.retarget(connector, id_tag.as_ref());
+    } else {
+        if let Some(token) = id_tag {
+            let len = token.chars().count();
+            if !(1..=36).contains(&len) {
+                return Err(format!(
+                    "idToken is {len} characters long, it must be 1 to 36"
+                ));
+            }
+        }
+        scenario.retarget_v201(connector.map(ConnectorId::get), id_tag);
+    }
+    Ok(())
 }
 
 /// SIGINT/SIGTERM streams created once: a signal that arrives while nobody awaits is kept
@@ -680,14 +740,14 @@ pub(crate) async fn stop_station<H: StationLike>(handle: &H, join: JoinHandle<()
 }
 
 /// A running station of either OCPP version. The 1.6 path stays a single variant.
-enum AnyStation {
+pub(crate) enum AnyStation {
     V16(StationHandle, JoinHandle<()>),
     V2(Station2Handle, JoinHandle<()>),
 }
 
 impl AnyStation {
     /// Spawns the station of `config.protocol`, recording to `sink` when given.
-    fn spawn(config: StationConfig, sink: Option<RecordSink>) -> Self {
+    pub(crate) fn spawn(config: StationConfig, sink: Option<RecordSink>) -> Self {
         let clock = Arc::new(SystemClock);
         if config.protocol == Protocol::V16 {
             let (handle, join) = Station::spawn_recorded(config, clock, sink);
@@ -698,7 +758,7 @@ impl AnyStation {
         }
     }
 
-    fn spawn_sink(
+    pub(crate) fn spawn_sink(
         &self,
         json: bool,
         log_file: Option<&Path>,
@@ -710,8 +770,8 @@ impl AnyStation {
         }
     }
 
-    /// Connects, waits for the boot and runs `scenario`. Scenarios exist for 1.6 only.
-    async fn run_scenario(
+    /// Connects, waits for the boot and runs `scenario`.
+    pub(crate) async fn run_scenario(
         &self,
         scenario: &Scenario,
         cancel: &CancelToken,
@@ -720,18 +780,16 @@ impl AnyStation {
         match self {
             Self::V16(handle, _) => connect_and_run(handle, scenario, cancel, overrides, 1).await,
             Self::V2(handle, _) => {
-                let mut link = LinkWatch::new(handle);
-                connect_and_wait_boot(handle, &mut link, cancel).await?;
-                Err(format!(
-                    "scenarios are not available for {} yet",
-                    handle.config().protocol.token()
-                ))
+                connect_and_run_with(handle, cancel, |events| {
+                    run_scenario_subscribed(handle, scenario, cancel, None, overrides, 1, events)
+                })
+                .await
             }
         }
     }
 
     /// Closes the connection and waits for the station to end.
-    async fn stop(self) {
+    pub(crate) async fn stop(self) {
         match self {
             Self::V16(handle, join) => stop_station(&handle, join).await,
             Self::V2(handle, join) => stop_station(&handle, join).await,
@@ -890,6 +948,7 @@ async fn run(
 ) -> ExitCode {
     let scenario = match load_scenario(
         &args.scenario,
+        config.protocol,
         connector,
         args.id_tag.as_deref(),
         &args.vars,
@@ -897,15 +956,6 @@ async fn run(
         Ok(scenario) => scenario,
         Err(error) => return usage_error(&error),
     };
-    // Scenarios are written for OCPP 1.6 (the loader rejects any other `ocpp_version`).
-    if config.protocol != Protocol::V16 {
-        return usage_error(&format!(
-            "scenario {} is for OCPP {}; this station speaks {}",
-            kirby_ocpp_tui::text::sanitize(&scenario.name),
-            kirby_ocpp_core::scenario::OCPP_VERSION,
-            config.protocol.token()
-        ));
-    }
     let outputs = RunOutputs {
         report: args.report.as_deref(),
         junit: args.junit.as_deref(),
@@ -965,6 +1015,7 @@ async fn execute_recorded(
     log_file: Option<&Path>,
     sink: Option<RecordSink>,
 ) -> ExitCode {
+    let protocol = config.protocol;
     let station = AnyStation::spawn(config, sink);
     let sink = match station.spawn_sink(json, log_file, headless::events_on_stdout(json)) {
         Ok(sink) => sink,
@@ -1028,7 +1079,7 @@ async fn execute_recorded(
             source: scenario.source.as_deref(),
             duration_ms: u64::try_from(run_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         };
-        if let Err(error) = write_junit(path, &[suite]) {
+        if let Err(error) = write_junit(path, protocol.ocpp_version(), &[suite]) {
             eprintln!("error: cannot write the JUnit report: {error}");
             write_failed = true;
         }
@@ -1085,17 +1136,32 @@ pub(crate) async fn connect_and_run(
     overrides: &Vars,
     index: u64,
 ) -> Result<ScenarioReport, String> {
+    connect_and_run_with(handle, cancel, |events| {
+        run_scenario_subscribed(handle, scenario, cancel, None, overrides, index, events)
+    })
+    .await
+}
+
+/// Connects any station, waits for the boot and runs the scenario that `run` starts on the
+/// event subscription it is given. The subscription is taken before connecting, so a CSMS
+/// CALL that arrives right after the boot is still seen by `expect_call direction = "in"`.
+pub(crate) async fn connect_and_run_with<H, F, Fut>(
+    handle: &H,
+    cancel: &CancelToken,
+    run: F,
+) -> Result<ScenarioReport, String>
+where
+    H: StationLike,
+    F: FnOnce(tokio::sync::broadcast::Receiver<kirby_ocpp_core::station::Event>) -> Fut,
+    Fut: std::future::Future<Output = ScenarioReport>,
+{
     // Subscribed before connecting: a connection that fails at once must not be missed.
     let mut link = LinkWatch::new(handle);
-    // The scenario's own subscription, also taken before connecting: a CSMS CALL that
-    // arrives right after the boot must still be seen by `expect_call direction = "in"`.
-    let events = handle.subscribe();
+    let events = StationLike::subscribe(handle);
     connect_and_wait_boot(handle, &mut link, cancel).await?;
     // The link can also go away while the scenario runs: end the run with that reason.
     tokio::select! {
-        report = run_scenario_subscribed(handle, scenario, cancel, None, overrides, index, events) => {
-            Ok(report)
-        }
+        report = run(events) => Ok(report),
         dead = link.dead() => Err(format!("connection lost: {dead}")),
     }
 }
@@ -1158,8 +1224,14 @@ pub(crate) fn print_report(report: &ScenarioReport, json: bool, station: Option<
     say(verdict);
 }
 
-pub(crate) fn write_junit(path: &Path, runs: &[JunitRun<'_>]) -> std::io::Result<()> {
-    write_atomic(path, junit_xml_runs(runs).as_bytes())
+/// Writes the JUnit report of `runs`; `ocpp_version` is the station's, for a run that never
+/// produced a report.
+pub(crate) fn write_junit(
+    path: &Path,
+    ocpp_version: &str,
+    runs: &[JunitRun<'_>],
+) -> std::io::Result<()> {
+    write_atomic(path, junit_xml_runs_for(ocpp_version, runs).as_bytes())
 }
 
 pub(crate) fn write_report(path: &Path, report: &ScenarioReport) -> std::io::Result<()> {
@@ -1339,14 +1411,10 @@ mod tests {
     }
 
     #[test]
-    fn fleets_suites_and_replays_are_gated_for_2_x_only() {
+    fn fleets_and_replays_are_gated_for_2_x_only() {
         let suite = Some(Cmd::Suite(SuiteArgs::for_sources(Vec::new())));
         assert_eq!(mode_gate(suite.as_ref(), false, Protocol::V16), None);
-        assert!(
-            mode_gate(suite.as_ref(), false, Protocol::V201)
-                .unwrap()
-                .contains("`suite` is not available for ocpp2.0.1")
-        );
+        assert_eq!(mode_gate(suite.as_ref(), false, Protocol::V201), None);
         assert_eq!(mode_gate(None, true, Protocol::V16), None);
         assert!(
             mode_gate(None, true, Protocol::V201)

@@ -518,7 +518,6 @@ async fn fleet_suite_and_replay_exit_2_with_2_0_1() {
             ],
             "fleet mode",
         ),
-        (vec!["suite", "--all-builtins"], "`suite`"),
         (vec!["replay", &recording], "`replay`"),
     ];
     for (extra, needle) in cases {
@@ -539,6 +538,29 @@ async fn fleet_suite_and_replay_exit_2_with_2_0_1() {
             stderr(&output)
         );
     }
+}
+
+#[test]
+fn a_fleet_suite_exits_2_with_2_0_1() {
+    let text = rejected(
+        &[
+            "--url",
+            URL,
+            "--protocol",
+            "ocpp2.0.1",
+            "--id",
+            "CP-{n}",
+            "--count",
+            "2",
+            "suite",
+            "--all-builtins",
+        ],
+        &[],
+    );
+    assert!(
+        text.contains("`suite`") && text.contains("fleet mode"),
+        "{text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -575,8 +597,15 @@ fn converting_a_2_0_1_recording_exits_2() {
     assert!(!out.exists(), "nothing is written");
 }
 
+const SCENARIO_V16: &str =
+    "name = \"plain\"\ndescription = \"x\"\n\n[[steps]]\naction = \"heartbeat\"\n";
+const SCENARIO_V201: &str = "name = \"plain\"\nocpp_version = \"2.0.1\"\ndescription = \"x\"\n\n[[steps]]\naction = \"heartbeat\"\n";
+
 #[test]
 fn run_refuses_a_scenario_for_another_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let v16 = write(dir.path(), "v16.toml", SCENARIO_V16);
+    let v201 = write(dir.path(), "v201.toml", SCENARIO_V201);
     let text = rejected(
         &[
             "--url",
@@ -585,12 +614,39 @@ fn run_refuses_a_scenario_for_another_version() {
             "ocpp2.0.1",
             "run",
             "--scenario",
-            "charge-session",
+            &v16,
         ],
         &[],
     );
     assert!(
-        text.contains("scenario charge-session is for OCPP 1.6; this station speaks ocpp2.0.1"),
+        text.contains("scenario plain is for OCPP 1.6; this station speaks ocpp2.0.1"),
+        "{text}"
+    );
+    let text = rejected(&["--url", URL, "run", "--scenario", &v201], &[]);
+    assert!(
+        text.contains("scenario plain is for OCPP 2.0.1; this station speaks ocpp1.6"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_built_in_name_resolves_for_the_station_protocol() {
+    // `finish-session` exists for 1.6 only: with 2.0.1 it is an unknown name.
+    let text = rejected(
+        &[
+            "--url",
+            URL,
+            "--protocol",
+            "ocpp2.0.1",
+            "run",
+            "--scenario",
+            "finish-session",
+        ],
+        &[],
+    );
+    assert!(
+        text.contains("no built-in scenario `finish-session`")
+            && text.contains("--protocol ocpp2.0.1"),
         "{text}"
     );
 }

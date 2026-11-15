@@ -1,0 +1,33 @@
+name = "reconnect"
+ocpp_version = "2.0.1"
+description = "Drop the WebSocket, wait until it is down, connect again, wait for an accepted registration and prove the link with a Heartbeat. A plain reconnect does not send a BootNotification again."
+
+[[steps]]
+action = "disconnect"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "disconnected" }
+timeout_ms = 3000
+
+[[steps]]
+action = "connect"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connected" }
+timeout_ms = 8000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 8000
+
+[[steps]]
+action = "heartbeat"
+
+[[steps]]
+action = "expect_call"
+call = "Heartbeat"
+direction = "out"
+timeout_ms = 3000

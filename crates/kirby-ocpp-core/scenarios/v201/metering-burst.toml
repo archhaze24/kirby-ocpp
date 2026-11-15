@@ -1,0 +1,64 @@
+name = "metering-burst"
+ocpp_version = "2.0.1"
+description = "Plug in, start a transaction on EVSE 1 and send three meter samples, checking each Updated TransactionEvent reached the CSMS, then stop the transaction, check the Ended event and unplug."
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+action = "start_tx"
+evse = 1
+id_token = "KIRBY-OCPP-TAG"
+
+[[steps]]
+action = "meter"
+evse = 1
+wh_delta = 250
+
+[[steps]]
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "MeterValuePeriodic" }
+timeout_ms = 3000
+
+[[steps]]
+action = "meter"
+evse = 1
+wh_delta = 500
+
+[[steps]]
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "MeterValuePeriodic" }
+timeout_ms = 3000
+
+[[steps]]
+action = "meter"
+evse = 1
+wh_delta = 1000
+
+[[steps]]
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "MeterValuePeriodic" }
+timeout_ms = 3000
+
+[[steps]]
+action = "stop_tx"
+evse = 1
+reason = "Local"
+
+[[steps]]
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended" }
+timeout_ms = 3000
+
+[[steps]]
+action = "unplug"
+evse = 1

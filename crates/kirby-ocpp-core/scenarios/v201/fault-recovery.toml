@@ -1,0 +1,35 @@
+name = "fault-recovery"
+ocpp_version = "2.0.1"
+description = "Inject a fault on EVSE 1, check the Faulted StatusNotification, then clear the fault and check the connector is Available again."
+
+[[steps]]
+action = "fault"
+evse = 1
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connector_status", evse = 1, connector = 1, status = "Faulted" }
+timeout_ms = 3000
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Faulted" }
+timeout_ms = 3000
+
+[[steps]]
+action = "clear_fault"
+evse = 1
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connector_status", evse = 1, connector = 1, status = "Available" }
+timeout_ms = 3000
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 3000

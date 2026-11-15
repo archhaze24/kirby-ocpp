@@ -1,0 +1,31 @@
+name = "charge-session"
+ocpp_version = "2.0.1"
+description = "Plug the EV in, present a token on EVSE 1 to start a transaction and send a meter sample, checking the Started and Updated TransactionEvents (needs EVSE 1 Available). The transaction keeps running."
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+action = "start_tx"
+evse = 1
+id_token = "KIRBY-OCPP-TAG"
+
+[[steps]]
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started" }
+timeout_ms = 3000
+
+[[steps]]
+action = "meter"
+evse = 1
+wh_delta = 1000
+
+[[steps]]
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Updated", triggerReason = "MeterValuePeriodic" }
+timeout_ms = 3000

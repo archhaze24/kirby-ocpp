@@ -232,6 +232,8 @@ SKIP last-one
 suite: 1/3 scenarios passed, FAILED: blocked-tag, SKIPPED: last-one
 ```
 
+The suite runs the scenarios of the station's OCPP version (`--protocol`): `--all-builtins` adds the built-ins of that version, and a file written for the other version is a usage error that names the file (exit 2). Reports and JUnit files carry the station's version.
+
 `--fail-fast` skips the rest after the first failure. `--count` above 1 is a usage error (exit 2). Options, JSON and JUnit shapes: [scenarios.md](scenarios.md#suite-runs); exit codes: [configuration.md](configuration.md#kirby-ocpp-suite).
 
 ## Recording and replay
@@ -370,7 +372,7 @@ Differences from the 1.6 station:
 * The station boots at start and after a reset, not after every reconnect.
 * A station id that is longer than 48 characters, contains a colon or has characters outside `identifierString` prints a `note:` and is used as given.
 * The terminal UI is not available yet: it prints `note: the terminal UI is not available for ocpp2.0.1 yet; running headless` and runs headless.
-* `--count` above 1, `suite`, `replay` and `scenarios from-recording` of a 2.0.1 recording exit 2. `run --scenario` exits 2 with `scenario NAME is for OCPP 1.6; this station speaks ocpp2.0.1`: scenario files are written for 1.6.
+* `--count` above 1, `replay` and `scenarios from-recording` exit 2. `run` and `suite` work: a scenario written for the other OCPP version exits 2 with `scenario NAME is for OCPP 1.6; this station speaks ocpp2.0.1` (or the reverse). Built-in names resolve for the station's version, `--connector` is the EVSE and `--id-tag` the `id_token` of a built-in; see [scenarios.md](scenarios.md#running-scenarios).
 
 Flags that exist for 1.6 only exit 2 when they are given (by flag, environment variable or configuration file) with `--protocol ocpp2.0.1`:
 

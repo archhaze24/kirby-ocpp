@@ -1,6 +1,6 @@
 //! `kirby-ocpp suite`: several scenarios, each on a fresh station.
 //!
-//! Every scenario gets its own [`Station`] with persistence switched off (`--state-dir` and
+//! Every scenario gets its own station with persistence switched off (`--state-dir` and
 //! `--no-persist` are ignored), so no state leaks from one scenario into the next and nothing
 //! is written to disk. Scenarios run one after another, or `--jobs` at a time; a failed
 //! scenario is run again up to `--retries` times, each attempt on a new station.
@@ -10,24 +10,25 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use kirby_ocpp_core::StationConfig;
 use kirby_ocpp_core::ids::ConnectorId;
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::scenario::{
-    CancelToken, JunitRetries, JunitRun, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, Scenario,
-    ScenarioReport, StepStatus, TOOL_VERSION, Vars, builtin, junit_xml_retried, now_rfc3339,
+    CancelToken, JunitRetries, JunitRun, JunitSuite, SCHEMA_VERSION, Scenario, ScenarioReport,
+    StepStatus, TOOL_VERSION, Vars, builtin, junit_xml_retried_for, now_rfc3339,
 };
-use kirby_ocpp_core::{Station, StationConfig, SystemClock};
 use serde_json::{Value, json};
 
 use crate::cli::SuiteArgs;
 use crate::headless::stdout_line;
 use crate::suite_ci::{self, CiRow, Selection};
 use crate::{
-    EXIT_INTERRUPTED, Shutdown, check_output_paths, connect_and_run, names_a_path, override_vars,
-    print_report, spawn_sink, stop_station, unknown_scenario_message, usage_error, write_atomic,
-    write_junit,
+    AnyStation, EXIT_INTERRUPTED, Shutdown, check_output_paths, names_a_path, override_vars,
+    print_report, protocol_mismatch, retarget_for, unknown_scenario_message, usage_error,
+    write_atomic, write_junit,
 };
 
 /// Built-ins that need a transaction left by an earlier run; they cannot pass on a fresh
@@ -169,14 +170,21 @@ impl Row {
 }
 
 /// Expands the SOURCE arguments into scenarios (files of a directory sorted by name).
-pub(crate) fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<Vec<Entry>, String> {
+/// Built-in names resolve for `protocol`. With `enforce_protocol` a file written for another
+/// OCPP version than `protocol` is an error naming the file; `scenarios validate` accepts any.
+pub(crate) fn load_entries(
+    args: &SuiteArgs,
+    connector: ConnectorId,
+    protocol: Protocol,
+    enforce_protocol: bool,
+) -> Result<Vec<Entry>, String> {
     let mut entries: Vec<Entry> = Vec::new();
     let add_builtin = |scenario: Scenario, entries: &mut Vec<Entry>| {
         let source = format!("built-in {}", scenario.name);
         if entries.iter().all(|e| e.source != source) {
             let mut scenario = scenario;
             // Built-ins target connector 1; files say what they mean.
-            scenario.retarget(Some(connector), None);
+            let _ = retarget_for(&mut scenario, Some(connector), None);
             entries.push(Entry { scenario, source });
         }
     };
@@ -186,7 +194,7 @@ pub(crate) fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<V
     for spec in &args.sources {
         // An existing path, or text that looks like one, beats a built-in of the same name.
         if !names_a_path(spec)
-            && let Some(scenario) = builtin::get(spec)
+            && let Some(scenario) = builtin::get_for(spec, protocol)
         {
             add_builtin(scenario, &mut entries);
             continue;
@@ -204,7 +212,9 @@ pub(crate) fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<V
                 return Err(format!("`{spec}` is not a regular file or a directory"));
             }
             // Not a built-in, not path-like and not on disk: most likely a mistyped name.
-            Err(_) if !names_a_path(spec) => return Err(unknown_scenario_message(spec)),
+            Err(_) if !names_a_path(spec) => {
+                return Err(unknown_scenario_message(spec, protocol));
+            }
             // Any other missing file is reported by `Scenario::load`.
             _ => vec![path.to_path_buf()],
         };
@@ -213,8 +223,10 @@ pub(crate) fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<V
             if !seen_files.insert(canonical) {
                 continue;
             }
-            let mut scenario = Scenario::load(&file).map_err(|e| e.to_string())?;
-            scenario.retarget(None, None);
+            let scenario = Scenario::load(&file).map_err(|e| e.to_string())?;
+            if enforce_protocol && let Some(error) = protocol_mismatch(&scenario, protocol) {
+                return Err(format!("{}: {error}", file.display()));
+            }
             entries.push(Entry {
                 scenario,
                 source: file.display().to_string(),
@@ -222,7 +234,7 @@ pub(crate) fn load_entries(args: &SuiteArgs, connector: ConnectorId) -> Result<V
         }
     }
     if args.all_builtins {
-        for scenario in builtin::all() {
+        for scenario in builtin::all_for(protocol) {
             if STATEFUL_BUILTINS.contains(&scenario.name.as_str()) {
                 continue;
             }
@@ -313,14 +325,14 @@ async fn run_one(
     config: &StationConfig,
     entry: &Entry,
 ) -> Result<Outcome, ExitCode> {
-    let (handle, join) = Station::spawn(config.clone(), Arc::new(SystemClock));
+    let station = AnyStation::spawn(config.clone(), None);
     // Events go to stdout only in JSON mode or with `-v` (like `run`); the human form is the summary.
     let stdout = crate::headless::events_on_stdout(ctx.json);
     let sink = if stdout || ctx.log_file.is_some() {
-        match spawn_sink(&handle, ctx.json, ctx.log_file, stdout) {
+        match station.spawn_sink(ctx.json, ctx.log_file, stdout) {
             Ok(sink) => Some(sink),
             Err(code) => {
-                stop_station(&handle, join).await;
+                station.stop().await;
                 return Err(code);
             }
         }
@@ -337,14 +349,14 @@ async fn run_one(
         })
     };
     let result = tokio::select! {
-        result = connect_and_run(&handle, &entry.scenario, &cancel, ctx.overrides, 1) => result,
+        result = station.run_scenario(&entry.scenario, &cancel, ctx.overrides) => result,
         () = ctx.abort.cancelled() => {
             cancel.cancel();
             Err("interrupted".to_owned())
         }
     };
     timer.abort();
-    stop_station(&handle, join).await;
+    station.stop().await;
     if let Some(sink) = sink {
         sink.finish().await;
     }
@@ -464,7 +476,7 @@ pub async fn run(
             "--github-annotations prints workflow commands to stdout and cannot be combined with --json",
         );
     }
-    let entries = match load_entries(args, connector) {
+    let entries = match load_entries(args, connector, config.protocol, true) {
         Ok(entries) => entries,
         Err(error) => return usage_error(&error),
     };
@@ -561,7 +573,8 @@ pub async fn run(
         .collect();
     let total_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
 
-    let summary = summary_json(&rows, total_ms, &started_at, args.retries);
+    let ocpp_version = config.protocol.ocpp_version();
+    let summary = summary_json(&rows, ocpp_version, total_ms, &started_at, args.retries);
     let ci_rows: Vec<CiRow> = rows.iter().map(Row::ci).collect();
     let mut write_failed = false;
     {
@@ -576,7 +589,7 @@ pub async fn run(
             }
         }
         if let Some(path) = &args.junit
-            && let Err(error) = write_suite_junit(path, &rows, args.retries)
+            && let Err(error) = write_suite_junit(path, ocpp_version, &rows, args.retries)
         {
             eprintln!("error: cannot write the JUnit report: {error}");
             write_failed = true;
@@ -652,7 +665,12 @@ fn write_summary_md(args: &SuiteArgs, markdown: &str) -> bool {
 }
 
 /// Writes the JUnit report: with `--retries` the retried suites carry their earlier attempts.
-fn write_suite_junit(path: &Path, rows: &[Row], retries: u32) -> std::io::Result<()> {
+fn write_suite_junit(
+    path: &Path,
+    ocpp_version: &str,
+    rows: &[Row],
+    retries: u32,
+) -> std::io::Result<()> {
     fn suite_of(row: &Row) -> Option<JunitRun<'_>> {
         let outcome = match &row.outcome {
             Outcome::Done(report) => Ok(report),
@@ -671,7 +689,7 @@ fn write_suite_junit(path: &Path, rows: &[Row], retries: u32) -> std::io::Result
     }
     if retries == 0 {
         let suites: Vec<JunitRun<'_>> = rows.iter().filter_map(suite_of).collect();
-        return write_junit(path, &suites);
+        return write_junit(path, ocpp_version, &suites);
     }
     let earlier: Vec<Vec<Result<&ScenarioReport, &str>>> = rows
         .iter()
@@ -699,7 +717,7 @@ fn write_suite_junit(path: &Path, rows: &[Row], retries: u32) -> std::io::Result
             ))
         })
         .collect();
-    write_atomic(path, junit_xml_retried(&runs).as_bytes())
+    write_atomic(path, junit_xml_retried_for(ocpp_version, &runs).as_bytes())
 }
 
 /// A duration for the PASS line: milliseconds below one second, else seconds with one decimal.
@@ -786,7 +804,13 @@ fn attempt_results(row: &Row) -> Vec<Value> {
         .collect()
 }
 
-fn summary_json(rows: &[Row], duration_ms: u64, started_at: &str, retries: u32) -> Value {
+fn summary_json(
+    rows: &[Row],
+    ocpp_version: &str,
+    duration_ms: u64,
+    started_at: &str,
+    retries: u32,
+) -> Value {
     let passed_count = rows.iter().filter(|r| r.status() == "passed").count();
     let failed = names_with(rows, Row::failed);
     let failed_names = names_with(rows, |r| r.status() == "failed");
@@ -798,7 +822,7 @@ fn summary_json(rows: &[Row], duration_ms: u64, started_at: &str, retries: u32) 
         .map(|row| {
             let ocpp_version = match &row.outcome {
                 Outcome::Done(report) => report.ocpp_version.as_str(),
-                _ => OCPP_VERSION,
+                _ => ocpp_version,
             };
             let mut value = json!({
                 "name": row.name,
@@ -843,7 +867,7 @@ fn summary_json(rows: &[Row], duration_ms: u64, started_at: &str, retries: u32) 
     json!({
         "type": "suite_report",
         "schema": SCHEMA_VERSION,
-        "ocpp_version": OCPP_VERSION,
+        "ocpp_version": ocpp_version,
         "tool_version": TOOL_VERSION,
         "started_at": started_at,
         "status": status,
@@ -910,7 +934,7 @@ mod tests {
             row("e", Outcome::Error("no boot".to_owned())),
             row("s", Outcome::Skipped),
         ];
-        let summary = summary_json(&rows, 5, "2026-01-01T00:00:00Z", 0);
+        let summary = summary_json(&rows, "1.6", 5, "2026-01-01T00:00:00Z", 0);
         let names = |key: &str| -> Vec<String> {
             summary[key]
                 .as_array()
@@ -971,7 +995,7 @@ mod tests {
         assert_eq!(flaky.ci().message.as_deref(), Some("no boot"));
 
         let rows = vec![flaky, stubborn, plain, skipped];
-        let summary = summary_json(&rows, 5, "2026-01-01T00:00:00Z", 2);
+        let summary = summary_json(&rows, "1.6", 5, "2026-01-01T00:00:00Z", 2);
         assert_eq!(summary["flaky_names"], json!(["w"]));
         assert_eq!(summary["retries"], 2);
         assert_eq!(

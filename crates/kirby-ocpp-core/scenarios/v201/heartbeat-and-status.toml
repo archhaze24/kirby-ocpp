@@ -1,0 +1,46 @@
+name = "heartbeat-and-status"
+ocpp_version = "2.0.1"
+description = "Send a Heartbeat, send the StatusNotification of EVSE 1 again, plug and unplug the EV, and check each StatusNotification the CSMS received (needs EVSE 1 Available)."
+
+[[steps]]
+action = "heartbeat"
+
+[[steps]]
+action = "expect_call"
+call = "Heartbeat"
+direction = "out"
+timeout_ms = 3000
+
+[[steps]]
+action = "status_notification"
+evse = 1
+connector = 1
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 3000
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Occupied" }
+timeout_ms = 3000
+
+[[steps]]
+action = "unplug"
+evse = 1
+
+[[steps]]
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 3000
