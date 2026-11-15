@@ -171,6 +171,8 @@ impl Station2Actor {
             security_profile_of(&actor.config, actor.basic_auth_password().is_some());
         actor.dm.security_profile = actor.state.security_profile;
         actor.refresh_variables();
+        // A04.FR.01: the start of the station is its boot; reported once the CSMS accepts it.
+        actor.raise_security_event("StartupOfTheDevice");
         let _ = actor.snapshot_tx.send_replace(actor.state.clone());
         (actor, snapshot_rx)
     }

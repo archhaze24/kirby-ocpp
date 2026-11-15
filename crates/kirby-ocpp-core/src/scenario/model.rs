@@ -651,12 +651,12 @@ impl Scenario {
     }
 
     fn parse(text: &str, max_steps: u64) -> Result<Self, Located> {
-        super::precheck_scenario_contract(text).map_err(Located::plain)?;
+        super::precheck_contract(text).map_err(Located::plain)?;
         let raw: RawScenario = toml::from_str(text).map_err(|e| Located {
             message: super::with_suggestion(e.message().to_owned()),
             offset: e.span().map(|span| span.start),
         })?;
-        let declared = super::check_scenario_contract(raw.ocpp_version.as_deref(), raw.schema)
+        let declared = super::check_contract_keys(raw.ocpp_version.as_deref(), raw.schema)
             .map_err(Located::plain)?;
         // The grammar a file is read in follows its declared version; there is no fallback
         // between the two, so every 1.6 message stays as it was.
@@ -1921,10 +1921,17 @@ call = "Heartbeat"
     }
 
     #[test]
-    fn csms_scripts_accept_1_6_and_2_0_1() {
+    fn contract_keys_accept_1_6_and_2_0_1() {
         use crate::scenario::check_contract_keys;
-        assert_eq!(check_contract_keys(Some("1.6"), Some(1)), Ok(()));
-        assert_eq!(check_contract_keys(Some("2.0.1"), None), Ok(()));
+        assert_eq!(
+            check_contract_keys(Some("1.6"), Some(1)),
+            Ok(Some(Protocol::V16))
+        );
+        assert_eq!(
+            check_contract_keys(Some("2.0.1"), None),
+            Ok(Some(Protocol::V201))
+        );
+        assert_eq!(check_contract_keys(None, None), Ok(None));
         assert!(
             check_contract_keys(Some("2.1"), None)
                 .unwrap_err()

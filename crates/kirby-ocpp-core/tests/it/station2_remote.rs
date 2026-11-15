@@ -161,6 +161,23 @@ impl Rig {
         self.calls(action)
     }
 
+    /// Waits for a security event of `kind` and returns its payload. Events of other types
+    /// are skipped: a reset right after the boot can make the station send the startup event
+    /// again, because the link closed before its answer arrived.
+    pub async fn wait_security_event(&self, kind: &str) -> Value {
+        self.csms
+            .wait_for_call_count_after(
+                0,
+                "SecurityEventNotification",
+                1,
+                |payload| payload["type"] == kind,
+                STEP,
+            )
+            .await
+            .expect("the security event arrives")
+            .remove(0)
+    }
+
     /// The `TransactionEvent` payloads with `eventType`.
     pub fn events_of(&self, kind: &str) -> Vec<Value> {
         self.calls("TransactionEvent")
@@ -591,9 +608,9 @@ async fn trigger_response_goes_out_before_the_triggered_call() {
         .iter()
         .position(|r| is_result(r, Direction::Out, "TriggerMessage"))
         .expect("the response was sent");
-    assert_eq!(
-        result + 1,
-        seen.len() - 1,
+    // The answer to the security event of the startup may still arrive in between.
+    assert!(
+        result < seen.len() - 1,
         "the CALL follows the response: {seen:#?}"
     );
     rig.stop().await;
@@ -660,6 +677,9 @@ async fn an_idle_station_reboots_for_both_kinds_of_reset() {
         assert_eq!(boots[0]["reason"], "PowerUp");
         assert_eq!(boots[1]["reason"], "RemoteReset", "{kind}");
         assert_eq!(rig.csms.connections(), 2, "{kind}: one new connection");
+        // A04.FR.01: the reboot is a critical security event.
+        let event = rig.wait_security_event("ResetOrReboot").await;
+        assert!(event["timestamp"].is_string(), "{kind}");
         rig.stop().await;
     }
 }
@@ -696,6 +716,7 @@ async fn an_immediate_reset_ends_the_transaction_before_the_reboot() {
     assert_eq!(ended["transactionInfo"]["stoppedReason"], "ImmediateReset");
     let boots = rig.wait_calls("BootNotification", 2).await;
     assert_eq!(boots[1]["reason"], "RemoteReset");
+    rig.wait_security_event("ResetOrReboot").await;
     let order: Vec<String> = rig
         .csms
         .received()
@@ -734,8 +755,10 @@ async fn an_on_idle_reset_waits_for_the_transaction() {
     .await;
     let ended = rig.wait_event("Ended").await;
     assert_ne!(ended["transactionInfo"]["stoppedReason"], "ImmediateReset");
+    // TC_B_21_CS: a reset that was answered `Scheduled` boots as `ScheduledReset`.
     let boots = rig.wait_calls("BootNotification", 2).await;
-    assert_eq!(boots[1]["reason"], "RemoteReset");
+    assert_eq!(boots[1]["reason"], "ScheduledReset");
+    rig.wait_security_event("ResetOrReboot").await;
     rig.stop().await;
 }
 

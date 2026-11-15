@@ -34,14 +34,14 @@ Functional blocks of OCPP 2.0.1 Part 2 (the numbers are the use-case letters):
 | Action | Status | Notes |
 | --- | --- | --- |
 | Authorize | full | Online; offline decision order: `AuthCtrlr.LocalAuthorizeOffline` with the cache, then `OfflineTxForUnknownIdEnabled`. Tokens of type `Central` and `NoAuthorization` need no `Authorize`. |
-| BootNotification | full | Sent at power-up and after a reset, not after every reconnect. `Pending` and `Rejected` are repeated after the interval of the answer (or after `max(1 s, HeartbeatInterval)` when that is 0). The reason is `PowerUp`, `RemoteReset`, `Triggered` or the reason of the last boot that was not accepted. |
+| BootNotification | full | Sent at power-up and after a reset, not after every reconnect. `Pending` and `Rejected` are repeated after the interval of the answer (or after `max(1 s, HeartbeatInterval)` when that is 0). The reason is `PowerUp`, `RemoteReset`, `ScheduledReset`, `Triggered`, `Unknown` (the `boot` command) or the reason of the last boot that was not accepted. |
 | DataTransfer | full | Free-form payload. |
 | FirmwareStatusNotification | partial | Sent only with status `Idle`, as the answer to `TriggerMessage`. |
 | Heartbeat | full | Fixed period (see deviations); the interval of an accepted boot replaces `HeartbeatInterval` when positive (B01.FR.04). |
 | LogStatusNotification | partial | Sent only with status `Idle`, as the answer to `TriggerMessage`. |
 | MeterValues | full (simulated meter) | Sent outside a transaction on `TriggerMessage` (`AlignedDataCtrlr.Measurands`) and when the meter is advanced by command; never queued offline. Values inside a transaction travel in `TransactionEvent`. |
 | NotifyReport | full | Chunked answer to `GetBaseReport`, one chunk per `ItemsPerMessage`/`BytesPerMessage` limit; a failed chunk abandons the report. |
-| SecurityEventNotification | full | Sent on command only; the station raises no security events by itself. |
+| SecurityEventNotification | full | Sent on command, and by the station itself for two critical events (A04.FR.01): `StartupOfTheDevice` once per station start and `ResetOrReboot` after every reboot caused by a `Reset`, each after the boot was accepted. A plain reconnect raises none. An event that was cut short by a closed link is sent again after the reconnect (A04.FR.02), so the CSMS may see it twice; events are not persisted, so one still undelivered when the process stops is lost, and so is one whose CALL timed out or was answered with an error. |
 | StatusNotification | full | One per connector; all connectors after an accepted boot, and after a reconnect without a boot (all of them when the offline period exceeded `OfflineThreshold`, otherwise those that changed). |
 | TransactionEvent | partial | Start and stop points, `seqNo`, offline queue and retries, see [Transactions](#transactions). |
 | the other 14 | not implemented | `ClearedChargingLimit`, `Get15118EVCertificate`, `GetCertificateStatus`, `NotifyChargingLimit`, `NotifyCustomerInformation`, `NotifyDisplayMessages`, `NotifyEVChargingNeeds`, `NotifyEVChargingSchedule`, `NotifyEvent`, `NotifyMonitoringReport`, `PublishFirmwareStatusNotification`, `ReportChargingProfiles`, `ReservationStatusUpdate`, `SignCertificate` |
@@ -72,7 +72,7 @@ Every CALL is answered exactly once. An action without a handler gets CALLERROR 
 `Reset` replies first; the work follows on a timer.
 - `Immediate`: every running transaction ends with trigger `ResetCommand` and reason `ImmediateReset` (B12.FR.04). The `Ended` events get the call timeout to reach the CSMS; after that they stay queued and go out after the reboot (B12.FR.05).
 - `OnIdle`: answered `Scheduled` while a transaction runs (`Accepted` otherwise); the reset continues once the last transaction has ended on its own (B12.FR.03).
-- The simulated reboot closes the link and opens it again; the next `BootNotification` carries `RemoteReset`. A request that arrives while a reset is in progress joins it.
+- The simulated reboot closes the link and opens it again; the next `BootNotification` carries `RemoteReset`, or `ScheduledReset` when the reset was answered `Scheduled`. Once that boot is accepted the station sends the security event `ResetOrReboot`. A request that arrives while a reset is in progress joins it.
 
 ## Device model
 
@@ -84,7 +84,7 @@ Components and variables the station reports and accepts. Only the `Actual` attr
 | `EVSE` | `AvailabilityState`, `Available`, `Power`, `SupplyPhases`, `AllowReset` | `Power` is live (W); `AllowReset` is `false` |
 | `Connector` | `AvailabilityState`, `Available`, `ConnectorType`, `SupplyPhases` | `ConnectorType` is `cType2` |
 | `ClockCtrlr` | `DateTime` (live), `TimeSource` | |
-| `OCPPCommCtrlr` | `HeartbeatInterval`, `MessageTimeout` (`Default`), `MessageAttempts` and `MessageAttemptInterval` (`TransactionEvent`), `OfflineThreshold`, `WebSocketPingInterval`, `ResetRetries`, `UnlockOnEVSideDisconnect`, `FileTransferProtocols`, `NetworkConfigurationPriority`, `NetworkProfileConnectionAttempts`, `QueueAllMessages` | `ResetRetries`, `UnlockOnEVSideDisconnect`, `QueueAllMessages` and the two network variables are stored and reported without further effect |
+| `OCPPCommCtrlr` | `HeartbeatInterval`, `MessageTimeout` (`Default`), `MessageAttempts` and `MessageAttemptInterval` (`TransactionEvent`), `OfflineThreshold`, `WebSocketPingInterval`, `ResetRetries`, `UnlockOnEVSideDisconnect`, `FileTransferProtocols`, `NetworkConfigurationPriority`, `NetworkProfileConnectionAttempts`, `QueueAllMessages` | `MessageTimeout` is read-only and follows `--call-timeout-ms`; `ResetRetries`, `UnlockOnEVSideDisconnect`, `QueueAllMessages` and the two network variables are stored and reported without further effect |
 | `AuthCtrlr` | `Enabled`, `AuthorizeRemoteStart`, `LocalAuthorizeOffline`, `LocalPreAuthorize`, `OfflineTxForUnknownIdEnabled` | |
 | `AuthCacheCtrlr` | `Enabled`, `LifeTime`, `Storage` | `Storage` is read-only |
 | `TxCtrlr` | `TxStartPoint`, `TxStopPoint`, `EVConnectionTimeOut`, `StopTxOnEVSideDisconnect`, `StopTxOnInvalidId` | |
@@ -165,11 +165,11 @@ The twelve scenarios in `conformance/v201/` exercise the station through a scrip
 | --- | --- | --- | --- |
 | `boot-pending` | `TC_B_02_CS` | all steps | The connector state is checked through `StatusNotification` only (the station sends no `NotifyEvent` for it); the content of the report is not inspected |
 | `boot-rejected` | `TC_B_03_CS`, `TC_B_30_CS` | all steps | That the station sends nothing while rejected is not asserted; the `SecurityError` code of the refused command is checked in the Rust test, the script checks that it is a CALLERROR |
-| `reset` | `TC_B_20_CS`, `TC_B_22_CS` | all steps | The `Ended` event is checked for trigger, reason and charging state, not for the absence of `idToken`; the connector is `Occupied` after the immediate reset because the cable stays plugged in |
+| `reset` | `TC_B_20_CS`, `TC_B_21_CS`, `TC_B_22_CS` | all steps | The `Ended` event is checked for trigger, reason and charging state, not for the absence of `idToken`; the connector is `Occupied` after the immediate reset because the cable stays plugged in. For `TC_B_21_CS` the transaction is stopped locally once the CSMS script has seen `Scheduled`, and the station reports the connector through `StatusNotification` only |
 | `remote-start-stop` | `TC_F_01_CS`, `TC_F_02_CS`, `TC_F_08_CS`, `TC_F_09_CS` | the remote start (cable first and remote start first), the remote stop and the rejected stop | The `EnergyTransferStarted` and `StopAuthorized` sub-steps of the reusable states are reduced to the `TransactionEvent` of the start (trigger `RemoteStart`) and of the stop (`Ended`, trigger `RemoteStop`, reason `Remote`); the charging state is not asserted |
 | `unlock-connector` | `TC_F_06_CS`, `TC_F_07_CS`, `TC_F_10_CS` | all steps | None |
 | `trigger-message` | `TC_F_11_CS`, `TC_F_13_CS`, `TC_F_20_CS`, `TC_F_23_CS`, `TC_F_24_CS`, `TC_F_26_CS`, `TC_F_27_CS` | all steps | The connector state is checked through `StatusNotification` only; the `meterValue` of the `TC_F_13_CS` event is not inspected |
-| `device-model` | `TC_B_06_CS`, `TC_B_07_CS`, `TC_B_09_CS`, `TC_B_10_CS`, `TC_B_32_CS` to `TC_B_37_CS`, `TC_B_12_CS`, `TC_B_13_CS` | all steps for the variable cases; the base report cases only in part | A base report is checked for the answer and for the first `NotifyReport` of its `requestId`, not for its items. The read-only case uses `SecurityCtrlr.SecurityProfile` instead of `TC_B_39_CS`, which sets `OCPPCommCtrlr.MessageTimeout`: the station accepts that value |
+| `device-model` | `TC_B_06_CS`, `TC_B_07_CS`, `TC_B_09_CS`, `TC_B_10_CS`, `TC_B_32_CS` to `TC_B_37_CS`, `TC_B_39_CS`, `TC_B_12_CS`, `TC_B_13_CS` | all steps for the variable cases; the base report cases only in part | A base report is checked for the answer and for the first `NotifyReport` of its `requestId`, not for its items |
 | `change-availability` | `TC_G_03_CS`, `TC_G_04_CS`, `TC_G_05_CS`, `TC_G_07_CS`, `TC_G_09_CS`, `TC_G_11_CS`, `TC_G_14_CS`, and by title `TC_G_06_CS`, `TC_G_08_CS`, `TC_G_10_CS` | the commands, the answers and the `StatusNotification` of each change | The connector state is checked through `StatusNotification` only. With a transaction, the connector is reported `Unavailable` once the transaction ended; the later cable and parking states of `TC_G_11_CS` and `TC_G_14_CS` are not stepped through. With a cable plugged in the connector is `Occupied`, not `Available`, after the EVSE is operative again |
 | `transaction-status` | `TC_E_28_CS`, `TC_E_30_CS`, `TC_E_32_CS`, `TC_E_34_CS`; `TC_E_29_CS`, `TC_E_31_CS`, `TC_E_33_CS` in part | all steps of the first four | The three cases with a queued message build the queue from a delivery the CSMS refuses with a CALLERROR (the event waits for its retry), not from a closed connection: the flags `ongoingIndicator` and `messagesInQueue` are checked, the `offline` flag and the delivery after reconnecting are not |
 | `transaction-retry` | `TC_E_50_CS`, `TC_E_51_CS` | the number of attempts | The wait between attempts is not asserted (a scenario sees no timestamps); the station sends the event `MessageAttempts` times and no more, which the script proves by the unused refusal |
@@ -180,8 +180,6 @@ Test cases listed by title (`TC_G_06_CS`, `TC_G_08_CS`, `TC_G_10_CS`) follow the
 
 Not in the family:
 
-- `TC_B_21_CS` (reset on idle with a transaction): the station reboots with boot reason `RemoteReset` where the test case expects `ScheduledReset`, and sends no `SecurityEventNotification` after the reboot.
-- `TC_B_39_CS`: see the `device-model` row.
 - `TC_E_41_CS`, `TC_E_42_CS`: the CSMS does not answer, so each attempt waits for the call timeout (30 s by default); `TC_E_50_CS` and `TC_E_51_CS` cover the same retry rule with CALLERROR answers.
 - Authorization cache and Local Authorization List cases (parts C and D), custom reports (`GetReport`), certificates, firmware, monitoring, reservation, smart charging and display messages: the station answers `NotSupported` or does not send the message.
 

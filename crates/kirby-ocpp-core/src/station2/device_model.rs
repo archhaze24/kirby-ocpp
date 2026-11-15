@@ -314,12 +314,12 @@ pub(crate) static TABLE: &[VarSpec] = &[
         DataType::SequenceList,
         Fixed("Heartbeat"),
     )
-    .opts("Heartbeat,NTP,GPS,RealTimeClock,MobileNetwork,RadioTimeTransmitter"),
+    .opts("Heartbeat,NTP,GPS,RealTimeClock,MobileNetwork,RadioTimeTransmitter")
+    .rw(),
     // OCPPCommCtrlr
     int(OCPP, "HeartbeatInterval", Heartbeat).rw().u("s").lo(1),
     int(OCPP, "MessageTimeout", CallTimeout)
         .at("Default")
-        .rw()
         .u("s")
         .lo(1)
         .hi(86_400),
@@ -343,9 +343,9 @@ pub(crate) static TABLE: &[VarSpec] = &[
         "HTTPS",
         "FTP,FTPS,HTTP,HTTPS,SFTP",
     ),
-    text(OCPP, "NetworkConfigurationPriority", "0"),
-    int(OCPP, "NetworkProfileConnectionAttempts", Fixed("1")),
-    flag(OCPP, "QueueAllMessages", "false"),
+    text(OCPP, "NetworkConfigurationPriority", "0").rw(),
+    int(OCPP, "NetworkProfileConnectionAttempts", Fixed("1")).rw(),
+    flag(OCPP, "QueueAllMessages", "false").rw(),
     // AuthCtrlr
     flag(AUTH, "Enabled", "true").rw(),
     flag(AUTH, "AuthorizeRemoteStart", "true").rw(),
@@ -425,7 +425,7 @@ pub(crate) static TABLE: &[VarSpec] = &[
         .lo(1),
     // SecurityCtrlr
     int(SECURITY, "SecurityProfile", Fixed("0")).hi(3),
-    text(SECURITY, "OrganizationName", "kirby-ocpp"),
+    text(SECURITY, "OrganizationName", "kirby-ocpp").rw(),
     int(SECURITY, "CertificateEntries", Fixed("0")).live(LiveVar::CertificateEntries),
     text(SECURITY, "BasicAuthPassword", "").wo(),
 ];
@@ -1794,11 +1794,16 @@ mod tests {
             ("TxCtrlr", "TxStopPoint", "Authorized,Authorized"),
             ("SampledDataCtrlr", "TxUpdatedMeasurands", "Nonsense"),
             ("DeviceDataCtrlr", "ItemsPerMessage", "5"),
-            ("ClockCtrlr", "TimeSource", "NTP"),
+            ("OCPPCommCtrlr", "MessageTimeout", "30"),
+            ("SecurityCtrlr", "SecurityProfile", "1"),
             ("EVSE", "AllowReset", "true"),
         ];
         for (component, variable, value) in cases {
-            let instance = (variable == "ItemsPerMessage").then_some("GetReport");
+            let instance = match variable {
+                "ItemsPerMessage" => Some("GetReport"),
+                "MessageTimeout" => Some("Default"),
+                _ => None,
+            };
             let result = set(
                 &mut dm,
                 comp(component),
@@ -1832,6 +1837,22 @@ mod tests {
                 .as_deref(),
             Some("ReadOnly")
         );
+        assert!(dm.persist().values.is_empty());
+    }
+
+    #[test]
+    fn message_timeout_is_read_only_and_keeps_its_value() {
+        let mut dm = model();
+        let before = dm.uint(OCPP, "MessageTimeout", Some("Default"));
+        let result = set(
+            &mut dm,
+            comp("OCPPCommCtrlr"),
+            var("MessageTimeout", Some("Default")),
+            &(before + 5).to_string(),
+            None,
+        );
+        assert_eq!(result.attribute_status, SetVariableStatus::Rejected);
+        assert_eq!(dm.uint(OCPP, "MessageTimeout", Some("Default")), before);
         assert!(dm.persist().values.is_empty());
     }
 
@@ -1897,7 +1918,7 @@ mod tests {
             ("OCPPCommCtrlr.MessageAttempts.TransactionEvent", "5"),
             ("OCPPCommCtrlr.ResetRetries", "bad"),
             ("OCPPCommCtrlr.NoSuchVariable", "1"),
-            ("ClockCtrlr.TimeSource", "NTP"),
+            ("OCPPCommCtrlr.MessageTimeout.Default", "99"),
             ("ClockCtrlr.DateTime", "2020-01-01T00:00:00Z"),
             ("SecurityCtrlr.BasicAuthPassword", SECRET),
             ("EVSE.AllowReset", "true"),
@@ -1911,7 +1932,10 @@ mod tests {
             5
         );
         assert_eq!(dm.uint(OCPP, "ResetRetries", None), 3);
-        assert_eq!(dm.station_text(CLOCK, "TimeSource", None), "Heartbeat");
+        assert_eq!(
+            dm.uint(OCPP, "MessageTimeout", Some("Default")),
+            u32::try_from(StationConfig::default().call_timeout().as_secs()).unwrap()
+        );
         assert_eq!(dm.password(), None);
         assert_eq!(dm.persist().values.len(), 2);
     }

@@ -14,7 +14,8 @@
 //! of user commands), `hooks` (timer and loop hooks), `handlers/` (CSMS-originated CALLs),
 //! `device_model`, `evse` and `status` (EVSEs, connectors, `StatusNotification`),
 //! `transactions` and `tx_queue` (transactions and the outbound event queue),
-//! `authorization`, `remote`, `reset`, `scripted` (scenario replies) and `persistence`.
+//! `authorization`, `remote`, `reset`, `security_events` (startup and reboot events), `scripted`
+//! (scenario replies) and `persistence`.
 
 mod actor;
 mod authorization;
@@ -31,6 +32,7 @@ mod persistence;
 mod remote;
 mod reset;
 mod scripted;
+mod security_events;
 mod snapshot;
 mod status;
 mod transactions;

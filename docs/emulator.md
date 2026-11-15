@@ -365,6 +365,8 @@ What the 2.0.1 station does:
 * Authorization: `Authorize`, an authorization cache (1000 entries, `AuthCacheCtrlr.LifeTime`), `LocalAuthorizeOffline`, `LocalPreAuthorize` and `OfflineTxForUnknownIdEnabled`. Tokens of type `Central` and `NoAuthorization` need no `Authorize`. There is no local authorization list.
 * CSMS commands: `RequestStartTransaction`, `RequestStopTransaction`, `TriggerMessage`, `Reset` (station level; `OnIdle` waits for running transactions), `ChangeAvailability`, `UnlockConnector`, `ClearCache`, `DataTransfer` and `GetTransactionStatus`. Other defined actions are answered with `NotSupported`; a `chargingProfile` in `RequestStartTransaction` is ignored with a warning.
 * A transaction that was running when the process stopped is ended with `stoppedReason` `PowerLoss` after the next accepted boot; queued events survive a restart.
+* A `Reset` of the station closes the link and boots again: the `BootNotification` carries `RemoteReset`, or `ScheduledReset` when the reset was answered `Scheduled` (`OnIdle` with a transaction running). A reset with an EVSE is rejected.
+* Security events: after the first accepted boot the station sends `SecurityEventNotification` with `StartupOfTheDevice`, and after the boot that follows a reset `ResetOrReboot`. A reconnect without a reboot sends neither. An event that the CSMS could not receive because the link closed is sent again after the reconnect; events do not survive a restart.
 
 Differences from the 1.6 station:
 

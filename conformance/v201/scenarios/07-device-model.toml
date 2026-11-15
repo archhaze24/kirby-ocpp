@@ -95,7 +95,7 @@ name = "SetVariables for a read-only variable arrives"
 action = "expect_call"
 call = "SetVariables"
 direction = "in"
-match = { setVariableData = [{ variable = { name = "SecurityProfile" } }] }
+match = { setVariableData = [{ component = { name = "OCPPCommCtrlr" }, variable = { name = "MessageTimeout" } }] }
 
 [[steps]]
 name = "GetBaseReport (ConfigurationInventory) arrives"

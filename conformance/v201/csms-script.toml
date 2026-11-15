@@ -241,6 +241,29 @@ payload = { type = "Immediate" }
 expect_status = "Accepted"
 
 [[steps]]
+name = "reset: the second transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reset-scheduled" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reset: Reset OnIdle is scheduled while the transaction runs"
+action = "call"
+station = "${station}"
+call = "Reset"
+payload = { type = "OnIdle" }
+expect_status = "Scheduled"
+
+[[steps]]
+name = "reset: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:reset-scheduled" }
+
+[[steps]]
 name = "reset: scenario over"
 action = "wait_call"
 call = "DataTransfer"
@@ -593,8 +616,8 @@ name = "device-model: SetVariables for a read-only variable"
 action = "call"
 station = "${station}"
 call = "SetVariables"
-payload = { setVariableData = [{ attributeValue = "1", component = { name = "SecurityCtrlr" }, variable = { name = "SecurityProfile" } }] }
-expect_payload = { setVariableResult = [{ attributeStatus = "Rejected", component = { name = "SecurityCtrlr" }, variable = { name = "SecurityProfile" } }] }
+payload = { setVariableData = [{ attributeValue = "30", component = { name = "OCPPCommCtrlr" }, variable = { name = "MessageTimeout", instance = "Default" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Rejected", component = { name = "OCPPCommCtrlr" }, variable = { name = "MessageTimeout", instance = "Default" } }] }
 
 [[steps]]
 name = "device-model: GetBaseReport with ConfigurationInventory"

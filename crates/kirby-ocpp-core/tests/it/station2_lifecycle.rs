@@ -15,7 +15,6 @@ use kirby_ocpp_core::{
 };
 use kirby_ocpp_testkit::{ErrorCode, Frame, Reply};
 use serde_json::{Value, json};
-use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -65,12 +64,15 @@ async fn stop(station: &Station2Handle, task: JoinHandle<()>) {
         .expect("the station task does not panic");
 }
 
-/// A URL nothing listens on.
-async fn dead_url() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a free port");
-    let addr = listener.local_addr().expect("a local address");
-    drop(listener);
-    format!("ws://{addr}/ocpp")
+/// A URL nothing listens on. The port stays bound (without `listen`) while the guard lives, so
+/// connections are refused and a parallel test cannot take the port over.
+fn dead_url() -> (String, tokio::net::TcpSocket) {
+    let socket = tokio::net::TcpSocket::new_v4().expect("a socket");
+    socket
+        .bind("127.0.0.1:0".parse().expect("an address"))
+        .expect("a free port");
+    let addr = socket.local_addr().expect("a local address");
+    (format!("ws://{addr}/ocpp"), socket)
 }
 
 /// Waits for a log line containing `needle`.
@@ -183,12 +185,15 @@ async fn an_accepted_boot_sends_the_statuses_before_the_first_heartbeat() {
         .iter()
         .position(|action| action == "Heartbeat")
         .expect("a heartbeat was sent");
-    // B01.FR.05: the statuses follow the boot, the heartbeat timer starts after them.
+    // B01.FR.05: the statuses follow the boot, the heartbeat timer starts after them. The
+    // security event of the startup may sit between them (A04.FR.01).
     assert_eq!(actions[0], "BootNotification");
     let between = &actions[1..first_heartbeat];
     assert!(!between.is_empty(), "{actions:?}");
     assert!(
-        between.iter().all(|action| action == "StatusNotification"),
+        between
+            .iter()
+            .all(|action| action == "StatusNotification" || action == "SecurityEventNotification"),
         "{actions:?}"
     );
     stop(&station, task).await;
@@ -456,8 +461,7 @@ async fn disconnect_clears_the_registration_and_the_next_connect_boots() {
 
 #[tokio::test]
 async fn backoff_doubles_and_stops_after_max_attempts() {
-    let url = dead_url().await;
-    let csms = v201_csms().await;
+    let (url, _port) = dead_url();
     let (station, task) = spawn_with(
         &url,
         |config| {
@@ -486,13 +490,12 @@ async fn backoff_doubles_and_stops_after_max_attempts() {
         snapshot.reconnect_stopped.as_deref(),
         Some("after 3 failed attempt(s)")
     );
-    drop(csms);
     stop(&station, task).await;
 }
 
 #[tokio::test]
 async fn disconnect_and_connect_reset_the_stopped_reason() {
-    let url = dead_url().await;
+    let (url, _port) = dead_url();
     let (station, task) = spawn_with(
         &url,
         |config| {
@@ -575,11 +578,101 @@ async fn security_events_are_sent_once_registered() {
         .await
         .unwrap();
     assert!(matches!(outcome, Outcome2::Response { .. }));
-    let events = calls_of(&csms, "SecurityEventNotification");
+    // The station reports its own startup too; only the command's event is checked here.
+    let events: Vec<Value> = calls_of(&csms, "SecurityEventNotification")
+        .into_iter()
+        .filter(|event| event["type"] == "StartupOfDevice")
+        .collect();
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["type"], "StartupOfDevice");
     assert_eq!(events[0]["techInfo"], "test");
     assert!(events[0]["timestamp"].is_string());
+    stop(&station, task).await;
+}
+
+/// The `type` of every `SecurityEventNotification` the CSMS has recorded, oldest first.
+fn security_event_types(csms: &kirby_ocpp_testkit::MockCsms) -> Vec<String> {
+    calls_of(csms, "SecurityEventNotification")
+        .into_iter()
+        .map(|event| event["type"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+#[tokio::test]
+async fn the_startup_is_reported_once_after_the_boot_was_accepted() {
+    let csms = v201_csms().await;
+    let (station, task) = spawn_v201(&csms);
+    station.connect().await.unwrap();
+    wait_booted(&station).await;
+    let event = csms
+        .wait_for_call("SecurityEventNotification", STEP)
+        .await
+        .unwrap();
+    assert_eq!(event["type"], "StartupOfTheDevice");
+    assert!(event["timestamp"].is_string());
+    assert!(event.get("techInfo").is_none());
+    let actions: Vec<String> = csms
+        .received()
+        .into_iter()
+        .map(|call| call.action)
+        .collect();
+    let position = |name: &str| actions.iter().position(|action| action == name);
+    assert!(
+        position("BootNotification") < position("SecurityEventNotification"),
+        "{actions:?}"
+    );
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn a_reconnect_without_a_reboot_does_not_report_the_startup_again() {
+    let csms = v201_csms().await;
+    let (station, task) = spawn_v201(&csms);
+    station.connect().await.unwrap();
+    wait_booted(&station).await;
+    csms.wait_for_call("SecurityEventNotification", STEP)
+        .await
+        .unwrap();
+    // The answer to the event reaches the station before the answer to the heartbeat; a link
+    // that closes earlier would make the station send the event again.
+    station.send(Command2::Heartbeat).await.unwrap();
+    let mark = csms.mark();
+
+    csms.drop_connection().unwrap();
+    csms.wait_for_connection_count(2, STEP).await.unwrap();
+    // The resume sends its security events before the heartbeat.
+    csms.wait_for_call_after(mark, "Heartbeat", |_| true, STEP)
+        .await
+        .unwrap();
+    assert_eq!(security_event_types(&csms), ["StartupOfTheDevice"]);
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn the_startup_waits_for_an_accepted_boot() {
+    let accept = Arc::new(AtomicBool::new(false));
+    let csms = v201_csms().await;
+    let flag = Arc::clone(&accept);
+    csms.respond("BootNotification", move |_| {
+        if flag.load(Ordering::SeqCst) {
+            boot_reply("Accepted", 5)
+        } else {
+            boot_reply("Pending", 1)
+        }
+    });
+    let (station, task) = spawn_v201(&csms);
+    station.connect().await.unwrap();
+    wait_snapshot(&station, "a pending registration", |s| {
+        s.registration == Some(RegistrationStatus::Pending)
+    })
+    .await;
+    assert_eq!(calls_of(&csms, "SecurityEventNotification").len(), 0);
+    accept.store(true, Ordering::SeqCst);
+    wait_booted(&station).await;
+    let event = csms
+        .wait_for_call("SecurityEventNotification", STEP)
+        .await
+        .unwrap();
+    assert_eq!(event["type"], "StartupOfTheDevice");
     stop(&station, task).await;
 }
 

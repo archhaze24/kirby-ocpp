@@ -49,6 +49,7 @@ use super::actor::{Internal2, Station2Actor, TimerKey2};
 use super::calls::call_failure;
 use super::command::Outcome2;
 use super::reset::ResetPhase;
+use super::security_events::PendingSecurityEvent;
 use super::types::{Origin2, Reply2};
 use crate::config::StationConfig;
 use crate::error::CallError;
@@ -93,6 +94,8 @@ pub(crate) struct Link2 {
     offline_since: Option<DateTime<Utc>>,
     /// Reason of the last boot that was not accepted; the retry repeats it.
     retry_reason: Option<BootReason>,
+    /// Security events raised by the station that the CSMS has not received yet.
+    pub(super) security_outbox: Vec<PendingSecurityEvent>,
 }
 
 impl Link2 {
@@ -110,6 +113,7 @@ impl Link2 {
                 .expect("bundled OCPP 2.0.1 schemas compile"),
             offline_since: None,
             retry_reason: None,
+            security_outbox: Vec::new(),
         }
     }
 }
@@ -361,6 +365,7 @@ impl Station2Actor {
         if rebooting && let Some(plan) = self.reset.take() {
             // The reboot is over once its boot goes out; retries keep the reason.
             self.link.retry_reason = Some(plan.reason);
+            self.raise_security_event("ResetOrReboot");
             self.log(LogLevel::Info, "reset finished".to_owned());
         }
         let reason = self.link.retry_reason.unwrap_or(BootReason::PowerUp);
@@ -377,6 +382,7 @@ impl Station2Actor {
         });
         self.send_all_statuses(since);
         self.flush_queue();
+        self.flush_security_events();
         self.send_heartbeat(Origin2::Station, None);
         self.arm_heartbeat();
     }
@@ -591,6 +597,8 @@ impl Station2Actor {
         // heartbeat timer.
         self.send_all_statuses(None);
         self.flush_queue();
+        // A04.FR.01: the startup or reboot of the station is a critical security event.
+        self.flush_security_events();
         self.arm_heartbeat();
     }
 

@@ -48,8 +48,7 @@ use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::scenario::vars::{self, Vars};
 use kirby_ocpp_core::scenario::{
     ScenarioReport, StepReport, StepStatus, check_contract_keys, check_reserved_keys, line_col,
-    now_rfc3339, parse_contract_version, precheck_contract, read_scenario_file, redact_params,
-    redacted, with_suggestion,
+    now_rfc3339, precheck_contract, read_scenario_file, redact_params, redacted, with_suggestion,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -285,8 +284,7 @@ impl Script {
             message: with_suggestion(e.message().to_owned()),
             offset: e.span().map(|span| span.start),
         })?;
-        check_contract_keys(raw.ocpp_version.as_deref(), raw.schema).map_err(Located::plain)?;
-        let protocol = parse_contract_version(raw.ocpp_version.as_deref())
+        let protocol = check_contract_keys(raw.ocpp_version.as_deref(), raw.schema)
             .map_err(Located::plain)?
             .unwrap_or(Protocol::V16);
         if raw.name.trim().is_empty() {

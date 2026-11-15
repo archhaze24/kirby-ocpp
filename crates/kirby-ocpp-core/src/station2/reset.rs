@@ -10,8 +10,10 @@
 //!    queued and are sent after the reboot (B12.FR.05). Without a registered link there is
 //!    nothing to wait for.
 //! 3. `Rebooting`: the link is closed and opened again, and the next `BootNotification`
-//!    carries `RemoteReset`. The link drops the plan when it sends that boot, or when the
-//!    link is disconnected by command (the next boot is a power-up then).
+//!    carries `RemoteReset`, or `ScheduledReset` when the reset was answered `Scheduled`
+//!    (TC_B_21_CS, TC_B_22_CS). The link drops the plan when it sends that boot, or when the
+//!    link is disconnected by command (the next boot is a power-up then). Once the boot is
+//!    accepted the station reports the security event `ResetOrReboot` (A04.FR.01).
 
 use std::time::Duration;
 
@@ -70,15 +72,21 @@ impl Station2Actor {
             ResetKind::Immediate => ResetPhase::EndingTransactions,
             ResetKind::OnIdle => ResetPhase::WaitingForIdle,
         };
+        // A reset answered `Scheduled` runs later on its own: its boot is a `ScheduledReset`.
+        let scheduled = kind == ResetKind::OnIdle && busy;
         self.reset = Some(ResetPlan {
             kind,
             phase,
-            reason: BootReason::RemoteReset,
+            reason: if scheduled {
+                BootReason::ScheduledReset
+            } else {
+                BootReason::RemoteReset
+            },
         });
         self.auth.reset_deadline = None;
         self.auth.reset_ended = false;
         self.timers.set(TimerKey2::ResetDelay, Duration::ZERO);
-        if kind == ResetKind::OnIdle && busy {
+        if scheduled {
             ResetStatus::Scheduled
         } else {
             ResetStatus::Accepted

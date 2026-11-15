@@ -379,9 +379,11 @@ async fn station_side_steps_change_state_and_send_notifications() {
     )
     .await;
     assert!(report.passed, "{report:#?}");
-    assert_eq!(
-        rig.calls("SecurityEventNotification")[0]["type"],
-        "SettingSystemTime"
+    // The first event is the startup of the station; the step's event follows it.
+    assert!(
+        rig.calls("SecurityEventNotification")
+            .iter()
+            .any(|event| event["type"] == "SettingSystemTime"),
     );
     assert_eq!(
         rig.calls("DataTransfer")[0]["data"],

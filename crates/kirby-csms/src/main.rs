@@ -23,7 +23,9 @@ use kirby_csms_core::{
     CsmsConfig, CsmsEvent, CsmsHandle, CsmsServer, server_config_from_pem,
     server_config_with_client_ca,
 };
-use kirby_ocpp_core::scenario::{JunitSuite, ScenarioReport, StepStatus, junit_xml};
+use kirby_ocpp_core::scenario::{
+    JunitRun, JunitSuite, ScenarioReport, StepStatus, junit_xml, junit_xml_runs_for,
+};
 use tokio::sync::broadcast;
 
 use crate::cli::{Cli, PrintFormat};
@@ -654,12 +656,17 @@ async fn run_script(
         // Like `kirby-ocpp run`: SIGTERM (a CI cancel) still leaves a JUnit file saying why;
         // Ctrl-C is a deliberate abort and leaves nothing.
         if !interrupted && let Some(path) = &cli.junit {
-            let suite = JunitSuite {
-                station: None,
-                scenario: &script.name,
-                outcome: Err("interrupted"),
+            let run = JunitRun {
+                suite: JunitSuite {
+                    station: None,
+                    scenario: &script.name,
+                    outcome: Err("interrupted"),
+                },
+                source: script.source.as_deref(),
+                duration_ms: 0,
             };
-            if let Err(error) = std::fs::write(path, junit_xml(&[suite])) {
+            let xml = junit_xml_runs_for(script.protocol.ocpp_version(), &[run]);
+            if let Err(error) = std::fs::write(path, xml) {
                 eprintln!("error: cannot write the JUnit report: {error}");
             }
         }

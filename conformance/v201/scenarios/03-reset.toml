@@ -1,10 +1,11 @@
 name = "conformance-v201-reset"
 ocpp_version = "2.0.1"
-description = "Reset OnIdle on an idle station, then Reset Immediate with a running transaction: the station reboots, registers with reason RemoteReset and reports its connector again; the immediate reset ends the transaction first"
+description = "Reset OnIdle on an idle station, Reset Immediate with a running transaction, then Reset OnIdle with a running transaction: the station reboots, registers with reason RemoteReset (ScheduledReset for the reset that waited for the transaction), reports its connector and the security event ResetOrReboot; the immediate reset ends the transaction first"
 tags = ["conformance", "ocpp2.0.1"]
 
 # The CSMS script sends Reset (OnIdle) after the ready message and Reset (Immediate) after
-# the second one, once the transaction runs. Both must be answered Accepted.
+# the second one, once the transaction runs; both must be answered Accepted. After the third
+# one, with a transaction running, Reset (OnIdle) must be answered Scheduled.
 
 [[steps]]
 name = "tell the CSMS the station is ready"
@@ -46,6 +47,14 @@ action = "expect_call"
 call = "StatusNotification"
 direction = "out"
 match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the station reports the reboot as a security event"
+action = "expect_call"
+call = "SecurityEventNotification"
+direction = "out"
+match = { type = "ResetOrReboot" }
 timeout_ms = 5000
 
 [[steps]]
@@ -109,8 +118,97 @@ match = { evseId = 1, connectorId = 1, connectorStatus = "Occupied" }
 timeout_ms = 5000
 
 [[steps]]
+name = "the station reports the reboot as a security event"
+action = "expect_call"
+call = "SecurityEventNotification"
+direction = "out"
+match = { type = "ResetOrReboot" }
+timeout_ms = 5000
+
+[[steps]]
 action = "wait_for"
 condition = { kind = "tx_idle", evse = 1 }
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connected" }
+
+# Reset OnIdle with a running transaction (TC_B_21_CS): answered Scheduled, the station
+# reboots once the transaction has ended and boots with reason ScheduledReset.
+
+[[steps]]
+action = "start_tx"
+evse = 1
+id_token = "CONF-TAG"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the second transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reset-scheduled"
+
+[[steps]]
+name = "Reset (OnIdle) arrives while the transaction runs"
+action = "expect_call"
+call = "Reset"
+direction = "in"
+match = { type = "OnIdle" }
+
+# The CSMS script sends "go" once the Reset was answered, so the transaction ends after the
+# station scheduled the reset.
+[[steps]]
+name = "the Reset was answered"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:reset-scheduled" }
+
+[[steps]]
+name = "the transaction ends on its own"
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "the Ended event is sent before the reboot"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the station boots again with the scheduled reset reason"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+match = { reason = "ScheduledReset" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the connector is still occupied by the cable"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Occupied" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the station reports the reboot as a security event"
+action = "expect_call"
+call = "SecurityEventNotification"
+direction = "out"
+match = { type = "ResetOrReboot" }
+timeout_ms = 5000
 
 [[steps]]
 action = "wait_for"

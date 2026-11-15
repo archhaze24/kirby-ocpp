@@ -108,19 +108,12 @@ fn check_schema_key(schema: Option<i64>) -> Result<(), String> {
     Ok(())
 }
 
-/// Checks the optional `ocpp_version` and `schema` keys of a CSMS script file. Scripts are
-/// protocol-neutral (raw payloads), so `"1.6"` and `"2.0.1"` are both accepted; the declared
-/// version is read with [`parse_contract_version`].
+/// Checks the optional `ocpp_version` and `schema` keys of a scenario or CSMS script file and
+/// returns the declared protocol, if any (see [`parse_contract_version`]).
 ///
 /// # Errors
-/// A message for any other version, or for a `schema` other than 1.
-pub fn check_contract_keys(ocpp_version: Option<&str>, schema: Option<i64>) -> Result<(), String> {
-    parse_contract_version(ocpp_version)?;
-    check_schema_key(schema)
-}
-
-/// [`check_contract_keys`] for scenario files: the declared protocol, if any.
-pub(crate) fn check_scenario_contract(
+/// A message for an unsupported version, or for a `schema` other than 1.
+pub fn check_contract_keys(
     ocpp_version: Option<&str>,
     schema: Option<i64>,
 ) -> Result<Option<crate::ocpp::Protocol>, String> {
@@ -129,20 +122,15 @@ pub(crate) fn check_scenario_contract(
     Ok(protocol)
 }
 
-/// Checks the version keys of a CSMS script file before the file is parsed in full, so a file
-/// written for a later version reports the version problem and not "unknown field". Text that
-/// is not valid TOML is left to the real parser.
+/// Checks the version keys of a scenario or CSMS script file before the file is parsed in
+/// full, so a file written for a later version reports the version problem and not "unknown
+/// field". Text that is not valid TOML is left to the real parser.
 ///
 /// # Errors
 /// A wrong value type, an unsupported `schema` or an unsupported `ocpp_version`.
 pub fn precheck_contract(text: &str) -> Result<(), String> {
-    precheck_with(text, check_contract_keys)
-}
-
-/// [`precheck_contract`] for scenario files (`"2.0.1"` is a valid version there).
-pub(crate) fn precheck_scenario_contract(text: &str) -> Result<(), String> {
     precheck_with(text, |version, schema| {
-        check_scenario_contract(version, schema).map(drop)
+        check_contract_keys(version, schema).map(drop)
     })
 }
 

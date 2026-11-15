@@ -1694,11 +1694,25 @@ async fn unread_stdout_does_not_stall_the_log_file_or_the_shutdown() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sigterm_during_a_script_writes_the_junit_report() {
+    sigterm_during_a_script("", "ocpp1.6.never").await;
+}
+
+/// The interrupted report names the version the script declares.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sigterm_during_a_2_0_1_script_names_2_0_1_in_the_junit_report() {
+    sigterm_during_a_script("ocpp_version = \"2.0.1\"\n", "ocpp2.0.1.never").await;
+}
+
+#[cfg(unix)]
+async fn sigterm_during_a_script(header: &str, classname: &str) {
     let dir = tempfile::tempdir().unwrap();
     let junit = dir.path().join("junit.xml");
     let csms = script_run(
         dir.path(),
-        "name = \"never\"\n[[steps]]\naction = \"wait_station\"\nstation = \"NOBODY\"\n",
+        &format!(
+            "name = \"never\"\n{header}[[steps]]\naction = \"wait_station\"\nstation = \"NOBODY\"\n"
+        ),
         &["--junit", junit.to_str().unwrap(), "--timeout", "120"],
     );
     // A booted station proves the script is running (and listening for the signal).
@@ -1715,7 +1729,7 @@ async fn sigterm_during_a_script_writes_the_junit_report() {
     assert_eq!(code, 1, "{stderr}");
     let xml = std::fs::read_to_string(&junit).expect("junit written");
     assert!(
-        xml.contains("interrupted") && xml.contains("never"),
+        xml.contains("interrupted") && xml.contains(&format!("classname=\"{classname}\"")),
         "{xml}"
     );
     let _ = booted.shutdown().await;
