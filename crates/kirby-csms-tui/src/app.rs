@@ -6,8 +6,7 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use chrono::{DateTime, Utc};
 use kirby_csms_core::Direction as CsmsDir;
 use kirby_csms_core::{
-    CsmsEvent, DisconnectReason, Frame, FrameEntry, StationInfo, StationState, TransactionStatus,
-    event_frame,
+    CsmsEvent, DisconnectReason, Frame, FrameEntry, Scope, StationInfo, StationState, event_frame,
 };
 use kirby_ocpp_core::station::{Direction, Event, FrameRecord, LogLevel, LogRecord};
 use kirby_ocpp_core::timefmt::TimeMode;
@@ -38,6 +37,7 @@ const KEY_SEP: char = '\u{1f}';
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Stations,
+    Details,
     Log,
 }
 
@@ -137,11 +137,7 @@ impl Summary {
     fn apply(&mut self, state: &StationState) {
         self.vendor = state.boot.as_ref().map(|b| b.vendor.clone());
         self.model = state.boot.as_ref().map(|b| b.model.clone());
-        self.active_tx = state
-            .transactions
-            .iter()
-            .filter(|t| t.status == TransactionStatus::Active)
-            .count();
+        self.active_tx = state.active_transaction_count();
     }
 }
 
@@ -225,6 +221,7 @@ pub struct App {
     pub info: Option<StationInfo>,
     /// Protocol state of the selected station.
     pub state: Option<StationState>,
+    pub transaction_selection: usize,
     pub focus: Focus,
     pub mode: Mode,
     pub view: LogView,
@@ -366,6 +363,11 @@ pub enum Effect {
         payload: serde_json::Value,
         station: Option<String>,
     },
+    RespondScoped {
+        action: String,
+        payload: serde_json::Value,
+        scope: Scope,
+    },
     /// Fault the next `times` occurrences of `action` (of `station` only, when set).
     Inject {
         action: String,
@@ -373,6 +375,13 @@ pub enum Effect {
         times: usize,
         payload: serde_json::Value,
         station: Option<String>,
+    },
+    InjectScoped {
+        action: String,
+        kind: FaultKind,
+        times: usize,
+        payload: serde_json::Value,
+        scope: Scope,
     },
     RemoveRule(String),
     /// Remove the rule of one station (`None`: a global rule that names a protocol).
@@ -397,6 +406,7 @@ impl App {
             selected: None,
             info: None,
             state: None,
+            transaction_selection: 0,
             focus: Focus::Stations,
             mode: Mode::Normal,
             view: LogView::Station,
@@ -567,6 +577,7 @@ impl App {
             return;
         }
         self.selected.clone_from(&id);
+        self.transaction_selection = 0;
         self.info = None;
         self.state = None;
         self.reset_station_log();
@@ -715,6 +726,27 @@ impl App {
             ),
             None => format!("{ts}{station} {}", entry.pretty()),
         }
+    }
+
+    /// Opens the detail popup for a transaction, newest first.
+    pub fn open_transaction_detail(&mut self, index: usize) {
+        let Some(tx) = self
+            .state
+            .as_ref()
+            .and_then(|s| s.v2.as_ref())
+            .and_then(|v| v.transactions.iter().rev().nth(index))
+        else {
+            return;
+        };
+        let Ok(json) = serde_json::to_string_pretty(tx) else {
+            return;
+        };
+        self.mode = Mode::Detail(Detail {
+            title: "Transaction".to_owned(),
+            copy: tx.id.clone(),
+            lines: json.lines().map(kirby_ocpp_tui::text::sanitize).collect(),
+            scroll: 0,
+        });
     }
 
     /// Opens the detail popup for the selected log row.
@@ -870,14 +902,14 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                     app.state = Some(*state);
                 }
             }
-            if let Some((id, info)) = info
-                && app.selected.as_deref() == Some(id.as_str())
-            {
-                app.info = info.map(|b| *b);
-                if let Some(protocol) = app.info.as_ref().map(|i| i.subprotocol.clone())
+            if let Some((id, info)) = info {
+                if let Some(protocol) = info.as_ref().map(|i| i.subprotocol.clone())
                     && let Some(s) = app.summary_mut(&id)
                 {
                     s.protocol = protocol;
+                }
+                if app.selected.as_deref() == Some(id.as_str()) {
+                    app.info = info.map(|b| *b);
                 }
             }
         }
@@ -937,6 +969,10 @@ fn tick(app: &mut App, now: DateTime<Utc>, fx: &mut Vec<Effect>) {
 fn on_event(app: &mut App, event: CsmsEvent, fx: &mut Vec<Effect>) {
     match event {
         CsmsEvent::Connected { station } => {
+            fx.push(Effect::Refresh {
+                states: Vec::new(),
+                info: Some(station.clone()),
+            });
             if !app.ensure_station(&station, true)
                 && let Some(s) = app.summary_mut(&station)
             {

@@ -1,16 +1,30 @@
 //! The action registry against the palette and the forms: nothing is listed in one place
 //! only, and every form agrees with the spec it belongs to.
 
+#![allow(
+    clippy::assert_is_empty,
+    reason = "test fixtures read better field by field"
+)]
+
 use std::collections::BTreeSet;
 
 use chrono::Utc;
-use kirby_csms_core::ACTIONS_PROTOCOL;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kirby_csms_core::registry::{self, ActionSpec, FieldType};
+use kirby_csms_core::{
+    ACTIONS_PROTOCOL, Counters2, SeqTracker, StationInfo, StationState, StationState2,
+    TransactionStatus, Tx2Record,
+};
+use kirby_ocpp_core::ocpp::v2::messages::TriggerReason;
+use kirby_ocpp_core::ocpp::{PayloadKind, Protocol, SchemaRegistry};
 use kirby_ocpp_tui::text::TextInput;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::actions::{ActionId, CATALOG, ScopedRule};
+use crate::app::{App, Effect, Mode, Msg, update};
+use crate::command::{CmdOutcome, Command};
 use crate::form::{Form, StopChoice, Submitted};
+use crate::tests::{app_with, info, press};
 
 /// Registered actions that have no palette entry (the raw call reaches them).
 const NO_PALETTE: &[&str] = &["CancelReservation", "GetLocalListVersion"];
@@ -239,4 +253,835 @@ fn the_remove_rule_form_lists_station_rules_next_to_global_ones() {
             action: "Reset".to_owned()
         })
     );
+}
+
+// ---- OCPP 2.0.1 stations ----------------------------------------------------------------
+
+const V201: &str = "ocpp2.0.1";
+/// A transaction id of 36 characters, as a station makes them.
+const TX_ID: &str = "0b9c5bd8-6f0e-4f8e-9a52-0c9a4d1c7e11";
+
+fn table201() -> &'static registry::ProtocolActions {
+    registry::protocol_actions(V201).expect("the 2.0.1 table")
+}
+
+fn schemas201() -> std::sync::Arc<SchemaRegistry> {
+    SchemaRegistry::for_protocol(Protocol::V201).expect("2.0.1 schemas")
+}
+
+fn running_tx(id: &str, token: &str) -> Tx2Record {
+    Tx2Record {
+        id: id.to_owned(),
+        evse: Some(1),
+        connector: Some(1),
+        id_token: Some(token.to_owned()),
+        id_token_type: None,
+        id_token_status: None,
+        status: TransactionStatus::Active,
+        charging_state: None,
+        remote_start_id: None,
+        reservation_id: None,
+        trigger_reason: TriggerReason::RemoteStart,
+        started_at: Utc::now(),
+        stopped_at: None,
+        stopped_reason: None,
+        time_spent_charging: None,
+        energy_wh: None,
+        power_w: None,
+        meter_start_wh: None,
+        meter_stop_wh: None,
+        last_meter_at: None,
+        seq: SeqTracker::default(),
+    }
+}
+
+/// An app whose selected station CP-1 speaks `subprotocol`, with the given running
+/// transactions of a 2.0.1 session.
+fn station_with(subprotocol: &str, transactions: Vec<Tx2Record>) -> App {
+    let (mut app, _) = app_with(&["CP-1", "CP-2"]);
+    let state = StationState {
+        v2: Some(Box::new(StationState2 {
+            protocol: V201.to_owned(),
+            boot_reason: None,
+            evses: std::collections::BTreeMap::new(),
+            transactions,
+            meters: std::collections::BTreeMap::new(),
+            counters: Counters2::default(),
+            last_report: None,
+        })),
+        ..StationState::default()
+    };
+    update(
+        &mut app,
+        Msg::Loaded {
+            id: "CP-1".into(),
+            history: vec![],
+            info: Some(Box::new(StationInfo {
+                subprotocol: Some(subprotocol.to_owned()),
+                ..info("CP-1", true)
+            })),
+            state: Some(Box::new(state)),
+        },
+    );
+    app
+}
+
+fn station201() -> App {
+    station_with(V201, vec![running_tx(TX_ID, "TAG1")])
+}
+
+#[test]
+fn transaction_detail_and_search_key_follow_focus() {
+    let mut app = station201();
+    press(&mut app, KeyCode::Right);
+    assert_eq!(app.focus, crate::app::Focus::Details);
+    press(&mut app, KeyCode::Enter);
+    let Mode::Detail(detail) = &app.mode else {
+        panic!("transaction detail")
+    };
+    assert_eq!(detail.copy, TX_ID);
+    press(&mut app, KeyCode::Esc);
+    press(&mut app, KeyCode::Right);
+    press(&mut app, KeyCode::Char('s'));
+    assert!(matches!(app.mode, Mode::Input(_)));
+    app.mode = Mode::Normal;
+    app.focus = crate::app::Focus::Stations;
+    press(&mut app, KeyCode::Char('s'));
+    assert!(matches!(app.mode, Mode::Form(_)));
+}
+
+/// Runs the table entry `name` and returns the form it opens.
+fn open(app: &mut App, name: &str) -> Form {
+    let index = table201()
+        .csms_actions
+        .iter()
+        .position(|spec| spec.name == name)
+        .unwrap_or_else(|| panic!("{name} is not in the table"));
+    let mut fx = Vec::new();
+    app.mode = Mode::Normal;
+    app.run_action(ActionId::Call(index), &mut fx);
+    match std::mem::replace(&mut app.mode, Mode::Normal) {
+        Mode::Form(form) => *form,
+        _ => panic!("{name} opened no form: {:?}", app.notice),
+    }
+}
+
+fn set(form: &mut Form, name: &str, text: &str) {
+    let field = form
+        .fields
+        .iter_mut()
+        .find(|f| f.spec.is_some_and(|s| s.name == name))
+        .unwrap_or_else(|| panic!("no field {name}"));
+    field.input = TextInput::new(text);
+}
+
+fn sent(form: &mut Form) -> (String, Value) {
+    match form.submit() {
+        Some(Submitted::Send(Command::Raw { action, payload })) => (action, payload),
+        other => panic!("the form did not submit ({other:?}): {:?}", form.error),
+    }
+}
+
+fn notice_text(app: &App) -> String {
+    app.notice
+        .as_ref()
+        .map(|n| n.text.clone())
+        .unwrap_or_default()
+}
+
+/// Input for the required fields that have no default, by field name.
+fn typed_input(action: &str) -> Vec<(&'static str, &'static str)> {
+    match action {
+        "RequestStartTransaction" => vec![("idToken.idToken", "TAG1")],
+        "DataTransfer" => vec![("vendorId", "vendor")],
+        "UnlockConnector" => vec![("evseId", "1"), ("connectorId", "1")],
+        "GetVariables" => vec![(
+            "getVariableData",
+            r#"[{"component":{"name":"ChargingStation"},"variable":{"name":"Model"}}]"#,
+        )],
+        "SetVariables" => vec![(
+            "setVariableData",
+            r#"[{"component":{"name":"ChargingStation"},"variable":{"name":"Model"},"attributeValue":"x"}]"#,
+        )],
+        _ => Vec::new(),
+    }
+}
+
+/// The schema node `node` with a local `$ref` followed.
+fn resolved<'a>(root: &'a Value, node: &'a Value) -> &'a Value {
+    match node.get("$ref").and_then(Value::as_str) {
+        Some(reference) => reference
+            .strip_prefix("#/definitions/")
+            .and_then(|key| root.get("definitions")?.get(key))
+            .expect("local definition"),
+        None => node,
+    }
+}
+
+/// The smallest value that satisfies `node`: the required properties only.
+fn minimal(root: &Value, node: &Value) -> Value {
+    let node = resolved(root, node);
+    if let Some(first) = node
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|e| e.first())
+    {
+        return first.clone();
+    }
+    let size = |key: &str| node.get(key).and_then(Value::as_u64).unwrap_or(0);
+    match node.get("type").and_then(Value::as_str) {
+        Some("object") => {
+            let mut object = serde_json::Map::new();
+            let required = node.get("required").and_then(Value::as_array);
+            for key in required.into_iter().flatten().filter_map(Value::as_str) {
+                if let Some(child) = node.get("properties").and_then(|p| p.get(key)) {
+                    object.insert(key.to_owned(), minimal(root, child));
+                }
+            }
+            Value::Object(object)
+        }
+        Some("array") => {
+            let item = node.get("items").map_or(Value::Null, |i| minimal(root, i));
+            let n = usize::try_from(size("minItems").max(1)).unwrap_or(1);
+            Value::Array(vec![item; n])
+        }
+        Some("integer" | "number") => {
+            Value::from(node.get("minimum").and_then(Value::as_i64).unwrap_or(0))
+        }
+        Some("boolean") => Value::Bool(false),
+        Some("string") if node.get("format").and_then(Value::as_str) == Some("date-time") => {
+            Value::String("2026-01-01T00:00:00Z".to_owned())
+        }
+        Some("string") => {
+            let n = usize::try_from(size("minLength").max(1)).unwrap_or(1);
+            Value::String("a".repeat(n))
+        }
+        _ => Value::String("x".to_owned()),
+    }
+}
+
+fn minimal_request(action: &str) -> Value {
+    let registry = schemas201();
+    let source = registry
+        .schema_source(action, PayloadKind::Request)
+        .expect("request schema");
+    let root: Value = serde_json::from_str(source).expect("schema is JSON");
+    minimal(&root, &root)
+}
+
+#[test]
+fn the_2_0_1_hotkeys_follow_the_table() {
+    let app = station201();
+    let table = table201();
+    let keys = [
+        ("Reset", 'R'),
+        ("TriggerMessage", 'T'),
+        ("UnlockConnector", 'u'),
+        ("ChangeAvailability", 'A'),
+        ("ClearCache", 'C'),
+        ("DataTransfer", 'D'),
+        ("RequestStartTransaction", 't'),
+        ("RequestStopTransaction", 'x'),
+        ("GetVariables", 'g'),
+        ("SetVariables", 'c'),
+        ("GetBaseReport", 'b'),
+        ("GetTransactionStatus", 's'),
+    ];
+    for (name, key) in keys {
+        let Some(ActionId::Call(i)) = app.action_for_key(key) else {
+            panic!("{key} is not a table entry");
+        };
+        assert_eq!(table.csms_actions[i].name, name, "key {key}");
+    }
+    // no other entry of the table has a hotkey, and no key is used twice
+    let catalog = app.catalog();
+    let mut used = BTreeSet::new();
+    for def in &catalog {
+        if let (Some(key), Some(name)) = (def.key, def.ocpp) {
+            assert!(
+                keys.contains(&(name, key)),
+                "unexpected hotkey {key} for {name}"
+            );
+        }
+        if let Some(key) = def.key {
+            assert!(used.insert(key), "{key} is used twice");
+        }
+    }
+}
+
+#[test]
+fn no_hotkey_collides_with_a_navigation_key() {
+    // the plain keys of the normal mode (`s` only searches while the log has the focus)
+    const RESERVED: &str = "q?:/afpyYGkj";
+    for catalog in [CATALOG.to_vec(), station201().catalog()] {
+        for def in catalog {
+            if let Some(key) = def.key {
+                assert!(!RESERVED.contains(key), "{key} is taken: {}", def.label());
+            }
+        }
+    }
+}
+
+#[test]
+fn the_1_6_palette_and_hotkeys_do_not_change() {
+    let (app, _) = app_with(&["CP-1"]);
+    assert_eq!(app.catalog(), CATALOG.to_vec());
+    let loaded = crate::ui::tests::loaded();
+    assert_eq!(loaded.catalog(), CATALOG.to_vec());
+    for def in CATALOG {
+        if let Some(key) = def.key {
+            assert_eq!(loaded.action_for_key(key), Some(def.id));
+        }
+    }
+    let mut app = loaded;
+    app.open_palette();
+    let Mode::Palette(p) = &app.mode else {
+        panic!("palette");
+    };
+    assert_eq!(p.results, (0..CATALOG.len()).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_1_6_only_hotkey_on_a_2_0_1_station_says_so() {
+    let mut app = station201();
+    let table_keys: BTreeSet<char> = app.catalog().iter().filter_map(|d| d.key).collect();
+    let mut checked = 0;
+    for def in CATALOG.iter().filter(|d| d.ocpp.is_some()) {
+        let Some(key) = def.key.filter(|k| !table_keys.contains(k)) else {
+            continue;
+        };
+        let fx = update(
+            &mut app,
+            Msg::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE)),
+        );
+        assert!(fx.is_empty(), "{key}");
+        assert!(matches!(app.mode, Mode::Normal), "{key}");
+        assert!(
+            notice_text(&app).ends_with("not an OCPP 2.0.1 action"),
+            "{key}: {}",
+            notice_text(&app)
+        );
+        checked += 1;
+    }
+    assert!(checked >= 14, "{checked}");
+    // a 1.6 hotkey on a 1.6 station still opens its form
+    let mut app = crate::ui::tests::loaded();
+    press(&mut app, KeyCode::Char('P'));
+    assert!(matches!(app.mode, Mode::Form(_)));
+}
+
+#[test]
+fn a_subprotocol_without_a_table_disables_every_action() {
+    let mut app = station_with("ocpp9.9", Vec::new());
+    assert!(app.catalog().iter().all(|d| d.ocpp.is_none()));
+    for key in ['R', 'w', 't'] {
+        press(&mut app, KeyCode::Char(key));
+        assert!(matches!(app.mode, Mode::Normal), "{key}");
+        assert!(
+            notice_text(&app).ends_with("no action table for ocpp9.9"),
+            "{key}: {}",
+            notice_text(&app)
+        );
+    }
+    assert_eq!(
+        app.reason_for(ActionId::Call(0)).as_deref(),
+        Some("no action table for ocpp9.9")
+    );
+    // the local operations stay
+    assert!(app.reason_for(ActionId::CopyId).is_none());
+}
+
+#[test]
+fn every_2_0_1_registry_entry_has_a_palette_path() {
+    let mut app = station201();
+    let table = table201();
+    app.open_palette();
+    let Mode::Palette(p) = &app.mode else {
+        panic!("palette");
+    };
+    let rows: Vec<_> = p.rows().copied().collect();
+    for (i, spec) in table.csms_actions.iter().enumerate() {
+        let def = rows
+            .iter()
+            .find(|d| d.id == ActionId::Call(i))
+            .unwrap_or_else(|| panic!("{} has no palette entry", spec.name));
+        assert_eq!(def.spec().map(|s| s.name), Some(spec.name));
+        assert_eq!((def.label(), def.desc()), (spec.title, spec.summary));
+    }
+    // choosing an entry reaches `run_action`: a form, or a command for an action without input
+    for (i, spec) in table.csms_actions.iter().enumerate() {
+        let mut fx = Vec::new();
+        app.mode = Mode::Normal;
+        app.run_action(ActionId::Call(i), &mut fx);
+        let opened = matches!(app.mode, Mode::Form(_)) || !fx.is_empty();
+        assert!(opened, "{} did nothing: {}", spec.name, notice_text(&app));
+    }
+    // the 1.6 entries are not offered
+    assert!(rows.iter().all(|d| d.protocol == V201 || d.ocpp.is_none()));
+}
+
+#[test]
+fn every_2_0_1_form_builds_a_schema_valid_request() {
+    let schemas = schemas201();
+    let mut app = station201();
+    let mut typed = 0;
+    let mut raw = 0;
+    for spec in table201().csms_actions {
+        if spec.name == "ClearCache" {
+            // no input: sent without a form
+            let mut fx = Vec::new();
+            let i = table201()
+                .csms_actions
+                .iter()
+                .position(|s| s.name == "ClearCache")
+                .unwrap();
+            app.run_action(ActionId::Call(i), &mut fx);
+            let (_, command) = match <[Effect; 1]>::try_from(fx) {
+                Ok(
+                    [
+                        Effect::Send {
+                            station, command, ..
+                        },
+                    ],
+                ) => (station, command),
+                other => panic!("expected one Send, got {other:?}"),
+            };
+            assert_eq!(
+                command,
+                Command::Raw {
+                    action: "ClearCache".into(),
+                    payload: json!({})
+                }
+            );
+            continue;
+        }
+        let mut form = open(&mut app, spec.name);
+        let payload = if spec.fields.is_empty() {
+            raw += 1;
+            assert_eq!(
+                form.fields[0].options,
+                [spec.name],
+                "{}: action fixed",
+                spec.name
+            );
+            let needs_input = schemas.validate_request(spec.name, &json!({})).is_err();
+            if needs_input {
+                assert!(
+                    form.submit().is_none(),
+                    "{}: {{}} must not submit",
+                    spec.name
+                );
+                assert!(form.fields[1].error.is_some(), "{}", spec.name);
+            }
+            form.fields[1].input = TextInput::new(minimal_request(spec.name).to_string());
+            let (action, payload) = sent(&mut form);
+            assert_eq!(action, spec.name);
+            payload
+        } else {
+            typed += 1;
+            for (name, text) in typed_input(spec.name) {
+                set(&mut form, name, text);
+            }
+            let (action, payload) = sent(&mut form);
+            assert_eq!(action, spec.name);
+            for field in spec.fields.iter().filter(|f| f.required) {
+                assert!(
+                    at(&payload, field.name).is_some(),
+                    "{}: required key {} is missing from {payload}",
+                    spec.name,
+                    field.name
+                );
+            }
+            payload
+        };
+        assert!(
+            schemas.validate_request(spec.name, &payload).is_ok(),
+            "{}: {payload}",
+            spec.name
+        );
+    }
+    assert_eq!(
+        (typed, raw),
+        (11, 28),
+        "ClearCache is the twelfth typed action"
+    );
+}
+
+#[test]
+fn required_fields_block_submit_and_integers_are_integers() {
+    let mut app = station201();
+    let mut start = open(&mut app, "RequestStartTransaction");
+    assert!(start.submit().is_none());
+    let at = start.fields.iter().position(|f| f.error.is_some()).unwrap();
+    assert_eq!(
+        start.fields[at].spec.map(|s| s.name),
+        Some("idToken.idToken")
+    );
+    assert_eq!(start.focus, at);
+    set(&mut start, "idToken.idToken", "TAG1");
+    set(&mut start, "evseId", "2");
+    let (_, payload) = sent(&mut start);
+    assert!(payload["evseId"].is_u64(), "{payload}");
+    assert!(payload["remoteStartId"].is_u64(), "{payload}");
+    assert_eq!(
+        payload["idToken"],
+        json!({"idToken": "TAG1", "type": "ISO14443"})
+    );
+
+    for bad in ["-1", "x", "1.5", " "] {
+        set(&mut start, "evseId", bad);
+        let error = start.validate_all();
+        if bad.trim().is_empty() {
+            assert!(error, "an empty optional integer is fine");
+        } else {
+            assert!(!error, "{bad:?} must be refused");
+            assert!(start.submit().is_none());
+        }
+    }
+    set(&mut start, "evseId", "");
+    let (_, payload) = sent(&mut start);
+    assert!(
+        payload.get("evseId").is_none(),
+        "empty optional fields are left out: {payload}"
+    );
+
+    let mut unlock = open(&mut app, "UnlockConnector");
+    assert!(unlock.submit().is_none());
+    let mut variables = open(&mut app, "GetVariables");
+    assert!(variables.submit().is_none());
+    let error = variables.fields[0].error.clone().unwrap();
+    assert!(
+        error.contains("component"),
+        "the hint tells the shape: {error}"
+    );
+}
+
+#[test]
+fn dotted_keys_nest_and_the_whole_request_is_checked() {
+    let mut app = station201();
+    let mut form = open(&mut app, "ChangeAvailability");
+    set(&mut form, "evse.id", "1");
+    set(&mut form, "evse.connectorId", "2");
+    let (_, payload) = sent(&mut form);
+    assert_eq!(
+        payload,
+        json!({"operationalStatus": "Operative", "evse": {"id": 1, "connectorId": 2}})
+    );
+    // a connector without its EVSE is a schema violation of the whole request
+    set(&mut form, "evse.id", "");
+    form.handle_key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+    assert!(form.error.is_some(), "checked while typing");
+    assert!(form.submit().is_none());
+    assert!(form.error.is_some());
+
+    let mut trigger = open(&mut app, "TriggerMessage");
+    assert_eq!(trigger.fields[0].chosen(), Some("StatusNotification"));
+    set(&mut trigger, "evse.id", "1");
+    let (_, payload) = sent(&mut trigger);
+    assert_eq!(
+        payload,
+        json!({"requestedMessage": "StatusNotification", "evse": {"id": 1}})
+    );
+}
+
+#[test]
+fn data_transfer_data_takes_a_string_a_number_and_an_array() {
+    let mut app = station201();
+    let mut form = open(&mut app, "DataTransfer");
+    set(&mut form, "vendorId", "vendor");
+    for (text, want) in [
+        ("hello world", json!("hello world")),
+        (r#""quoted""#, json!("quoted")),
+        ("42", json!(42)),
+        ("[1, 2, 3]", json!([1, 2, 3])),
+        (r#"{"a": true}"#, json!({"a": true})),
+    ] {
+        set(&mut form, "data", text);
+        let (_, payload) = sent(&mut form);
+        assert_eq!(payload["data"], want, "{text}");
+    }
+    set(&mut form, "data", "[1, 2");
+    assert!(!form.validate_all(), "broken JSON is refused");
+    assert!(
+        form.fields[2]
+            .error
+            .as_deref()
+            .unwrap()
+            .starts_with("invalid JSON")
+    );
+    set(&mut form, "data", "");
+    let (_, payload) = sent(&mut form);
+    assert!(payload.get("data").is_none());
+}
+
+#[test]
+fn request_stop_picks_a_running_transaction_by_its_string_id() {
+    let mut app = station_with(
+        V201,
+        vec![
+            running_tx(TX_ID, "TAG1"),
+            running_tx("11111111-2222-3333-4444-555555555555", "EVIL\u{1b}[31m"),
+        ],
+    );
+    let mut form = open(&mut app, "RequestStopTransaction");
+    assert_eq!(form.fields[0].options.len(), 2);
+    // newest first, short id, EVSE/connector, idToken without control characters
+    assert!(
+        form.fields[0].options[0].starts_with("11111111  1/1  EVIL"),
+        "{:?}",
+        form.fields[0].options
+    );
+    assert!(form.fields[0].options.iter().all(|o| !o.contains('\u{1b}')));
+    form.fields[0].option = 1;
+    let (action, payload) = sent(&mut form);
+    assert_eq!(action, "RequestStopTransaction");
+    assert_eq!(payload, json!({"transactionId": TX_ID}));
+
+    // without a running transaction the action is disabled
+    let mut idle = station_with(V201, Vec::new());
+    let i = table201()
+        .csms_actions
+        .iter()
+        .position(|s| s.name == "RequestStopTransaction")
+        .unwrap();
+    assert_eq!(
+        idle.reason_for(ActionId::Call(i)).as_deref(),
+        Some("no active transaction")
+    );
+    press(&mut idle, KeyCode::Char('x'));
+    assert!(notice_text(&idle).ends_with("no active transaction"));
+    // an ended transaction does not count
+    let mut ended = running_tx(TX_ID, "TAG1");
+    ended.status = TransactionStatus::Stopped;
+    let app = station_with(V201, vec![ended]);
+    assert!(app.reason_for(ActionId::Call(i)).is_some());
+}
+
+#[test]
+fn transaction_status_leaves_an_empty_id_out() {
+    let mut app = station201();
+    let mut form = open(&mut app, "GetTransactionStatus");
+    let (_, payload) = sent(&mut form);
+    assert_eq!(payload, json!({}));
+    set(&mut form, "transactionId", TX_ID);
+    let (_, payload) = sent(&mut form);
+    assert_eq!(payload, json!({"transactionId": TX_ID}));
+}
+
+#[test]
+fn remote_start_ids_come_from_the_session_counter() {
+    let mut app = station201();
+    let first = open(&mut app, "RequestStartTransaction");
+    let second = open(&mut app, "RequestStartTransaction");
+    let id = |form: &Form| {
+        form.fields
+            .iter()
+            .find(|f| f.spec.is_some_and(|s| s.name == "remoteStartId"))
+            .map(|f| f.input.text().to_owned())
+            .unwrap()
+    };
+    assert_ne!(id(&first), id(&second));
+}
+
+#[test]
+fn reset_asks_first_and_only_the_reports_open_a_popup() {
+    let mut app = station201();
+    let mut reset = open(&mut app, "Reset");
+    let (_, payload) = sent(&mut reset);
+    assert_eq!(payload, json!({"type": "OnIdle"}));
+    let mut fx = Vec::new();
+    app.submitted(
+        "CP-1",
+        Submitted::Send(Command::Raw {
+            action: "Reset".into(),
+            payload,
+        }),
+        &mut fx,
+    );
+    assert!(fx.is_empty());
+    assert!(matches!(app.mode, Mode::Confirm(_)));
+    // a 1.6 station does not ask for a raw Reset (its own form asks for the typed one)
+    let mut old = crate::ui::tests::loaded();
+    let mut fx = Vec::new();
+    old.submitted(
+        "CP-1",
+        Submitted::Send(Command::Raw {
+            action: "Reset".into(),
+            payload: json!({"type": "Hard"}),
+        }),
+        &mut fx,
+    );
+    assert!(matches!(old.mode, Mode::Normal));
+
+    let raw = |name: &str| Command::Raw {
+        action: name.into(),
+        payload: json!({}),
+    };
+    for (name, answer, content) in [
+        ("GetVariables", json!({"getVariableResult": []}), true),
+        ("SetVariables", json!({"setVariableResult": []}), true),
+        ("GetBaseReport", json!({"status": "Accepted"}), true),
+        (
+            "GetTransactionStatus",
+            json!({"messagesInQueue": false}),
+            true,
+        ),
+        ("GetLog", json!({"status": "Accepted"}), true),
+        ("Reset", json!({"status": "Accepted"}), false),
+        ("ClearCache", json!({"status": "Accepted"}), false),
+        (
+            "RequestStartTransaction",
+            json!({"status": "Accepted"}),
+            false,
+        ),
+        ("DataTransfer", json!({"status": "Accepted"}), false),
+        (
+            "DataTransfer",
+            json!({"status": "Accepted", "data": 1}),
+            true,
+        ),
+    ] {
+        assert_eq!(
+            raw(name).answer_is_content_in(V201, &answer),
+            content,
+            "{name} {answer}"
+        );
+    }
+    // the same raw command on a 1.6 station keeps its popup
+    assert!(raw("Reset").answer_is_content_in("ocpp1.6", &json!({})));
+}
+
+#[test]
+fn the_raw_form_of_a_2_0_1_station_lists_its_actions_and_checks_its_schemas() {
+    let mut app = station201();
+    press(&mut app, KeyCode::Char('w'));
+    let Mode::Form(form) = &mut app.mode else {
+        panic!("raw form");
+    };
+    let mut names: Vec<&str> = table201().csms_actions.iter().map(|s| s.name).collect();
+    names.sort_unstable();
+    let options: Vec<&str> = form.fields[0].options.iter().map(String::as_str).collect();
+    assert_eq!(options, names);
+    let at = options.iter().position(|o| *o == "Reset").unwrap();
+    form.fields[0].option = at;
+    form.fields[1].input = TextInput::new(r#"{"type":"Hard"}"#);
+    assert!(!form.validate_all(), "Hard is a 1.6 value");
+    form.fields[1].input = TextInput::new(r#"{"type":"Immediate"}"#);
+    assert!(form.validate_all());
+    // the 1.6 form is unchanged
+    let old = Form::raw("CP-1", None);
+    assert!(
+        old.fields[0]
+            .options
+            .iter()
+            .any(|o| o == "RemoteStartTransaction")
+    );
+}
+
+#[test]
+fn rule_and_fault_forms_pick_a_protocol_first() {
+    let mut rule = Form::rule_in(V201);
+    assert_eq!(rule.fields[0].chosen(), Some(V201));
+    let actions = rule.fields[1].options.clone();
+    assert_eq!(actions, table201().station_actions);
+    assert!(matches!(
+        rule.submit(),
+        Some(Submitted::Rule { protocol: Some(p), station: None, .. }) if p == V201
+    ));
+    // another protocol re-lists the actions
+    rule.focus = 0;
+    rule.fields[1].option = actions.iter().position(|a| a == "Heartbeat").unwrap();
+    rule.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+    assert_eq!(rule.fields[0].chosen(), Some("ocpp1.6"));
+    let old: Vec<&str> = rule.fields[1].options.iter().map(String::as_str).collect();
+    assert_eq!(
+        old,
+        registry::protocol_actions("ocpp1.6")
+            .unwrap()
+            .station_actions
+    );
+    assert_eq!(
+        rule.fields[1].chosen(),
+        Some("Heartbeat"),
+        "the action is kept"
+    );
+    // (all) keeps the engine-wide behavior
+    rule.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    rule.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(rule.fields[0].chosen(), Some("(all)"));
+    assert!(matches!(
+        rule.submit(),
+        Some(Submitted::Rule { protocol: None, .. })
+    ));
+
+    let mut fault = Form::fault_in(V201);
+    assert!(matches!(
+        fault.submit(),
+        Some(Submitted::Fault { protocol: Some(p), times: 1, .. }) if p == V201
+    ));
+    fault.fields[5].input = TextInput::new("CP-9");
+    assert!(matches!(
+        fault.submit(),
+        Some(Submitted::Fault { station: Some(s), .. }) if s == "CP-9"
+    ));
+    // the payload only matters for invalid_payload
+    fault.focus = 2;
+    fault.handle_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+    assert_eq!(fault.fields[2].chosen(), Some("invalid_payload"));
+    fault.fields[4].input = TextInput::new("nope");
+    assert!(!fault.validate_all());
+}
+
+#[test]
+fn rules_open_the_1_6_form_unless_the_station_has_a_table() {
+    let mut old = crate::ui::tests::loaded();
+    press(&mut old, KeyCode::Char('m'));
+    let Mode::Form(form) = &old.mode else {
+        panic!("rule form");
+    };
+    assert_eq!(form.fields.len(), 3);
+
+    let mut app = station201();
+    press(&mut app, KeyCode::Char('m'));
+    let Mode::Form(form) = &app.mode else {
+        panic!("rule form");
+    };
+    assert_eq!(form.fields.len(), 4);
+    assert_eq!(form.fields[0].chosen(), Some(V201));
+    let fx = press(&mut app, KeyCode::Enter);
+    assert!(matches!(fx.first(), Some(Effect::RespondScoped { .. })));
+}
+
+#[test]
+fn a_secret_variable_value_stays_out_of_results_and_notices() {
+    const SECRET: &str = "s3cr3t-sentinel-value";
+    let mut app = station201();
+    let command = Command::Raw {
+        action: "SetVariables".into(),
+        payload: json!({"setVariableData": [{
+            "component": {"name": "SecurityCtrlr"},
+            "variable": {"name": "BasicAuthPassword"},
+            "attributeValue": SECRET
+        }]}),
+    };
+    app.command_done(
+        "CP-1",
+        &command,
+        &CmdOutcome {
+            result: Ok(json!({"setVariableResult": [{
+                "attributeStatus": "Accepted",
+                "component": {"name": "SecurityCtrlr"},
+                "variable": {"name": "BasicAuthPassword"}
+            }]})),
+        },
+    );
+    let records = app.results.get("CP-1").expect("a result");
+    for record in records {
+        let text = format!("{record:?}");
+        assert!(!text.contains(SECRET), "{text}");
+    }
+    assert!(!notice_text(&app).contains(SECRET));
+    if let Mode::Detail(d) = &app.mode {
+        assert!(!format!("{d:?}").contains(SECRET));
+    }
 }

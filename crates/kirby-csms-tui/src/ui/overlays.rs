@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::{centered, popup};
-use crate::actions::{CATALOG, Palette, ResultsList, results_of};
+use crate::actions::{Palette, ResultsList, results_of};
 use crate::app::{App, Confirm};
 use crate::form::{Field, FieldKind, Form};
 
@@ -41,9 +41,7 @@ pub(super) fn palette(f: &mut Frame<'_>, app: &App, p: &Palette, area: Rect) {
         inner.y,
     ));
     let items: Vec<ListItem<'_>> = p
-        .results
-        .iter()
-        .filter_map(|&i| CATALOG.get(i))
+        .rows()
         .map(|a| {
             let why = app.reason_for(a.id);
             let key = a.key.map_or_else(|| "  ".to_owned(), |k| format!("{k} "));

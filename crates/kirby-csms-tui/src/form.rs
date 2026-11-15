@@ -9,6 +9,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kirby_csms_core::registry;
 use kirby_csms_core::{ACTIONS_PROTOCOL, MAX_STATION_ID_LEN};
 use kirby_ocpp_core::ids::{ConnectorId, IdTag, ReservationId};
+use kirby_ocpp_core::ocpp::Protocol;
+use kirby_ocpp_core::ocpp::SchemaRegistry;
 use kirby_ocpp_core::ocpp::messages::{
     AuthorizationData, CertificateHashData, CertificateUse, ChargingProfile,
     ClearChargingProfileRequest, ExtendedMessageTrigger, GetDiagnosticsRequest, GetLogRequest,
@@ -89,6 +91,9 @@ pub enum FieldKind {
     Timestamp {
         optional: bool,
     },
+    /// A typed input of a registry form: what it accepts (text, whole number, JSON value,
+    /// time, PEM) and whether it may stay empty come from its [`Field::spec`].
+    Spec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +106,13 @@ pub struct Field {
     pub error: Option<String>,
     /// Input was dropped at the size cap; shown as the field error until text is removed.
     pub capped: bool,
+    /// A short note for the person filling the field (registry forms); empty when none.
+    pub hint: &'static str,
+    /// The registry field behind this input (registry forms only).
+    pub spec: Option<&'static registry::FieldSpec>,
+    /// What each option stands for when it differs from its text (the transaction ids behind
+    /// the options of `RequestStopTransaction`); empty when the options are the values.
+    pub values: Vec<String>,
 }
 
 impl Field {
@@ -113,6 +125,9 @@ impl Field {
             option: 0,
             error: None,
             capped: false,
+            hint: "",
+            spec: None,
+            values: Vec::new(),
         }
     }
 
@@ -129,6 +144,14 @@ impl Field {
 
     pub fn chosen(&self) -> Option<&str> {
         self.options.get(self.option).map(String::as_str)
+    }
+
+    /// The value behind the chosen option: its `values` entry, else the option text.
+    pub fn chosen_value(&self) -> Option<&str> {
+        self.values
+            .get(self.option)
+            .map(String::as_str)
+            .or_else(|| self.chosen())
     }
 }
 
@@ -158,6 +181,8 @@ pub enum FormKind {
     GetDiagnostics,
     SendLocalList,
     Raw,
+    /// A form generated from the registry spec of one action ([`Form::from_spec`]).
+    Spec,
     Rule,
     Fault,
     RemoveRule,
@@ -199,6 +224,8 @@ pub enum Submitted {
         payload: Value,
         /// The one station it answers; `None` answers every station.
         station: Option<String>,
+        /// The subprotocol it is limited to (`ocpp2.0.1`); `None` for every protocol.
+        protocol: Option<String>,
     },
     Fault {
         action: String,
@@ -207,6 +234,8 @@ pub enum Submitted {
         payload: Value,
         /// The one station it applies to; `None` applies to every station.
         station: Option<String>,
+        /// The subprotocol it is limited to; `None` for every protocol.
+        protocol: Option<String>,
     },
     RemoveRule(String),
     /// Remove a rule of one station (`None`: a global rule limited to a protocol).
@@ -231,6 +260,36 @@ pub struct StopChoice {
     pub id_tag: String,
 }
 
+/// A running OCPP 2.0.1 transaction a `RequestStopTransaction` can target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TxChoice {
+    /// The station-made transaction id (a string of at most 36 characters).
+    pub id: String,
+    pub evse: Option<u32>,
+    pub connector: Option<u32>,
+    pub id_token: Option<String>,
+}
+
+/// What a registry form needs to know besides the spec: the protocol (its schemas check the
+/// payload), a fresh request id and the running transactions of the station.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpecContext {
+    pub protocol: Protocol,
+    /// The suggestion for `remoteStartId` and `requestId`.
+    pub request_id: i32,
+    pub transactions: Vec<TxChoice>,
+}
+
+impl SpecContext {
+    pub fn new(protocol: Protocol) -> Self {
+        Self {
+            protocol,
+            request_id: 1,
+            transactions: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Form {
     pub kind: FormKind,
@@ -246,6 +305,13 @@ pub struct Form {
     /// Behind the options of a `RemoveRule` form: whether the rule is scoped (a station or a
     /// protocol), its station and its action.
     targets: Vec<(bool, Option<String>, String)>,
+    /// The protocol whose schemas check the payload of a `Raw` or `Spec` form.
+    protocol: Protocol,
+    /// The registry entry a `Spec` form was generated from.
+    spec: Option<&'static registry::ActionSpec>,
+    /// Leading fields in front of the ones the kind describes: 1 in a rule or fault form that
+    /// has a `protocol` select first, else 0.
+    lead: usize,
 }
 
 fn names<I, S>(items: I) -> Vec<String>
@@ -260,7 +326,12 @@ where
 /// Security Whitepaper actions (which also have typed forms), sorted by name. They come from
 /// the action registry of the protocol the palette serves.
 pub fn csms_actions() -> Vec<String> {
-    let mut names: Vec<String> = registry::protocol_actions(ACTIONS_PROTOCOL)
+    csms_actions_of(ACTIONS_PROTOCOL)
+}
+
+/// The same for the table of `protocol`; empty for a subprotocol without one.
+fn csms_actions_of(protocol: &str) -> Vec<String> {
+    let mut names: Vec<String> = registry::protocol_actions(protocol)
         .map(|table| {
             table
                 .csms_actions
@@ -278,6 +349,25 @@ fn station_actions() -> &'static [&'static str] {
     registry::protocol_actions(ACTIONS_PROTOCOL).map_or(&[], |table| table.station_actions)
 }
 
+/// The "no protocol" choice of the `protocol` select of a rule or fault form: the rule applies
+/// to every protocol (the engine-wide behavior).
+pub const ALL_PROTOCOLS: &str = "(all)";
+
+/// The actions a rule or fault can target for `protocol` (one of the protocols with a table, or
+/// [`ALL_PROTOCOLS`]: every action any table lists, sorted).
+fn station_actions_for(protocol: &str) -> Vec<String> {
+    if let Some(table) = registry::protocol_actions(protocol) {
+        return names(table.station_actions);
+    }
+    let mut all: Vec<String> = registry::protocols()
+        .filter_map(registry::protocol_actions)
+        .flat_map(|table| names(table.station_actions))
+        .collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
 impl Form {
     fn build(kind: FormKind, title: &str, station: &str, fields: Vec<Field>) -> Self {
         let mut form = Self {
@@ -289,6 +379,9 @@ impl Form {
             error: None,
             tx_ids: Vec::new(),
             targets: Vec::new(),
+            protocol: Protocol::V16,
+            spec: None,
+            lead: 0,
         };
         form.validate_all();
         form.error = None;
@@ -802,7 +895,12 @@ impl Form {
     }
 
     pub fn raw(station: &str, initial_action: Option<&str>) -> Self {
-        let mut action = Field::select("action", csms_actions());
+        Self::raw_in(station, ACTIONS_PROTOCOL, initial_action)
+    }
+
+    /// The raw call form of `protocol`: its actions, its schemas.
+    pub fn raw_in(station: &str, protocol: &str, initial_action: Option<&str>) -> Self {
+        let mut action = Field::select("action", csms_actions_of(protocol));
         if let Some(i) = initial_action.and_then(|a| action.options.iter().position(|o| o == a)) {
             action.option = i;
         }
@@ -815,21 +913,179 @@ impl Form {
                 Field::new("payload (JSON)", FieldKind::RawJson, "{}"),
             ],
         )
+        .in_protocol(Protocol::from_token(protocol).unwrap_or(Protocol::V16))
+    }
+
+    /// Checks the payload against the schemas of `protocol` from now on.
+    fn in_protocol(mut self, protocol: Protocol) -> Self {
+        self.protocol = protocol;
+        self.validate_all();
+        self.error = None;
+        self
     }
 
     /// The generic form of a registry action of the station's protocol: one field per
-    /// `FieldSpec`. Stub of M6 slice S3: for now a raw payload form with the action fixed
-    /// (its payload is still checked against the 1.6 schemas).
-    pub fn from_spec(station: &str, spec: &'static registry::ActionSpec) -> Self {
-        Self::build(
-            FormKind::Raw,
-            spec.title,
-            station,
+    /// `FieldSpec` (dotted names build nested objects, empty optional fields are left out), or
+    /// a JSON payload field with the action fixed when the spec has no fields. The whole
+    /// request is checked against the schemas of `ctx.protocol` while typing. It submits as
+    /// [`Command::Raw`].
+    pub fn from_spec(
+        station: &str,
+        spec: &'static registry::ActionSpec,
+        ctx: &SpecContext,
+    ) -> Self {
+        if spec.fields.is_empty() {
+            return Self::build(
+                FormKind::Raw,
+                spec.title,
+                station,
+                vec![
+                    Field::select("action", vec![spec.name.to_owned()]),
+                    Field::new("payload (JSON)", FieldKind::RawJson, "{}"),
+                ],
+            )
+            .in_protocol(ctx.protocol);
+        }
+        let fields = spec.fields.iter().map(|f| spec_field(f, ctx)).collect();
+        let mut form = Self::build(FormKind::Spec, spec.title, station, fields);
+        form.spec = Some(spec);
+        form.protocol = ctx.protocol;
+        form.check_request();
+        form.error = None;
+        form
+    }
+
+    /// The registry entry a `Spec` form was generated from.
+    pub fn spec(&self) -> Option<&'static registry::ActionSpec> {
+        self.spec
+    }
+
+    /// The payload a `Spec` form would send now (without checking it).
+    pub fn spec_payload(&self) -> Option<Value> {
+        let mut root = serde_json::Map::new();
+        for f in &self.fields {
+            let Some(spec) = f.spec else { continue };
+            let value = if f.kind == FieldKind::Select {
+                match f.chosen_value() {
+                    Some(v) if v != ANY => Value::String(v.to_owned()),
+                    _ => continue,
+                }
+            } else {
+                let text = f.input.text().trim();
+                if text.is_empty() {
+                    continue;
+                }
+                match spec.ty {
+                    registry::FieldType::Integer => Value::from(text.parse::<i32>().ok()?),
+                    registry::FieldType::Json => json_value(text).ok()?,
+                    registry::FieldType::Timestamp => Value::String(
+                        DateTime::parse_from_rfc3339(text)
+                            .ok()?
+                            .with_timezone(&Utc)
+                            .to_rfc3339_opts(SecondsFormat::Secs, true),
+                    ),
+                    registry::FieldType::Pem => {
+                        Value::String(normalize_pem(text, MAX_CERTIFICATE_CHAIN_LEN).ok()?)
+                    }
+                    _ => Value::String(text.to_owned()),
+                }
+            };
+            insert_path(&mut root, spec.name, value);
+        }
+        Some(Value::Object(root))
+    }
+
+    /// Why the whole request of a `Spec` form violates the schema, if it does.
+    fn spec_schema_error(&self) -> Option<String> {
+        let spec = self.spec?;
+        let payload = self.spec_payload()?;
+        match SchemaRegistry::for_protocol(self.protocol) {
+            Ok(schemas) => schemas
+                .validate_request(spec.name, &payload)
+                .err()
+                .map(|e| e.to_string()),
+            Err(e) => Some(e.to_string()),
+        }
+    }
+
+    /// Sets the form error from the schema once every field is fine on its own.
+    fn check_request(&mut self) {
+        if self.kind == FormKind::Spec && self.fields.iter().all(|f| f.error.is_none()) {
+            self.error = self.spec_schema_error();
+        }
+    }
+
+    /// The `protocol` select of a rule or fault form: the protocols that have an action table,
+    /// then [`ALL_PROTOCOLS`]; `default` is preselected when it is one of them.
+    fn protocol_select(default: &str) -> Field {
+        let mut options = names(registry::protocols());
+        options.push(ALL_PROTOCOLS.to_owned());
+        let mut field = Field::select("protocol", options);
+        field.option = field.options.iter().position(|o| o == default).unwrap_or(0);
+        field
+    }
+
+    /// Re-lists the actions of a rule or fault form after its protocol changed, keeping the
+    /// chosen action when the new list has it.
+    fn refresh_actions(&mut self) {
+        let protocol = self
+            .fields
+            .first()
+            .and_then(Field::chosen)
+            .unwrap_or_default()
+            .to_owned();
+        let list = station_actions_for(&protocol);
+        if let Some(action) = self.fields.get_mut(1) {
+            let current = action.chosen().map(str::to_owned);
+            action.option = current
+                .and_then(|c| list.iter().position(|a| *a == c))
+                .unwrap_or(0);
+            action.options = list;
+        }
+    }
+
+    /// A response rule form with a `protocol` select first (`default` is preselected).
+    pub fn rule_in(default: &str) -> Self {
+        let protocol = Self::protocol_select(default);
+        let actions = station_actions_for(protocol.chosen().unwrap_or_default());
+        let mut form = Self::build(
+            FormKind::Rule,
+            "Response rule (all stations, or one if set)",
+            "",
             vec![
-                Field::select("action", vec![spec.name.to_owned()]),
-                Field::new("payload (JSON)", FieldKind::RawJson, "{}"),
+                protocol,
+                Field::select("action", actions),
+                Field::new("CALLRESULT payload (JSON)", FieldKind::Json, "{}"),
+                Field::new(STATION_LABEL, FieldKind::Station, ""),
             ],
-        )
+        );
+        form.lead = 1;
+        form.validate_all();
+        form.error = None;
+        form
+    }
+
+    /// An inject-fault form with a `protocol` select first (`default` is preselected).
+    pub fn fault_in(default: &str) -> Self {
+        let protocol = Self::protocol_select(default);
+        let actions = station_actions_for(protocol.chosen().unwrap_or_default());
+        let mut form = Self::build(
+            FormKind::Fault,
+            "Inject fault (all stations, or one if set)",
+            "",
+            vec![
+                protocol,
+                Field::select("action", actions),
+                Field::select("kind", names(FaultKind::ALL.iter().map(|k| k.name()))),
+                Field::new("times", FieldKind::Times, "1"),
+                Field::new("payload (invalid_payload only)", FieldKind::FaultJson, "{}"),
+                Field::new(STATION_LABEL, FieldKind::Station, ""),
+            ],
+        );
+        form.lead = 1;
+        form.validate_all();
+        form.error = None;
+        form
     }
 
     pub fn rule() -> Self {
@@ -907,8 +1163,8 @@ impl Form {
 
     fn touched(&mut self, i: usize) {
         self.validate_field(i);
-        self.after_edit();
         self.error = None;
+        self.after_edit();
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> FormEvent {
@@ -967,7 +1223,7 @@ impl Form {
     fn dependent(&self) -> Option<usize> {
         match self.kind {
             FormKind::Raw | FormKind::SetProfile => Some(1),
-            FormKind::Fault => Some(3),
+            FormKind::Fault => Some(self.lead + 3),
             _ => None,
         }
     }
@@ -976,6 +1232,10 @@ impl Form {
         if let Some(i) = self.dependent() {
             self.validate_field(i);
         }
+        if self.lead == 1 && self.focus == 0 {
+            self.refresh_actions();
+        }
+        self.check_request();
     }
 
     pub fn validate_all(&mut self) -> bool {
@@ -1009,22 +1269,31 @@ impl Form {
     }
 
     fn validate_field(&mut self, i: usize) {
-        let first = self.fields.first();
-        let action = first.and_then(|f| f.chosen()).map(str::to_owned);
+        let action = self
+            .fields
+            .get(self.lead)
+            .and_then(|f| f.chosen())
+            .map(str::to_owned);
         let connector_text = self.text(0);
         let fault_kind = self
             .fields
-            .get(1)
+            .get(self.lead + 1)
             .and_then(|f| f.chosen())
             .map(str::to_owned);
         let form_kind = self.kind;
+        let protocol = self.protocol;
         let Some(f) = self.fields.get_mut(i) else {
             return;
         };
         let text = f.input.text().trim().to_owned();
         f.error = match f.kind {
             FieldKind::Text => text.is_empty().then(|| "required".to_owned()),
-            FieldKind::OptionalText | FieldKind::Select => None,
+            FieldKind::OptionalText => None,
+            FieldKind::Select => (f.spec.is_some() && f.options.is_empty())
+                .then(|| "nothing to choose from".to_owned()),
+            FieldKind::Spec => f
+                .spec
+                .and_then(|spec| spec_text_error(spec, f.input.text())),
             FieldKind::IdTag => {
                 if text.is_empty() {
                     Some("idTag is required".to_owned())
@@ -1055,9 +1324,11 @@ impl Form {
                 _ => Some(format!("a number from 1 to {TIMES_MAX}")),
             },
             FieldKind::Json => json_object(f.input.text()).err(),
-            FieldKind::RawJson => {
-                validate_request(f.input.text(), action.as_deref().unwrap_or_default())
-            }
+            FieldKind::RawJson => validate_request(
+                protocol,
+                f.input.text(),
+                action.as_deref().unwrap_or_default(),
+            ),
             FieldKind::ProfileJson => validate_profile(f.input.text(), &connector_text),
             FieldKind::FaultJson => {
                 if fault_kind.as_deref() == Some(FaultKind::InvalidPayload.name()) {
@@ -1106,6 +1377,19 @@ impl Form {
                 None => CAP_NOTICE.to_owned(),
             });
         }
+    }
+
+    /// The protocol a rule or fault form is limited to: `None` without a `protocol` select and
+    /// for [`ALL_PROTOCOLS`].
+    fn chosen_protocol(&self) -> Option<String> {
+        if self.lead == 0 {
+            return None;
+        }
+        self.fields
+            .first()
+            .and_then(Field::chosen)
+            .filter(|p| *p != ALL_PROTOCOLS)
+            .map(str::to_owned)
     }
 
     /// Whether field `i` holds a secret that is drawn as `*`: the value of a
@@ -1287,27 +1571,45 @@ impl Form {
                 action: chosen(0)?,
                 payload: serde_json::from_str(self.fields.get(1)?.input.text()).ok()?,
             }),
-            FormKind::Rule => Submitted::Rule {
-                action: chosen(0)?,
-                payload: serde_json::from_str(self.fields.get(1)?.input.text()).ok()?,
-                station: Some(self.text(2)).filter(|station| !station.is_empty()),
-            },
+            FormKind::Spec => {
+                let spec = self.spec?;
+                let payload = self.spec_payload()?;
+                if let Some(error) = self.spec_schema_error() {
+                    self.error = Some(error);
+                    return None;
+                }
+                Submitted::Send(Command::Raw {
+                    action: spec.name.to_owned(),
+                    payload,
+                })
+            }
+            FormKind::Rule => {
+                let at = self.lead;
+                Submitted::Rule {
+                    action: chosen(at)?,
+                    payload: serde_json::from_str(self.fields.get(at + 1)?.input.text()).ok()?,
+                    station: Some(self.text(at + 2)).filter(|station| !station.is_empty()),
+                    protocol: self.chosen_protocol(),
+                }
+            }
             FormKind::Fault => {
+                let at = self.lead;
                 let kind = FaultKind::ALL
                     .iter()
                     .copied()
-                    .find(|k| Some(k.name()) == chosen(1).as_deref())?;
+                    .find(|k| Some(k.name()) == chosen(at + 1).as_deref())?;
                 let payload = if kind == FaultKind::InvalidPayload {
-                    serde_json::from_str(self.fields.get(3)?.input.text()).ok()?
+                    serde_json::from_str(self.fields.get(at + 3)?.input.text()).ok()?
                 } else {
                     Value::Null
                 };
                 Submitted::Fault {
-                    action: chosen(0)?,
+                    action: chosen(at)?,
                     kind,
-                    times: self.text(2).parse().ok()?,
+                    times: self.text(at + 2).parse().ok()?,
                     payload,
-                    station: Some(self.text(4)).filter(|station| !station.is_empty()),
+                    station: Some(self.text(at + 4)).filter(|station| !station.is_empty()),
+                    protocol: self.chosen_protocol(),
                 }
             }
             FormKind::RemoveRule => match self.targets.get(self.fields.first()?.option) {
@@ -1457,16 +1759,131 @@ fn json_object(text: &str) -> Result<Value, String> {
     }
 }
 
-/// `None` when `text` is a JSON object that satisfies the request schema of `action`.
-fn validate_request(text: &str, action: &str) -> Option<String> {
+/// `None` when `text` is a JSON object that satisfies the request schema of `action` in
+/// `protocol`.
+fn validate_request(protocol: Protocol, text: &str, action: &str) -> Option<String> {
     let value = match json_object(text) {
         Ok(v) => v,
         Err(e) => return Some(e),
     };
-    schemas()
+    let registry = if protocol == Protocol::V16 {
+        schemas()
+    } else {
+        match SchemaRegistry::for_protocol(protocol) {
+            Ok(registry) => registry,
+            Err(e) => return Some(e.to_string()),
+        }
+    };
+    registry
         .validate_request(action, &value)
         .err()
         .map(|e| e.to_string())
+}
+
+/// The input of one registry field: a select for a choice, else a typed text input.
+fn spec_field(spec: &'static registry::FieldSpec, ctx: &SpecContext) -> Field {
+    let mut field = if spec.ty == registry::FieldType::Choice {
+        let (mut options, mut values) = if spec.choices.is_empty() {
+            transaction_options(&ctx.transactions)
+        } else {
+            (names(spec.choices), Vec::new())
+        };
+        if !spec.required {
+            options.insert(0, ANY.to_owned());
+            if !values.is_empty() {
+                values.insert(0, ANY.to_owned());
+            }
+        }
+        let mut field = Field::select(spec.label, options);
+        field.values = values;
+        if let Some(default) = spec.default {
+            field.option = field.options.iter().position(|o| o == default).unwrap_or(0);
+        }
+        field
+    } else {
+        let default = match spec.name {
+            // A fresh id per form, as the 1.6 forms take one from the session counter.
+            "remoteStartId" | "requestId" => ctx.request_id.to_string(),
+            _ => spec.default.unwrap_or_default().to_owned(),
+        };
+        Field::new(spec.label, FieldKind::Spec, &default)
+    };
+    field.hint = spec.hint;
+    field.spec = Some(spec);
+    field
+}
+
+/// The options of a transaction choice: `id8  evse/connector  idToken` and the full id behind
+/// each. The text comes from the station, so it is sanitized and cut.
+fn transaction_options(transactions: &[TxChoice]) -> (Vec<String>, Vec<String>) {
+    use kirby_ocpp_tui::text::{sanitize, truncate};
+    let part = |n: Option<u32>| n.map_or_else(|| "-".to_owned(), |n| n.to_string());
+    transactions
+        .iter()
+        .map(|tx| {
+            let short: String = sanitize(&tx.id).chars().take(8).collect();
+            let token = tx.id_token.as_deref().map(sanitize).unwrap_or_default();
+            let text = format!(
+                "{short}  {}/{}  {}",
+                part(tx.evse),
+                part(tx.connector),
+                truncate(&token, 36)
+            );
+            (text.trim_end().to_owned(), tx.id.clone())
+        })
+        .unzip()
+}
+
+/// Why `raw` is not an acceptable value of the registry field `spec`, or `None`.
+fn spec_text_error(spec: &registry::FieldSpec, raw: &str) -> Option<String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return spec.required.then(|| {
+            if spec.ty == registry::FieldType::Json && !spec.hint.is_empty() {
+                format!("required: {}", spec.hint)
+            } else {
+                "required".to_owned()
+            }
+        });
+    }
+    match spec.ty {
+        registry::FieldType::Integer => (!matches!(text.parse::<i32>(), Ok(n) if n >= 0))
+            .then(|| "a whole number, 0 or more".to_owned()),
+        registry::FieldType::Timestamp => DateTime::parse_from_rfc3339(text)
+            .err()
+            .map(|_| "a time like 2026-01-31T12:00:00Z".to_owned()),
+        registry::FieldType::Json => json_value(text).err(),
+        registry::FieldType::Pem => normalize_pem(text, MAX_CERTIFICATE_CHAIN_LEN).err(),
+        _ => None,
+    }
+}
+
+/// Any JSON value. Text that is not JSON and does not start like an object, an array or a
+/// string is taken as a plain string, so `hello` and `42` both work for a free `data` field;
+/// the schema then decides whether the type fits.
+fn json_value(text: &str) -> Result<Value, String> {
+    match serde_json::from_str(text) {
+        Ok(value) => Ok(value),
+        Err(e) if text.starts_with(['{', '[', '"']) => Err(format!("invalid JSON: {e}")),
+        Err(_) => Ok(Value::String(text.to_owned())),
+    }
+}
+
+/// Sets `value` at the dotted `path` of `object`, creating the objects on the way.
+fn insert_path(object: &mut serde_json::Map<String, Value>, path: &str, value: Value) {
+    match path.split_once('.') {
+        None => {
+            object.insert(path.to_owned(), value);
+        }
+        Some((head, rest)) => {
+            let child = object
+                .entry(head.to_owned())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if let Value::Object(inner) = child {
+                insert_path(inner, rest, value);
+            }
+        }
+    }
 }
 
 /// `None` when `text` is a `csChargingProfiles` object that fits `SetChargingProfile` (with

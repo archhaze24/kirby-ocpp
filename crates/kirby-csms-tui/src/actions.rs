@@ -6,16 +6,16 @@ use std::collections::VecDeque;
 use chrono::{DateTime, Utc};
 use crossterm::event::KeyCode;
 use kirby_csms_core::registry;
-use kirby_csms_core::{ACTIONS_PROTOCOL, Frame, TransactionStatus};
-use kirby_ocpp_core::ocpp::redact_secrets;
+use kirby_csms_core::{ACTIONS_PROTOCOL, Frame, Scope, TransactionId, TransactionStatus};
+use kirby_ocpp_core::ocpp::{Protocol, redact_secrets};
 use kirby_ocpp_tui::app::{Detail, NoticeLevel};
 use kirby_ocpp_tui::palette::rank_by;
 use kirby_ocpp_tui::text::{TextInput, sanitize, truncate};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::app::{App, CANCELLED_CAP, Confirm, ConfirmAction, Effect, Inflight, Mode};
-use crate::command::{CmdError, CmdOutcome, Command};
-use crate::form::{Form, StopChoice, Submitted};
+use crate::command::{CmdError, CmdOutcome, Command, takes_raw_payload};
+use crate::form::{Form, SpecContext, StopChoice, Submitted, TxChoice};
 
 /// Results remembered per station.
 pub const RESULTS_PER_STATION: usize = 20;
@@ -74,8 +74,10 @@ pub struct ActionDef {
     /// The hotkey in the normal mode, if any.
     pub key: Option<char>,
     /// The OCPP action this entry sends. Its title and description come from the action
-    /// registry of [`ACTIONS_PROTOCOL`]; `label` and `desc` are used only when it is `None`.
+    /// registry of `protocol`; `label` and `desc` are used only when it is `None`.
     pub ocpp: Option<&'static str>,
+    /// The subprotocol whose action table `ocpp` belongs to.
+    pub protocol: &'static str,
 }
 
 impl ActionDef {
@@ -91,7 +93,7 @@ impl ActionDef {
 
     /// The registry entry of the OCPP action behind this entry.
     pub fn spec(&self) -> Option<&'static registry::ActionSpec> {
-        registry::csms_action(ACTIONS_PROTOCOL, self.ocpp?)
+        registry::csms_action(self.protocol, self.ocpp?)
     }
 }
 
@@ -108,6 +110,7 @@ const fn def(
         desc,
         key,
         ocpp: None,
+        protocol: ACTIONS_PROTOCOL,
     }
 }
 
@@ -119,6 +122,7 @@ const fn ocpp(id: ActionId, name: &'static str, key: Option<char>) -> ActionDef 
         desc: "",
         key,
         ocpp: Some(name),
+        protocol: ACTIONS_PROTOCOL,
     }
 }
 
@@ -234,6 +238,74 @@ pub const CATALOG: &[ActionDef] = &[
     ),
 ];
 
+/// The hotkeys of the actions of the OCPP 2.0.1 table. The ones that exist for 1.6 too keep
+/// their key; `g`, `c`, `b` and `s` are new.
+const KEYS_V201: &[(&str, char)] = &[
+    ("Reset", 'R'),
+    ("TriggerMessage", 'T'),
+    ("UnlockConnector", 'u'),
+    ("ChangeAvailability", 'A'),
+    ("ClearCache", 'C'),
+    ("DataTransfer", 'D'),
+    ("RequestStartTransaction", 't'),
+    ("RequestStopTransaction", 'x'),
+    ("GetVariables", 'g'),
+    ("SetVariables", 'c'),
+    ("GetBaseReport", 'b'),
+    ("GetTransactionStatus", 's'),
+];
+
+/// The hotkey of `action` in the table of `protocol`.
+fn hotkey_in(protocol: &str, action: &str) -> Option<char> {
+    if protocol == ACTIONS_PROTOCOL {
+        return CATALOG.iter().find(|a| a.ocpp == Some(action))?.key;
+    }
+    KEYS_V201
+        .iter()
+        .find(|(name, _)| *name == action)
+        .map(|(_, key)| *key)
+}
+
+/// What a protocol offers in the palette and on the hotkeys: the entries of its table (as
+/// [`ActionId::Call`]), then the local operations that do not depend on a protocol.
+fn entries_for(table: &'static registry::ProtocolActions) -> Vec<ActionDef> {
+    let remote = table
+        .csms_actions
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| ActionDef {
+            id: ActionId::Call(index),
+            label: spec.title,
+            desc: spec.summary,
+            key: hotkey_in(table.protocol, spec.name),
+            ocpp: Some(spec.name),
+            protocol: table.protocol,
+        });
+    remote.chain(local_entries()).collect()
+}
+
+/// The entries that are not OCPP actions: the same for every protocol.
+fn local_entries() -> impl Iterator<Item = ActionDef> {
+    CATALOG.iter().filter(|a| a.ocpp.is_none()).copied()
+}
+
+/// Which action list the selected station gets.
+enum Offer {
+    /// OCPP 1.6, or no station selected: the fixed catalogue.
+    V16,
+    /// Another protocol with an action table.
+    Table(&'static registry::ProtocolActions),
+    /// A subprotocol without a table: only the local operations.
+    NoTable(String),
+}
+
+/// The text of a protocol token in a notice: `ocpp2.0.1` is "OCPP 2.0.1".
+fn version_text(protocol: &str) -> String {
+    protocol
+        .strip_prefix("ocpp")
+        .map_or_else(|| sanitize(protocol), |v| format!("OCPP {}", sanitize(v)))
+}
+
 /// The action a normal-mode key triggers.
 pub fn by_key(c: char) -> Option<ActionId> {
     CATALOG.iter().find(|a| a.key == Some(c)).map(|a| a.id)
@@ -248,19 +320,28 @@ fn haystack(a: &ActionDef) -> String {
     format!("{} {}", a.label(), a.desc())
 }
 
-/// Command palette: fuzzy search over [`CATALOG`].
+/// Command palette: fuzzy search over the entries of the selected station's protocol
+/// ([`CATALOG`] for OCPP 1.6 and when no station is selected).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Palette {
     pub query: TextInput,
-    /// Indices into [`CATALOG`], best match first.
+    /// Every entry the palette can show, in palette order.
+    pub entries: Vec<ActionDef>,
+    /// Indices into `entries`, best match first (into [`CATALOG`] for OCPP 1.6).
     pub results: Vec<usize>,
     pub selected: usize,
 }
 
 impl Palette {
+    /// The palette of OCPP 1.6.
     pub fn new() -> Self {
+        Self::with_entries(CATALOG.to_vec())
+    }
+
+    pub fn with_entries(entries: Vec<ActionDef>) -> Self {
         let mut p = Self {
             query: TextInput::default(),
+            entries,
             results: Vec::new(),
             selected: 0,
         };
@@ -268,8 +349,13 @@ impl Palette {
         p
     }
 
+    /// The entries in result order, as the palette lists them.
+    pub fn rows(&self) -> impl Iterator<Item = &ActionDef> {
+        self.results.iter().filter_map(|&i| self.entries.get(i))
+    }
+
     pub fn refresh(&mut self) {
-        self.results = rank_by(CATALOG, self.query.text(), haystack);
+        self.results = rank_by(&self.entries, self.query.text(), haystack);
         self.selected = 0;
     }
 
@@ -283,7 +369,7 @@ impl Palette {
     pub fn chosen(&self) -> Option<ActionId> {
         self.results
             .get(self.selected)
-            .and_then(|i| CATALOG.get(*i))
+            .and_then(|i| self.entries.get(*i))
             .map(|a| a.id)
     }
 }
@@ -490,6 +576,122 @@ impl App {
         registry::protocol_actions(summary.protocol.as_deref().unwrap_or(ACTIONS_PROTOCOL))
     }
 
+    /// The protocol token the selected station speaks (`ocpp1.6` when it negotiated none).
+    fn protocol_name(&self, station: &str) -> &str {
+        self.summary(station)
+            .and_then(|s| s.protocol.as_deref())
+            .unwrap_or(ACTIONS_PROTOCOL)
+    }
+
+    /// What the palette and the hotkeys offer for the selected station.
+    fn offer(&self) -> Offer {
+        let Some(station) = self.selected.as_deref() else {
+            return Offer::V16;
+        };
+        let name = self.protocol_name(station);
+        if name == ACTIONS_PROTOCOL {
+            return Offer::V16;
+        }
+        registry::protocol_actions(name)
+            .map_or_else(|| Offer::NoTable(name.to_owned()), Offer::Table)
+    }
+
+    /// The entries of the palette and the hotkeys for the selected station: the OCPP 1.6
+    /// catalogue (also when no station is selected), the table of its protocol, or only the
+    /// local operations for a protocol without a table.
+    pub fn catalog(&self) -> Vec<ActionDef> {
+        match self.offer() {
+            Offer::V16 => CATALOG.to_vec(),
+            Offer::Table(table) => entries_for(table),
+            Offer::NoTable(_) => local_entries().collect(),
+        }
+    }
+
+    /// The action a normal-mode key triggers for the selected station. A key that only the
+    /// OCPP 1.6 catalogue knows still resolves, so that [`App::reason_for`] can say why it
+    /// does nothing here.
+    pub fn action_for_key(&self, c: char) -> Option<ActionId> {
+        self.catalog()
+            .iter()
+            .find(|a| a.key == Some(c))
+            .map(|a| a.id)
+            .or_else(|| by_key(c))
+    }
+
+    /// Why an OCPP 1.6 action cannot run for the selected station's protocol.
+    fn protocol_reason(&self, id: ActionId) -> Option<String> {
+        let v16_action = def_of(id).is_some_and(|d| d.ocpp.is_some());
+        match self.offer() {
+            Offer::V16 => None,
+            Offer::Table(table) => {
+                v16_action.then(|| format!("not an {} action", version_text(table.protocol)))
+            }
+            Offer::NoTable(name) => (v16_action || matches!(id, ActionId::Call(_) | ActionId::Raw))
+                .then(|| format!("no action table for {}", sanitize(&name))),
+        }
+    }
+
+    /// The running OCPP 2.0.1 transactions of the selected station, newest first.
+    fn tx_choices(&self) -> Vec<TxChoice> {
+        let Some(state) = &self.state else {
+            return Vec::new();
+        };
+        let v2 = state.v2.as_ref();
+        state
+            .active_transactions()
+            .into_iter()
+            .rev()
+            .filter_map(|tx| {
+                let TransactionId::Text(id) = tx.id else {
+                    return None;
+                };
+                let id_token = v2
+                    .and_then(|v2| v2.transactions.iter().find(|t| t.id == id))
+                    .and_then(|t| t.id_token.clone());
+                Some(TxChoice {
+                    id,
+                    evse: tx.evse,
+                    connector: tx.connector,
+                    id_token,
+                })
+            })
+            .collect()
+    }
+
+    /// Opens the form of entry `index` of the station's action table, or sends the action
+    /// right away when it takes no input.
+    fn open_call(&mut self, station: &str, index: usize, fx: &mut Vec<Effect>) {
+        let Some(table) = self.protocol_of(station) else {
+            self.notify(NoticeLevel::Error, "no such action for this station");
+            return;
+        };
+        let (Some(spec), Some(protocol)) = (
+            table.csms_actions.get(index),
+            Protocol::from_token(table.protocol),
+        ) else {
+            self.notify(NoticeLevel::Error, "no such action for this station");
+            return;
+        };
+        if spec.fields.is_empty() && !takes_raw_payload(table.protocol, spec) {
+            let command = Command::Raw {
+                action: spec.name.to_owned(),
+                payload: json!({}),
+            };
+            self.send(station, command, fx);
+            return;
+        }
+        let mut ctx = SpecContext::new(protocol);
+        if spec
+            .field("remoteStartId")
+            .or(spec.field("requestId"))
+            .is_some()
+        {
+            ctx.request_id = self.take_request_id();
+        }
+        ctx.transactions = self.tx_choices();
+        self.mode = Mode::Form(Box::new(Form::from_spec(station, spec, &ctx)));
+    }
+
     fn active_transactions(&self) -> Vec<StopChoice> {
         self.state
             .as_ref()
@@ -525,8 +727,29 @@ impl App {
                 _ => reason("no station selected"),
             };
         };
+        if let Some(why) = self.protocol_reason(id) {
+            return Some(why);
+        }
         let connected = self.summary(selected).is_some_and(|s| s.connected);
         match id {
+            ActionId::Call(index) => {
+                let stop = self
+                    .protocol_of(selected)
+                    .and_then(|table| table.csms_actions.get(index))
+                    .is_some_and(|spec| spec.name == "RequestStopTransaction");
+                if !connected {
+                    reason("station is disconnected")
+                } else if stop
+                    && self
+                        .state
+                        .as_ref()
+                        .is_none_or(|s| s.active_transactions().is_empty())
+                {
+                    reason("no active transaction")
+                } else {
+                    None
+                }
+            }
             ActionId::RemoteStart
             | ActionId::Reset
             | ActionId::ChangeConfiguration
@@ -550,7 +773,6 @@ impl App {
             | ActionId::UpdateFirmware
             | ActionId::GetDiagnostics
             | ActionId::SendLocalList
-            | ActionId::Call(_)
             | ActionId::Raw => (!connected).then(|| "station is disconnected".to_owned()),
             ActionId::RemoteStop => {
                 if !connected {
@@ -585,13 +807,18 @@ impl App {
     }
 
     pub fn open_palette(&mut self) {
-        self.mode = Mode::Palette(Palette::new());
+        self.mode = Mode::Palette(Palette::with_entries(self.catalog()));
     }
 
     /// Runs an action from a key or the palette; an unavailable one says why.
     pub fn run_action(&mut self, id: ActionId, fx: &mut Vec<Effect>) {
         if let Some(why) = self.reason_for(id) {
-            let label = def_of(id).map_or("action", ActionDef::label);
+            let label = self
+                .catalog()
+                .iter()
+                .find(|d| d.id == id)
+                .or_else(|| def_of(id))
+                .map_or("action", ActionDef::label);
             self.notify(NoticeLevel::Error, format!("{label}: {why}"));
             return;
         }
@@ -669,15 +896,33 @@ impl App {
                     self.mode = Mode::Detail(security_events_detail(&station, state));
                 }
             }
-            ActionId::Raw => self.mode = Mode::Form(Box::new(Form::raw(st, None))),
-            ActionId::Rule => self.mode = Mode::Form(Box::new(Form::rule())),
+            ActionId::Raw => {
+                let form = match self.offer() {
+                    Offer::Table(table) => Form::raw_in(st, table.protocol, None),
+                    _ => Form::raw(st, None),
+                };
+                self.mode = Mode::Form(Box::new(form));
+            }
+            ActionId::Rule => {
+                let form = match self.offer() {
+                    Offer::Table(table) => Form::rule_in(table.protocol),
+                    _ => Form::rule(),
+                };
+                self.mode = Mode::Form(Box::new(form));
+            }
             ActionId::RemoveRule => {
                 self.mode = Mode::Form(Box::new(Form::remove_rule_scoped(
                     &self.rules.actions,
                     &self.rules.scoped,
                 )));
             }
-            ActionId::Fault => self.mode = Mode::Form(Box::new(Form::fault())),
+            ActionId::Fault => {
+                let form = match self.offer() {
+                    Offer::Table(table) => Form::fault_in(table.protocol),
+                    _ => Form::fault(),
+                };
+                self.mode = Mode::Form(Box::new(form));
+            }
             ActionId::ClearRules => {
                 self.mode = Mode::Confirm(Confirm {
                     message: "Remove every response rule and pending fault?".to_owned(),
@@ -701,15 +946,7 @@ impl App {
                 });
             }
             ActionId::PendingCalls => self.mode = Mode::Pending(0),
-            ActionId::Call(index) => {
-                let spec = self
-                    .protocol_of(st)
-                    .and_then(|table| table.csms_actions.get(index));
-                match spec {
-                    Some(spec) => self.mode = Mode::Form(Box::new(Form::from_spec(st, spec))),
-                    None => self.notify(NoticeLevel::Error, "no such action for this station"),
-                }
-            }
+            ActionId::Call(index) => self.open_call(st, index, fx),
         }
     }
 
@@ -717,7 +954,7 @@ impl App {
     pub fn submitted(&mut self, form_station: &str, submitted: Submitted, fx: &mut Vec<Effect>) {
         match submitted {
             Submitted::Send(command) => {
-                if command.needs_confirm() {
+                if command.needs_confirm_in(self.protocol_name(form_station)) {
                     self.mode = Mode::Confirm(Confirm {
                         message: format!("Send {} to {}?", command.label(), sanitize(form_station)),
                         action: ConfirmAction::Send {
@@ -733,6 +970,41 @@ impl App {
                 action,
                 payload,
                 station,
+                protocol: Some(protocol),
+            } => {
+                let scope = station
+                    .map_or_else(Scope::global, Scope::station)
+                    .protocol(protocol);
+                fx.push(Effect::RespondScoped {
+                    action,
+                    payload,
+                    scope,
+                });
+            }
+            Submitted::Fault {
+                action,
+                kind,
+                times,
+                payload,
+                station,
+                protocol: Some(protocol),
+            } => {
+                let scope = station
+                    .map_or_else(Scope::global, Scope::station)
+                    .protocol(protocol);
+                fx.push(Effect::InjectScoped {
+                    action,
+                    kind,
+                    times,
+                    payload,
+                    scope,
+                });
+            }
+            Submitted::Rule {
+                action,
+                payload,
+                station,
+                protocol: None,
             } => {
                 let target = scope_text(&action, station.as_deref());
                 fx.push(Effect::Respond {
@@ -748,6 +1020,7 @@ impl App {
                 times,
                 payload,
                 station,
+                protocol: None,
             } => {
                 let target = scope_text(&action, station.as_deref());
                 fx.push(Effect::Inject {
@@ -881,7 +1154,8 @@ impl App {
                 }
                 let body = pretty(answer);
                 lines.extend(body.lines().map(sanitize));
-                (true, text, level, body, command.answer_is_content(answer))
+                let content = command.answer_is_content_in(self.protocol_name(station), answer);
+                (true, text, level, body, content)
             }
             Err(e) => {
                 lines.push(String::new());

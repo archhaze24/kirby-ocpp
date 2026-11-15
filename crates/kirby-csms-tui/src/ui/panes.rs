@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
 use kirby_csms_core::{StationInfo, StationState, TransactionStatus};
+use kirby_ocpp_core::ocpp::v2::types::WireEnum;
 use kirby_ocpp_core::station::{Direction, LogLevel};
 use kirby_ocpp_tui::logview::{FrameKind, LogEntry};
 use kirby_ocpp_tui::text::{sanitize, truncate, truncate_middle, width};
@@ -29,7 +30,7 @@ fn block(title: String, focused: bool) -> Block<'static> {
 fn status_color(status: &str) -> Color {
     match status {
         "Available" => Color::Green,
-        "Charging" => Color::Cyan,
+        "Charging" | "Occupied" => Color::Cyan,
         "Faulted" => Color::Red,
         "Unavailable" => Color::DarkGray,
         _ => Color::Yellow,
@@ -76,8 +77,13 @@ fn station_row(s: &Summary, inner_w: usize, selected: bool, mono: bool) -> Line<
         (_, Some(m)) if inner_w >= 34 => format!(" {}", truncate(&sanitize(m), 14)),
         _ => String::new(),
     };
+    let protocol = if s.protocol.as_deref() == Some("ocpp2.0.1") {
+        " v2"
+    } else {
+        ""
+    };
     let id_w = inner_w
-        .saturating_sub(2 + width(&model) + width(&tx))
+        .saturating_sub(2 + width(&model) + width(&tx) + width(protocol))
         .max(1);
     // Middle cut: ids that share a long prefix still differ in the tail.
     let id = pad(&truncate_middle(&sanitize(&s.id), id_w), id_w);
@@ -92,6 +98,7 @@ fn station_row(s: &Summary, inner_w: usize, selected: bool, mono: bool) -> Line<
         Span::styled(format!("{dot} "), Style::new().fg(color)),
         Span::styled(id, text_style),
         Span::styled(model, dim()),
+        Span::styled(protocol, dim()),
         Span::styled(tx, tx_style),
     ]);
     if selected { line.style(SELECTED) } else { line }
@@ -179,11 +186,16 @@ pub fn details(f: &mut Frame<'_>, app: &App, area: Rect) {
     let inner_w = usize::from(area.width.saturating_sub(2));
     let outer = block(
         truncate(&format!("Station {}", sanitize(id)), inner_w.max(1)),
-        false,
+        app.focus == Focus::Details,
     );
     let inner = outer.inner(area);
     f.render_widget(outer, area);
     let lines = info_lines(app, app.info.as_ref(), app.state.as_ref(), inner_w);
+    let is_v2 = app.info.as_ref().and_then(|i| i.subprotocol.as_deref()) == Some("ocpp2.0.1")
+        || app
+            .stations
+            .iter()
+            .any(|s| s.id == id && s.protocol.as_deref() == Some("ocpp2.0.1"));
     let info_h = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .min(inner.height);
@@ -193,6 +205,10 @@ pub fn details(f: &mut Frame<'_>, app: &App, area: Rect) {
     let Some(state) = &app.state else {
         return;
     };
+    if is_v2 {
+        details_v2(f, app, state, tables);
+        return;
+    }
     if tables.width >= 140 {
         let [c, t] = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
             .areas(tables);
@@ -275,15 +291,140 @@ fn info_lines(
         }
         out.push(line);
         let received = info.map_or(0, |i| i.received_calls);
-        out.push(format!(
-            "calls received {received}  failed {}  unknown stops {}",
-            s.failed_calls, s.unknown_stops
-        ));
+        if let Some(v2) = &s.v2 {
+            if let Some(reason) = v2.boot_reason {
+                out.push(format!("boot reason {}", reason.as_str()));
+            }
+            let c = &v2.counters;
+            out.push(format!(
+                "events {}  duplicates {}  rejected {}  meters {}  reports {}",
+                c.transaction_events,
+                c.duplicate_events,
+                c.rejected_events,
+                c.meter_values,
+                c.notify_reports
+            ));
+            if let Some(r) = &v2.last_report {
+                out.push(format!(
+                    "report #{} seqNo {} tbc {}",
+                    r.request_id, r.seq_no, r.tbc
+                ));
+            }
+        } else {
+            out.push(format!(
+                "calls received {received}  failed {}  unknown stops {}",
+                s.failed_calls, s.unknown_stops
+            ));
+        }
         out.extend(security_lines(app, s));
     }
     out.into_iter()
         .map(|l| Line::raw(truncate(&sanitize(&l), w)))
         .collect()
+}
+
+fn details_v2(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
+    let Some(v2) = &state.v2 else { return };
+    let statuses = state.connector_statuses();
+    let (c, t) = if area.width >= 140 {
+        let [c, t] = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+            .areas(area);
+        (c, t)
+    } else {
+        let wanted = u16::try_from(statuses.len() + 1).unwrap_or(u16::MAX);
+        let cap = (area.height / 3).max(area.height.saturating_sub(3)).max(2);
+        let [c, t] =
+            Layout::vertical([Constraint::Length(wanted.clamp(2, cap)), Constraint::Min(0)])
+                .areas(area);
+        (c, t)
+    };
+    let rows = statuses.iter().map(|(id, status)| {
+        let updated = v2
+            .evses
+            .iter()
+            .flat_map(|(e, ev)| {
+                ev.connectors
+                    .iter()
+                    .map(move |(c, s)| (format!("{e}/{c}"), s))
+            })
+            .find(|(key, _)| key == id)
+            .map_or_else(|| "-".to_owned(), |(_, s)| age(app.now, s.received_at));
+        Row::new(vec![
+            truncate(&sanitize(id), 10),
+            truncate(&sanitize(status), 12),
+            updated,
+        ])
+        .style(Style::new().fg(status_color(status)))
+    });
+    f.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Length(12),
+                Constraint::Length(5),
+            ],
+        )
+        .header(Row::new(["EVSE/conn", "Status", "Upd"]).style(dim())),
+        c,
+    );
+    let rows = v2.transactions.iter().rev().enumerate().map(|(index, tx)| {
+        let loc = format!(
+            "{}/{}",
+            tx.evse.map_or_else(|| "-".to_owned(), |v| v.to_string()),
+            tx.connector
+                .map_or_else(|| "-".to_owned(), |v| v.to_string())
+        );
+        let active = tx.status == TransactionStatus::Active;
+        let state = if active {
+            "active".to_owned()
+        } else {
+            format!("ended {}", tx.stopped_reason.map_or("-", |r| r.as_str()))
+        };
+        Row::new(vec![
+            truncate(&sanitize(&tx.id), 8),
+            loc,
+            truncate(&sanitize(tx.id_token.as_deref().unwrap_or("-")), 10),
+            tx.charging_state.map_or("-", |s| s.as_str()).to_owned(),
+            tx.energy_wh
+                .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}")),
+            tx.power_w
+                .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}")),
+            truncate(&sanitize(&state), 24),
+            clock(tx.started_at),
+        ])
+        .style(
+            if app.focus == Focus::Details && index == app.transaction_selection {
+                SELECTED
+            } else if active {
+                Style::new().fg(Color::Cyan)
+            } else {
+                dim()
+            },
+        )
+    });
+    f.render_widget(
+        Table::new(
+            rows,
+            [
+                Constraint::Length(8),
+                Constraint::Length(7),
+                Constraint::Length(10),
+                Constraint::Length(13),
+                Constraint::Length(7),
+                Constraint::Length(6),
+                Constraint::Length(24),
+                Constraint::Min(8),
+            ],
+        )
+        .header(
+            Row::new([
+                "Tx", "EVSE/C", "idToken", "Charging", "Wh", "W", "State", "Time",
+            ])
+            .style(dim()),
+        ),
+        t,
+    );
 }
 
 /// What the station reported under the Security Whitepaper: nothing when it reported nothing.

@@ -243,6 +243,9 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                     ("p", "pause"),
                 ]);
             }
+            if app.focus == Focus::Details {
+                v.push(("Enter", "transaction"));
+            }
             v.extend([("↑↓", "move"), ("←→", "pane")]);
             // `/` narrows the focused pane; the log pane already lists `s` for the same thing.
             if app.focus == Focus::Stations {
@@ -307,8 +310,25 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
         }
         Mode::Help => {
             let rect_w = kirby_ocpp_tui::ui::popup_width(area.width, 96);
+            let catalog = app.catalog();
+            let dynamic = catalog.iter().any(|a| a.protocol == "ocpp2.0.1");
+            let action_lines: Vec<String> = catalog
+                .iter()
+                .filter_map(|a| a.key.map(|key| format!("{key}  {}", a.label())))
+                .collect();
+            let mut lines: Vec<&str> = if dynamic {
+                HELP[..14].to_vec()
+            } else {
+                HELP.to_vec()
+            };
+            if dynamic {
+                lines.push("Actions on the selected station (s searches when the log is focused):");
+                lines.extend(action_lines.iter().map(String::as_str));
+                lines.push("Log pane: Enter detail, s search, y copy, f filter, p pause/follow");
+                lines.push("Details pane: Up/Down select transaction, Enter opens it");
+            }
             let wrapped =
-                kirby_ocpp_tui::text::wrap_help(HELP, usize::from(rect_w.saturating_sub(2)));
+                kirby_ocpp_tui::text::wrap_help(&lines, usize::from(rect_w.saturating_sub(2)));
             let mut wrapped = wrapped;
             if wrapped.len() + 2 > usize::from(area.height) {
                 // A short terminal: drop the spacer lines so more of the help fits.

@@ -94,18 +94,32 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         KeyCode::Char(':') => app.open_palette(),
         KeyCode::Char('/') => open_input(app, input_target_for_focus(app.focus)),
         KeyCode::Char('s') if app.focus == Focus::Log => open_input(app, InputTarget::LogSearch),
-        KeyCode::Tab | KeyCode::Right => app.focus = Focus::Log,
-        KeyCode::BackTab | KeyCode::Left => app.focus = Focus::Stations,
+        KeyCode::Tab | KeyCode::Right => {
+            app.focus = match app.focus {
+                Focus::Stations if app.state.as_ref().is_some_and(|s| s.v2.is_some()) => {
+                    Focus::Details
+                }
+                _ => Focus::Log,
+            }
+        }
+        KeyCode::BackTab | KeyCode::Left => {
+            app.focus = match app.focus {
+                Focus::Log if app.state.as_ref().is_some_and(|s| s.v2.is_some()) => Focus::Details,
+                _ => Focus::Stations,
+            }
+        }
         KeyCode::Up | KeyCode::Char('k') => step(app, -1, fx),
         KeyCode::Down | KeyCode::Char('j') => step(app, 1, fx),
         KeyCode::PageUp => step(app, -PAGE, fx),
         KeyCode::PageDown => step(app, PAGE, fx),
         KeyCode::Home => match app.focus {
             Focus::Stations => app.select_row(0, fx),
+            Focus::Details => app.transaction_selection = 0,
             Focus::Log => app.log_mut().select_first(),
         },
         KeyCode::End => match app.focus {
             Focus::Stations => app.select_row(app.visible_len().saturating_sub(1), fx),
+            Focus::Details => app.transaction_selection = transaction_count(app).saturating_sub(1),
             Focus::Log => app.log_mut().follow_tail(),
         },
         KeyCode::Char('G') => app.log_mut().follow_tail(),
@@ -137,7 +151,7 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         KeyCode::Char('y') => copy_row(app, fx),
         KeyCode::Char('Y') => copy_visible(app, fx),
         KeyCode::Char(c) => {
-            if let Some(id) = actions::by_key(c) {
+            if let Some(id) = app.action_for_key(c) {
                 app.run_action(id, fx);
             }
         }
@@ -151,13 +165,16 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
             }
         }
         KeyCode::Enter if app.focus == Focus::Log => app.open_detail(),
+        KeyCode::Enter if app.focus == Focus::Details => {
+            app.open_transaction_detail(app.transaction_selection);
+        }
         _ => {}
     }
 }
 
 fn input_target_for_focus(focus: Focus) -> InputTarget {
     match focus {
-        Focus::Stations => InputTarget::Stations,
+        Focus::Stations | Focus::Details => InputTarget::Stations,
         Focus::Log => InputTarget::LogSearch,
     }
 }
@@ -176,8 +193,21 @@ fn open_input(app: &mut App, target: InputTarget) {
 fn step(app: &mut App, delta: isize, fx: &mut Vec<Effect>) {
     match app.focus {
         Focus::Stations => app.move_cursor(delta, fx),
+        Focus::Details => {
+            app.transaction_selection = app
+                .transaction_selection
+                .saturating_add_signed(delta)
+                .min(transaction_count(app).saturating_sub(1));
+        }
         Focus::Log => app.log_mut().move_selection(delta),
     }
+}
+
+fn transaction_count(app: &App) -> usize {
+    app.state
+        .as_ref()
+        .and_then(|s| s.v2.as_ref())
+        .map_or(0, |v| v.transactions.len())
 }
 
 fn copy_row(app: &App, fx: &mut Vec<Effect>) {

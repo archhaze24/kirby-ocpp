@@ -135,7 +135,20 @@ Actions on the selected station:
 | `F` | forget a disconnected station and its state (asks first) |
 | `n` | copy the station id |
 
-Forms: `Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels. Fields are checked as you type and the request is checked against the OCPP 1.6J schema before anything is sent; errors show under the field. A field takes at most 256 KiB (typed or pasted; the rest is dropped and the field says so). DataTransfer limits `vendorId` to 255 characters, `messageId` to 50 and `data` to 64 KiB. Ids and numbers are trimmed; the values of ChangeConfiguration and DataTransfer `data` keep their leading and trailing spaces.
+Forms: `Tab` next field, `Left` `Right` or a letter picks an option, `Enter` sends, `Esc` cancels. Fields are checked as you type and the request is checked against the schema of the station's OCPP version before anything is sent; errors show under the field. A field takes at most 256 KiB (typed or pasted; the rest is dropped and the field says so). DataTransfer limits `vendorId` to 255 characters, `messageId` to 50 and `data` to 64 KiB. Ids and numbers are trimmed; the values of ChangeConfiguration and DataTransfer `data` keep their leading and trailing spaces.
+
+OCPP 2.0.1 stations (marked `v2` in the list): the details show the boot reason, the EVSE connectors with their 2.0.1 status, the transactions (first characters of the id, `EVSE/connector`, `idToken`, charging state, energy, power, `active` or `ended` with the stop reason; select a row and press `Enter` for every field and the full id), the event counters and the progress of the last `NotifyReport`. The palette and the hotkeys follow the station's version; every 2.0.1 CSMS action is in the palette, with a form built from its fields (a JSON field for actions with nested payloads). Hotkeys on a 2.0.1 station:
+
+| Key | Action |
+| --- | --- |
+| `R` | Reset (`Immediate` or `OnIdle`, asks first) |
+| `t` / `x` | RequestStartTransaction / RequestStopTransaction (picks an active transaction) |
+| `g` / `c` | GetVariables / SetVariables |
+| `b` | GetBaseReport |
+| `s` | GetTransactionStatus (with the station list focused; in the log pane `s` searches) |
+| `T`, `u`, `A`, `C`, `D` | TriggerMessage, UnlockConnector, ChangeAvailability, ClearCache, DataTransfer |
+
+A 1.6 hotkey without a 2.0.1 counterpart says so in the status line. The response rule and fault forms start with a protocol field (default: the selected station's); a rule or fault limited to a protocol applies only to stations that speak it, `(all)` applies to every station as before.
 
 Pending commands: `W` (or `Pending calls` in the palette) lists every command that waits for a station, oldest first, with the time since it was sent (`7s`, `1m05s`; the list updates every second). `x` cancels the selected one: the UI stops waiting and reports `cancelled` in the status line and the results history. The command itself is already on the wire and cannot be recalled; the engine releases the station's call queue when the call timeout (`--call-timeout`) has passed, and an answer that still arrives is recorded in the log and ignored. The footer shows `W pending` while commands wait.
 

@@ -223,6 +223,24 @@ async fn execute(effect: Effect, handle: &CsmsHandle, exec: &mut Exec) -> Vec<Ms
                 }
             }
         },
+        Effect::RespondScoped {
+            action,
+            payload,
+            scope,
+        } => match handle.respond_scoped(&scope, &action, payload) {
+            Ok(()) => vec![rules_msg(handle)],
+            Err(error) => vec![Msg::Notice(NoticeLevel::Error, error), rules_msg(handle)],
+        },
+        Effect::InjectScoped {
+            action,
+            kind,
+            times,
+            payload,
+            scope,
+        } => {
+            let _ = handle.inject_scoped(fault_for(&action, kind, times, payload), scope);
+            vec![rules_msg(handle)]
+        }
         Effect::Inject {
             action,
             kind,

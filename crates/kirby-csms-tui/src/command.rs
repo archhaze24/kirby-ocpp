@@ -1,8 +1,9 @@
 //! What the UI can send to a station, and the executor that sends it. [`Command`] is plain
 //! data (the model builds it from a form); [`run`] performs it against the engine.
 
-use kirby_csms_core::{CsmsError, CsmsHandle, Frame};
+use kirby_csms_core::{ACTIONS_PROTOCOL, CsmsError, CsmsHandle, Frame, registry};
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::messages::{
     CertificateHashData, CertificateUse, ChargingProfile, ClearChargingProfileRequest,
     ExtendedMessageTrigger, GetDiagnosticsRequest, GetLogRequest, ReserveNowRequest,
@@ -11,6 +12,7 @@ use kirby_ocpp_core::ocpp::messages::{
 use kirby_ocpp_core::ocpp::types::{
     AvailabilityType, ChargingRateUnitType, MessageTrigger, ResetType,
 };
+use kirby_ocpp_core::ocpp::v2::registry as v2_registry;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -226,6 +228,27 @@ impl Command {
         }
     }
 
+    /// [`needs_confirm`](Self::needs_confirm) for a station that speaks `protocol`. The
+    /// commands of an OCPP 2.0.1 table are sent as [`Command::Raw`], so what asks first is
+    /// decided by the action name there.
+    pub fn needs_confirm_in(&self, protocol: &str) -> bool {
+        self.needs_confirm()
+            || matches!(self, Self::Raw { action, .. }
+                if protocol != ACTIONS_PROTOCOL && CONFIRM_BY_NAME.contains(&action.as_str()))
+    }
+
+    /// [`answer_is_content`](Self::answer_is_content) for a station that speaks `protocol`: a
+    /// raw command of a table other than OCPP 1.6 opens the popup only when its answer is
+    /// content (a report, a status, a payload of a raw entry), not for a plain status.
+    pub fn answer_is_content_in(&self, protocol: &str, response: &Value) -> bool {
+        match self {
+            Self::Raw { action, .. } if protocol != ACTIONS_PROTOCOL => {
+                content_by_name(protocol, action, response)
+            }
+            _ => self.answer_is_content(response),
+        }
+    }
+
     /// Whether a successful answer is worth a popup instead of just a notice.
     pub fn answer_is_content(&self, response: &Value) -> bool {
         match self {
@@ -236,6 +259,34 @@ impl Command {
             Self::DataTransfer { .. } => response.get("data").is_some(),
             _ => false,
         }
+    }
+}
+
+/// Actions of a table other than OCPP 1.6 that ask for confirmation before they are sent.
+const CONFIRM_BY_NAME: &[&str] = &["Reset"];
+/// Actions whose answer opens a popup (it lists what the station reported).
+const CONTENT_BY_NAME: &[&str] = &[
+    "GetVariables",
+    "SetVariables",
+    "GetBaseReport",
+    "GetTransactionStatus",
+];
+
+/// Whether the registry entry `spec` of `protocol` takes its payload as raw JSON: it has no
+/// form fields and is not an action that simply takes no input.
+pub fn takes_raw_payload(protocol: &str, spec: &registry::ActionSpec) -> bool {
+    spec.fields.is_empty()
+        && !(protocol == Protocol::V201.token() && v2_registry::is_typed(spec.name))
+}
+
+fn content_by_name(protocol: &str, action: &str, response: &Value) -> bool {
+    if action == "DataTransfer" {
+        return response.get("data").is_some();
+    }
+    match registry::csms_action(protocol, action) {
+        Some(spec) if spec.fields.is_empty() => takes_raw_payload(protocol, spec),
+        Some(_) => CONTENT_BY_NAME.contains(&action),
+        None => true,
     }
 }
 

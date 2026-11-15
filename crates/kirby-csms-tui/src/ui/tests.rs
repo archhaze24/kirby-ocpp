@@ -42,6 +42,124 @@ fn render(app: &App, w: u16, h: u16) -> String {
     screen(terminal.backend())
 }
 
+#[test]
+fn v2_before_first_message_renders_at_small_sizes() {
+    let (mut app, _) = app_with(&["CP-1"]);
+    let mut station_info = info("CP-1", true);
+    station_info.subprotocol = Some("ocpp2.0.1".into());
+    app.info = Some(station_info);
+    app.state = None;
+    for (w, h) in [(24, 8), (110, 30), (160, 40)] {
+        let screen = render(&app, w, h);
+        assert!(!screen.contains("idTag"));
+    }
+}
+
+fn tx2(id: &str, connector: Option<u32>, token: &str) -> kirby_csms_core::Tx2Record {
+    use kirby_ocpp_core::ocpp::v2::messages::TriggerReason;
+    kirby_csms_core::Tx2Record {
+        id: id.into(),
+        evse: Some(1),
+        connector,
+        id_token: Some(token.into()),
+        id_token_type: None,
+        id_token_status: None,
+        status: TransactionStatus::Active,
+        charging_state: None,
+        remote_start_id: None,
+        reservation_id: None,
+        trigger_reason: TriggerReason::Authorized,
+        started_at: at(0),
+        stopped_at: None,
+        stopped_reason: None,
+        time_spent_charging: None,
+        energy_wh: Some(1500.0),
+        power_w: None,
+        meter_start_wh: None,
+        meter_stop_wh: None,
+        last_meter_at: None,
+        seq: kirby_csms_core::SeqTracker::default(),
+    }
+}
+
+/// A 2.0.1 station with one running and one ended transaction, a duplicate event and a
+/// report in progress; ids and tokens are hostile.
+fn app_v2() -> App {
+    use kirby_ocpp_core::ocpp::v2::messages::{BootReason, ConnectorStatus as Status2};
+    use kirby_ocpp_core::ocpp::v2::types::{ChargingState, StopReason};
+    let (mut app, _) = app_with(&["CP-1"]);
+    let mut station_info = info("CP-1", true);
+    station_info.subprotocol = Some("ocpp2.0.1".into());
+    app.info = Some(station_info);
+    let mut running = tx2(
+        "0123456789abcdef-running-transaction",
+        None,
+        "TOK\u{1b}[2J\u{202e}",
+    );
+    running.charging_state = Some(ChargingState::SuspendedEvse);
+    let mut ended = tx2("fedcba98-ended", Some(1), "TOK-2");
+    ended.status = TransactionStatus::Stopped;
+    ended.stopped_at = Some(at(60));
+    ended.stopped_reason = Some(StopReason::ImmediateReset);
+    let mut evse = kirby_csms_core::EvseState::default();
+    evse.connectors.insert(
+        1,
+        kirby_csms_core::Connector2State {
+            status: Status2::Occupied,
+            timestamp: at(0),
+            received_at: at(0),
+        },
+    );
+    let mut s = state();
+    s.connectors.clear();
+    s.transactions.clear();
+    s.v2 = Some(Box::new(kirby_csms_core::StationState2 {
+        protocol: "ocpp2.0.1".into(),
+        boot_reason: Some(BootReason::PowerUp),
+        evses: [(1, evse)].into_iter().collect(),
+        transactions: vec![ended, running],
+        meters: std::collections::BTreeMap::new(),
+        counters: kirby_csms_core::Counters2 {
+            transaction_events: 4,
+            duplicate_events: 1,
+            ..kirby_csms_core::Counters2::default()
+        },
+        last_report: Some(kirby_csms_core::ReportInfo {
+            request_id: 7,
+            seq_no: 2,
+            tbc: true,
+            at: at(30),
+        }),
+    }));
+    app.state = Some(s);
+    app
+}
+
+#[test]
+fn v2_station_shows_wire_names_short_ids_and_report_progress() {
+    let app = app_v2();
+    let screen = render(&app, 160, 40);
+    for want in [
+        "Occupied",
+        "SuspendedEVSE",
+        "ImmediateReset",
+        "0123456…",
+        "PowerUp",
+        "1/-",
+        "report #7 seqNo 2 tbc true",
+    ] {
+        assert!(screen.contains(want), "missing {want}:\n{screen}");
+    }
+    assert!(!screen.contains("0123456789abcdef-running"), "{screen}");
+    for unwanted in ["idTag", "Preparing", "Finishing", "\u{1b}", "\u{202e}"] {
+        assert!(!screen.contains(unwanted), "found {unwanted:?}:\n{screen}");
+    }
+    for (w, h) in [(24, 8), (80, 24), (110, 30)] {
+        let screen = render(&app, w, h);
+        assert!(!screen.contains('\u{1b}'));
+    }
+}
+
 pub(crate) fn state() -> StationState {
     let mut s = StationState::default();
     s.boot = Some(BootInfo {

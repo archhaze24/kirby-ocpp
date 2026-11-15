@@ -340,7 +340,10 @@ fn connection_events_update_flags_and_lines() {
             station: "0".to_owned(),
         }),
     );
-    assert!(fx.is_empty());
+    assert!(fx.contains(&Effect::Refresh {
+        states: vec![],
+        info: Some("0".to_owned())
+    }));
     assert_eq!(app.stations[0].id, "0");
     assert_eq!(
         app.selected.as_deref(),
@@ -569,4 +572,51 @@ async fn run_loop_ends_when_the_key_stream_ends() {
     .expect("ends");
     result.expect("clean");
     csms.shutdown().await;
+}
+#[test]
+fn protocol_scoped_rules_and_faults_keep_their_scope() {
+    use crate::form::{FaultKind, Submitted};
+    let (mut app, _) = app_with(&["CP-1"]);
+    for protocol in [None, Some("ocpp2.0.1".to_owned())] {
+        let mut effects = Vec::new();
+        app.submitted(
+            "CP-1",
+            Submitted::Rule {
+                action: "Heartbeat".into(),
+                payload: serde_json::json!({}),
+                station: Some("CP-1".into()),
+                protocol: protocol.clone(),
+            },
+            &mut effects,
+        );
+        assert!(if protocol.is_some() {
+            matches!(
+                effects.first(),
+                Some(crate::app::Effect::RespondScoped { .. })
+            )
+        } else {
+            matches!(effects.first(), Some(crate::app::Effect::Respond { .. }))
+        });
+        effects.clear();
+        app.submitted(
+            "CP-1",
+            Submitted::Fault {
+                action: "Heartbeat".into(),
+                kind: FaultKind::Silence,
+                times: 1,
+                payload: serde_json::json!({}),
+                station: None,
+                protocol: protocol.clone(),
+            },
+            &mut effects,
+        );
+        assert!(if protocol.is_some() {
+            matches!(
+                effects.first(),
+                Some(crate::app::Effect::InjectScoped { .. })
+            )
+        } else {
+            matches!(effects.first(), Some(crate::app::Effect::Inject { .. }))
+        });
+    }
 }
