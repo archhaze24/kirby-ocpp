@@ -18,7 +18,7 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 | Crate | Role | Published |
 | --- | --- | --- |
 | `kirby-ocpp-core` | UI-free charge point emulator and the OCPP layer (see below) | yes |
-| `kirby-ocpp-tui` | Emulator terminal UI (ratatui). Also holds generic pieces reused by the CSMS UI: terminal guard, `logview`, `text`, `clipboard`, `palette` | yes |
+| `kirby-ocpp-tui` | Emulator terminal UI (ratatui); the 2.0.1 station has its own model, view and loop in `v2/` over the same widgets. Also holds generic pieces reused by the CSMS UI: terminal guard, `logview`, `text`, `clipboard`, `palette` | yes |
 | `kirby-ocpp` | Emulator binary: `clap` CLI, headless runner, fleet mode, `run`/`scenarios` subcommands | yes |
 | `kirby-csms-core` | Multi-station CSMS engine: `CsmsServer` / `CsmsHandle` | yes |
 | `kirby-csms-tui` | CSMS terminal UI: station list, details, log, command forms, rules | yes |

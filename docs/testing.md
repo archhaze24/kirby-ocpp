@@ -26,7 +26,7 @@ Contents: [Quick commands](#quick-commands) · [Layout](#layout) · [Mock CSMS](
 | --- | --- | --- |
 | `kirby-ocpp-core` | `tests/it/`: `station_*.rs` (lifecycle, transactions, power, sampling, security, TLS, persistence, response rules, ...), `station2_*.rs` (the OCPP 2.0.1 station: lifecycle, device model, status, transactions, transaction queue, authorization, remote control, persistence), `ws_*.rs` (connection, calls, TLS), `scenario_runner.rs`, `scenario_reply.rs`, `scenario2_runner.rs` (the scenario runner on a 2.0.1 station: step kinds, `wait_for` conditions, evidence redaction, report and JUnit shapes), `fleet.rs` | `station_support/`, `station2_support/`, `ws_support/` |
 | `kirby-csms-core` | `tests/it/`: `engine.rs`, `security.rs`, `state.rs`, `redaction.rs` | `common/` where present |
-| `kirby-ocpp-tui` | `tests/it/`: `model_flow.rs`, `fleet_flow.rs` | |
+| `kirby-ocpp-tui` | `tests/it/`: `model_flow.rs`, `fleet_flow.rs`, `model_flow2.rs` (2.0.1 station) | |
 | `kirby-ocpp` | `tests/it/`: `cli.rs`, `config_file.rs`, `fleet.rs`, `headless.rs`, `hardening.rs` | |
 | `kirby-csms` | `tests/cli.rs` | |
 | `kirby-ocpp-testkit` | `tests/it/` (tests of the mock itself) | |

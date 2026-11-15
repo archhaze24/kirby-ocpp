@@ -291,11 +291,7 @@ async fn real_main() -> ExitCode {
         }
         None => {
             // `--json` is for machines: it never opens the terminal UI.
-            let mut tui = !no_tui && !json && std::io::stdout().is_terminal();
-            if tui && let Some(note) = tui_note(config.protocol) {
-                eprintln!("{note}");
-                tui = false;
-            }
+            let tui = !no_tui && !json && std::io::stdout().is_terminal();
             if is_fleet {
                 return fleet::interactive(config, spec, tui, json, log_file.as_deref()).await;
             }
@@ -307,16 +303,6 @@ async fn real_main() -> ExitCode {
 pub(crate) fn usage_error(error: &str) -> ExitCode {
     eprintln!("error: {error}");
     ExitCode::from(EXIT_USAGE)
-}
-
-/// The note that replaces the terminal UI by the headless run, when `protocol` has no UI.
-fn tui_note(protocol: Protocol) -> Option<String> {
-    (protocol != Protocol::V16).then(|| {
-        format!(
-            "note: the terminal UI is not available for {} yet; running headless (pass --no-tui to hide this)",
-            protocol.token()
-        )
-    })
 }
 
 /// The reason a mode cannot run with `protocol`: fleets and `replay` drive the 1.6 station
@@ -825,24 +811,36 @@ async fn interactive_recorded(
     sink: Option<RecordSink>,
 ) -> ExitCode {
     match AnyStation::spawn(config, sink) {
-        AnyStation::V16(handle, join) => interactive_v16(handle, join, tui, json, log_file).await,
-        // Callers turn the terminal UI off for 2.x before they get here.
+        AnyStation::V16(handle, join) => {
+            interactive_station(handle, join, tui, json, log_file, |handle| {
+                kirby_ocpp_tui::run(handle, headless::tui_options())
+            })
+            .await
+        }
         AnyStation::V2(handle, join) => {
-            let link = LinkWatch::new(&handle);
-            headless_loop(&handle, join, link, None, false, json, log_file).await
+            interactive_station(handle, join, tui, json, log_file, |handle| {
+                kirby_ocpp_tui::v2::run2(handle, headless::tui_options())
+            })
+            .await
         }
     }
 }
 
-/// The 1.6 station of an interactive run: terminal UI first, headless when it is off or cannot
-/// start.
-async fn interactive_v16(
-    handle: StationHandle,
+/// The station of an interactive run: terminal UI (`run_ui`) first, headless when it is off or
+/// cannot start.
+async fn interactive_station<H, F, Fut>(
+    handle: H,
     join: JoinHandle<()>,
     tui: bool,
     json: bool,
     log_file: Option<&Path>,
-) -> ExitCode {
+    run_ui: F,
+) -> ExitCode
+where
+    H: StationLike,
+    F: FnOnce(H) -> Fut,
+    Fut: Future<Output = Result<(), TuiError>>,
+{
     // Subscribed before anything connects (also before the terminal UI does), so a give-up that
     // happens early is not missed when the run falls back to headless.
     let link = LinkWatch::new(&handle);
@@ -866,7 +864,7 @@ async fn interactive_v16(
                 kirby_ocpp_tui::text::sanitize(&error.to_string())
             );
         }
-        match kirby_ocpp_tui::run(handle.clone(), headless::tui_options()).await {
+        match run_ui(handle.clone()).await {
             Ok(()) => {
                 stop_station(&handle, join).await;
                 if let Some(sink) = sink {
@@ -1396,18 +1394,6 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
         format!("ws://127.0.0.1:{port}/ocpp")
-    }
-
-    #[test]
-    fn only_a_2_x_station_loses_the_terminal_ui() {
-        assert_eq!(tui_note(Protocol::V16), None);
-        let note = tui_note(Protocol::V201).unwrap();
-        assert!(
-            note.starts_with(
-                "note: the terminal UI is not available for ocpp2.0.1 yet; running headless"
-            ),
-            "{note}"
-        );
     }
 
     #[test]

@@ -81,6 +81,22 @@ Keys `q j k ? / : [ ] 1`-`7` are never accelerators. The Station pane shows the 
 
 Security Whitepaper actions: `C` creates a key pair and a CSR and sends `SignCertificate`; `S` reports a security event (pick one of the 21 whitepaper event types, optional `techInfo`); `Y` opens the certificate browser.
 
+### For OCPP 2.0.1
+
+With `--protocol ocpp2.0.1` the same layout shows the 2.0.1 station. Six tabs (`1`-`6`): Station, EVSE, Transaction, Data, Logs, Scenarios. The left pane lists the EVSEs with the connector status as sent (`Available`, `Occupied`, `Reserved`, `Unavailable`, `Faulted`), a plug marker, the first 8 characters of the transaction id and the meter in Wh; the details show the full transaction id, its charging state (`Charging`, `EVConnected`, `SuspendedEV`, `SuspendedEVSE`, `Idle`) and `idToken`, and the Station tab shows the registration, the boot reason, the queued transaction events and the security events sent since the UI started.
+
+| Tab | Actions (accelerator) |
+| --- | --- |
+| Station | BootNotification `b`, Heartbeat `h`, Reconnect `r`, Disconnect `x`, Connect `c`, device model `K`, security event `S` |
+| EVSE | plug / unplug `p`, fault / clear fault `f`, StatusNotification `n` |
+| Transaction | Authorize `a`, present token `t`, stop transaction with reason `e`, meter +120 Wh `m`, meter custom `c`, charging state `g` |
+| Data | DataTransfer `d` (data is any JSON value), vendor ping `v`, raw CALL `r` (checked against the 2.0.1 schemas) |
+| Logs, Scenarios | as for 1.6; the Scenarios tab lists the 2.0.1 built-ins |
+
+`t` presents a token at the selected EVSE; whether that starts a transaction depends on `TxCtrlr.TxStartPoint`, so the token may come before the cable. `m` advances the meter and sends a sample right away. `K` opens the station-level variables of the device model (`/` filters, `Enter` edits a `ReadWrite` variable like `SetVariables` would; write-only values show as `(hidden)`); EVSE and connector variables are read with `GetVariables` from the CSMS. `W` lists pending commands without a cancel.
+
+Not available for 2.0.1, so not shown: add connector, cycle or set status (the status follows the plug, fault and availability state), response rules, configuration keys (the device model replaces them), local auth list, charging profiles, certificates, diagnostics and firmware outcomes.
+
 ### Data browser
 
 `K` (config keys), `L` (local authorization list), `P` (charging profiles) and `Y` (certificates) open one popup with four pages, switched with `Tab`/`Shift-Tab`, `Left`/`Right`, `h`/`l` or `1`-`4`. `/` filters the rows fuzzily (`Enter` keeps the filter, `Esc` clears it). `Up/Down`, `j/k`, `PageUp/PageDown`, `g`/`G` move. `Esc` or `q` clears an active filter first, then closes. Forms and confirmations opened from the browser return to it.
@@ -373,7 +389,7 @@ Differences from the 1.6 station:
 * `--vendor` may have 50 characters (`vendorName`); `--connectors` is the number of EVSEs, at most 64.
 * The station boots at start and after a reset, not after every reconnect.
 * A station id that is longer than 48 characters, contains a colon or has characters outside `identifierString` prints a `note:` and is used as given.
-* The terminal UI is not available yet: it prints `note: the terminal UI is not available for ocpp2.0.1 yet; running headless` and runs headless.
+* The terminal UI shows the 2.0.1 tabs and actions; see [For OCPP 2.0.1](#for-ocpp-201).
 * `--count` above 1, `replay` and `scenarios from-recording` exit 2. `run` and `suite` work: a scenario written for the other OCPP version exits 2 with `scenario NAME is for OCPP 1.6; this station speaks ocpp2.0.1` (or the reverse). Built-in names resolve for the station's version, `--connector` is the EVSE and `--id-tag` the `id_token` of a built-in; see [scenarios.md](scenarios.md#running-scenarios).
 
 Flags that exist for 1.6 only exit 2 when they are given (by flag, environment variable or configuration file) with `--protocol ocpp2.0.1`:
