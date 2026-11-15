@@ -15,6 +15,8 @@ impl Station2Actor {
             TimerKey2::BootRetry => self.on_boot_retry_timer(),
             TimerKey2::MeterPeriodic(evse) => self.on_meter_periodic(evse),
             TimerKey2::MeterAligned => self.on_meter_aligned(),
+            TimerKey2::TxEndedSample(evse) => self.on_tx_ended_sample(evse),
+            TimerKey2::TxEndedAligned(evse) => self.on_tx_ended_aligned(evse),
             TimerKey2::TxRetry => self.on_tx_retry_timer(),
             TimerKey2::EvConnectTimeout(evse) => self.on_ev_connect_timeout(evse),
             TimerKey2::ResetDelay => self.on_reset_timer(),

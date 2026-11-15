@@ -89,9 +89,17 @@ pub fn junit_xml(suites: &[JunitSuite<'_>]) -> String {
 /// property and the `time` of a suite that never produced a report.
 #[must_use]
 pub fn junit_xml_runs(runs: &[JunitRun<'_>]) -> String {
+    junit_xml_runs_for(OCPP_VERSION, runs)
+}
+
+/// [`junit_xml_runs`] for stations that speak `ocpp_version` (for example `"2.0.1"`). A suite
+/// with a report takes the version from the report; the version given here names the class and
+/// the `ocpp_version` property of a suite that never produced one (the setup error).
+#[must_use]
+pub fn junit_xml_runs_for(ocpp_version: &str, runs: &[JunitRun<'_>]) -> String {
     let runs: Vec<(JunitRun<'_>, Option<JunitRetries<'_>>)> =
         runs.iter().map(|run| (*run, None)).collect();
-    render_document(&runs)
+    render_document(ocpp_version, &runs)
 }
 
 /// [`junit_xml_runs`] for runs that may have been retried. The suite of a retried scenario
@@ -103,18 +111,30 @@ pub fn junit_xml_runs(runs: &[JunitRun<'_>]) -> String {
 /// and the counts describe the final attempt only.
 #[must_use]
 pub fn junit_xml_retried(runs: &[(JunitRun<'_>, JunitRetries<'_>)]) -> String {
+    junit_xml_retried_for(OCPP_VERSION, runs)
+}
+
+/// [`junit_xml_retried`] for stations that speak `ocpp_version`; see [`junit_xml_runs_for`].
+#[must_use]
+pub fn junit_xml_retried_for(
+    ocpp_version: &str,
+    runs: &[(JunitRun<'_>, JunitRetries<'_>)],
+) -> String {
     let runs: Vec<(JunitRun<'_>, Option<JunitRetries<'_>>)> = runs
         .iter()
         .map(|(run, retries)| (*run, Some(*retries)))
         .collect();
-    render_document(&runs)
+    render_document(ocpp_version, &runs)
 }
 
-fn render_document(runs: &[(JunitRun<'_>, Option<JunitRetries<'_>>)]) -> String {
+fn render_document(
+    ocpp_version: &str,
+    runs: &[(JunitRun<'_>, Option<JunitRetries<'_>>)],
+) -> String {
     let mut total = Counts::default();
     let mut body = String::new();
     for (run, retries) in runs {
-        let (xml, counts) = render_suite(run, retries.as_ref());
+        let (xml, counts) = render_suite(ocpp_version, run, retries.as_ref());
         total.add(counts);
         body.push_str(&xml);
     }
@@ -194,7 +214,11 @@ fn reroute_strays(extras: &mut HashMap<usize, String>, report: &ScenarioReport) 
 }
 
 #[allow(clippy::too_many_lines)]
-fn render_suite(run: &JunitRun<'_>, retries: Option<&JunitRetries<'_>>) -> (String, Counts) {
+fn render_suite(
+    default_version: &str,
+    run: &JunitRun<'_>,
+    retries: Option<&JunitRetries<'_>>,
+) -> (String, Counts) {
     let suite = &run.suite;
     let final_passed = suite.outcome.is_ok_and(|report| report.passed);
     let mut extras = retries
@@ -207,7 +231,7 @@ fn render_suite(run: &JunitRun<'_>, retries: Option<&JunitRetries<'_>>) -> (Stri
     };
     let ocpp_version = suite
         .outcome
-        .map_or(OCPP_VERSION, |r| r.ocpp_version.as_str());
+        .map_or(default_version, |r| r.ocpp_version.as_str());
     // A label for grouping, not a parsed structure: names may contain `.` and `]`.
     let classname = escape(&clean(&format!("ocpp{ocpp_version}.{name}")));
     let mut cases = String::new();
@@ -598,6 +622,89 @@ mod tests {
             plain.contains("time=\"0.000\"") && !plain.contains("\"source\""),
             "{plain}"
         );
+    }
+
+    #[test]
+    fn a_setup_error_names_the_version_of_its_station() {
+        let run = JunitRun {
+            suite: JunitSuite {
+                station: Some("CP-2"),
+                scenario: "demo",
+                outcome: Err("never booted"),
+            },
+            source: Some("demo.toml"),
+            duration_ms: 12,
+        };
+        let xml = junit_xml_runs_for("2.0.1", &[run]);
+        assert!(
+            xml.contains(
+                "<testcase classname=\"ocpp2.0.1.demo [CP-2]\" name=\"setup\" time=\"0.012\">"
+            ),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<property name=\"ocpp_version\" value=\"2.0.1\"/>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<error message=\"never booted\" type=\"SetupError\">"),
+            "{xml}"
+        );
+        assert!(xml.contains("tests=\"1\" failures=\"0\" errors=\"1\" skipped=\"0\""));
+        // The plain variants keep naming 1.6.
+        let plain = junit_xml_runs(&[run]);
+        assert!(
+            plain.contains("classname=\"ocpp1.6.demo [CP-2]\""),
+            "{plain}"
+        );
+        assert!(plain.contains("<property name=\"ocpp_version\" value=\"1.6\"/>"));
+        // A suite with a report keeps the version of the report.
+        let mut passed = report(vec![step(0, "boot", StepStatus::Passed, 1)], true);
+        passed.ocpp_version = "2.0.1".to_owned();
+        let with_report = JunitRun {
+            suite: JunitSuite {
+                station: None,
+                scenario: "demo",
+                outcome: Ok(&passed),
+            },
+            source: None,
+            duration_ms: 0,
+        };
+        let xml = junit_xml_runs_for("1.6", &[with_report]);
+        assert!(xml.contains("classname=\"ocpp2.0.1.demo\""), "{xml}");
+    }
+
+    #[test]
+    fn a_retried_setup_error_names_the_version_of_its_station() {
+        let run = JunitRun {
+            suite: JunitSuite {
+                station: None,
+                scenario: "demo",
+                outcome: Err("no boot"),
+            },
+            source: None,
+            duration_ms: 0,
+        };
+        let earlier = [Err("no connection")];
+        let retries = JunitRetries {
+            attempts: 2,
+            earlier: &earlier,
+        };
+        let xml = junit_xml_retried_for("2.0.1", &[(run, retries)]);
+        assert!(xml.contains("classname=\"ocpp2.0.1.demo\""), "{xml}");
+        assert!(
+            xml.contains("<property name=\"ocpp_version\" value=\"2.0.1\"/>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<rerunError message=\"no connection\""),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<property name=\"attempts\" value=\"2\"/>"),
+            "{xml}"
+        );
+        assert!(junit_xml_retried(&[(run, retries)]).contains("classname=\"ocpp1.6.demo\""));
     }
 
     #[test]

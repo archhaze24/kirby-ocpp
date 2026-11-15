@@ -505,7 +505,7 @@ const SECRET_VARIABLES: [(&str, &str); 6] = [
 ];
 
 /// `true` when `fields` has a `component` and a `variable` naming a secret variable.
-fn names_secret_variable(fields: &serde_json::Map<String, Value>) -> bool {
+pub(crate) fn names_secret_variable(fields: &serde_json::Map<String, Value>) -> bool {
     let name = |key: &str| {
         fields
             .get(key)

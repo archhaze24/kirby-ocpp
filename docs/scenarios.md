@@ -19,13 +19,15 @@ The allowed top-level keys are `name`, `description`, `vars`, `steps` and three 
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `ocpp_version` | string | `"1.6"` | Protocol the file is written for. Any other value is a load error (`this build supports OCPP 1.6 only`, naming the value). |
+| `ocpp_version` | string | `"1.6"` | Protocol the file is written for: `"1.6"` or `"2.0.1"`. A scenario without the key is a 1.6 scenario. Any other value is a load error (`this build supports OCPP 1.6 and 2.0.1 only`, naming the value). A CSMS script still accepts `"1.6"` only. See [OCPP 2.0.1 scenarios](#ocpp-201-scenarios). |
 | `schema` | integer | `1` | Version of the file format. Any other value is a load error (`unsupported schema N`). |
 | `tags` | array of strings | none | Free-form labels. Each entry must be a string (any other type is a load error); the text is not checked further. `suite --tag` and `--skip-tag` select on them (exact, case-sensitive match); built-in scenarios have none. |
 
-Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key. The version keys are read and checked before anything else, so a file written for a later version fails with `unsupported schema N` or `this build supports OCPP 1.6 only` even when it also uses keys this build does not know. A value of the wrong type fails with a plain message such as `` `schema` must be an integer``.
+Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key. The version keys are read and checked before anything else, so a file written for a later version fails with `unsupported schema N` or `this build supports OCPP 1.6 and 2.0.1 only` (`1.6 only` for a CSMS script) even when it also uses keys this build does not know. A value of the wrong type fails with a plain message such as `` `schema` must be an integer``.
 
-Reserved step keys: `evse` and `id_token` are reserved for scenarios that target OCPP 2.0.1 and later. Any step that uses them fails to load with ``action `x`: `evse` is reserved for OCPP 2.x steps; not supported in this build``.
+Reserved step keys: `evse` and `id_token` belong to OCPP 2.0.1 steps. In a 1.6 file (no `ocpp_version`, or `"1.6"`) any step that uses them fails to load with ``action `x`: `evse` is reserved for OCPP 2.x steps; not supported in this build (use `ocpp_version = "2.0.1"` for OCPP 2.0.1 scenarios)``. A CSMS script rejects them the same way.
+
+The version picks the grammar. A file is read as 1.6 or as 2.0.1 and never as a mix: there is no fallback, so a 1.6 mistake in a 2.0.1 file is reported as a mistake, not guessed at.
 
 ### Example
 
@@ -165,7 +167,7 @@ Rules:
 
 ### Actions
 
-Every step has `action` plus the fields of that action, and may add `name` (shown in reports; the default report label is derived from the action, see [JUnit XML](#junit-xml---junit); an empty or blank `name` counts as absent) and `expect` (see [Expect](#expect)). Fields without a default are required.
+Every step has `action` plus the fields of that action, and may add `name` (shown in reports; the default report label is derived from the action, see [JUnit XML](#junit-xml---junit); an empty or blank `name` counts as absent) and `expect` (see [Expect](#expect)). Fields without a default are required. The table below is the OCPP 1.6 grammar; a file with `ocpp_version = "2.0.1"` uses the steps in [OCPP 2.0.1 scenarios](#ocpp-201-scenarios).
 
 | Action | Fields | What it does |
 | --- | --- | --- |
@@ -214,7 +216,90 @@ Steps that send a CALL (`start_tx`, `send_raw`, ...) finish when the CSMS has an
 | `tx_idle` | `connector` | No transaction on the connector |
 | `no_pending_messages` | none | No transaction messages are queued for delivery |
 
-`timeout_ms` must be between 1 and 86400000. The step fails on timeout.
+`timeout_ms` must be between 1 and 86400000. The step fails on timeout. The conditions of an OCPP 2.0.1 file are listed in [OCPP 2.0.1 scenarios](#ocpp-201-scenarios).
+
+### OCPP 2.0.1 scenarios
+
+`ocpp_version = "2.0.1"` selects the 2.0.1 grammar. EVSE numbers start at 1, tokens are `id_token` plus `type`, and `reason` and `state` use the 2.0.1 names. A scenario without `ocpp_version` is never run on a 2.0.1 station.
+
+```toml
+name = "charge-and-stop"
+ocpp_version = "2.0.1"
+tags = ["smoke"]
+
+[[steps]]
+action = "boot"
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+action = "start_tx"                 # alias: start_session
+evse = 1
+id_token = "TAG-1"
+capture = { tx = "/transaction_id" }   # status, transaction_id and evse of the answer
+
+[[steps]]
+action = "set_variable"
+component = "OCPPCommCtrlr"         # a name, or { name = "...", instance = "...", evse = 1 }
+variable = "HeartbeatInterval"
+value = 30                          # numbers and booleans are sent as text
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+action = "stop_tx"                  # alias: stop_session
+evse = 1
+```
+
+Steps that read and write as in 1.6: `connect`, `disconnect`, `reconnect`, `boot`, `heartbeat`, `sleep`, `expect_call`, `send_raw`, `repeat` and `reply`. `name`, `expect` and the `${var}` placeholders work the same. The steps below differ.
+
+| Action | Fields | What it does |
+| --- | --- | --- |
+| `plug`, `unplug` | `evse` (1 or more) | EV plugs in or out |
+| `authorize` | `id_token`, `type` (default `ISO14443`) | Send Authorize; implicitly expects `Accepted` |
+| `start_tx` (alias `start_session`) | `evse`, `id_token`, `type` | Present the token on the EVSE and start a transaction; implicitly expects `Accepted` and fails when no transaction started |
+| `present_token` | optional `evse`, `id_token`, `type` | Present a token with no expected outcome (it may also stop a transaction) |
+| `stop_tx` (alias `stop_session`) | `evse`, `reason` (default `Local`) | Stop the transaction of the EVSE |
+| `meter` | `evse`, `wh_delta` (default 1000) | Advance the meter and send a sample |
+| `charging_state` | `evse`, `state` | Set the charging state of the transaction |
+| `fault`, `clear_fault` | `evse`, optional `connector` (1 or more) | Inject or clear a fault |
+| `status_notification` | `evse`, `connector` | Send the connector's StatusNotification again |
+| `set_variable` | `component`, `variable`, `value` | Change a device-model variable locally |
+| `security_event` | `event_type` (1 to 50 characters), optional `tech_info` (up to 255) | Send SecurityEventNotification. Any type is accepted: use the names of the OCPP security event list when one fits |
+| `data_transfer` | `vendor_id` (1 to 255 characters), optional `message_id` (up to 50), `data` (any TOML value) | Send DataTransfer |
+| `wait_for` | `condition`, `timeout_ms` (default 5000) | Wait until the station state satisfies the condition |
+
+Value sets:
+
+* `type`: `Central`, `eMAID`, `ISO14443`, `ISO15693`, `KeyCode`, `Local`, `MacAddress`, `NoAuthorization`. `id_token` is 1 to 36 characters (empty is allowed for `NoAuthorization`).
+* `reason`: `DeAuthorized`, `EmergencyStop`, `EnergyLimitReached`, `EVDisconnected`, `GroundFault`, `ImmediateReset`, `Local`, `LocalOutOfCredit`, `MasterPass`, `Other`, `OvercurrentFault`, `PowerLoss`, `PowerQuality`, `Reboot`, `Remote`, `SOCLimitReached`, `StoppedByEV`, `TimeLimitReached`, `Timeout`.
+* `state`: `Charging`, `EVConnected`, `SuspendedEV`, `SuspendedEVSE`, `Idle`.
+* `component` and `variable` names are 1 to 50 characters, `value` up to 2500; `instance` is 1 to 50. `component.evse` is 1 or more.
+* Connector statuses: `Available`, `Occupied`, `Reserved`, `Unavailable`, `Faulted`.
+
+Conditions (`condition = { kind = "...", ... }`):
+
+| `kind` | Extra fields | Holds when |
+| --- | --- | --- |
+| `connected`, `disconnected` | none | The WebSocket is connected, or not |
+| `registration` | `status` (`Accepted`, `Pending`, `Rejected`) | The last BootNotification got that status |
+| `connector_status` | `evse`, `connector`, `status` | The connector has that status |
+| `tx_active` | `evse` | A transaction is running on the EVSE |
+| `tx_idle` | `evse` | No transaction on the EVSE |
+| `charging_state` | `evse`, `state` | The transaction on the EVSE is in that charging state |
+| `no_pending_messages` | none | No transaction events are queued for delivery |
+
+`capture` is valid on `send_raw`, `data_transfer`, `expect_call`, `authorize`, `start_tx` and `present_token`. The three token steps answer with `{"status", "transaction_id", "evse"}`, so `capture = { tx = "/transaction_id" }` can feed a later `expect_call` for `TransactionEvent`.
+
+`reply` keeps its keys. `call` is one of the commands the CSMS sends in OCPP 2.0.1 (case-insensitive); `result` is checked against the 2.0.1 response schema, and `error.code` is one of the 2.0.1 CALLERROR codes: `FormatViolation`, `GenericError`, `InternalError`, `MessageTypeNotSupported`, `NotImplemented`, `NotSupported`, `OccurrenceConstraintViolation`, `PropertyConstraintViolation`, `ProtocolError`, `RpcFrameworkError`, `SecurityError`, `TypeConstraintViolation`.
+
+These 1.6 steps are load errors in a 2.0.1 file, each with a hint: `set_rule` and `clear_rules` (use `reply`), `request_certificate` and `status` (use `status_notification`, `plug`, `fault` or `clear_fault`). `connector` on a step that takes `evse` and `id_tag` on a token step are reported with the 2.0.1 spelling.
+
+Secrets in the failure evidence of a step are replaced by `***`: the value of the `BasicAuthPassword`-style device-model variables in `set_variable`, in the payloads of `send_raw`, `expect_call` and `reply`, and an `AuthorizationKey` value, whatever the call is named.
 
 ### expect_call
 
@@ -676,7 +761,7 @@ Report fields:
 | Field | Level | Meaning |
 | --- | --- | --- |
 | `schema` | run, suite, fleet, station entry | Report format version, currently `1`. |
-| `ocpp_version` | run, suite, suite scenario, fleet, station entry | Protocol of the run, currently `"1.6"`. |
+| `ocpp_version` | run, suite, suite scenario, fleet, station entry | Protocol of the station that ran it: `"1.6"`, or `"2.0.1"` for an OCPP 2.0.1 station. |
 | `tool_version` | run, suite, fleet, station entry | Version of the tool that wrote the report. |
 | `station` | run, suite scenario, fleet entry | Station id. Absent for CSMS script reports. |
 | `source` | run, suite scenario, fleet, station entry | Scenario file path or `builtin:NAME`; for a CSMS script, its file path. |
@@ -723,7 +808,7 @@ Naming:
 
 * `name` of a test case is the step's stable `label`, never its position. Names are unique within a suite: a repeated label gets ` #2`, ` #3` (a number already taken by an explicit label is skipped), and steps in loops already carry their ` [n]` suffix.
 * The 1-based position is a `<property name="index">` of the test case, next to `action`.
-* `classname` is `ocpp1.6.<suite name>`, so a fleet run gives `ocpp1.6.scenario [CP-1]`. It is a grouping label, not a structure to parse: names may contain `.` and `]`, and control characters are replaced by spaces.
+* `classname` is `ocpp1.6.<suite name>`, so a fleet run gives `ocpp1.6.scenario [CP-1]`; a run on an OCPP 2.0.1 station gives `ocpp2.0.1.<suite name>` and the `ocpp_version` property `2.0.1`, also for a `setup` case. It is a grouping label, not a structure to parse: names may contain `.` and `]`, and control characters are replaced by spaces.
 * Each `<testsuite>` has `<properties>` `ocpp_version`, `station` (when known), `tool_version` and `source` (when known). A suite run with `--retries` above 0 adds `attempts` and, for a flaky pass, `flaky`; see [Retries](#retries-and-flaky-scenarios) for the `<flakyFailure>` and `<rerunFailure>` elements.
 * The text of a `<failure>` holds the reason, then `action:`, `params:`, `expected:` and `actual:` lines where the report has them (params and expected are clipped).
 

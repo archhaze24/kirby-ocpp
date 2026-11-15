@@ -18,7 +18,8 @@ use thiserror::Error;
 use tokio::sync::watch;
 
 pub use self::junit::{
-    JunitRetries, JunitRun, JunitSuite, junit_xml, junit_xml_retried, junit_xml_runs,
+    JunitRetries, JunitRun, JunitSuite, junit_xml, junit_xml_retried, junit_xml_retried_for,
+    junit_xml_runs, junit_xml_runs_for,
 };
 pub use self::model::{
     Action, Condition, DEFAULT_TIMEOUT_MS, Expect, Scenario, Step, read_scenario_file,
@@ -198,8 +199,11 @@ pub fn check_reserved_keys(table: &toml::Table) -> Result<(), String> {
     Ok(())
 }
 
-/// Replaces the value of an `AuthorizationKey` `ChangeConfiguration` in step parameters (the
-/// same rule as [`crate::ocpp::redact_secrets`] applies to frames) with the redaction marker.
+/// Replaces secret values in step parameters with the redaction marker: the `AuthorizationKey`
+/// value and the values of secret device-model variables (the same rule
+/// [`crate::ocpp::redact_secrets`] applies to frames). Works on the shape of every payload
+/// key (`payload`, `match`, `payload_contains`, `result`, `expect.payload`), whatever the
+/// call is named, and on the `value` of a 2.0.1 `set_variable` step.
 pub fn redact_params(params: &mut serde_json::Value) {
     use serde_json::Value;
     let Some(fields) = params.as_object_mut() else {
@@ -210,16 +214,23 @@ pub fn redact_params(params: &mut serde_json::Value) {
     {
         redact_payload(payload);
     }
-    if let Some(payload) = fields.get_mut("expect_payload") {
-        redact_payload(payload);
-    }
-    if fields.get("call").and_then(Value::as_str) != Some("ChangeConfiguration") {
-        return;
-    }
-    for key in ["payload", "match", "payload_contains"] {
+    for key in [
+        "expect_payload",
+        "payload",
+        "match",
+        "payload_contains",
+        "result",
+    ] {
         if let Some(payload) = fields.get_mut(key) {
             redact_payload(payload);
         }
+    }
+    // A `set_variable` step stores `component`, `variable` and `value` (the payload rule
+    // looks for `attributeValue`), so the value is hidden when the names say it is a secret.
+    if crate::ocpp::frame::names_secret_variable(fields)
+        && let Some(value) = fields.get_mut("value")
+    {
+        *value = Value::from(crate::ocpp::REDACTED);
     }
 }
 
@@ -404,6 +415,71 @@ mod tests {
         });
         redact_params(&mut params);
         assert!(!params.to_string().contains("secret"));
+    }
+
+    const SENTINEL: &str = "sentinel-made-up-password-1f3a";
+
+    fn password_payload() -> serde_json::Value {
+        json!({"setVariableData": [{
+            "attributeValue": SENTINEL,
+            "component": {"name": "SecurityCtrlr"},
+            "variable": {"name": "BasicAuthPassword"},
+        }]})
+    }
+
+    #[test]
+    fn redact_params_hides_device_model_secrets_in_every_payload_key() {
+        for (key, call) in [
+            ("payload", "SetVariables"),
+            ("match", "SetVariables"),
+            ("payload_contains", "SetVariables"),
+            ("result", "GetVariables"),
+        ] {
+            let mut params = json!({"call": call});
+            params[key] = password_payload();
+            redact_params(&mut params);
+            assert!(
+                !params.to_string().contains(SENTINEL),
+                "{key} leaked: {params}"
+            );
+            assert!(params.to_string().contains("***"), "{key}: {params}");
+        }
+    }
+
+    #[test]
+    fn redact_params_is_shape_based_for_any_call_name() {
+        let mut params = json!({
+            "call": "Whatever",
+            "payload": {"key": "AuthorizationKey", "value": SENTINEL},
+            "expect": {"payload": password_payload()},
+        });
+        redact_params(&mut params);
+        assert!(!params.to_string().contains(SENTINEL), "{params}");
+        // Other values stay readable.
+        let mut params = json!({"call": "Heartbeat", "payload": {"key": "Other", "value": "kept"}});
+        redact_params(&mut params);
+        assert_eq!(params["payload"]["value"], "kept");
+    }
+
+    #[test]
+    fn redact_params_hides_the_value_of_a_set_variable_step() {
+        let mut params = json!({
+            "component": {"name": "securityctrlr"},
+            "variable": {"name": "BasicAuthPassword", "instance": "x"},
+            "value": SENTINEL,
+        });
+        redact_params(&mut params);
+        assert_eq!(params["value"], "***");
+        assert_eq!(params["component"]["name"], "securityctrlr");
+        assert!(!params.to_string().contains(SENTINEL));
+
+        let mut params = json!({
+            "component": {"name": "OCPPCommCtrlr"},
+            "variable": {"name": "HeartbeatInterval"},
+            "value": "30",
+        });
+        redact_params(&mut params);
+        assert_eq!(params["value"], "30");
     }
 
     #[test]

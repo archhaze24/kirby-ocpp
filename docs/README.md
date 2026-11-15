@@ -33,5 +33,6 @@ Contents: [Start here](#start-here) · [Pages](#pages)
 | [distribution.md](distribution.md) | Install channels and how to build the packages |
 | [development.md](development.md) | Toolchain, commands, conventions, commit style, store version, recipes for adding messages, commands, actions and flags |
 | [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md) | Spec coverage and intentional deviations |
+| [OCPP_2.0.1_CONFORMANCE.md](OCPP_2.0.1_CONFORMANCE.md) | OCPP 2.0.1 spec coverage of the station and the CSMS, device model, known deviations |
 | [../RELEASING.md](../RELEASING.md) | Release runbook (tag, GitHub release, crates.io, npm) |
 | [../CHANGELOG.md](../CHANGELOG.md) | Release history; the `Unreleased` section collects the next release |

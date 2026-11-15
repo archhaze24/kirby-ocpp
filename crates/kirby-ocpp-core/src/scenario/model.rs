@@ -397,6 +397,23 @@ impl Action {
         }
     }
 
+    /// Can the step store `capture` variables? `send_raw`, `data_transfer` and `expect_call`
+    /// in both grammars; in 2.0.1 also `authorize`, `start_tx` and `present_token`, which
+    /// answer with a synthesized `{status, transaction_id, evse}` object.
+    fn accepts_capture(&self) -> bool {
+        match self {
+            Self::SendRaw { .. } | Self::DataTransfer { .. } | Self::ExpectCall { .. } => true,
+            Self::V201(action) => matches!(
+                **action,
+                Action2::DataTransfer { .. }
+                    | Action2::Authorize { .. }
+                    | Action2::StartTx { .. }
+                    | Action2::PresentToken { .. }
+            ),
+            _ => false,
+        }
+    }
+
     /// Is this a `wait_for` step of either grammar?
     pub(crate) fn is_wait_for(&self) -> bool {
         match self {
@@ -509,8 +526,21 @@ impl Step {
                 text(Some(&Value::String(format!("{prefix}{number}"))));
             }
         }
-        for key in ["direction", "id_tag", "id_token", "status", "error_code"] {
+        for key in [
+            "direction",
+            "id_tag",
+            "id_token",
+            "status",
+            "state",
+            "error_code",
+        ] {
             text(fields.get(key));
+        }
+        // A `set_variable` step: component and variable names (never the value).
+        for key in ["component", "variable"] {
+            if let Some(Value::Object(part)) = fields.get(key) {
+                text(part.get("name"));
+            }
         }
         if let Some(ms) = fields.get("ms").and_then(Value::as_u64) {
             text(Some(&Value::String(format!("{ms}ms"))));
@@ -745,13 +775,22 @@ impl Scenario {
                 )));
             }
         }
-        validate_steps(&self.steps, &mut Vec::new(), &reserved).map_err(ScenarioError::invalid)
+        validate_steps(&self.steps, &mut Vec::new(), &reserved, self.protocol())
+            .map_err(ScenarioError::invalid)
     }
 
     /// Points every connector-bound step at `connector` and every idTag at `id_tag`
-    /// (when given). Used to adapt the built-ins to the station being tested.
+    /// (when given). Used to adapt the built-ins to the station being tested. Leaves OCPP
+    /// 2.0.1 steps alone; see [`Scenario::retarget_v201`].
     pub fn retarget(&mut self, connector: Option<ConnectorId>, id_tag: Option<&IdTag>) {
         retarget_steps(&mut self.steps, connector, id_tag);
+    }
+
+    /// [`Scenario::retarget`] for OCPP 2.0.1 steps: points every EVSE-bound step at `evse`
+    /// and every `id_token` at `id_token` (when given). The caller checks the token length.
+    /// A `set_variable` component keeps its own `evse`; 1.6 steps are left alone.
+    pub fn retarget_v201(&mut self, evse: Option<u32>, id_token: Option<&str>) {
+        super::model2::retarget_steps(&mut self.steps, evse, id_token);
     }
 }
 
@@ -805,6 +844,7 @@ fn validate_steps(
     steps: &[Step],
     path: &mut Vec<usize>,
     reserved: &BTreeSet<String>,
+    protocol: Protocol,
 ) -> Result<(), String> {
     for (i, step) in steps.iter().enumerate() {
         path.push(i + 1);
@@ -819,7 +859,7 @@ fn validate_steps(
         }
         match &step.action {
             Action::Repeat { steps: inner, .. } => {
-                validate_steps(inner, path, reserved)?;
+                validate_steps(inner, path, reserved, protocol)?;
             }
             Action::Plug { connector }
             | Action::Unplug { connector }
@@ -865,7 +905,9 @@ fn validate_steps(
                 delay_ms,
                 ..
             } => {
-                if let Err(message) = validate_reply(call, result.as_ref(), error.as_ref()) {
+                if let Err(message) =
+                    validate_reply(protocol, call, result.as_ref(), error.as_ref())
+                {
                     return bad(&format!("action `reply`: {message}"));
                 }
                 if *times == 0 || *times > crate::station::scripted_reply::MAX_TIMES {
@@ -895,11 +937,14 @@ fn validate_steps(
 
 /// Checks the shape of a `reply` step (what can be known before the step runs).
 fn validate_reply(
+    protocol: Protocol,
     call: &str,
     result: Option<&Value>,
     error: Option<&ReplyError>,
 ) -> Result<(), String> {
+    let v201 = protocol == Protocol::V201;
     let action = match static_text(call) {
+        Some(text) if v201 => Some(canonical_action_v201(&text)?),
         Some(text) => Some(
             canonical_action(&text)
                 .map_err(|e| e.to_string())?
@@ -917,21 +962,30 @@ fn validate_reply(
             // A payload without placeholders can be checked against the response schema now.
             if let Some(action) = &action
                 && !result.to_string().contains('$')
-                && let Some(registry) = schema_registry()
-                && let Err(violation) = registry.validate_response(action, result)
             {
-                return Err(format!(
-                    "`result` is not a valid {action} response: {violation}"
-                ));
+                let violation = if v201 {
+                    crate::ocpp::schema::SchemaRegistry::for_protocol(protocol)
+                        .ok()
+                        .and_then(|registry| registry.validate_response(action, result).err())
+                } else {
+                    schema_registry().and_then(|r| r.validate_response(action, result).err())
+                };
+                if let Some(violation) = violation {
+                    return Err(format!(
+                        "`result` is not a valid {action} response: {violation}"
+                    ));
+                }
             }
         }
         (None, Some(error)) => {
-            if let Some(text) = static_text(&error.code)
-                && standard_error_code(&text).is_none()
-            {
-                return Err(format!(
-                    "unknown error code `{text}` (expected one of the ten OCPP 1.6 CALLERROR codes, FormatViolation, OccurrenceConstraintViolation, MessageTypeNotSupported or RpcFrameworkError)"
-                ));
+            if let Some(text) = static_text(&error.code) {
+                if v201 {
+                    check_error_code_v201(&text)?;
+                } else if standard_error_code(&text).is_none() {
+                    return Err(format!(
+                        "unknown error code `{text}` (expected one of the ten OCPP 1.6 CALLERROR codes, FormatViolation, OccurrenceConstraintViolation, MessageTypeNotSupported or RpcFrameworkError)"
+                    ));
+                }
             }
             if !error.details.is_object() {
                 return Err("`error.details` must be a table".to_owned());
@@ -939,6 +993,63 @@ fn validate_reply(
         }
     }
     Ok(())
+}
+
+/// The CALLERROR codes of OCPP 2.0.1 (OCPP-J, Part 4).
+pub(super) const ERROR_CODES_V201: [&str; 12] = [
+    "FormatViolation",
+    "GenericError",
+    "InternalError",
+    "MessageTypeNotSupported",
+    "NotImplemented",
+    "NotSupported",
+    "OccurrenceConstraintViolation",
+    "PropertyConstraintViolation",
+    "ProtocolError",
+    "RpcFrameworkError",
+    "SecurityError",
+    "TypeConstraintViolation",
+];
+
+/// The CSMS command a 2.0.1 `reply` answers, in its canonical spelling (case-insensitive
+/// match).
+fn canonical_action_v201(text: &str) -> Result<String, String> {
+    use crate::ocpp::v2::registry;
+    let name = text.trim();
+    let Some(info) = registry::iter().find(|info| info.name.eq_ignore_ascii_case(name)) else {
+        return Err(format!(
+            "unknown OCPP 2.0.1 action `{name}` (expected a command the CSMS sends, e.g. Reset)"
+        ));
+    };
+    if !info.direction.csms_may_send() {
+        return Err(format!(
+            "`{}` is sent by the station; a `reply` answers a command from the CSMS (e.g. Reset)",
+            info.name
+        ));
+    }
+    Ok(info.name.to_owned())
+}
+
+/// Checks a CALLERROR code of a 2.0.1 `reply` (case-insensitive).
+fn check_error_code_v201(text: &str) -> Result<(), String> {
+    let text = text.trim();
+    if ERROR_CODES_V201
+        .iter()
+        .any(|code| code.eq_ignore_ascii_case(text))
+    {
+        return Ok(());
+    }
+    let hint = match text.to_ascii_lowercase().as_str() {
+        "formationviolation" => " (spelled `FormatViolation` in OCPP 2.0.1)",
+        "occurenceconstraintviolation" => {
+            " (spelled `OccurrenceConstraintViolation` in OCPP 2.0.1)"
+        }
+        _ => "",
+    };
+    Err(format!(
+        "unknown error code `{text}`{hint} (expected one of the OCPP 2.0.1 CALLERROR codes: {})",
+        ERROR_CODES_V201.join(", ")
+    ))
 }
 
 /// The bundled schemas, compiled once on first use (`None` if they cannot be compiled).
@@ -1032,7 +1143,7 @@ fn mentions(value: &Value, needle: &str) -> bool {
 /// The text as it will read at run time when it holds no placeholder (`$${` escapes are
 /// resolved to `${`); `None` for text with a `${name}` placeholder, which is checked when it
 /// runs.
-fn static_text(text: &str) -> Option<String> {
+pub(super) fn static_text(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(at) = rest.find('$') {
@@ -1162,13 +1273,12 @@ fn parse_repeat(
 /// `open_loops` is the number of `repeat` steps around this one; `mode` is the grammar of the
 /// file (`Protocol::V16` or `Protocol::V201`).
 fn parse_step(mut table: toml::Table, open_loops: usize, mode: Protocol) -> Result<Step, String> {
-    if mode == Protocol::V201 {
-        return super::model2::parse_step(table, open_loops);
+    if mode != Protocol::V201 {
+        // The hint names the way out for a file that was written for 2.0.1 but does not say so.
+        super::check_reserved_keys(&table).map_err(|message| {
+            format!("{message} (use `ocpp_version = \"2.0.1\"` for OCPP 2.0.1 scenarios)")
+        })?;
     }
-    // The hint names the way out for a file that was written for 2.0.1 but does not say so.
-    super::check_reserved_keys(&table).map_err(|message| {
-        format!("{message} (use `ocpp_version = \"2.0.1\"` for OCPP 2.0.1 scenarios)")
-    })?;
     let name = match table.remove("name") {
         None => None,
         Some(toml::Value::String(s)) => Some(s),
@@ -1205,24 +1315,28 @@ fn parse_step(mut table: toml::Table, open_loops: usize, mode: Protocol) -> Resu
         Some(toml::Value::String(s)) => s.clone(),
         Some(_) => return Err("`action` must be a string".to_owned()),
     };
-    let action = toml::Value::Table(table)
-        .try_into::<Action>()
-        .map_err(|e| {
+    let mut action = if mode == Protocol::V201 {
+        super::model2::parse_action(table, &tag)?
+    } else {
+        toml::Value::Table(table)
+            .try_into::<Action>()
+            .map_err(|e| {
+                format!(
+                    "action `{tag}`: {}",
+                    super::with_suggestion(e.message().to_owned())
+                )
+            })?
+    };
+    if !capture.is_empty() && !action.accepts_capture() {
+        return Err(if mode == Protocol::V201 {
             format!(
-                "action `{tag}`: {}",
-                super::with_suggestion(e.message().to_owned())
+                "action `{tag}`: `capture` is only valid on send_raw, data_transfer, expect_call, authorize, start_tx and present_token steps"
             )
-        })?;
-    let mut action = action;
-    if !capture.is_empty()
-        && !matches!(
-            action,
-            Action::SendRaw { .. } | Action::DataTransfer { .. } | Action::ExpectCall { .. }
-        )
-    {
-        return Err(format!(
-            "action `{tag}`: `capture` is only valid on send_raw, data_transfer and expect_call steps"
-        ));
+        } else {
+            format!(
+                "action `{tag}`: `capture` is only valid on send_raw, data_transfer and expect_call steps"
+            )
+        });
     }
     if let Action::SetRule { rule } = &mut action
         && let Some(text) = static_text(rule)
@@ -1764,12 +1878,12 @@ call = "Heartbeat"
             e.contains("OCPP 1.6 and 2.0.1 only") && e.contains("2.1"),
             "{e}"
         );
-        // 2.0.1 is a valid version; the file then fails in the 2.0.1 grammar.
-        let e = err(&format!("name = \"t\"\nocpp_version = \"2.0.1\"\n{step}"));
-        assert!(
-            !e.contains("this build supports") && e.contains("not implemented yet"),
-            "{e}"
-        );
+        // 2.0.1 is a valid version and `heartbeat` is a neutral step.
+        let ok = Scenario::from_toml(&format!(
+            "name = \"t\"\nocpp_version = \"2.0.1\"\nschema = 1\n{step}"
+        ))
+        .unwrap();
+        assert_eq!(ok.protocol(), Protocol::V201);
         let e = err(&format!("name = \"t\"\nschema = 2\n{step}"));
         assert!(e.contains("unsupported schema 2"), "{e}");
         let e = err(&format!("name = \"t\"\ntags = [1]\n{step}"));
@@ -1852,6 +1966,25 @@ call = "Heartbeat"
         std::fs::write(&path, "name = \"t\"\n[[steps]]\naction = \"heartbeat\"\n").unwrap();
         let ok = Scenario::load(&path).unwrap();
         assert_eq!(ok.source.as_deref(), Some(path.to_str().unwrap()));
+    }
+
+    #[test]
+    fn parsed_2_0_1_steps_redact_secrets_in_their_params() {
+        const SENTINEL: &str = "sentinel-made-up-password-9c2e";
+        let text = format!(
+            "name = \"t\"\nocpp_version = \"2.0.1\"\n\
+             [[steps]]\naction = \"set_variable\"\ncomponent = \"SecurityCtrlr\"\nvariable = \"BasicAuthPassword\"\nvalue = \"{SENTINEL}\"\n\
+             [[steps]]\naction = \"send_raw\"\ncall = \"SetVariables\"\npayload = {{ setVariableData = [{{ attributeValue = \"{SENTINEL}\", component = {{ name = \"SecurityCtrlr\" }}, variable = {{ name = \"BasicAuthPassword\" }} }}] }}\n\
+             [[steps]]\naction = \"expect_call\"\ncall = \"SetVariables\"\nmatch = {{ setVariableData = [{{ attributeValue = \"{SENTINEL}\", component = {{ name = \"SecurityCtrlr\" }}, variable = {{ name = \"BasicAuthPassword\" }} }}] }}\n"
+        );
+        let scenario = Scenario::from_toml(&text).unwrap();
+        for step in &scenario.steps {
+            let mut params = step.to_json().unwrap();
+            assert!(params.to_string().contains(SENTINEL), "setup: {params}");
+            crate::scenario::redact_params(&mut params);
+            assert!(!params.to_string().contains(SENTINEL), "{params}");
+            assert!(params.to_string().contains("***"), "{params}");
+        }
     }
 
     #[test]

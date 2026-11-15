@@ -21,7 +21,23 @@
 //! A charging EVSE draws its nominal power; the energy register is the integral of that power
 //! over monotonic time ([`Station2Actor::settle_tx_meters`] runs at the start and the end of
 //! every actor loop iteration). The register is per EVSE and also counts outside
-//! transactions; `Command2::AdvanceMeter` adds to it.
+//! transactions; `Command2::AdvanceMeter` adds to it and the register survives a restart.
+//!
+//! # Meter values of the `Ended` event
+//!
+//! The `Ended` event carries, in time order: the `Transaction.Begin` sample, one sample per
+//! `SampledDataCtrlr.TxEndedInterval` seconds since the start (context `Sample.Periodic`,
+//! `TxEndedMeasurands`), one per `AlignedDataCtrlr.TxEndedInterval` clock boundary (context
+//! `Sample.Clock`, `AlignedDataCtrlr.TxEndedMeasurands`) and the `Transaction.End` sample. An
+//! interval of 0 takes no intermediate samples; empty `TxEndedMeasurands` put no sampled
+//! values into the event (J02, E06.FR.11). The samples are kept in memory only: a transaction
+//! restored after a restart ends with the end sample alone.
+//!
+//! Each kind keeps at most [`MAX_ENDED_SAMPLES`] intermediate samples. When the list is full,
+//! every second sample is dropped (the 2nd, 4th, 6th, ...; E06.FR.13) and from then on only
+//! every second tick is kept, so the spacing stays even (doubled) and a transaction of any
+//! length stays bounded. The begin and end samples are never dropped. Changing an interval
+//! re-arms the sample timer of a running transaction, as for `TxUpdatedInterval`.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
@@ -51,6 +67,10 @@ use crate::station::metering::{PowerModel, clock_aligned_delay, energy_wh_for};
 
 /// Stopped transaction ids kept for `GetTransactionStatus`.
 const STOPPED_HISTORY: usize = 64;
+
+/// Most intermediate `Ended` samples kept per kind (sampled and clock-aligned) and
+/// transaction.
+const MAX_ENDED_SAMPLES: usize = 120;
 
 /// What starts a transaction.
 #[derive(Debug, Clone, PartialEq)]
@@ -108,6 +128,9 @@ pub struct TxLookup {
 pub struct TxPersist {
     pub active: Vec<ActiveTx>,
     pub stopped_ids: Vec<String>,
+    /// The energy register of each EVSE in Wh, by EVSE id. A file without it restores the
+    /// register of an EVSE with a transaction from the transaction and starts the others at 0.
+    pub meters: BTreeMap<u32, f64>,
 }
 
 /// A token that was accepted before a start point could be reached.
@@ -122,10 +145,51 @@ struct PendingAuth {
 struct TxRuntime {
     /// `remoteStartId` went out in an event already.
     remote_sent: bool,
-    /// The `Transaction.Begin` sample, kept for the `Ended` event.
+    /// The `Transaction.Begin` sample of the `TxStartedMeasurands`, kept for the first event
+    /// that carries the EVSE.
     begin_sample: Option<MeterValue>,
+    /// The `Transaction.Begin` sample of the `TxEndedMeasurands`, for the `Ended` event.
+    ended_begin: Option<MeterValue>,
     /// The begin sample waits for the first event that carries the EVSE (E01.FR.17).
     begin_pending: bool,
+    /// `TxEndedInterval` samples for the `Ended` event.
+    ended: IntervalSamples,
+    /// Clock-aligned `TxEndedInterval` samples for the `Ended` event.
+    ended_aligned: IntervalSamples,
+}
+
+/// The intermediate samples of one kind for the `Ended` event, at most
+/// [`MAX_ENDED_SAMPLES`].
+#[derive(Debug, Default)]
+struct IntervalSamples {
+    values: Vec<MeterValue>,
+    /// Ticks seen, kept or not.
+    ticks: u64,
+    /// Only every `stride`th tick is kept; 0 counts as 1.
+    stride: u64,
+}
+
+impl IntervalSamples {
+    /// Takes the sample of the next tick, thinning the list when it is full.
+    fn push(&mut self, value: MeterValue) {
+        let tick = self.ticks;
+        self.ticks = self.ticks.saturating_add(1);
+        if !tick.is_multiple_of(self.stride.max(1)) {
+            return;
+        }
+        if self.values.len() >= MAX_ENDED_SAMPLES {
+            let mut index = 0_usize;
+            self.values.retain(|_| {
+                index += 1;
+                index % 2 == 1
+            });
+            self.stride = self.stride.max(1).saturating_mul(2);
+            if !tick.is_multiple_of(self.stride) {
+                return;
+            }
+        }
+        self.values.push(value);
+    }
 }
 
 /// The simulated meter of one EVSE.
@@ -145,8 +209,21 @@ pub(crate) struct TxEngine {
     runtime: BTreeMap<u32, TxRuntime>,
     meters: BTreeMap<u32, MeterRt>,
     stopped: VecDeque<String>,
-    /// `(TxUpdatedInterval, AlignedDataCtrlr.Interval)` the timers were armed for.
-    seen_intervals: Option<(u32, u32)>,
+    /// The intervals the timers were armed for.
+    seen_intervals: Option<MeterIntervals>,
+}
+
+/// The configured meter intervals in seconds; 0 is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MeterIntervals {
+    /// `SampledDataCtrlr.TxUpdatedInterval`.
+    updated: u32,
+    /// `AlignedDataCtrlr.Interval`.
+    aligned: u32,
+    /// `SampledDataCtrlr.TxEndedInterval`.
+    ended: u32,
+    /// `AlignedDataCtrlr.TxEndedInterval`.
+    ended_aligned: u32,
 }
 
 /// Which start point was reached.
@@ -221,6 +298,16 @@ fn wh_from(wh: u64) -> f64 {
     {
         wh as f64
     }
+}
+
+/// The clock-aligned boundary nearest to `now`; `now` itself for a 0 interval.
+fn nearest_boundary(now: DateTime<Utc>, interval_s: u32) -> DateTime<Utc> {
+    let period_ms = i64::from(interval_s) * 1000;
+    if period_ms == 0 {
+        return now;
+    }
+    let rounded = (now.timestamp_millis() + period_ms / 2).div_euclid(period_ms) * period_ms;
+    DateTime::from_timestamp_millis(rounded).unwrap_or(now)
 }
 
 /// A reading with one decimal; `None` for a value JSON cannot hold.
@@ -304,11 +391,8 @@ impl Station2Actor {
             meter.last = Some(now);
             meter.charging = charging_now;
         }
-        if !self.tx.active.is_empty() {
-            let current = (self.tx_updated_interval(), self.aligned_interval());
-            if self.tx.seen_intervals != Some(current) {
-                self.rearm_meter_timers();
-            }
+        if !self.tx.active.is_empty() && self.tx.seen_intervals != Some(self.meter_intervals()) {
+            self.rearm_meter_timers();
         }
         self.sync_tx_snapshot();
     }
@@ -398,6 +482,15 @@ impl Station2Actor {
         }
     }
 
+    fn meter_intervals(&self) -> MeterIntervals {
+        MeterIntervals {
+            updated: self.tx_updated_interval(),
+            aligned: self.aligned_interval(),
+            ended: self.tx_ended_interval(),
+            ended_aligned: self.aligned_tx_ended_interval(),
+        }
+    }
+
     /// Brings the periodic and clock-aligned timers in line with the configuration. A timer
     /// that is already running keeps its schedule unless its interval changed.
     fn rearm_meter_timers(&mut self) {
@@ -406,26 +499,28 @@ impl Station2Actor {
             self.tx.seen_intervals = None;
             return;
         }
-        let current = (self.tx_updated_interval(), self.aligned_interval());
-        let (old_updated, old_aligned) = self.tx.seen_intervals.unwrap_or(current);
+        let current = self.meter_intervals();
+        let old = self.tx.seen_intervals.unwrap_or(current);
         let ids: Vec<u32> = self.tx.active.keys().copied().collect();
         for id in ids {
             let key = TimerKey2::MeterPeriodic(id);
-            if current.0 == 0 {
+            if current.updated == 0 {
                 self.timers.cancel(&key);
             } else {
-                let delay = Duration::from_secs(u64::from(current.0));
-                if current.0 == old_updated {
+                let delay = Duration::from_secs(u64::from(current.updated));
+                if current.updated == old.updated {
                     self.timers.set_if_idle(key, delay);
                 } else {
                     self.timers.set(key, delay);
                 }
             }
+            self.arm_tx_ended_sample(id, current.ended == old.ended);
+            self.arm_tx_ended_aligned(id, current.ended_aligned == old.ended_aligned);
         }
-        let aligned_delay = clock_aligned_delay(self.clock.now_utc(), current.1)
+        let aligned_delay = clock_aligned_delay(self.clock.now_utc(), current.aligned)
             .and_then(|delay| delay.to_std().ok());
         match aligned_delay {
-            Some(delay) if current.1 == old_aligned => {
+            Some(delay) if current.aligned == old.aligned => {
                 self.timers.set_if_idle(TimerKey2::MeterAligned, delay);
             }
             Some(delay) => self.timers.set(TimerKey2::MeterAligned, delay),
@@ -485,6 +580,83 @@ impl Station2Actor {
             }
         }
         self.rearm_meter_timers();
+    }
+
+    /// Arms the next `SampledDataCtrlr.TxEndedInterval` sample of `evse`, or disarms the
+    /// timer when the interval is 0 or no measurand is configured. With `keep` a running
+    /// timer keeps its schedule.
+    fn arm_tx_ended_sample(&mut self, evse: u32, keep: bool) {
+        let interval = self.tx_ended_interval();
+        let key = TimerKey2::TxEndedSample(evse);
+        if interval > 0 && !self.tx_ended_measurands().is_empty() {
+            let delay = Duration::from_secs(u64::from(interval));
+            if keep {
+                self.timers.set_if_idle(key, delay);
+            } else {
+                self.timers.set(key, delay);
+            }
+        } else {
+            self.timers.cancel(&key);
+        }
+    }
+
+    /// Arms the next clock-aligned `AlignedDataCtrlr.TxEndedInterval` sample of `evse`; `keep`
+    /// as for [`Self::arm_tx_ended_sample`].
+    fn arm_tx_ended_aligned(&mut self, evse: u32, keep: bool) {
+        let delay = if self.aligned_tx_ended_measurands().is_empty() {
+            None
+        } else {
+            clock_aligned_delay(self.clock.now_utc(), self.aligned_tx_ended_interval())
+                .and_then(|delay| delay.to_std().ok())
+        };
+        let key = TimerKey2::TxEndedAligned(evse);
+        match delay {
+            Some(delay) if keep => {
+                self.timers.set_if_idle(key, delay);
+            }
+            Some(delay) => self.timers.set(key, delay),
+            None => {
+                self.timers.cancel(&key);
+            }
+        }
+    }
+
+    /// An intermediate sample for the `Ended` event of `evse` is due.
+    pub(super) fn on_tx_ended_sample(&mut self, evse: u32) {
+        if !self.tx.active.contains_key(&evse) {
+            return;
+        }
+        self.settle_tx_meters();
+        let sample = self.sample_value(
+            evse,
+            &self.tx_ended_measurands(),
+            ReadingContext::SamplePeriodic,
+            self.clock.now_utc(),
+        );
+        if let (Some(sample), Some(runtime)) = (sample, self.tx.runtime.get_mut(&evse)) {
+            runtime.ended.push(sample);
+        }
+        self.arm_tx_ended_sample(evse, false);
+    }
+
+    /// A clock-aligned sample for the `Ended` event of `evse` is due. It is stamped with the
+    /// nearest boundary, so a timer that fires a little early or late keeps the spacing.
+    pub(super) fn on_tx_ended_aligned(&mut self, evse: u32) {
+        if !self.tx.active.contains_key(&evse) {
+            return;
+        }
+        self.settle_tx_meters();
+        let at = nearest_boundary(self.clock.now_utc(), self.aligned_tx_ended_interval());
+        let sample = self.sample_value(
+            evse,
+            &self.aligned_tx_ended_measurands(),
+            ReadingContext::SampleClock,
+            at,
+        );
+        if let (Some(sample), Some(runtime)) = (sample, self.tx.runtime.get_mut(&evse)) {
+            runtime.ended_aligned.push(sample);
+        }
+        self.arm_tx_ended_aligned(evse, false);
     }
 
     /// Sends `MeterValues` outside a transaction for `evse` (every EVSE for `None`); never
@@ -716,12 +888,20 @@ impl Station2Actor {
             ReadingContext::TransactionBegin,
             now,
         );
+        let ended_begin = self.sample_value(
+            evse,
+            &self.tx_ended_measurands(),
+            ReadingContext::TransactionBegin,
+            now,
+        );
         self.tx.runtime.insert(
             evse,
             TxRuntime {
                 remote_sent: false,
                 begin_sample: begin.clone(),
+                ended_begin,
                 begin_pending: !connected && begin.is_some(),
+                ..TxRuntime::default()
             },
         );
         if connected {
@@ -733,6 +913,8 @@ impl Station2Actor {
             );
         }
         self.arm_periodic(evse);
+        self.arm_tx_ended_sample(evse, false);
+        self.arm_tx_ended_aligned(evse, false);
         self.rearm_meter_timers();
         self.tx_event(
             evse,
@@ -1157,6 +1339,22 @@ impl Station2Actor {
         Ok(())
     }
 
+    /// The meter values of the `Ended` event before the end sample: the begin sample (of the
+    /// `TxEndedMeasurands`; none when that list is empty, E06.FR.11) and the intermediate
+    /// samples, oldest first.
+    fn ended_samples(&mut self, evse: u32) -> Vec<MeterValue> {
+        let Some(runtime) = self.tx.runtime.get_mut(&evse) else {
+            return Vec::new();
+        };
+        let mut meter: Vec<MeterValue> = runtime.ended_begin.take().into_iter().collect();
+        let mut intermediate = std::mem::take(&mut runtime.ended.values);
+        intermediate.append(&mut runtime.ended_aligned.values);
+        // Stable, so equal timestamps keep the sampled before the aligned one.
+        intermediate.sort_by_key(|value| value.timestamp);
+        meter.append(&mut intermediate);
+        meter
+    }
+
     /// Generates the `Ended` event with the begin and end samples, removes the transaction and
     /// queues the event. With `quiet` nothing is written or sent (state restore).
     fn end_core(
@@ -1174,13 +1372,7 @@ impl Station2Actor {
             self.settle_tx_meters();
         }
         let now = self.clock.now_utc();
-        let mut meter: Vec<MeterValue> = self
-            .tx
-            .runtime
-            .get(&evse)
-            .and_then(|runtime| runtime.begin_sample.clone())
-            .into_iter()
-            .collect();
+        let mut meter = self.ended_samples(evse);
         meter.extend(self.sample_value(
             evse,
             &self.tx_ended_measurands(),
@@ -1224,6 +1416,8 @@ impl Station2Actor {
             meter.charging = false;
         }
         self.timers.cancel(&TimerKey2::MeterPeriodic(evse));
+        self.timers.cancel(&TimerKey2::TxEndedSample(evse));
+        self.timers.cancel(&TimerKey2::TxEndedAligned(evse));
         self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
         if self.tx.active.is_empty() {
             self.timers.cancel(&TimerKey2::MeterAligned);
@@ -1291,24 +1485,30 @@ impl Station2Actor {
         };
         self.sync_tx_snapshot();
         let _ = reply.send(Ok(Outcome2::Done));
-        if in_transaction {
-            // The delivered energy is part of the state a restart keeps.
-            self.mark_dirty();
-        } else {
+        // The register and the delivered energy are part of the state a restart keeps.
+        self.mark_dirty();
+        if !in_transaction {
             self.send_meter_values(Some(evse), Origin2::Station);
         }
     }
 
-    /// `Command2::SampleMeter`: one meter sample as the periodic timer would take it. Not
-    /// written yet; answers `NotImplemented`.
-    #[allow(
-        clippy::unused_self,
-        reason = "the sampling reads the actor state once it is implemented"
-    )]
-    pub(super) fn cmd_sample_meter(&mut self, _evse: u32, reply: Reply2) {
-        let _ = reply.send(Err(StationError::NotImplemented {
-            command: "sample_meter",
-        }));
+    /// `Command2::SampleMeter`: one meter sample as the periodic timer would take it. Inside a
+    /// transaction it is an `Updated` event with trigger reason `MeterValuePeriodic`, outside
+    /// one a `MeterValues`. The periodic timer keeps its schedule.
+    pub(super) fn cmd_sample_meter(&mut self, evse: u32, reply: Reply2) {
+        if self.evse(evse).is_none() {
+            // The requester may have gone away; nothing to do about that.
+            let _ = reply.send(Err(StationError::InvalidArgument(format!(
+                "EVSE {evse} does not exist"
+            ))));
+            return;
+        }
+        let _ = reply.send(Ok(Outcome2::Done));
+        if self.tx.active.contains_key(&evse) {
+            self.on_meter_periodic(evse);
+        } else {
+            self.send_meter_values(Some(evse), Origin2::Station);
+        }
     }
 
     // ----- persistence -----------------------------------------------------------------
@@ -1318,6 +1518,12 @@ impl Station2Actor {
         TxPersist {
             active: self.tx.active.values().cloned().collect(),
             stopped_ids: self.tx.stopped.iter().cloned().collect(),
+            meters: self
+                .tx
+                .meters
+                .iter()
+                .map(|(evse, meter)| (*evse, meter.register_wh))
+                .collect(),
         }
     }
 
@@ -1328,14 +1534,24 @@ impl Station2Actor {
     pub(super) fn tx_restore(&mut self, tx: TxPersist) {
         let skip = tx.stopped_ids.len().saturating_sub(STOPPED_HISTORY);
         self.tx.stopped = tx.stopped_ids.into_iter().skip(skip).collect();
+        let mut restored_registers = Vec::new();
+        for (evse, register) in tx.meters {
+            if self.evse(evse).is_some() && register.is_finite() && register >= 0.0 {
+                self.tx.meters.entry(evse).or_default().register_wh = register;
+                restored_registers.push(evse);
+            }
+        }
         for mut active in tx.active {
             let evse = active.evse;
             if self.tx.active.contains_key(&evse) {
                 continue;
             }
             active.ev_connected = false;
-            self.tx.meters.entry(evse).or_default().register_wh =
-                wh_from(active.meter_start_wh) + active.energy_wh;
+            if !restored_registers.contains(&evse) {
+                // A file from before the registers were stored.
+                self.tx.meters.entry(evse).or_default().register_wh =
+                    wh_from(active.meter_start_wh) + active.energy_wh;
+            }
             self.tx.active.insert(evse, active);
             self.tx.runtime.insert(evse, TxRuntime::default());
             if let Err(error) = self.end_core(
@@ -1371,7 +1587,7 @@ mod tests {
     use tokio::sync::{broadcast, mpsc, oneshot};
 
     use super::*;
-    use crate::clock::ManualClock;
+    use crate::clock::{Clock, ManualClock};
     use crate::config::StationConfig;
     use crate::ocpp::Protocol;
     use crate::ocpp::v2::types::{Component, IdTokenType, Variable};
@@ -1894,6 +2110,7 @@ mod tests {
         a.tx_restore(TxPersist {
             active: vec![restored(5)],
             stopped_ids: (0..70).map(|i| format!("old-{i}")).collect(),
+            ..TxPersist::default()
         });
         a.queue_restore(crate::station2::QueuePersist {
             events: vec![queued(3), queued(4)],
@@ -1939,5 +2156,297 @@ mod tests {
         assert_eq!(persisted.active.len(), 0);
         assert_eq!(persisted.stopped_ids.len(), 1);
         assert_eq!(a.queue_persist().events.len(), 3);
+    }
+
+    // ----- Ended event meter values, SampleMeter, register persistence -------------------
+
+    /// `actor()` with a clock the test can move.
+    fn actor_with_clock(start: DateTime<Utc>) -> (Station2Actor, Arc<ManualClock>) {
+        let clock = Arc::new(ManualClock::new(start));
+        let mut a = actor();
+        a.clock = clock.clone();
+        (a, clock)
+    }
+
+    /// `(context, timestamp)` of the first sampled value of each meter value of the last
+    /// queued event.
+    fn last_meter_contexts(actor: &Station2Actor) -> Vec<(String, DateTime<Utc>)> {
+        let event = payloads(actor).pop().expect("an event");
+        event["meterValue"]
+            .as_array()
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|value| {
+                        let timestamp = value["timestamp"]
+                            .as_str()
+                            .and_then(|text| text.parse().ok())
+                            .expect("timestamp");
+                        let context = value["sampledValue"][0]["context"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_owned();
+                        (context, timestamp)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn sample_at(second: i64) -> MeterValue {
+        MeterValue {
+            sampled_value: Vec::new(),
+            timestamp: DateTime::<Utc>::UNIX_EPOCH + chrono::Duration::seconds(second),
+            custom_data: None,
+        }
+    }
+
+    #[test]
+    fn interval_samples_stay_bounded_and_evenly_spaced() {
+        let mut samples = IntervalSamples::default();
+        for second in 0..10_000 {
+            samples.push(sample_at(second));
+            assert!(samples.values.len() <= MAX_ENDED_SAMPLES);
+        }
+        assert!(samples.values.len() > MAX_ENDED_SAMPLES / 2);
+        let times: Vec<i64> = samples
+            .values
+            .iter()
+            .map(|value| value.timestamp.timestamp())
+            .collect();
+        assert_eq!(times[0], 0, "the first sample is never dropped");
+        let step = times[1] - times[0];
+        assert!(step > 1, "the spacing doubled while thinning");
+        assert!(times.windows(2).all(|pair| pair[1] - pair[0] == step));
+        // Below the cap nothing is dropped.
+        let mut short = IntervalSamples::default();
+        for second in 0..i64::try_from(MAX_ENDED_SAMPLES).expect("fits") {
+            short.push(sample_at(second));
+        }
+        assert_eq!(short.values.len(), MAX_ENDED_SAMPLES);
+    }
+
+    #[tokio::test]
+    async fn ended_event_carries_one_sample_per_tx_ended_interval() {
+        // A whole second: the wire format keeps milliseconds.
+        let (mut a, clock) = actor_with_clock("2026-03-01T12:00:00Z".parse().expect("time"));
+        set_var(&mut a, "SampledDataCtrlr", "TxEndedInterval", "5");
+        // The begin sample of the `Ended` event follows `TxEndedMeasurands`, not
+        // `TxStartedMeasurands`.
+        set_var(
+            &mut a,
+            "SampledDataCtrlr",
+            "TxEndedMeasurands",
+            "Energy.Active.Import.Register,Voltage",
+        );
+        plug(&mut a, 1);
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(a.timers.is_armed(&TimerKey2::TxEndedSample(1)));
+        let start = clock.now_utc();
+        for _ in 0..3 {
+            clock.advance(chrono::Duration::seconds(5));
+            a.on_tx_ended_sample(1);
+        }
+        clock.advance(chrono::Duration::seconds(2));
+        unplug(&mut a, 1);
+        assert!(!a.timers.is_armed(&TimerKey2::TxEndedSample(1)));
+        let contexts = last_meter_contexts(&a);
+        let names: Vec<&str> = contexts.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "Transaction.Begin",
+                "Sample.Periodic",
+                "Sample.Periodic",
+                "Sample.Periodic",
+                "Transaction.End"
+            ]
+        );
+        let seconds: Vec<i64> = contexts
+            .iter()
+            .map(|(_, at)| (*at - start).num_seconds())
+            .collect();
+        assert_eq!(seconds, [0, 5, 10, 15, 17]);
+        let ended = payloads(&a).pop().expect("Ended");
+        for value in ended["meterValue"].as_array().expect("meter values") {
+            assert_eq!(value["sampledValue"].as_array().map(Vec::len), Some(2));
+        }
+        // The intermediate samples reach the CSMS only with the Ended event.
+        for event in &payloads(&a)[..payloads(&a).len() - 1] {
+            let contexts = event["meterValue"].as_array().map_or(0, Vec::len);
+            assert!(contexts <= 1, "{event}");
+        }
+    }
+
+    #[tokio::test]
+    async fn tx_ended_interval_zero_keeps_only_the_begin_and_end_samples() {
+        let (mut a, clock) = actor_with_clock(Utc::now());
+        plug(&mut a, 1);
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(!a.timers.is_armed(&TimerKey2::TxEndedSample(1)));
+        clock.advance(chrono::Duration::seconds(30));
+        unplug(&mut a, 1);
+        let names: Vec<String> = last_meter_contexts(&a).into_iter().map(|c| c.0).collect();
+        assert_eq!(names, ["Transaction.Begin", "Transaction.End"]);
+    }
+
+    #[tokio::test]
+    async fn empty_tx_ended_measurands_put_no_sampled_values_into_the_ended_event() {
+        let (mut a, _clock) = actor_with_clock(Utc::now());
+        set_var(&mut a, "SampledDataCtrlr", "TxEndedInterval", "5");
+        set_var(&mut a, "SampledDataCtrlr", "TxEndedMeasurands", "");
+        plug(&mut a, 1);
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(!a.timers.is_armed(&TimerKey2::TxEndedSample(1)));
+        unplug(&mut a, 1);
+        let ended = payloads(&a).pop().expect("Ended");
+        assert_eq!(ended["eventType"], "Ended");
+        assert!(ended.get("meterValue").is_none(), "{ended}");
+    }
+
+    #[tokio::test]
+    async fn clock_aligned_ended_samples_are_stamped_with_their_boundary() {
+        let start = "2026-03-01T12:00:07Z"
+            .parse::<DateTime<Utc>>()
+            .expect("time");
+        let (mut a, clock) = actor_with_clock(start);
+        set_var(&mut a, "AlignedDataCtrlr", "TxEndedInterval", "60");
+        set_var(
+            &mut a,
+            "AlignedDataCtrlr",
+            "TxEndedMeasurands",
+            "Energy.Active.Import.Register",
+        );
+        plug(&mut a, 1);
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(a.timers.is_armed(&TimerKey2::TxEndedAligned(1)));
+        // Timers fire a little late and a little early; the stamp is the boundary.
+        clock.set("2026-03-01T12:01:00.040Z".parse().expect("time"));
+        a.on_tx_ended_aligned(1);
+        clock.set("2026-03-01T12:01:59.970Z".parse().expect("time"));
+        a.on_tx_ended_aligned(1);
+        clock.set("2026-03-01T12:02:30Z".parse().expect("time"));
+        unplug(&mut a, 1);
+        let contexts = last_meter_contexts(&a);
+        let shape: Vec<(&str, String)> = contexts
+            .iter()
+            .map(|(context, at)| (context.as_str(), at.format("%H:%M:%S").to_string()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Transaction.Begin", "12:00:07".to_owned()),
+                ("Sample.Clock", "12:01:00".to_owned()),
+                ("Sample.Clock", "12:02:00".to_owned()),
+                ("Transaction.End", "12:02:30".to_owned()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn clock_aligned_ended_samples_alone_carry_only_sample_clock() {
+        let start = "2026-03-01T12:00:07Z"
+            .parse::<DateTime<Utc>>()
+            .expect("time");
+        let (mut a, clock) = actor_with_clock(start);
+        set_var(&mut a, "SampledDataCtrlr", "TxEndedMeasurands", "");
+        set_var(&mut a, "AlignedDataCtrlr", "TxEndedInterval", "60");
+        set_var(
+            &mut a,
+            "AlignedDataCtrlr",
+            "TxEndedMeasurands",
+            "Energy.Active.Import.Register",
+        );
+        plug(&mut a, 1);
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        clock.set("2026-03-01T12:01:00Z".parse().expect("time"));
+        a.on_tx_ended_aligned(1);
+        unplug(&mut a, 1);
+        let names: Vec<String> = last_meter_contexts(&a).into_iter().map(|c| c.0).collect();
+        assert_eq!(names, ["Sample.Clock"]);
+    }
+
+    #[tokio::test]
+    async fn changing_tx_ended_interval_during_a_transaction_arms_the_timer() {
+        let mut a = actor();
+        plug(&mut a, 1);
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(!a.timers.is_armed(&TimerKey2::TxEndedSample(1)));
+        set_var(&mut a, "SampledDataCtrlr", "TxEndedInterval", "5");
+        a.settle_tx_meters();
+        assert!(a.timers.is_armed(&TimerKey2::TxEndedSample(1)));
+        set_var(&mut a, "SampledDataCtrlr", "TxEndedInterval", "0");
+        a.settle_tx_meters();
+        assert!(!a.timers.is_armed(&TimerKey2::TxEndedSample(1)));
+    }
+
+    #[tokio::test]
+    async fn sample_meter_in_a_transaction_is_a_periodic_update() {
+        let mut a = actor();
+        plug(&mut a, 1);
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        let before = payloads(&a).len();
+        let (reply, answer) = oneshot::channel();
+        a.cmd_sample_meter(1, reply);
+        assert!(answer.await.expect("answered").is_ok());
+        let events = payloads(&a);
+        assert_eq!(events.len(), before + 1);
+        let update = &events[before];
+        assert_eq!(update["eventType"], "Updated");
+        assert_eq!(update["triggerReason"], "MeterValuePeriodic");
+        assert_eq!(
+            update["meterValue"][0]["sampledValue"][0]["context"],
+            "Sample.Periodic"
+        );
+        let (reply, answer) = oneshot::channel();
+        a.cmd_sample_meter(9, reply);
+        assert!(matches!(
+            answer.await.expect("answered"),
+            Err(StationError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn registers_are_persisted_and_restored() {
+        let mut a = actor();
+        a.tx.meters.entry(1).or_default().register_wh = 1234.5;
+        a.tx.meters.entry(2).or_default().register_wh = 7.0;
+        let persisted = a.tx_persist();
+        assert_eq!(persisted.meters, BTreeMap::from([(1, 1234.5), (2, 7.0)]));
+        // Through the file format, with an EVSE that does not exist and bad values.
+        let mut json = serde_json::to_value(&persisted).expect("serializes");
+        json["meters"]["9"] = json!(5.0);
+        let mut restored: TxPersist = serde_json::from_value(json).expect("loads");
+        restored.meters.insert(2, -1.0);
+        let mut b = actor();
+        b.tx_restore(restored);
+        assert_eq!(b.state.evses[0].meter_wh, 1234);
+        assert_eq!(
+            b.state.evses[1].meter_wh, 0,
+            "a negative register is refused"
+        );
+        assert!(!b.tx.meters.contains_key(&9));
+        // A file from before the registers were stored has no `meters` key.
+        let old: TxPersist = serde_json::from_value(json!({"active": [], "stopped_ids": []}))
+            .expect("old file loads");
+        assert!(old.meters.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_register_of_a_restored_transaction_wins_over_the_start_value() {
+        let mut a = actor();
+        a.tx_restore(TxPersist {
+            active: vec![restored(5)],
+            meters: BTreeMap::from([(1, 999.5)]),
+            ..TxPersist::default()
+        });
+        assert_eq!(a.state.evses[0].meter_wh, 999);
     }
 }

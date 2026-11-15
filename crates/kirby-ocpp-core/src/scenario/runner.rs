@@ -935,12 +935,36 @@ fn reply_command(
     delay_ms: u64,
 ) -> Result<Command, String> {
     let action = canonical_action(call).map_err(|e| format!("reply: {e}"))?;
+    let reply = scripted_reply(
+        tag,
+        action,
+        result,
+        error,
+        times,
+        delay_ms,
+        super::model::schema_registry(),
+    )?;
+    Ok(Command::ArmScriptedReply { reply })
+}
+
+/// Builds the scripted reply of a `reply` step for the canonical `action`: the answer is
+/// checked against the response schema of `registry` (the station's protocol) and the error
+/// code against the CALLERROR codes. The text of a failure starts with `reply:`.
+pub(super) fn scripted_reply(
+    tag: u64,
+    action: &str,
+    result: Option<&Value>,
+    error: Option<&ReplyError>,
+    times: u32,
+    delay_ms: u64,
+    registry: Option<&crate::ocpp::schema::SchemaRegistry>,
+) -> Result<ScriptedReply, String> {
     let answer = match (result, error) {
         (Some(payload), None) => {
             if !payload.is_object() {
                 return Err("reply: `result` must be a table".to_owned());
             }
-            if let Some(registry) = super::model::schema_registry()
+            if let Some(registry) = registry
                 && let Err(violation) = registry.validate_response(action, payload)
             {
                 return Err(format!(
@@ -963,14 +987,12 @@ fn reply_command(
         },
         _ => return Err("reply: needs exactly one of `result` and `error`".to_owned()),
     };
-    Ok(Command::ArmScriptedReply {
-        reply: ScriptedReply {
-            tag,
-            action: action.to_owned(),
-            answer,
-            remaining: times,
-            delay_ms,
-        },
+    Ok(ScriptedReply {
+        tag,
+        action: action.to_owned(),
+        answer,
+        remaining: times,
+        delay_ms,
     })
 }
 

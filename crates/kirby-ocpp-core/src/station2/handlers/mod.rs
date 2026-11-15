@@ -9,6 +9,7 @@
 //! * a handler **consumes** its `Responder`, so it replies exactly once;
 //! * handlers never await; work they trigger is started *after* the reply was queued and
 //!   completes through a continuation;
+//! * an armed scripted reply (see `scripted`) answers the CALL instead of the handler;
 //! * an action without a handler is answered with `NotSupported` (`NotImplemented` for a name
 //!   2.0.1 does not define), so no CALL is left unanswered.
 //!
@@ -58,6 +59,10 @@ impl Station2Actor {
         } = call;
         self.log(LogLevel::Info, format!("CSMS requests {action}"));
         let Some(reply) = self.gate_incoming(&action, reply) else {
+            return;
+        };
+        // A scripted reply answers the CALL itself; the handler does not run.
+        let Some(reply) = self.apply_scripted_reply(&action, reply) else {
             return;
         };
         match action.as_str() {

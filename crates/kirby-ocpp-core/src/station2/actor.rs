@@ -32,6 +32,7 @@ use crate::clock::Clock;
 use crate::config::StationConfig;
 use crate::error::CallError;
 use crate::recording::RecordSink;
+use crate::station::scripted_reply::ReplyList;
 use crate::station::{Event, FrameRecord, LogLevel, LogRecord};
 use crate::store::StoreError;
 use crate::timers::TimerWheel;
@@ -55,6 +56,10 @@ pub(crate) enum TimerKey2 {
     MeterPeriodic(u32),
     /// Clock-aligned samples.
     MeterAligned,
+    /// The next `TxEndedInterval` sample of an EVSE with a running transaction.
+    TxEndedSample(u32),
+    /// The next clock-aligned `TxEndedInterval` sample of such an EVSE.
+    TxEndedAligned(u32),
     /// A queued transaction event is tried again.
     TxRetry,
     /// The EV did not connect in time after a remote start.
@@ -113,6 +118,8 @@ pub(crate) struct Station2Actor {
     pub(super) auth: AuthState,
     pub(super) reset: Option<ResetPlan>,
     pub(super) persistence: Persistence2,
+    /// Answers armed by scenario `reply` steps (runtime only, see `scripted`).
+    pub(super) scripted_replies: ReplyList,
     /// The session recording, when `--record` is on, and the connection count it stamps.
     recording: Option<(RecordSink, u64)>,
     /// Messages from building the actor, logged when the loop starts.
@@ -152,6 +159,7 @@ impl Station2Actor {
             auth: AuthState::default(),
             reset: None,
             persistence,
+            scripted_replies: ReplyList::default(),
             recording: recording.map(|sink| (sink, 0)),
             startup_logs,
         };

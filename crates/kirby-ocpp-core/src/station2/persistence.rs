@@ -19,7 +19,8 @@
 //!
 //! Restored: availability, device-model values, the authorization cache (expired entries are
 //! dropped), transactions in progress (their owner ends them after the boot is accepted), the
-//! event queue (every entry flagged `offline`: the process was down) and the stopped ids.
+//! event queue (every entry flagged `offline`: the process was down), the stopped ids and the
+//! energy register of every EVSE.
 
 use std::time::Duration;
 

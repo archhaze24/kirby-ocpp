@@ -593,26 +593,6 @@ fn run_refuses_a_scenario_for_another_version() {
         text.contains("scenario charge-session is for OCPP 1.6; this station speaks ocpp2.0.1"),
         "{text}"
     );
-    // A scenario file that names 2.0.1 is still the loader's error.
-    let dir = tempfile::tempdir().unwrap();
-    let file = write(
-        dir.path(),
-        "s.toml",
-        "name = \"s\"\nocpp_version = \"2.0.1\"\n[[steps]]\nsleep_ms = 1\n",
-    );
-    let text = rejected(
-        &[
-            "--url",
-            URL,
-            "--protocol",
-            "ocpp2.0.1",
-            "run",
-            "--scenario",
-            &file,
-        ],
-        &[],
-    );
-    assert!(text.contains("ocpp_version"), "{text}");
 }
 
 #[test]

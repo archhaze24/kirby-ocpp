@@ -3,6 +3,7 @@
 //! The first group tests the store alone. The second one starts stations against a mock CSMS:
 //! it writes a state file, starts the station on it and checks what the CSMS receives.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
@@ -112,6 +113,7 @@ fn sample() -> PersistedStation2 {
     state.tx = TxPersist {
         active: vec![active_tx(1, "11111111-1111-4111-8111-111111111111", 3)],
         stopped_ids: vec!["22222222-2222-4222-8222-222222222222".to_owned()],
+        meters: BTreeMap::from([(1, 350.5), (2, 12.0)]),
     };
     state.queue = QueuePersist {
         events: vec![queued(
@@ -531,4 +533,85 @@ fn device_model_values_are_plain_strings_in_the_file() {
     assert_eq!(value["device_model"]["values"]["K"], "v");
     assert_eq!(value["version"], STORE2_VERSION);
     assert_eq!(value["protocol"], "ocpp2.0.1");
+}
+
+#[test]
+fn a_file_from_before_the_registers_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    store.save2(&sample()).unwrap();
+    let mut value: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(value["tx"]["meters"]["1"], 350.5);
+    value["tx"].as_object_mut().unwrap().remove("meters");
+    fs::write(store.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+    let state = loaded2(store.load2().unwrap());
+    assert!(state.tx.meters.is_empty());
+    assert_eq!(state.tx.active.len(), 1);
+    assert_eq!(state.version, STORE2_VERSION);
+}
+
+fn evse_meter(snapshot: &kirby_ocpp_core::Snapshot2, evse: u32) -> u64 {
+    snapshot.evse(evse).expect("the EVSE exists").meter_wh
+}
+
+#[tokio::test]
+async fn the_meter_register_survives_a_restart() {
+    let csms = v201_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (station, join) = spawn(&csms, dir.path());
+    station
+        .send(kirby_ocpp_core::Command2::Connect)
+        .await
+        .unwrap();
+    wait_booted(&station).await;
+    station
+        .send(kirby_ocpp_core::Command2::AdvanceMeter {
+            evse: 2,
+            wh_delta: 321,
+        })
+        .await
+        .unwrap();
+    station.shutdown().await.unwrap();
+    timeout(STEP, join).await.unwrap().unwrap();
+    let saved = loaded2(store(dir.path()).load2().unwrap());
+    assert!(saved.tx.meters.get(&2).copied().unwrap_or_default() >= 321.0);
+
+    let (station, join) = spawn(&csms, dir.path());
+    let snapshot = wait_snapshot(&station, "the restored register", |s| {
+        evse_meter(s, 2) >= 321
+    })
+    .await;
+    assert_eq!(evse_meter(&snapshot, 1), 0);
+    station.shutdown().await.unwrap();
+    timeout(STEP, join).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn a_restored_register_wins_over_the_start_value_of_a_transaction() {
+    let csms = v201_csms().await;
+    let tx = "11111111-1111-4111-8111-111111111111";
+
+    // Without a stored register the transaction supplies it: start 100 + 250.5 Wh.
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = PersistedStation2::new(ID);
+    state.tx.active = vec![active_tx(1, tx, 3)];
+    store(dir.path()).save2(&state).unwrap();
+    let (station, join) = spawn(&csms, dir.path());
+    let snapshot = wait_snapshot(&station, "the restored transaction register", |s| {
+        evse_meter(s, 1) > 0
+    })
+    .await;
+    assert_eq!(evse_meter(&snapshot, 1), 350);
+    station.shutdown().await.unwrap();
+    timeout(STEP, join).await.unwrap().unwrap();
+
+    // With one, that value is used.
+    let dir = tempfile::tempdir().unwrap();
+    state.tx.meters = BTreeMap::from([(1, 900.5)]);
+    store(dir.path()).save2(&state).unwrap();
+    let (station, join) = spawn(&csms, dir.path());
+    let snapshot = wait_snapshot(&station, "the stored register", |s| evse_meter(s, 1) > 0).await;
+    assert_eq!(evse_meter(&snapshot, 1), 900);
+    station.shutdown().await.unwrap();
+    timeout(STEP, join).await.unwrap().unwrap();
 }

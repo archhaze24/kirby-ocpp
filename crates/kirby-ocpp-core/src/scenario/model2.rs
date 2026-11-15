@@ -13,7 +13,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::model::{MAX_WAIT_MS, Step, default_timeout_ms, default_wh_delta};
+use super::model::{Action, MAX_WAIT_MS, Step, default_timeout_ms, default_wh_delta, static_text};
 use crate::ocpp::v2::messages::{ConnectorStatus, RegistrationStatus};
 use crate::ocpp::v2::types::{ChargingState, IdTokenType, StopReason};
 
@@ -173,15 +173,218 @@ pub enum Condition2 {
     NoPendingMessages {},
 }
 
-/// Parses one `[[steps]]` table of a 2.0.1 file; `open_loops` is the number of `repeat` steps
-/// around it. The loader is not written yet: every 2.0.1 file fails to load with a clear
-/// message.
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "the 2.0.1 loader consumes the table once it is implemented"
-)]
-pub(super) fn parse_step(_table: toml::Table, _open_loops: usize) -> Result<Step, String> {
-    Err("`ocpp_version = \"2.0.1\"`: OCPP 2.0.1 scenario files are not implemented yet".to_owned())
+/// Steps that read and write like their 1.6 counterparts.
+const NEUTRAL_TAGS: [&str; 9] = [
+    "connect",
+    "disconnect",
+    "reconnect",
+    "boot",
+    "heartbeat",
+    "sleep",
+    "expect_call",
+    "send_raw",
+    "reply",
+];
+
+/// Steps typed by [`Action2`], with their aliases.
+const V201_TAGS: [&str; 17] = [
+    "plug",
+    "unplug",
+    "authorize",
+    "start_tx",
+    "start_session",
+    "present_token",
+    "stop_tx",
+    "stop_session",
+    "meter",
+    "charging_state",
+    "fault",
+    "clear_fault",
+    "status_notification",
+    "set_variable",
+    "security_event",
+    "data_transfer",
+    "wait_for",
+];
+
+/// Every step name a 2.0.1 file may use, for the "unknown variant" message and its suggestion.
+fn known_tags() -> impl Iterator<Item = &'static str> {
+    NEUTRAL_TAGS.into_iter().chain(["repeat"]).chain(V201_TAGS)
+}
+
+/// The load error for a step that exists in 1.6 only.
+fn refused(tag: &str, hint: &str) -> String {
+    format!("action `{tag}`: not available for OCPP 2.0.1 ({hint})")
+}
+
+/// Reads the `action` of one 2.0.1 step from its table (`action` still in it, `name`,
+/// `expect` and `capture` already taken out). `tag` is the step's `action` text.
+///
+/// # Errors
+/// A message for an unknown or 1.6-only step, an unknown or missing key and a bad value.
+pub(super) fn parse_action(mut table: toml::Table, tag: &str) -> Result<Action, String> {
+    match tag {
+        "set_rule" | "clear_rules" => {
+            return Err(refused(
+                tag,
+                "response rules name OCPP 1.6 commands; use a `reply` step to answer a CSMS command",
+            ));
+        }
+        "request_certificate" => {
+            return Err(refused(tag, "use `send_raw` with `SignCertificate`"));
+        }
+        "status" => {
+            return Err(refused(
+                tag,
+                "`status` sets a 1.6 connector status; use `plug`, `unplug`, `fault` or `clear_fault` to change it and `status_notification` to resend it",
+            ));
+        }
+        _ => {}
+    }
+    let value_error = |message: String| {
+        let mut message = super::with_suggestion(message);
+        if message.contains("unknown field `id_tag`") {
+            message.push_str("; OCPP 2.0.1 steps use `id_token`");
+        } else if message.contains("unknown field `connector`") {
+            message.push_str("; OCPP 2.0.1 steps use `evse`");
+        }
+        format!("action `{tag}`: {message}")
+    };
+    if NEUTRAL_TAGS.contains(&tag) {
+        return toml::Value::Table(table)
+            .try_into::<Action>()
+            .map_err(|e| value_error(e.message().to_owned()));
+    }
+    if !V201_TAGS.contains(&tag) {
+        let list = known_tags()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "action `{tag}`: {}",
+            super::with_suggestion(format!("unknown variant `{tag}`, expected one of {list}"))
+        ));
+    }
+    if tag == "set_variable" {
+        expand_set_variable(&mut table)?;
+    }
+    toml::Value::Table(table)
+        .try_into::<Action2>()
+        .map(|action| Action::V201(Box::new(action)))
+        .map_err(|e| value_error(e.message().to_owned()))
+}
+
+/// `set_variable` accepts a bare string for `component` and `variable` (the name) and plain
+/// numbers and booleans for `value` (the wire type is a string).
+fn expand_set_variable(table: &mut toml::Table) -> Result<(), String> {
+    for key in ["component", "variable"] {
+        match table.remove(key) {
+            None => {}
+            Some(toml::Value::String(name)) => {
+                let mut part = toml::Table::new();
+                part.insert("name".to_owned(), toml::Value::String(name));
+                table.insert(key.to_owned(), toml::Value::Table(part));
+            }
+            Some(part @ toml::Value::Table(_)) => {
+                table.insert(key.to_owned(), part);
+            }
+            Some(_) => {
+                return Err(format!(
+                    "action `set_variable`: `{key}` must be a name or a table with `name`"
+                ));
+            }
+        }
+    }
+    match table.remove("value") {
+        Some(toml::Value::Integer(n)) => {
+            table.insert("value".to_owned(), toml::Value::String(n.to_string()));
+        }
+        Some(toml::Value::Boolean(b)) => {
+            table.insert("value".to_owned(), toml::Value::String(b.to_string()));
+        }
+        Some(other) => {
+            table.insert("value".to_owned(), other);
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+/// Characters of `text` once placeholders are resolved; `None` for text with a `${name}`
+/// placeholder, which is checked when the step runs.
+fn static_len(text: &str) -> Option<usize> {
+    static_text(text).map(|text| text.chars().count())
+}
+
+/// A bound on a text key that is known at load time.
+fn check_len(key: &str, text: &str, min: usize, max: usize) -> Result<(), String> {
+    match static_len(text) {
+        Some(len) if len < min || len > max => Err(if min == 0 {
+            format!("`{key}` must be at most {max} characters")
+        } else {
+            format!("`{key}` must be {min} to {max} characters")
+        }),
+        _ => Ok(()),
+    }
+}
+
+/// Points every EVSE-bound 2.0.1 step at `evse` and every token at `id_token` (when given),
+/// recursing into `repeat`. A `set_variable` component keeps its own EVSE.
+pub(super) fn retarget_steps(steps: &mut [Step], evse: Option<u32>, id_token: Option<&str>) {
+    let set_evse = |slot: &mut u32| {
+        if let Some(evse) = evse {
+            *slot = evse;
+        }
+    };
+    let set_token = |slot: &mut String| {
+        if let Some(token) = id_token {
+            token.clone_into(slot);
+        }
+    };
+    for step in steps {
+        match &mut step.action {
+            Action::Repeat { steps, .. } => retarget_steps(steps, evse, id_token),
+            Action::V201(action) => match &mut **action {
+                Action2::Plug { evse: e }
+                | Action2::Unplug { evse: e }
+                | Action2::StopTx { evse: e, .. }
+                | Action2::Meter { evse: e, .. }
+                | Action2::ChargingState { evse: e, .. }
+                | Action2::Fault { evse: e, .. }
+                | Action2::ClearFault { evse: e, .. }
+                | Action2::StatusNotification { evse: e, .. }
+                | Action2::WaitFor {
+                    condition:
+                        Condition2::ConnectorStatus { evse: e, .. }
+                        | Condition2::TxActive { evse: e }
+                        | Condition2::TxIdle { evse: e }
+                        | Condition2::ChargingState { evse: e, .. },
+                    ..
+                } => set_evse(e),
+                Action2::StartTx {
+                    evse: e,
+                    id_token: t,
+                    ..
+                } => {
+                    set_evse(e);
+                    set_token(t);
+                }
+                Action2::PresentToken {
+                    evse: e,
+                    id_token: t,
+                    ..
+                } => {
+                    if let Some(e) = e {
+                        set_evse(e);
+                    }
+                    set_token(t);
+                }
+                Action2::Authorize { id_token: t, .. } => set_token(t),
+                _ => {}
+            },
+            _ => {}
+        }
+    }
 }
 
 impl Action2 {
@@ -206,13 +409,77 @@ impl Action2 {
         }
     }
 
-    /// Checks what can be known before the step runs. The scaffold covers the EVSE numbers and
-    /// the wait limits; the remaining checks (names, lengths, shorthand) belong to the
-    /// 2.0.1 loader.
+    /// Checks what can be known before the step runs: EVSE and connector numbers, wait
+    /// limits and the lengths the OCPP 2.0.1 schemas set. Text with a `${name}` placeholder is
+    /// checked when the step runs.
     ///
     /// # Errors
     /// A message naming the offending key.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_numbers()?;
+        self.validate_texts()
+    }
+
+    fn validate_texts(&self) -> Result<(), String> {
+        let token = |id_token: &str, token_type: IdTokenType| {
+            // `NoAuthorization` tokens carry no value.
+            let min = usize::from(token_type != IdTokenType::NoAuthorization);
+            check_len("id_token", id_token, min, 36)
+        };
+        match self {
+            Self::Authorize {
+                id_token,
+                token_type,
+            }
+            | Self::StartTx {
+                id_token,
+                token_type,
+                ..
+            }
+            | Self::PresentToken {
+                id_token,
+                token_type,
+                ..
+            } => token(id_token, *token_type),
+            Self::SecurityEvent {
+                event_type,
+                tech_info,
+            } => {
+                check_len("event_type", event_type, 1, 50)?;
+                tech_info
+                    .as_deref()
+                    .map_or(Ok(()), |text| check_len("tech_info", text, 0, 255))
+            }
+            Self::DataTransfer {
+                vendor_id,
+                message_id,
+                ..
+            } => {
+                check_len("vendor_id", vendor_id, 1, 255)?;
+                message_id
+                    .as_deref()
+                    .map_or(Ok(()), |text| check_len("message_id", text, 0, 50))
+            }
+            Self::SetVariable {
+                component,
+                variable,
+                value,
+            } => {
+                check_len("component", &component.name, 1, 50)?;
+                if let Some(instance) = &component.instance {
+                    check_len("component.instance", instance, 1, 50)?;
+                }
+                check_len("variable", &variable.name, 1, 50)?;
+                if let Some(instance) = &variable.instance {
+                    check_len("variable.instance", instance, 1, 50)?;
+                }
+                check_len("value", value, 0, 2500)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn validate_numbers(&self) -> Result<(), String> {
         let evse = match self {
             Self::Plug { evse }
             | Self::Unplug { evse }
@@ -238,6 +505,30 @@ impl Action2 {
         };
         if evse == Some(0) {
             return Err("`evse` must be 1 or more".to_owned());
+        }
+        let connector = match self {
+            Self::Fault {
+                connector: Some(connector),
+                ..
+            }
+            | Self::ClearFault {
+                connector: Some(connector),
+                ..
+            }
+            | Self::StatusNotification { connector, .. }
+            | Self::WaitFor {
+                condition: Condition2::ConnectorStatus { connector, .. },
+                ..
+            } => Some(*connector),
+            _ => None,
+        };
+        if connector == Some(0) {
+            return Err("`connector` must be 1 or more".to_owned());
+        }
+        if let Self::SetVariable { component, .. } = self
+            && component.evse == Some(0)
+        {
+            return Err("`component.evse` must be 1 or more".to_owned());
         }
         if let Self::WaitFor { timeout_ms, .. } = self {
             if *timeout_ms == 0 {

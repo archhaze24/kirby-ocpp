@@ -1195,6 +1195,22 @@ impl Station2Actor {
         self.dm.measurands(SAMPLED, "TxEndedMeasurands")
     }
 
+    /// `SampledDataCtrlr.TxEndedInterval`, seconds; 0 means only the values at the start and
+    /// the end of a transaction go into the `Ended` event.
+    pub(super) fn tx_ended_interval(&self) -> u32 {
+        self.dm.uint(SAMPLED, "TxEndedInterval", None)
+    }
+
+    /// `AlignedDataCtrlr.TxEndedMeasurands`.
+    pub(super) fn aligned_tx_ended_measurands(&self) -> Vec<Measurand> {
+        self.dm.measurands(ALIGNED, "TxEndedMeasurands")
+    }
+
+    /// `AlignedDataCtrlr.TxEndedInterval`, seconds; 0 is off.
+    pub(super) fn aligned_tx_ended_interval(&self) -> u32 {
+        self.dm.uint(ALIGNED, "TxEndedInterval", None)
+    }
+
     /// `AlignedDataCtrlr.Measurands`.
     pub(super) fn aligned_measurands(&self) -> Vec<Measurand> {
         self.dm.measurands(ALIGNED, "Measurands")
@@ -1559,6 +1575,9 @@ mod tests {
             actor.tx_ended_measurands(),
             [Measurand::EnergyActiveImportRegister]
         );
+        assert_eq!(actor.tx_ended_interval(), 0);
+        assert_eq!(actor.aligned_tx_ended_interval(), 0);
+        assert_eq!(actor.aligned_tx_ended_measurands(), []);
         assert_eq!(actor.aligned_interval(), 0);
         assert_eq!(actor.offline_threshold(), Duration::from_secs(60));
         assert!(actor.authorize_remote_start());
