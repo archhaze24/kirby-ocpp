@@ -14,19 +14,50 @@ pub struct Palette {
     pub selected: usize,
 }
 
+/// What the palette matches on for one action: the tab title, the label and the description.
+/// Any catalogue (1.6 [`ActionDef`], the 2.x one) is turned into rows of this shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaletteRow<'a> {
+    pub label: &'a str,
+    pub desc: &'a str,
+    pub tab: &'a str,
+}
+
+impl<'a> From<&'a ActionDef> for PaletteRow<'a> {
+    fn from(a: &'a ActionDef) -> Self {
+        Self {
+            label: &a.label,
+            desc: &a.desc,
+            tab: a.tab.title(),
+        }
+    }
+}
+
 impl Palette {
     pub fn new(catalog: &[ActionDef]) -> Self {
+        let rows: Vec<PaletteRow<'_>> = catalog.iter().map(PaletteRow::from).collect();
+        Self::from_rows(&rows)
+    }
+
+    /// A palette over any catalogue; `results` index into `rows`.
+    pub fn from_rows(rows: &[PaletteRow<'_>]) -> Self {
         let mut p = Self {
             query: TextInput::default(),
             results: Vec::new(),
             selected: 0,
         };
-        p.refresh(catalog);
+        p.refresh_rows(rows);
         p
     }
 
     pub fn refresh(&mut self, catalog: &[ActionDef]) {
-        self.results = rank(catalog, self.query.text());
+        let rows: Vec<PaletteRow<'_>> = catalog.iter().map(PaletteRow::from).collect();
+        self.refresh_rows(&rows);
+    }
+
+    /// Re-ranks `rows` for the current query and selects the best match.
+    pub fn refresh_rows(&mut self, rows: &[PaletteRow<'_>]) {
+        self.results = rank_rows(rows, self.query.text());
         self.selected = 0;
     }
 
@@ -44,11 +75,21 @@ impl Palette {
 
 /// Text the matcher sees for an action: tab, label and description.
 pub fn haystack(a: &ActionDef) -> String {
-    format!("{} {} {}", a.tab.title(), a.label, a.desc)
+    haystack_row(&PaletteRow::from(a))
+}
+
+/// [`haystack`] of a row: `"{tab} {label} {desc}"`.
+pub fn haystack_row(r: &PaletteRow<'_>) -> String {
+    format!("{} {} {}", r.tab, r.label, r.desc)
 }
 
 pub fn rank(catalog: &[ActionDef], query: &str) -> Vec<usize> {
     rank_by(catalog, query, haystack)
+}
+
+/// [`rank`] over rows.
+pub fn rank_rows(rows: &[PaletteRow<'_>], query: &str) -> Vec<usize> {
+    rank_by(rows, query, haystack_row)
 }
 
 /// Fuzzy ranking over any catalogue: indices of the items matching `query`, best first
@@ -95,6 +136,16 @@ mod tests {
         let hits = rank(&cat, "firmware");
         assert!(hits.iter().any(|i| cat[*i].id == ActionId::FwStatus));
         assert_eq!(rank(&cat, "zzzzqq").len(), 0);
+    }
+
+    #[test]
+    fn rows_rank_like_the_catalogue_they_come_from() {
+        let cat = catalog(&builtin::all());
+        let rows: Vec<PaletteRow<'_>> = cat.iter().map(PaletteRow::from).collect();
+        for query in ["", "authz", "firmware", "zzzzqq"] {
+            assert_eq!(rank_rows(&rows, query), rank(&cat, query), "{query}");
+        }
+        assert_eq!(Palette::from_rows(&rows), Palette::new(&cat));
     }
 
     #[test]

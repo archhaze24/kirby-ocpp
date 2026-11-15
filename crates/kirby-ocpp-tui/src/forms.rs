@@ -100,9 +100,19 @@ pub enum FieldKind {
     OptionalIdTag,
     /// A `csChargingProfiles` JSON object, checked against the `SetChargingProfile` schema.
     ProfileJson,
+    /// An OCPP 2.x EVSE number: 1 to the form's `max_connector` (used as the EVSE count).
+    Evse,
+    /// An OCPP 2.x `idToken`: required, at most [`ID_TOKEN_MAX`] characters.
+    IdToken,
+    /// Any JSON value (string, number, array, object, ...); empty means "none". Unlike
+    /// [`FieldKind::Json`] it is not checked against a schema.
+    JsonValue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Most characters of an OCPP 2.x `idToken` (the schema's `IdTokenType.idToken`).
+pub const ID_TOKEN_MAX: usize = 36;
+
+#[derive(Clone, PartialEq, Eq)]
 pub struct Field {
     pub label: &'static str,
     pub kind: FieldKind,
@@ -114,8 +124,30 @@ pub struct Field {
     pub error: Option<String>,
     /// Input was dropped at [`INPUT_CAP`]; shown as the field error until text is removed.
     pub capped: bool,
-    /// The value is a secret: it is drawn as `*` (copy, paste and editing work as usual).
+    /// The value is a secret: it is drawn as `*` (copy, paste and editing work as usual) and
+    /// left out of the `Debug` output.
     pub secret: bool,
+    /// Most characters the value may have; longer input is an error on the field.
+    pub max_chars: Option<usize>,
+}
+
+impl std::fmt::Debug for Field {
+    /// Like the derived output, except that a secret value is never printed.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hidden: &dyn std::fmt::Debug = &"<hidden>";
+        f.debug_struct("Field")
+            .field("label", &self.label)
+            .field("kind", &self.kind)
+            .field("input", if self.secret { hidden } else { &self.input })
+            .field("options", &self.options)
+            .field("option", &self.option)
+            .field("checked", &self.checked)
+            .field("error", &self.error)
+            .field("capped", &self.capped)
+            .field("secret", &self.secret)
+            .field("max_chars", &self.max_chars)
+            .finish()
+    }
 }
 
 /// Configuration keys whose value is a secret and must not be drawn in clear text.
@@ -127,7 +159,7 @@ pub fn is_secret_config_key(key: &str) -> bool {
 pub const SECRET_HINT: &str = "hidden while typing; paste works";
 
 impl Field {
-    fn new(label: &'static str, kind: FieldKind, value: &str) -> Self {
+    pub fn new(label: &'static str, kind: FieldKind, value: &str) -> Self {
         Self {
             label,
             kind,
@@ -138,12 +170,29 @@ impl Field {
             error: None,
             capped: false,
             secret: false,
+            max_chars: None,
         }
     }
 
-    fn with_options(mut self, options: Vec<String>) -> Self {
+    /// The options of a `Select` or `Multi` field.
+    #[must_use]
+    pub fn with_options(mut self, options: Vec<String>) -> Self {
         self.checked = vec![false; options.len()];
         self.options = options;
+        self
+    }
+
+    /// Limits the value to `max` characters.
+    #[must_use]
+    pub fn with_max_chars(mut self, max: usize) -> Self {
+        self.max_chars = Some(max);
+        self
+    }
+
+    /// Marks the value as a secret: drawn as `*` and never printed by `Debug`.
+    #[must_use]
+    pub fn hidden(mut self) -> Self {
+        self.secret = true;
         self
     }
 
@@ -167,11 +216,30 @@ pub enum FormKind {
     LocalEntry,
     Profile,
     SecurityEvent,
+    /// A form of another OCPP version, built with [`Form::generic`]. The name tells the model
+    /// which form it is; submitting yields [`Submitted::Generic`].
+    Generic(&'static str),
+}
+
+/// The value of one field of a [`FormKind::Generic`] form, as the user entered it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldValue {
+    /// Text of every free-input kind, trimmed (empty for an empty optional field).
+    Text(String),
+    /// The chosen option of a `Select` field.
+    Select { index: usize, value: String },
+    /// The checked options of a `Multi` field, in list order.
+    Multi(Vec<String>),
 }
 
 /// What a valid form produced.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Submitted {
+    /// A [`FormKind::Generic`] form: its name and one value per field, in field order.
+    Generic {
+        kind: &'static str,
+        values: Vec<FieldValue>,
+    },
     Authorize {
         id_tag: IdTag,
     },
@@ -468,6 +536,13 @@ impl Form {
         form
     }
 
+    /// A form that is not one of the 1.6 forms. `max_target` is the highest number an
+    /// [`FieldKind::Evse`] field accepts. Validation runs per field; the model reads the
+    /// values from [`Submitted::Generic`].
+    pub fn generic(name: &'static str, title: &str, fields: Vec<Field>, max_target: u32) -> Self {
+        Self::build(FormKind::Generic(name), title, fields, max_target)
+    }
+
     fn build(kind: FormKind, title: &str, fields: Vec<Field>, max_connector: u32) -> Self {
         Self {
             kind,
@@ -622,8 +697,36 @@ impl Form {
             FieldKind::ProfileJson => {
                 validate_profile(f.input.text(), connector_text.as_deref().unwrap_or("0"))
             }
+            FieldKind::Evse => match text.parse::<u32>() {
+                Ok(n) if (1..=max).contains(&n) => None,
+                _ => Some(format!("EVSE must be a number from 1 to {max}")),
+            },
+            FieldKind::IdToken => {
+                if text.is_empty() {
+                    Some("idToken is required".to_owned())
+                } else {
+                    let n = text.chars().count();
+                    (n > ID_TOKEN_MAX)
+                        .then(|| format!("idToken is {n} characters, at most {ID_TOKEN_MAX}"))
+                }
+            }
+            FieldKind::JsonValue => (!text.is_empty())
+                .then(|| {
+                    serde_json::from_str::<Value>(&text)
+                        .err()
+                        .map(|e| format!("not valid JSON: {e}"))
+                })
+                .flatten(),
             FieldKind::OptionalText | FieldKind::Select | FieldKind::Multi => None,
         };
+        if f.error.is_none()
+            && let Some(limit) = f.max_chars
+        {
+            let n = f.input.text().trim().chars().count();
+            if n > limit {
+                f.error = Some(format!("{n} characters, at most {limit}"));
+            }
+        }
         if f.error.is_none() && form_kind == FormKind::DataTransfer {
             let value = if i == 2 {
                 f.input.text()
@@ -655,6 +758,28 @@ impl Form {
         let opt = |i: usize| Some(text(i)).filter(|s| !s.is_empty());
         let connector = |i: usize| ConnectorId::new(text(i).parse().unwrap_or(1));
         Some(match self.kind {
+            FormKind::Generic(kind) => Submitted::Generic {
+                kind,
+                values: self
+                    .fields
+                    .iter()
+                    .map(|f| match f.kind {
+                        FieldKind::Select => FieldValue::Select {
+                            index: f.option,
+                            value: f.options.get(f.option).cloned().unwrap_or_default(),
+                        },
+                        FieldKind::Multi => FieldValue::Multi(
+                            f.options
+                                .iter()
+                                .zip(&f.checked)
+                                .filter(|(_, on)| **on)
+                                .map(|(o, _)| o.clone())
+                                .collect(),
+                        ),
+                        _ => FieldValue::Text(f.input.text().trim().to_owned()),
+                    })
+                    .collect(),
+            },
             FormKind::Authorize => Submitted::Authorize {
                 id_tag: IdTag::new(text(0)).ok()?,
             },
@@ -793,19 +918,49 @@ pub enum ChoiceKind {
     FwOutcome,
     DiagStatus,
     FwStatus,
+    /// A pick-list of another OCPP version, built with [`Choice::generic`]; the name tells the
+    /// model which list it is.
+    Generic(&'static str),
 }
 
-/// A pick-list opened for one connector.
+/// A pick-list opened for one connector (or, for another OCPP version, one EVSE).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Choice {
     pub kind: ChoiceKind,
-    pub connector: ConnectorId,
+    /// What the list acts on: the connector number (1.6), or the EVSE or other number the
+    /// model put there.
+    pub target: u32,
+    /// What `target` is called in the title (`connector`, `EVSE`); empty shows no target.
+    pub target_label: &'static str,
     pub title: String,
     pub items: Vec<String>,
     pub selected: usize,
 }
 
 impl Choice {
+    /// A pick-list of `items` for the model of another OCPP version.
+    pub fn generic(
+        name: &'static str,
+        title: &str,
+        items: Vec<String>,
+        target: u32,
+        target_label: &'static str,
+    ) -> Self {
+        Self {
+            kind: ChoiceKind::Generic(name),
+            target,
+            target_label,
+            title: title.to_owned(),
+            items,
+            selected: 0,
+        }
+    }
+
+    /// The connector of a 1.6 list.
+    pub fn connector(&self) -> ConnectorId {
+        ConnectorId::new(self.target)
+    }
+
     pub fn new(kind: ChoiceKind, connector: ConnectorId) -> Self {
         let (title, items): (&str, Vec<String>) = match kind {
             ChoiceKind::SetStatus => (
@@ -847,10 +1002,12 @@ impl Choice {
                 "FirmwareStatus",
                 names(FirmwareStatus::ALL.iter().map(|s| s.as_str())),
             ),
+            ChoiceKind::Generic(_) => ("", Vec::new()),
         };
         Self {
             kind,
-            connector,
+            target: connector.get(),
+            target_label: "connector",
             title: title.to_owned(),
             items,
             selected: 0,
@@ -1083,5 +1240,85 @@ mod tests {
         assert!(Form::config_value(&item("AuthorizationKey"), &snapshot).fields[0].secret);
         assert!(!Form::config_value(&item("HeartbeatInterval"), &snapshot).fields[0].secret);
         assert!(is_secret_config_key(" authorizationkey "));
+    }
+
+    fn generic_form() -> Form {
+        Form::generic(
+            "test",
+            "Test",
+            vec![
+                Field::new("EVSE", FieldKind::Evse, "1"),
+                Field::new("idToken", FieldKind::IdToken, ""),
+                Field::new("data (optional)", FieldKind::JsonValue, ""),
+                Field::new("info (optional)", FieldKind::OptionalText, "").with_max_chars(5),
+                Field::new("type", FieldKind::Select, "")
+                    .with_options(vec!["A".to_owned(), "B".to_owned()]),
+            ],
+            2,
+        )
+    }
+
+    #[test]
+    fn generic_fields_are_checked_and_submitted_as_values() {
+        let mut form = generic_form();
+        assert!(form.submit().is_none(), "idToken is required");
+        assert_eq!(form.fields[1].error.as_deref(), Some("idToken is required"));
+        form.focus = 1;
+        type_text(&mut form, &"t".repeat(ID_TOKEN_MAX + 1));
+        assert!(form.fields[1].error.is_some(), "37 characters refused");
+        form.handle_key(key(KeyCode::Backspace));
+        assert_eq!(form.fields[1].error, None, "36 characters accepted");
+        form.focus = 0;
+        form.handle_key(key(KeyCode::Backspace));
+        type_text(&mut form, "3");
+        assert!(form.fields[0].error.is_some(), "EVSE 3 of 2 refused");
+        form.handle_key(key(KeyCode::Backspace));
+        type_text(&mut form, "2");
+        form.focus = 2;
+        type_text(&mut form, "[1,");
+        assert!(form.fields[2].error.is_some(), "invalid JSON refused");
+        type_text(&mut form, "2]");
+        assert_eq!(form.fields[2].error, None);
+        form.focus = 3;
+        type_text(&mut form, "abcdef");
+        assert!(form.fields[3].error.is_some(), "6 of at most 5 characters");
+        form.handle_key(key(KeyCode::Backspace));
+        form.focus = 4;
+        form.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            form.submit(),
+            Some(Submitted::Generic {
+                kind: "test",
+                values: vec![
+                    FieldValue::Text("2".to_owned()),
+                    FieldValue::Text("t".repeat(ID_TOKEN_MAX)),
+                    FieldValue::Text("[1,2]".to_owned()),
+                    FieldValue::Text("abcde".to_owned()),
+                    FieldValue::Select {
+                        index: 1,
+                        value: "B".to_owned()
+                    },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn a_secret_value_never_shows_in_debug_output() {
+        let secret = Field::new("password", FieldKind::Text, "hunter2hunter2").hidden();
+        assert!(!format!("{secret:?}").contains("hunter2"));
+        let plain = Field::new("name", FieldKind::Text, "visible-text");
+        assert!(format!("{plain:?}").contains("visible-text"));
+    }
+
+    #[test]
+    fn generic_choice_has_a_target_and_a_label() {
+        let c = Choice::generic("test", "Reason", vec!["a".to_owned()], 2, "EVSE");
+        assert_eq!(
+            (c.target, c.target_label, c.kind),
+            (2, "EVSE", ChoiceKind::Generic("test"))
+        );
+        let old = Choice::new(ChoiceKind::SetStatus, ConnectorId::new(3));
+        assert_eq!((old.target, old.target_label), (3, "connector"));
     }
 }

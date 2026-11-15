@@ -115,6 +115,10 @@ pub struct Summary {
     pub vendor: Option<String>,
     pub model: Option<String>,
     pub active_tx: usize,
+    /// The subprotocol of the last connection (`StationInfo::subprotocol`); `None` when none
+    /// was negotiated or the station was not seen connected yet (the engine then treats it as
+    /// OCPP 1.6).
+    pub protocol: Option<String>,
 }
 
 impl Summary {
@@ -126,6 +130,7 @@ impl Summary {
             vendor: None,
             model: None,
             active_tx: 0,
+            protocol: None,
         }
     }
 
@@ -842,6 +847,11 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             if app.selected.as_deref() == Some(id.as_str()) {
                 app.load_history(history);
                 app.info = info.map(|b| *b);
+                if let Some(protocol) = app.info.as_ref().map(|i| i.subprotocol.clone())
+                    && let Some(s) = app.summary_mut(&id)
+                {
+                    s.protocol = protocol;
+                }
                 if let Some(state) = state {
                     if let Some(s) = app.summary_mut(&id) {
                         s.apply(&state);
@@ -864,6 +874,11 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 && app.selected.as_deref() == Some(id.as_str())
             {
                 app.info = info.map(|b| *b);
+                if let Some(protocol) = app.info.as_ref().map(|i| i.subprotocol.clone())
+                    && let Some(s) = app.summary_mut(&id)
+                {
+                    s.protocol = protocol;
+                }
             }
         }
         Msg::Notice(level, text) => app.notify(level, text),
@@ -1033,6 +1048,7 @@ fn resync(
         .map(|i| {
             let mut s = Summary::new(i.id.clone(), i.connected);
             s.replaced = replaced.contains(&i.id);
+            s.protocol.clone_from(&i.subprotocol);
             s
         })
         .collect();

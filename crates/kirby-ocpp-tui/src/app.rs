@@ -45,6 +45,25 @@ pub struct Notice {
     ttl: u32,
 }
 
+impl Notice {
+    /// A fresh notice that stays for the usual number of ticks. The text is sanitized: notices
+    /// may carry peer-controlled text (CALLERROR descriptions).
+    #[must_use]
+    pub fn new(text: &str, level: NoticeLevel) -> Self {
+        Self {
+            text: crate::text::sanitize(text),
+            level,
+            ttl: NOTICE_TICKS,
+        }
+    }
+
+    /// Counts one tick down; `true` when the notice has run out and should be dropped.
+    pub fn tick(&mut self) -> bool {
+        self.ttl = self.ttl.saturating_sub(1);
+        self.ttl == 0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Detail {
     pub title: String,
@@ -339,11 +358,7 @@ impl App {
     pub fn notify(&mut self, level: NoticeLevel, text: impl Into<String>) {
         // Notices may carry peer-controlled text (CALLERROR descriptions).
         let text: String = text.into();
-        self.notice = Some(Notice {
-            text: crate::text::sanitize(&text),
-            level,
-            ttl: NOTICE_TICKS,
-        });
+        self.notice = Some(Notice::new(&text, level));
     }
 
     /// Catalogue indices of the active tab's actions.
@@ -704,6 +719,8 @@ impl App {
                 };
                 fx.push(Effect::RunScenarioFile(path));
             }
+            // Forms of another OCPP version are applied by that version's model.
+            Submitted::Generic { .. } => {}
         }
     }
 
@@ -800,13 +817,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             if changed {
                 app.dirty = true;
             }
-            let expired = match &mut app.notice {
-                Some(n) => {
-                    n.ttl = n.ttl.saturating_sub(1);
-                    n.ttl == 0
-                }
-                None => false,
-            };
+            let expired = app.notice.as_mut().is_some_and(Notice::tick);
             if expired {
                 app.notice = None;
             } else {

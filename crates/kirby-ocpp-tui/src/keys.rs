@@ -441,8 +441,10 @@ fn choice(app: &mut App, mut c: Choice, key: KeyEvent, fx: &mut Vec<Effect>) {
 
 fn choice_command(c: &Choice) -> Option<Command> {
     let i = c.selected;
-    let connector = c.connector;
+    let connector = c.connector();
     Some(match c.kind {
+        // Lists of another OCPP version are handled by that version's model.
+        ChoiceKind::Generic(_) => return None,
         ChoiceKind::SetStatus => Command::SetConnectorStatus {
             connector,
             status: *ConnectorStatus::ALL.get(i)?,

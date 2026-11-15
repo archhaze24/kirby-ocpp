@@ -5,14 +5,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
 use super::{dim, popup_width};
-use crate::app::{App, Confirm, ConfirmAction, Detail, Mode};
+use crate::app::{App, ConfirmAction, Detail, Mode};
 use crate::forms::{Choice, Field, FieldKind, Form, SECRET_HINT};
 use crate::palette::Palette;
 use crate::text::{sanitize, truncate, width, wrap_help, wrap_text};
 
-pub(super) const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
+pub(crate) const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
-fn centered(area: Rect, w: u16, h: u16) -> Rect {
+pub(crate) fn centered(area: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(area.width);
     let h = h.min(area.height);
     Rect::new(
@@ -23,7 +23,7 @@ fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
-pub(super) fn popup(f: &mut Frame<'_>, rect: Rect, title: &str) -> Rect {
+pub(crate) fn popup(f: &mut Frame<'_>, rect: Rect, title: &str) -> Rect {
     f.render_widget(Clear, rect);
     let block = Block::bordered()
         .border_style(Style::new().fg(Color::Cyan))
@@ -36,12 +36,18 @@ pub(super) fn popup(f: &mut Frame<'_>, rect: Rect, title: &str) -> Rect {
 pub fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
     match &app.mode {
         Mode::Normal => {}
-        Mode::Palette(p) => palette(f, app, p, area),
+        Mode::Palette(p) => palette(f, p, area, |i| {
+            let a = &app.catalog[i];
+            (
+                format!("{}: {}", a.tab.title(), a.label),
+                app.reason_for(a.id).is_some(),
+            )
+        }),
         Mode::Form(form) => self::form(f, form, area),
         Mode::Choice(c) => choice(f, c, area),
-        Mode::Help => help(f, app.in_fleet, area),
+        Mode::Help => help(f, &help_lines(app.in_fleet), area),
         Mode::Detail(d) => detail(f, d, area),
-        Mode::Confirm(c) => confirm(f, c, area),
+        Mode::Confirm(c) => confirm(f, &c.message, c.action == ConfirmAction::Quit, area),
         Mode::Browser(b) => super::browser::draw(f, app, b, area),
         Mode::Pending(sel) => {
             let rows: Vec<PendingRow> = app
@@ -104,7 +110,14 @@ pub fn pending_list(f: &mut Frame<'_>, area: Rect, rows: &[PendingRow], selected
     );
 }
 
-fn palette(f: &mut Frame<'_>, app: &App, p: &Palette, area: Rect) {
+/// The command palette. `row` gives the list text of the catalogue entry at an index of
+/// `p.results` and whether the action is unavailable (drawn dim).
+pub(crate) fn palette(
+    f: &mut Frame<'_>,
+    p: &Palette,
+    area: Rect,
+    row: impl Fn(usize) -> (String, bool),
+) {
     let h = u16::try_from(p.results.len() + 3)
         .unwrap_or(u16::MAX)
         .min(area.height.saturating_sub(2))
@@ -131,10 +144,9 @@ fn palette(f: &mut Frame<'_>, app: &App, p: &Palette, area: Rect) {
         .results
         .iter()
         .map(|&i| {
-            let a = &app.catalog[i];
-            let why = app.reason_for(a.id);
-            let style = if why.is_some() { dim() } else { Style::new() };
-            ListItem::new(truncate(&format!("{}: {}", a.tab.title(), a.label), w)).style(style)
+            let (text, unavailable) = row(i);
+            let style = if unavailable { dim() } else { Style::new() };
+            ListItem::new(truncate(&text, w)).style(style)
         })
         .collect();
     let mut state =
@@ -202,7 +214,7 @@ fn field_notes(fl: &Field, w: usize) -> Vec<(String, bool)> {
     }
 }
 
-fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
+pub(crate) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
     let width_cells = popup_width(area.width, 76);
     let inner_w = usize::from(width_cells.saturating_sub(2));
     let label_w = form
@@ -268,13 +280,18 @@ fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
     }
 }
 
-fn choice(f: &mut Frame<'_>, c: &Choice, area: Rect) {
+pub(crate) fn choice(f: &mut Frame<'_>, c: &Choice, area: Rect) {
     let h = u16::try_from(c.items.len() + 2)
         .unwrap_or(u16::MAX)
         .min(area.height.saturating_sub(2))
         .max(3);
     let rect = centered(area, 44.min(area.width.saturating_sub(2)), h);
-    let inner = popup(f, rect, &format!("{} (connector {})", c.title, c.connector));
+    let title = if c.target_label.is_empty() {
+        c.title.clone()
+    } else {
+        format!("{} ({} {})", c.title, c.target_label, c.target)
+    };
+    let inner = popup(f, rect, &title);
     let items: Vec<ListItem<'_>> = c.items.iter().map(|i| ListItem::new(i.clone())).collect();
     let mut state = ListState::default().with_selected(Some(c.selected));
     f.render_stateful_widget(
@@ -333,9 +350,10 @@ pub fn help_lines(fleet: bool) -> Vec<&'static str> {
     lines
 }
 
-fn help(f: &mut Frame<'_>, fleet: bool, area: Rect) {
+/// The help popup over `text` (one entry per line; long lines are wrapped).
+pub(crate) fn help(f: &mut Frame<'_>, text: &[&str], area: Rect) {
     let rect_w = popup_width(area.width, 96);
-    let mut lines = wrap_help(&help_lines(fleet), usize::from(rect_w.saturating_sub(2)));
+    let mut lines = wrap_help(text, usize::from(rect_w.saturating_sub(2)));
     if lines.len() + 2 > usize::from(area.height) {
         // A short terminal: drop the spacer lines so more of the help fits.
         lines.retain(|l| !l.is_empty());
@@ -349,7 +367,7 @@ fn help(f: &mut Frame<'_>, fleet: bool, area: Rect) {
     );
 }
 
-fn detail(f: &mut Frame<'_>, d: &Detail, area: Rect) {
+pub(crate) fn detail(f: &mut Frame<'_>, d: &Detail, area: Rect) {
     let rect = Rect::new(
         area.x + 1.min(area.width / 4),
         area.y + 1.min(area.height / 4),
@@ -367,16 +385,17 @@ fn detail(f: &mut Frame<'_>, d: &Detail, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn confirm(f: &mut Frame<'_>, c: &Confirm, area: Rect) {
-    let w = u16::try_from(width(&c.message) + 28)
+/// A yes/no question; `quit` shows the keys of the quit question (`y`/`q` quit, `n`/Esc stay).
+pub(crate) fn confirm(f: &mut Frame<'_>, message: &str, quit: bool, area: Rect) {
+    let w = u16::try_from(width(message) + 28)
         .unwrap_or(u16::MAX)
         .max(24);
     let rect = centered(area, w, 3);
     let inner = popup(f, rect, "Confirm");
-    let keys = if c.action == ConfirmAction::Quit {
+    let keys = if quit {
         "[y/q quit, n/Esc stay]"
     } else {
         "[y/N]"
     };
-    f.render_widget(Paragraph::new(format!("{}  {keys}", c.message)), inner);
+    f.render_widget(Paragraph::new(format!("{message}  {keys}")), inner);
 }

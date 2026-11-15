@@ -27,6 +27,7 @@ mod tests_support;
 pub mod text;
 pub mod theme;
 pub mod ui;
+pub mod v2;
 
 use std::time::Duration;
 
@@ -95,9 +96,10 @@ pub async fn run(handle: StationHandle, options: TuiOptions) -> Result<(), TuiEr
     run_fleet(&[handle], options).await
 }
 
-/// What the loop receives from the station tasks.
-enum Inbound {
-    Msg(usize, Msg),
+/// What the loop receives from the station tasks. `M` is the message type of the model the
+/// loop drives (the 1.6 [`Msg`] by default, `v2::Msg2` for OCPP 2.x).
+pub(crate) enum Inbound<M = Msg> {
+    Msg(usize, M),
     /// The station's event channel closed (the station ended).
     Gone,
 }
@@ -124,11 +126,11 @@ struct Ctx {
 }
 
 /// Station events that may wait for the UI loop before new ones are dropped.
-const EVENT_QUEUE: usize = 8192;
+pub(crate) const EVENT_QUEUE: usize = 8192;
 
 /// Pushes one forwarded station message into the bounded queue; a full queue drops it and
 /// counts it in `dropped`.
-fn deliver(tx: &mpsc::Sender<Inbound>, station: usize, msg: Msg, dropped: &mut u64) {
+pub(crate) fn deliver<M>(tx: &mpsc::Sender<Inbound<M>>, station: usize, msg: M, dropped: &mut u64) {
     if tx.try_send(Inbound::Msg(station, msg)).is_err() {
         *dropped += 1;
     }
@@ -142,19 +144,36 @@ fn resync(
     dropped: &mut u64,
     snapshot: impl FnOnce() -> Snapshot,
 ) {
+    resync_with(
+        tx,
+        station,
+        dropped,
+        || Msg::Snapshot(Box::new(snapshot())),
+        |text| Msg::Notice(NoticeLevel::Error, text),
+    );
+}
+
+/// [`resync`] for any message type: `snapshot_msg` builds the message that carries a fresh
+/// snapshot, `notice_msg` the one that shows the "UI too slow" text as an error notice.
+pub(crate) fn resync_with<M>(
+    tx: &mpsc::Sender<Inbound<M>>,
+    station: usize,
+    dropped: &mut u64,
+    snapshot_msg: impl FnOnce() -> M,
+    notice_msg: impl FnOnce(String) -> M,
+) {
     if *dropped == 0 {
         return;
     }
     let (Ok(first), Ok(second)) = (tx.try_reserve(), tx.try_reserve()) else {
         return;
     };
-    first.send(Inbound::Msg(station, Msg::Snapshot(Box::new(snapshot()))));
+    first.send(Inbound::Msg(station, snapshot_msg()));
     second.send(Inbound::Msg(
         station,
-        Msg::Notice(
-            NoticeLevel::Error,
-            format!("UI too slow: {dropped} events dropped, state resynced (the log has a gap)"),
-        ),
+        notice_msg(format!(
+            "UI too slow: {dropped} events dropped, state resynced (the log has a gap)"
+        )),
     ));
     *dropped = 0;
 }
@@ -382,7 +401,7 @@ async fn execute(effect: Effect, ctx: &mut Ctx, guard: &mut terminal::TerminalGu
 
 /// Writes the export readable by the owner only: logs contain idTags and meter data. Refuses
 /// a symlink, and tightens the mode of an existing file before any byte is written.
-async fn write_private(path: &str, contents: String) -> std::io::Result<()> {
+pub(crate) async fn write_private(path: &str, contents: String) -> std::io::Result<()> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
         write_private_blocking(std::path::Path::new(&path), &contents)

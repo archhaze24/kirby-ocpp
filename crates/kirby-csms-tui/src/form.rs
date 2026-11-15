@@ -817,6 +817,21 @@ impl Form {
         )
     }
 
+    /// The generic form of a registry action of the station's protocol: one field per
+    /// `FieldSpec`. Stub of M6 slice S3: for now a raw payload form with the action fixed
+    /// (its payload is still checked against the 1.6 schemas).
+    pub fn from_spec(station: &str, spec: &'static registry::ActionSpec) -> Self {
+        Self::build(
+            FormKind::Raw,
+            spec.title,
+            station,
+            vec![
+                Field::select("action", vec![spec.name.to_owned()]),
+                Field::new("payload (JSON)", FieldKind::RawJson, "{}"),
+            ],
+        )
+    }
+
     pub fn rule() -> Self {
         Self::build(
             FormKind::Rule,

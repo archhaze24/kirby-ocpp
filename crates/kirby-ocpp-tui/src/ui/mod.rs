@@ -1,7 +1,7 @@
 //! Drawing. `draw` is a pure function of the [`App`]; it never mutates it.
 
 mod browser;
-mod overlays;
+pub(crate) mod overlays;
 mod panes;
 
 pub use overlays::{PendingRow, help_lines, pending_line, pending_list};
@@ -177,7 +177,7 @@ fn draw_body(f: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-fn chip(text: &str, color: Color) -> Span<'static> {
+pub(crate) fn chip(text: &str, color: Color) -> Span<'static> {
     Span::styled(format!(" {text} "), Style::new().fg(Color::Black).bg(color))
 }
 

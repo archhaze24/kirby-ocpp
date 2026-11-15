@@ -61,6 +61,9 @@ pub enum ActionId {
     Results,
     /// The commands waiting for an answer, with a way to cancel one.
     PendingCalls,
+    /// An entry of the action table of the selected station's protocol
+    /// (`ProtocolActions::csms_actions`), opened with the generic form of its registry spec.
+    Call(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +482,14 @@ impl App {
         self.stations.get(i)
     }
 
+    /// The action table of the protocol `station` speaks: the subprotocol of its last
+    /// connection, `ocpp1.6` when none was negotiated (as the engine does). `None` for an
+    /// unknown station and for a subprotocol without a table.
+    pub fn protocol_of(&self, station: &str) -> Option<&'static registry::ProtocolActions> {
+        let summary = self.summary(station)?;
+        registry::protocol_actions(summary.protocol.as_deref().unwrap_or(ACTIONS_PROTOCOL))
+    }
+
     fn active_transactions(&self) -> Vec<StopChoice> {
         self.state
             .as_ref()
@@ -539,6 +550,7 @@ impl App {
             | ActionId::UpdateFirmware
             | ActionId::GetDiagnostics
             | ActionId::SendLocalList
+            | ActionId::Call(_)
             | ActionId::Raw => (!connected).then(|| "station is disconnected".to_owned()),
             ActionId::RemoteStop => {
                 if !connected {
@@ -689,6 +701,15 @@ impl App {
                 });
             }
             ActionId::PendingCalls => self.mode = Mode::Pending(0),
+            ActionId::Call(index) => {
+                let spec = self
+                    .protocol_of(st)
+                    .and_then(|table| table.csms_actions.get(index));
+                match spec {
+                    Some(spec) => self.mode = Mode::Form(Box::new(Form::from_spec(st, spec))),
+                    None => self.notify(NoticeLevel::Error, "no such action for this station"),
+                }
+            }
         }
     }
 
