@@ -97,11 +97,26 @@ pub fn update2(app: &mut App2, msg: Msg2) -> Vec<Effect2> {
         Msg2::Signal => app.quit = true,
     }
     for e in &fx {
-        if let Effect2::Send { label, .. } = e {
+        if let Effect2::Send {
+            label, commands, ..
+        } = e
+        {
             app.pending.push(PendingCall {
                 label: label.clone(),
-                // 2.x commands cannot be cancelled yet.
-                action: None,
+                action: commands.iter().find_map(|command| match command {
+                    Command2::Boot => Some("BootNotification".to_owned()),
+                    Command2::Heartbeat => Some("Heartbeat".to_owned()),
+                    Command2::Authorize { .. } | Command2::PresentToken { .. } => {
+                        Some("Authorize".to_owned())
+                    }
+                    Command2::StatusNotification { .. } => Some("StatusNotification".to_owned()),
+                    Command2::SendSecurityEvent { .. } => {
+                        Some("SecurityEventNotification".to_owned())
+                    }
+                    Command2::DataTransfer { .. } => Some("DataTransfer".to_owned()),
+                    Command2::SendRaw { action, .. } => Some(action.clone()),
+                    _ => None,
+                }),
                 since: Instant::now(),
             });
         }

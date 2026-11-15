@@ -946,18 +946,27 @@ fn a_station_without_evses_disables_the_evse_actions() {
 // ---- pending list -------------------------------------------------------------------
 
 #[test]
-fn pending_commands_are_listed_and_cannot_be_cancelled() {
+fn pending_commands_are_listed_and_cancelled() {
     let mut app = app();
     press(&mut app, "h");
     assert_eq!(app.pending.len(), 1);
     assert_eq!(app.pending[0].label, "heartbeat");
-    assert_eq!(app.pending[0].action, None);
+    assert_eq!(app.pending[0].action.as_deref(), Some("Heartbeat"));
     press(&mut app, "W");
     assert!(matches!(app.mode, Mode2::Pending(0)));
-    assert!(press(&mut app, "x").is_empty());
-    assert_eq!(notice(&app).0, "cancel is not available for OCPP 2.0.1 yet");
+    assert_eq!(
+        press(&mut app, "x"),
+        vec![Effect2::CancelCall {
+            action: "Heartbeat".to_owned()
+        }]
+    );
     assert!(matches!(app.mode, Mode2::Pending(0)));
-    assert!(press_code(&mut app, KeyCode::Delete).is_empty());
+    assert_eq!(
+        press_code(&mut app, KeyCode::Delete),
+        vec![Effect2::CancelCall {
+            action: "Heartbeat".to_owned()
+        }]
+    );
     assert_eq!(app.pending.len(), 1, "nothing was cancelled");
     press_code(&mut app, KeyCode::Esc);
     assert!(matches!(app.mode, Mode2::Normal));

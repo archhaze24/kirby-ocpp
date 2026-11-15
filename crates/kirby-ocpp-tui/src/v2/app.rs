@@ -66,6 +66,9 @@ impl Mode2 {
 /// Something the event loop must do on behalf of the model.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect2 {
+    CancelCall {
+        action: String,
+    },
     /// Sends `commands` one after the other (the next only after the previous one finished)
     /// and reports the outcome of the last one, or the first failure, as
     /// [`Msg2::CommandDone`].

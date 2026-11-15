@@ -69,7 +69,7 @@ pub enum ActionId2 {
     /// The device-model browser.
     DeviceModel,
     SecurityEvent,
-    /// The commands waiting for the CSMS (a list; 2.x has no cancel).
+    /// The commands waiting for the CSMS.
     PendingCalls,
     // EVSE
     PlugToggle,

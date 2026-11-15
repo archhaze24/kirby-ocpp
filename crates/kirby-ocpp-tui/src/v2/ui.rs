@@ -282,7 +282,7 @@ fn hints(app: &App2) -> Vec<(&'static str, &'static str)> {
             ]);
             v
         }
-        Mode2::Pending(_) => vec![("↑↓", "select"), ("Esc", "close")],
+        Mode2::Pending(_) => vec![("↑↓", "select"), ("x/Del", "cancel"), ("Esc", "close")],
         Mode2::Palette(_) => vec![("Enter", "run"), ("Esc", "close"), ("↑↓", "select")],
         Mode2::Form(_) => vec![
             ("Enter", "submit"),
@@ -338,7 +338,7 @@ fn draw_overlay(f: &mut Frame<'_>, app: &App2, area: Rect) {
                 .map(|p| PendingRow {
                     elapsed: crate::app::elapsed_text(app.now.saturating_duration_since(p.since)),
                     text: sanitize(&p.label),
-                    cancellable: false,
+                    cancellable: p.action.as_deref().is_some_and(|a| a != "TransactionEvent"),
                 })
                 .collect();
             overlays::pending_list(f, area, &rows, *sel);
@@ -382,7 +382,7 @@ const HELP2: &[&str] = &[
     "",
     "Not available for OCPP 2.0.1: setting a connector status, rules, configuration keys (the",
     "     device model replaces them), local authorization list, charging profiles,",
-    "     certificates, diagnostics, firmware, and cancelling a waiting command.",
+    "     certificates, diagnostics, and firmware.",
     "",
     "Without color (--color never or NO_COLOR): chips and selections are reverse video, errors",
     "     bold, and log lines start with a marker: i info, + success, ! warning, x error.",

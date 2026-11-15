@@ -16,6 +16,10 @@ impl Station2Actor {
             Command2::Reconnect => self.cmd_reconnect(reply),
             Command2::Boot => self.cmd_boot(reply),
             Command2::Heartbeat => self.cmd_heartbeat(reply),
+            Command2::CancelCall { action } => {
+                let result = self.cancel_call(&action).map(|()| Outcome2::Done);
+                let _ = reply.send(result);
+            }
             Command2::PlugIn { evse } => self.cmd_plug_in(evse, reply),
             Command2::Unplug { evse } => self.cmd_unplug(evse, reply),
             Command2::PresentToken {

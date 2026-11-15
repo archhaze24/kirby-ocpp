@@ -93,7 +93,7 @@ With `--protocol ocpp2.0.1` the same layout shows the 2.0.1 station. Six tabs (`
 | Data | DataTransfer `d` (data is any JSON value), vendor ping `v`, raw CALL `r` (checked against the 2.0.1 schemas) |
 | Logs, Scenarios | as for 1.6; the Scenarios tab lists the 2.0.1 built-ins |
 
-`t` presents a token at the selected EVSE; whether that starts a transaction depends on `TxCtrlr.TxStartPoint`, so the token may come before the cable. `m` advances the meter and sends a sample right away. `K` opens the station-level variables of the device model (`/` filters, `Enter` edits a `ReadWrite` variable like `SetVariables` would; write-only values show as `(hidden)`); EVSE and connector variables are read with `GetVariables` from the CSMS. `W` lists pending commands without a cancel.
+`t` presents a token at the selected EVSE; whether that starts a transaction depends on `TxCtrlr.TxStartPoint`, so the token may come before the cable. `m` advances the meter and sends a sample right away. `K` opens the station-level variables of the device model (`/` filters, `Enter` edits a `ReadWrite` variable like `SetVariables` would; write-only values show as `(hidden)`); EVSE and connector variables are read with `GetVariables` from the CSMS. `W` lists pending commands; `x` or `Delete` cancels the selected call. `TransactionEvent` cannot be cancelled.
 
 Not available for 2.0.1, so not shown: add connector, cycle or set status (the status follows the plug, fault and availability state), response rules, configuration keys (the device model replaces them), local auth list, charging profiles, certificates, diagnostics and firmware outcomes.
 

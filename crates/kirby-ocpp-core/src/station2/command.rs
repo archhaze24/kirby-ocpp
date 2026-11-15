@@ -28,6 +28,10 @@ pub enum Command2 {
     Boot,
     /// Send `Heartbeat`.
     Heartbeat,
+    /// Stop waiting for the oldest unanswered CALL of this action. The sending command
+    /// completes with a cancelled error; a late answer is logged and ignored.
+    /// `TransactionEvent` cannot be cancelled because its answer determines station state.
+    CancelCall { action: String },
     /// Simulate an EV plugging in.
     PlugIn { evse: u32 },
     /// Simulate the EV being unplugged.
@@ -105,6 +109,7 @@ impl Command2 {
             Self::Reconnect => "reconnect",
             Self::Boot => "boot",
             Self::Heartbeat => "heartbeat",
+            Self::CancelCall { .. } => "cancel_call",
             Self::PlugIn { .. } => "plug_in",
             Self::Unplug { .. } => "unplug",
             Self::PresentToken { .. } => "present_token",

@@ -213,6 +213,45 @@ async fn heartbeat_interval_zero_keeps_the_configured_period() {
 }
 
 #[tokio::test]
+async fn cancel_heartbeat_and_refuse_invalid_cancellations() {
+    let csms = v201_csms().await;
+    csms.respond("Heartbeat", |_| Reply::Silence);
+    let (station, task) = spawn_v201(&csms);
+    station.connect().await.unwrap();
+    wait_booted(&station).await;
+    let sender = station.clone();
+    let heartbeat = tokio::spawn(async move { sender.send(Command2::Heartbeat).await });
+    csms.wait_for_call("Heartbeat", STEP).await.unwrap();
+    station
+        .send(Command2::CancelCall {
+            action: "Heartbeat".into(),
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        timeout(STEP, heartbeat).await.unwrap().unwrap(),
+        Err(StationError::Call(CallError::Cancelled { .. }))
+    ));
+    assert!(
+        station
+            .send(Command2::CancelCall {
+                action: "Heartbeat".into()
+            })
+            .await
+            .is_err()
+    );
+    assert!(
+        station
+            .send(Command2::CancelCall {
+                action: "TransactionEvent".into()
+            })
+            .await
+            .is_err()
+    );
+    stop(&station, task).await;
+}
+
+#[tokio::test]
 async fn heartbeat_command_returns_the_csms_time() {
     let csms = v201_csms().await;
     let (station, task) = spawn_v201(&csms);

@@ -466,7 +466,7 @@ fn overlays_draw_for_each_mode() {
     let text = render(&a, 110, 30);
     assert!(text.contains("Pending calls (1)"), "{text}");
     assert!(text.contains("boot notification"), "{text}");
-    assert!(text.contains("(no cancel)"), "{text}");
+    assert!(!text.contains("(no cancel)"), "{text}");
 }
 
 // ---- device-model browser ----

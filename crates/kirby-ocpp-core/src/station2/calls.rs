@@ -79,6 +79,38 @@ impl std::fmt::Debug for Calls2 {
 }
 
 impl Station2Actor {
+    /// Stops waiting for the oldest unanswered call of an action.
+    pub(super) fn cancel_call(&mut self, action: &str) -> Result<(), StationError> {
+        if action == "TransactionEvent" {
+            return Err(StationError::InvalidState {
+                connector: None,
+                reason: format!("{action} cannot be cancelled: the transaction follows its answer"),
+            });
+        }
+        let token = self
+            .calls
+            .pending
+            .iter()
+            .filter(|(_, call)| call.action == action)
+            .map(|(token, _)| *token)
+            .min()
+            .ok_or_else(|| StationError::InvalidState {
+                connector: None,
+                reason: format!("no unanswered {action} call to cancel"),
+            })?;
+        if let Some(call) = self.calls.pending.remove(&token) {
+            call.task.abort();
+            self.log(LogLevel::Warn, format!("{action} cancelled"));
+            (call.continuation)(
+                self,
+                Err(CallError::Cancelled {
+                    action: action.to_owned(),
+                }),
+            );
+        }
+        Ok(())
+    }
+
     /// Sends a CALL with a JSON payload; `cont` runs when it completed. Never blocks. If the
     /// message cannot be sent at all, the continuation runs immediately with the error.
     pub(super) fn call_raw(
@@ -338,6 +370,23 @@ mod tests {
             }),
         );
         result
+    }
+
+    #[tokio::test]
+    async fn cancelled_call_ignores_late_result() {
+        let mut actor = actor();
+        let (connection, mut reply) = Connection::test_reply_channel();
+        actor.link.conn = Some(connection);
+        let mut outcome = queued_call(&mut actor);
+        let late = reply();
+        actor.cancel_call("Heartbeat").unwrap();
+        assert!(matches!(
+            outcome.try_recv().unwrap(),
+            Err(CallError::Cancelled { .. })
+        ));
+        let _ = late.send(Ok(serde_json::json!({})));
+        actor.on_call_done(0, actor.link.generation, Ok(serde_json::json!({})));
+        assert!(actor.calls.pending.is_empty());
     }
 
     #[tokio::test]

@@ -7,7 +7,7 @@ use std::time::Duration;
 use crossterm::event::{Event as TermEvent, EventStream};
 use futures_util::StreamExt;
 use kirby_ocpp_core::scenario::{CancelToken, Scenario, ScenarioProgress, run_scenario};
-use kirby_ocpp_core::station2::{Outcome2, Station2Handle};
+use kirby_ocpp_core::station2::{Command2, Outcome2, Station2Handle};
 use tokio::sync::{broadcast, mpsc};
 
 use super::app::{App2, Effect2, Msg2};
@@ -151,6 +151,14 @@ pub async fn run2(handle: Station2Handle, options: TuiOptions) -> Result<(), Tui
 
 async fn execute(effect: Effect2, ctx: &mut Ctx, guard: &mut TerminalGuard) {
     match effect {
+        Effect2::CancelCall { action } => {
+            let (handle, out) = (ctx.handle.clone(), ctx.out.clone());
+            tokio::spawn(async move {
+                if let Err(error) = handle.send(Command2::CancelCall { action }).await {
+                    out.send(Msg2::Notice(NoticeLevel::Error, error.to_string()));
+                }
+            });
+        }
         Effect2::Send {
             label,
             commands,

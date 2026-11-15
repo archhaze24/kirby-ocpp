@@ -62,7 +62,7 @@ pub(super) fn handle_key(app: &mut App2, key: KeyEvent, fx: &mut Vec<Effect2>) {
             }
         },
         Mode2::DeviceModel(b) => device_model(app, b, key),
-        Mode2::Pending(sel) => pending(app, sel, key),
+        Mode2::Pending(sel) => pending(app, sel, key, fx),
     }
     // A form or detail opened from the device model gives the screen back to it.
     if matches!(app.mode, Mode2::Normal)
@@ -72,8 +72,8 @@ pub(super) fn handle_key(app: &mut App2, key: KeyEvent, fx: &mut Vec<Effect2>) {
     }
 }
 
-/// Keys of the pending-commands list: move; `x` and `Delete` explain that there is no cancel.
-fn pending(app: &mut App2, sel: usize, key: KeyEvent) {
+/// Keys of the pending-commands list.
+fn pending(app: &mut App2, sel: usize, key: KeyEvent, fx: &mut Vec<Effect2>) {
     let last = app.pending.len().saturating_sub(1);
     let sel = match key.code {
         KeyCode::Esc | KeyCode::Char('q' | 'W') | KeyCode::Enter => return,
@@ -82,10 +82,9 @@ fn pending(app: &mut App2, sel: usize, key: KeyEvent) {
         KeyCode::Home => 0,
         KeyCode::End => last,
         KeyCode::Char('x') | KeyCode::Delete => {
-            app.notify(
-                NoticeLevel::Info,
-                "cancel is not available for OCPP 2.0.1 yet",
-            );
+            if let Some(action) = app.pending.get(sel).and_then(|p| p.action.clone()) {
+                fx.push(Effect2::CancelCall { action });
+            }
             sel
         }
         _ => sel,
