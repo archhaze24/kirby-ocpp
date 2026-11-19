@@ -47,6 +47,10 @@ pub(crate) struct Connector {
 
 /// One EVSE with its connectors.
 #[derive(Debug, Clone)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent flags of one EVSE; the status is derived from them"
+)]
 pub(crate) struct Evse {
     pub(super) id: u32,
     pub(super) operative: bool,
@@ -54,7 +58,12 @@ pub(crate) struct Evse {
     /// An EVSE-level `Inoperative` request waits for the transaction to end.
     pub(super) pending_inoperative: bool,
     /// A station-level `Inoperative` request waits for the transaction on this EVSE to end.
+    /// The EVSE keeps its status until then.
     pub(super) pending_station_inoperative: bool,
+    /// A station-level `Inoperative` request is waiting for another EVSE's transaction and
+    /// this EVSE is already unavailable (G04.FR.07). Cleared when the station flag takes over
+    /// or `Operative` restores the station.
+    pub(super) station_hold: bool,
 }
 
 impl Evse {
@@ -76,7 +85,13 @@ impl Evse {
                 .collect(),
             pending_inoperative: false,
             pending_station_inoperative: false,
+            station_hold: false,
         }
+    }
+
+    /// Whether the EVSE itself allows operation: its own flag and no station-level hold.
+    pub(super) fn gate(&self) -> bool {
+        self.operative && !self.station_hold
     }
 
     fn connector(&self, id: u32) -> Option<&Connector> {
@@ -105,6 +120,10 @@ pub(crate) enum Scope {
 /// `Operative` always applies at once and cancels a waiting `Inoperative` of the same scope.
 /// `Inoperative` that would change the state during a transaction waits for its end
 /// (`Scheduled`). Requesting the state a scope already has is `Accepted` (G03.FR.03).
+///
+/// A station-level `Inoperative` with transactions running holds every EVSE without one at
+/// once; each busy EVSE follows when its own transaction ends and the station flag changes
+/// after the last one (G04.FR.06/07).
 pub(crate) fn apply_availability(
     evses: &mut [Evse],
     station_operative: &mut bool,
@@ -117,6 +136,7 @@ pub(crate) fn apply_availability(
             if operative {
                 for evse in evses.iter_mut() {
                     evse.pending_station_inoperative = false;
+                    evse.station_hold = false;
                 }
                 *station_operative = true;
                 return Ok(ChangeAvailabilityStatus::Accepted);
@@ -125,12 +145,21 @@ pub(crate) fn apply_availability(
                 return Ok(ChangeAvailabilityStatus::Accepted);
             }
             let mut scheduled = false;
-            for evse in evses.iter_mut().filter(|e| busy(e.id)) {
-                evse.pending_station_inoperative = true;
-                scheduled = true;
+            for evse in evses.iter_mut() {
+                if busy(evse.id) {
+                    evse.pending_station_inoperative = true;
+                    evse.station_hold = false;
+                    scheduled = true;
+                } else {
+                    evse.pending_station_inoperative = false;
+                    evse.station_hold = true;
+                }
             }
             if scheduled {
                 return Ok(ChangeAvailabilityStatus::Scheduled);
+            }
+            for evse in evses.iter_mut() {
+                evse.station_hold = false;
             }
             *station_operative = false;
             Ok(ChangeAvailabilityStatus::Accepted)
@@ -176,7 +205,8 @@ pub(crate) fn apply_availability(
 }
 
 /// The transaction on `evse_id` ended: applies what waited for it. A station-level request
-/// takes effect once no EVSE waits for it any more. Returns whether any flag changed.
+/// holds this EVSE at once and sets the station flag once no EVSE waits for it any more.
+/// Returns whether any flag changed.
 pub(crate) fn release_pending(
     evses: &mut [Evse],
     station_operative: &mut bool,
@@ -200,7 +230,11 @@ pub(crate) fn release_pending(
     }
     if evse.pending_station_inoperative {
         evse.pending_station_inoperative = false;
+        evse.station_hold = true;
         if !evses.iter().any(|e| e.pending_station_inoperative) {
+            for e in evses.iter_mut() {
+                e.station_hold = false;
+            }
             *station_operative = false;
         }
     }
@@ -231,7 +265,7 @@ impl Station2Actor {
 
     /// Whether the EVSE and the station are operative.
     pub(super) fn evse_operative(&self, id: u32) -> bool {
-        self.state.availability_operative && self.evse(id).is_some_and(|e| e.operative)
+        self.state.availability_operative && self.evse(id).is_some_and(Evse::gate)
     }
 
     /// Whether the station-level availability is `Operative`.
@@ -254,7 +288,7 @@ impl Station2Actor {
         let c = e.connector(connector)?;
         Some(derive_status(
             self.state.availability_operative,
-            e.operative,
+            e.gate(),
             c,
         ))
     }
@@ -304,7 +338,7 @@ impl Station2Actor {
                 .iter()
                 .map(|c| ConnectorSnapshot2 {
                     id: c.id,
-                    status: derive_status(station, evse.operative, c),
+                    status: derive_status(station, evse.gate(), c),
                     ev_connected: c.ev_connected,
                     fault: c.fault,
                 })
@@ -536,13 +570,36 @@ mod tests {
             ChangeAvailabilityStatus::Scheduled
         );
         assert!(station);
-        release_pending(&mut e, &mut station, 1);
-        assert!(station);
-        release_pending(&mut e, &mut station, 2);
+        // The idle EVSE is held at once, the busy ones are left alone.
+        assert!(e[0].gate() && e[1].gate() && !e[2].gate() && e[2].station_hold);
+        assert!(e[0].pending_station_inoperative && e[1].pending_station_inoperative);
+        assert!(release_pending(&mut e, &mut station, 1));
+        assert!(station && e[0].station_hold && !e[1].station_hold);
+        assert!(release_pending(&mut e, &mut station, 2));
         assert!(!station);
+        assert!(e.iter().all(|evse| !evse.station_hold && evse.gate()));
         // Operative restores the station and keeps EVSE flags independent.
         apply(&mut e, &mut station, Scope::Station, true, &[]);
         assert!(station);
+    }
+
+    #[test]
+    fn station_request_during_a_transaction_holds_only_the_idle_evses() {
+        let mut e = evses(2);
+        let mut station = true;
+        assert_eq!(
+            apply(&mut e, &mut station, Scope::Station, false, &[1]),
+            ChangeAvailabilityStatus::Scheduled
+        );
+        assert!(e[0].gate() && e[0].pending_station_inoperative);
+        assert!(!e[1].gate() && !e[1].pending_station_inoperative);
+        // Operative before the transaction ends lifts the hold and the wait.
+        assert_eq!(
+            apply(&mut e, &mut station, Scope::Station, true, &[1]),
+            ChangeAvailabilityStatus::Accepted
+        );
+        assert!(e.iter().all(|evse| evse.gate() && !evse.has_pending()));
+        assert!(!release_pending(&mut e, &mut station, 1));
     }
 
     #[test]

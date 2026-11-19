@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use kirby_ocpp_core::Command2;
 use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::scenario::{
     Action, Action2, CancelToken, Expect, JunitSuite, RunStatus, Scenario, ScenarioReport, Step,
@@ -441,6 +442,23 @@ async fn the_meter_step_advances_and_samples() {
     let snapshot = rig.station.snapshot();
     let evse = snapshot.evse(1).expect("EVSE 1");
     assert_eq!(evse.transaction.as_ref().map(|t| t.energy_wh), Some(2500));
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn the_meter_step_outside_a_transaction_sends_one_meter_values() {
+    let rig = Rig::new().await;
+    let report = run(
+        &rig,
+        json!([{"action": "meter", "evse": 1, "wh_delta": 2500}]),
+    )
+    .await;
+    assert!(report.passed, "{report:#?}");
+    rig.wait_calls("MeterValues", 1).await;
+    // Calls leave in the order they were queued: when the heartbeat is answered, a second
+    // `MeterValues` would be recorded already.
+    rig.send(Command2::Heartbeat).await;
+    assert_eq!(rig.calls("MeterValues").len(), 1);
     rig.stop().await;
 }
 

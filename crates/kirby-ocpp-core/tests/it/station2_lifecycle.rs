@@ -783,3 +783,48 @@ async fn log_lines_that_tools_parse_keep_their_prefixes() {
     wait_log(&mut events, "reconnect attempt 1 in 30ms").await;
     stop(&station, task).await;
 }
+
+#[tokio::test]
+async fn an_unanswered_heartbeat_is_not_followed_by_a_backlog() {
+    let csms = v201_csms().await;
+    csms.respond("BootNotification", |_| boot_reply("Accepted", 1));
+    let answering = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&answering);
+    csms.respond("Heartbeat", move |_| {
+        if flag.load(Ordering::SeqCst) {
+            Reply::Result(json!({"currentTime": "2026-03-01T12:00:00Z"}))
+        } else {
+            Reply::Silence
+        }
+    });
+    let (station, task) = spawn_with(csms.url(), |c| c.call_timeout_ms = 4_000, None);
+    station.connect().await.unwrap();
+    wait_booted(&station).await;
+    csms.wait_for_call("Heartbeat", STEP).await.unwrap();
+    // Three periods pass while the first heartbeat waits for its answer.
+    let more = csms
+        .wait_for_call_count_after(
+            0,
+            "Heartbeat",
+            2,
+            |_| true,
+            std::time::Duration::from_secs(3),
+        )
+        .await;
+    assert!(more.is_err(), "a second heartbeat was sent");
+
+    answering.store(true, Ordering::SeqCst);
+    csms.wait_for_call_count_after(0, "Heartbeat", 3, |_| true, STEP)
+        .await
+        .unwrap();
+    let times: Vec<_> = csms
+        .received()
+        .into_iter()
+        .filter(|call| call.action == "Heartbeat")
+        .map(|call| call.ts)
+        .collect();
+    // The heartbeats of the stalled periods are not sent in a row once the CSMS answers.
+    let gap = times[2] - times[1];
+    assert!(gap >= chrono::Duration::milliseconds(500), "{times:?}");
+    stop(&station, task).await;
+}

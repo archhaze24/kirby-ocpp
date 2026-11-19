@@ -93,6 +93,11 @@ fn needs_no_check(kind: IdTokenType) -> bool {
     matches!(kind, IdTokenType::NoAuthorization | IdTokenType::Central)
 }
 
+/// The `groupIdToken` of an `idTokenInfo` as received.
+fn group_in(info: Option<&Value>) -> Option<&str> {
+    info?.pointer("/groupIdToken/idToken")?.as_str()
+}
+
 fn wire_token(token: &IdTokenRef) -> IdToken {
     IdToken {
         additional_info: None,
@@ -411,6 +416,12 @@ impl Station2Actor {
         };
         if let Some(token) = event_token.or(of_transaction) {
             self.cache_store(&token, &parsed);
+            if current.as_deref() == Some(transaction_id)
+                && parsed.status == AuthorizationStatus::Accepted
+            {
+                let group = parsed.group_id_token.as_ref().map(|g| g.id_token.clone());
+                self.set_authorization_group(evse, &token, group);
+            }
         }
         let ongoing = self.tx_by_id(transaction_id).is_some_and(|tx| tx.ongoing);
         if parsed.status != AuthorizationStatus::Accepted
@@ -466,8 +477,8 @@ impl Station2Actor {
             }
         };
         // C01.FR.03: the token that started the authorization ends it, without `Authorize`.
-        if self.token_ends_authorization(evse, &token) {
-            self.on_deauthorized(evse, TriggerReason::StopAuthorized, StopReason::Local);
+        if self.token_ends_authorization(evse, &token, None) {
+            self.on_stopped_by_token(evse, token);
             let _ = reply.send(Ok(Outcome2::Done));
             return;
         }
@@ -497,7 +508,7 @@ impl Station2Actor {
         };
         ids.iter()
             .copied()
-            .find(|id| self.token_ends_authorization(*id, token))
+            .find(|id| self.token_ends_authorization(*id, token, None))
             .or_else(|| ids.iter().copied().find(|id| free(id) && connected(id)))
             .or_else(|| {
                 ids.iter()
@@ -510,21 +521,41 @@ impl Station2Actor {
             })
     }
 
-    /// Whether `token` is the one that authorized `evse`, or valid in the cache with the same
-    /// group (C01.FR.03).
-    fn token_ends_authorization(&self, evse: u32, token: &IdTokenRef) -> bool {
+    /// The group of an accepted `token`: the one the fresh answer named, else the cache's.
+    fn group_of_token(&self, token: &IdTokenRef, fresh: Option<&str>) -> Option<String> {
+        fresh.map(str::to_owned).or_else(|| {
+            self.cache_peek(&token_key(token))
+                .filter(|entry| entry.status == ACCEPTED)
+                .and_then(|entry| entry.group_id.clone())
+        })
+    }
+
+    /// Keeps the group of `token` with the authorization it just started on `evse`.
+    pub(super) fn note_authorization_group(
+        &mut self,
+        evse: u32,
+        token: &IdTokenRef,
+        info: Option<&Value>,
+    ) {
+        let group = self.group_of_token(token, group_in(info));
+        self.set_authorization_group(evse, token, group);
+    }
+
+    /// Whether `token` is the one that authorized `evse`, or accepted with the same group
+    /// (C01.FR.03). `fresh` is the group of the `Authorize` answer for `token`, when there is
+    /// one; the group of the authorization is the one kept with it, else the cache's.
+    fn token_ends_authorization(&self, evse: u32, token: &IdTokenRef, fresh: Option<&str>) -> bool {
         let Some(started) = self.authorized_token(evse) else {
             return false;
         };
         if started == token {
             return true;
         }
-        let group_of = |t: &IdTokenRef| {
-            self.cache_peek(&token_key(t))
-                .filter(|entry| entry.status == ACCEPTED)
-                .and_then(|entry| entry.group_id.as_deref())
-        };
-        match (group_of(token), group_of(started)) {
+        let started_group = self
+            .authorization_group(evse)
+            .map(str::to_owned)
+            .or_else(|| self.group_of_token(started, None));
+        match (self.group_of_token(token, fresh), started_group) {
             (Some(a), Some(b)) => a == b,
             _ => false,
         }
@@ -556,9 +587,9 @@ impl Station2Actor {
                 status,
                 id_token_info: info,
             })
-        } else if self.token_ends_authorization(evse, &token) {
+        } else if self.token_ends_authorization(evse, &token, group_in(info.as_ref())) {
             // The answer showed the token shares the group of the one that started.
-            self.on_deauthorized(evse, TriggerReason::StopAuthorized, StopReason::Local);
+            self.on_stopped_by_token(evse, token);
             Ok(Outcome2::Done)
         } else if self.authorized_token(evse).is_some() {
             // C01.FR.23: a second, unrelated token does not take over a running authorization.
@@ -568,16 +599,19 @@ impl Station2Actor {
             })
         } else {
             let had_transaction = self.active_tx(evse).is_some();
-            self.on_authorized(evse, token, None, TriggerReason::Authorized)
-                .map(|()| match self.active_tx(evse) {
-                    Some(tx) if !had_transaction => Outcome2::TransactionStarted {
-                        evse,
-                        transaction_id: tx.id.0.clone(),
-                    },
-                    _ => Outcome2::Authorized {
-                        status,
-                        id_token_info: info,
-                    },
+            self.on_authorized(evse, token.clone(), None, TriggerReason::Authorized)
+                .map(|()| {
+                    self.note_authorization_group(evse, &token, info.as_ref());
+                    match self.active_tx(evse) {
+                        Some(tx) if !had_transaction => Outcome2::TransactionStarted {
+                            evse,
+                            transaction_id: tx.id.0.clone(),
+                        },
+                        _ => Outcome2::Authorized {
+                            status,
+                            id_token_info: info,
+                        },
+                    }
                 })
         };
         // The requester may have gone away; nothing to do about that.

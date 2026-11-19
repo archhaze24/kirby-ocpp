@@ -16,6 +16,9 @@
 //!   dropped (E12.FR.04/05); `Started` and `Ended` are never dropped. An `Updated` event that
 //!   carries a once-only field (`evse`, `idToken`, `transactionInfo.remoteStartId`, the
 //!   `Transaction.Begin` meter value) is kept too, since no later event repeats the field.
+//! * Close to twice [`QUEUE_CAP`] entries the queue is full for good: no new transaction
+//!   starts (`RequestStartTransaction` is rejected, a local start fails) until the CSMS takes
+//!   events again. Events of the transactions that run keep being queued.
 
 use std::collections::VecDeque;
 
@@ -150,6 +153,13 @@ impl Station2Actor {
                 .any(|event| event.transaction_id == id),
             None => !self.queue.events.is_empty(),
         }
+    }
+
+    /// The queue is at its hard bound, twice the cap, less the two events (`Started` and
+    /// `Ended`) a new transaction adds at least: nothing can be thinned any more and a new
+    /// transaction would only add undroppable events.
+    pub(super) fn queue_full(&self) -> bool {
+        self.queue.events.len().saturating_add(2) > self.queue.cap.saturating_mul(2)
     }
 
     /// The queued events, oldest first.
@@ -337,9 +347,23 @@ impl Station2Actor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use serde_json::json;
+    use tokio::sync::{broadcast, mpsc};
 
     use super::*;
+    use crate::clock::SystemClock;
+    use crate::config::StationConfig;
+    use crate::ocpp::v2::messages::TriggerReason;
+    use crate::ocpp::v2::types::{IdTokenType, StopReason};
+
+    fn actor() -> Station2Actor {
+        let (_commands_tx, commands) = mpsc::channel(1);
+        let (events, _) = broadcast::channel(16);
+        let config = StationConfig::new("ws://127.0.0.1:1/").without_persistence();
+        Station2Actor::new(config, Arc::new(SystemClock), commands, events, None).0
+    }
 
     fn event(kind: TransactionEventKind, seq_no: i32) -> QueuedEvent {
         QueuedEvent {
@@ -437,6 +461,41 @@ mod tests {
         ]
         .into();
         assert_eq!(thin_updated(&mut events), 0);
+    }
+
+    #[tokio::test]
+    async fn the_queue_stays_bounded_and_refuses_new_transactions_when_full() {
+        let mut actor = actor();
+        actor.set_queue_cap(4);
+        let (reply, _answer) = tokio::sync::oneshot::channel();
+        actor.cmd_plug_in(1, reply);
+        let token = IdTokenRef {
+            id_token: "TAG".to_owned(),
+            kind: IdTokenType::KeyCode,
+        };
+        // The CSMS never answers: every session leaves a `Started` and an `Ended` event.
+        let mut started = 0;
+        for _ in 0..20 {
+            if actor
+                .on_authorized(1, token.clone(), None, TriggerReason::Authorized)
+                .is_ok()
+            {
+                started += 1;
+                actor.on_deauthorized(1, TriggerReason::StopAuthorized, StopReason::Local);
+            }
+        }
+        let queued = actor.queued_events();
+        assert!(queued.len() <= 8, "the queue grew to {}", queued.len());
+        assert!(started < 20, "every session started: {started}");
+        assert!(actor.queue_full());
+        assert!(actor.active_tx(1).is_none());
+        let refused = actor.on_authorized(1, token, None, TriggerReason::Authorized);
+        assert!(
+            refused.is_err(),
+            "a new transaction started on a full queue"
+        );
+        assert!(actor.active_tx(1).is_none());
+        assert_eq!(actor.queued_events().len(), queued.len());
     }
 
     #[test]

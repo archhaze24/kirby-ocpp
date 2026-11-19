@@ -138,6 +138,8 @@ pub struct TxPersist {
 struct PendingAuth {
     token: IdTokenRef,
     remote_start_id: Option<i32>,
+    /// The `groupIdToken` the CSMS named for the token.
+    group: Option<String>,
 }
 
 /// Per-transaction state that is not persisted.
@@ -206,6 +208,8 @@ struct MeterRt {
 pub(crate) struct TxEngine {
     active: BTreeMap<u32, ActiveTx>,
     pending: BTreeMap<u32, PendingAuth>,
+    /// The `groupIdToken` of the token that authorizes the transaction, by EVSE id.
+    groups: BTreeMap<u32, String>,
     runtime: BTreeMap<u32, TxRuntime>,
     meters: BTreeMap<u32, MeterRt>,
     stopped: VecDeque<String>,
@@ -354,6 +358,40 @@ impl Station2Actor {
         match self.tx.active.get(&evse) {
             Some(tx) => tx.token.as_ref().filter(|_| tx.authorized),
             None => self.tx.pending.get(&evse).map(|pending| &pending.token),
+        }
+    }
+
+    /// The group the CSMS named for the token that authorizes `evse`, when it did.
+    pub(super) fn authorization_group(&self, evse: u32) -> Option<&str> {
+        match self.tx.active.get(&evse) {
+            Some(tx) if tx.authorized => self.tx.groups.get(&evse).map(String::as_str),
+            Some(_) => None,
+            None => self
+                .tx
+                .pending
+                .get(&evse)
+                .and_then(|pending| pending.group.as_deref()),
+        }
+    }
+
+    /// Keeps the `groupIdToken` of `token` with the authorization of `evse`, provided `token`
+    /// is the one that authorizes it. A missing group leaves the stored one alone.
+    pub(super) fn set_authorization_group(
+        &mut self,
+        evse: u32,
+        token: &IdTokenRef,
+        group: Option<String>,
+    ) {
+        let Some(group) = group else {
+            return;
+        };
+        if self.authorized_token(evse) != Some(token) {
+            return;
+        }
+        if self.tx.active.contains_key(&evse) {
+            self.tx.groups.insert(evse, group);
+        } else if let Some(pending) = self.tx.pending.get_mut(&evse) {
+            pending.group = Some(group);
         }
     }
 
@@ -536,10 +574,16 @@ impl Station2Actor {
         if !self.tx.active.contains_key(&evse) {
             return;
         }
+        let measurands = self.tx_updated_measurands();
+        if measurands.is_empty() {
+            // J02: the event carries the configured measurands; without any it has no purpose.
+            self.rearm_meter_timers();
+            return;
+        }
         self.settle_tx_meters();
         let sample = self.sample_value(
             evse,
-            &self.tx_updated_measurands(),
+            &measurands,
             ReadingContext::SamplePeriodic,
             self.clock.now_utc(),
         );
@@ -853,6 +897,9 @@ impl Station2Actor {
                 reason: format!("a transaction is already running on EVSE {evse}"),
             });
         }
+        if self.queue_full() {
+            return Err(queue_full_error());
+        }
         self.settle_tx_meters();
         let now = self.clock.now_utc();
         let connected = self.evse_connected(evse);
@@ -864,6 +911,7 @@ impl Station2Actor {
             ChargingState::Idle
         });
         self.tx.pending.remove(&evse);
+        self.tx.groups.remove(&evse);
         self.tx.active.insert(
             evse,
             ActiveTx {
@@ -969,6 +1017,9 @@ impl Station2Actor {
                 "EVSE {evse} does not exist"
             )));
         }
+        if !self.tx.active.contains_key(&evse) && self.queue_full() {
+            return Err(queue_full_error());
+        }
         self.settle_tx_meters();
         if let Some(tx) = self.tx.active.get_mut(&evse) {
             if tx.authorized {
@@ -1024,6 +1075,7 @@ impl Station2Actor {
                 PendingAuth {
                     token,
                     remote_start_id,
+                    group: None,
                 },
             );
             if !connected {
@@ -1080,9 +1132,9 @@ impl Station2Actor {
         } else {
             (TriggerReason::CablePluggedIn, None)
         };
-        let (token, remote_start_id) = match pending {
-            Some(pending) => (Some(pending.token), pending.remote_start_id),
-            None => (None, None),
+        let (token, remote_start_id, group) = match pending {
+            Some(pending) => (Some(pending.token), pending.remote_start_id, pending.group),
+            None => (None, None, None),
         };
         let spec = StartSpec {
             token,
@@ -1090,8 +1142,13 @@ impl Station2Actor {
             trigger,
             authorized,
         };
-        if let Err(error) = self.begin_inner(evse, spec, initial) {
-            self.log(LogLevel::Warn, format!("transaction not started: {error}"));
+        match self.begin_inner(evse, spec, initial) {
+            Ok(_) => {
+                if let Some(group) = group {
+                    self.tx.groups.insert(evse, group);
+                }
+            }
+            Err(error) => self.log(LogLevel::Warn, format!("transaction not started: {error}")),
         }
     }
 
@@ -1222,6 +1279,28 @@ impl Station2Actor {
         trigger: TriggerReason,
         reason: StopReason,
     ) {
+        self.deauthorize(evse, trigger, reason, None);
+    }
+
+    /// [`Self::on_deauthorized`] for a token that was presented to stop: with `StopAuthorized`
+    /// the stopping event carries `presented` instead of the token of the transaction (a
+    /// token of the same group, C09.FR.03).
+    pub(super) fn on_stopped_by_token(&mut self, evse: u32, presented: IdTokenRef) {
+        self.deauthorize(
+            evse,
+            TriggerReason::StopAuthorized,
+            StopReason::Local,
+            Some(presented),
+        );
+    }
+
+    fn deauthorize(
+        &mut self,
+        evse: u32,
+        trigger: TriggerReason,
+        reason: StopReason,
+        presented: Option<IdTokenRef>,
+    ) {
         self.settle_tx_meters();
         let Some(tx) = self.tx.active.get(&evse) else {
             self.tx.pending.remove(&evse);
@@ -1233,7 +1312,7 @@ impl Station2Actor {
         }
         let charging = tx.charging_state == ChargingState::Charging;
         let stop_token = (trigger == TriggerReason::StopAuthorized)
-            .then(|| tx.token.clone())
+            .then(|| presented.or_else(|| tx.token.clone()))
             .flatten();
         if authorization_stops(&self.tx_stop_points(), charging) {
             self.finish(evse, reason, trigger, stop_token);
@@ -1271,6 +1350,7 @@ impl Station2Actor {
         };
         tx.authorized = false;
         tx.charging_state = state;
+        self.tx.groups.remove(&evse);
         self.tx_event(
             evse,
             TransactionEventKind::Updated,
@@ -1412,6 +1492,7 @@ impl Station2Actor {
         }
         self.tx.runtime.remove(&evse);
         self.tx.pending.remove(&evse);
+        self.tx.groups.remove(&evse);
         if let Some(meter) = self.tx.meters.get_mut(&evse) {
             meter.charging = false;
         }
@@ -1568,6 +1649,14 @@ impl Station2Actor {
             }
         }
         self.sync_tx_snapshot();
+    }
+}
+
+/// The error for a transaction that cannot start because the event queue is full.
+fn queue_full_error() -> StationError {
+    StationError::InvalidState {
+        connector: None,
+        reason: "the transaction event queue is full".to_owned(),
     }
 }
 

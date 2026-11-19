@@ -199,6 +199,11 @@ const DEVICE: &str = "DeviceDataCtrlr";
 const SECURITY: &str = "SecurityCtrlr";
 const CLOCK: &str = "ClockCtrlr";
 
+/// Whether `spec` is `SecurityCtrlr.BasicAuthPassword`.
+pub(super) fn is_basic_auth_password(spec: &VarSpec) -> bool {
+    spec.component == SECURITY && spec.variable == "BasicAuthPassword"
+}
+
 /// Every variable of the station. Stored (non-live) values of `Station` rows are the only
 /// ones that can change.
 pub(crate) static TABLE: &[VarSpec] = &[
@@ -1019,7 +1024,8 @@ impl Station2Actor {
         }
     }
 
-    /// Re-applies what a changed variable controls.
+    /// Re-applies what a changed variable controls. The password reconnect of A01 is the
+    /// `SetVariables` handler's: a local edit does not reconnect.
     pub(super) fn apply_variable_effects(&mut self, spec: &VarSpec) {
         match (spec.component, spec.variable) {
             (OCPP, "HeartbeatInterval") => {
@@ -1030,13 +1036,7 @@ impl Station2Actor {
                         .set(TimerKey2::Heartbeat, Duration::from_secs(u64::from(secs)));
                 }
             }
-            (SECURITY, "BasicAuthPassword") => {
-                self.log(
-                    LogLevel::Info,
-                    "BasicAuthPassword changed; it applies at the next connect".to_owned(),
-                );
-                self.mark_secrets_dirty();
-            }
+            (SECURITY, "BasicAuthPassword") => self.mark_secrets_dirty(),
             _ => {}
         }
         self.flush_now();
@@ -1061,6 +1061,14 @@ impl Station2Actor {
                     self.log_weak_password();
                 }
                 self.apply_variable_effects(applied.spec);
+                if is_basic_auth_password(applied.spec) {
+                    // A local edit is not known to the CSMS: no reconnect (that is A01, a
+                    // SetVariables from the CSMS).
+                    self.log(
+                        LogLevel::Info,
+                        "BasicAuthPassword changed; it applies at the next connect".to_owned(),
+                    );
+                }
                 self.mark_dirty();
                 Ok(Outcome2::Done)
             }

@@ -225,6 +225,12 @@ async fn password_is_write_only_everywhere() {
         answer["setVariableResult"][0]["attributeStatus"],
         json!("Accepted")
     );
+    // The station reconnects with the new password; wait for the new link before asking.
+    csms.wait_for_connection_count(2, STEP).await.unwrap();
+    wait_snapshot(&station, "the link is back", |s| {
+        s.connection == kirby_ocpp_core::station::ConnectionState::Connected
+    })
+    .await;
     let read = call(
         &csms,
         "GetVariables",
@@ -364,5 +370,108 @@ async fn get_report_is_not_supported() {
     let answer = call(&csms, "GetReport", json!({"requestId": 4})).await;
     assert_eq!(answer["status"], json!("NotSupported"));
     assert_eq!(calls_of(&csms, "NotifyReport").len(), 0);
+    stop(&station, task).await;
+}
+
+/// Answers every CALL the station sends on `peer` (a generic empty result, an accepted boot)
+/// until `done` returns `true` for a frame; returns the actions of the CALLs seen.
+async fn serve_until(
+    peer: &mut crate::ws_support::RawPeer,
+    mut done: impl FnMut(&Value) -> bool,
+) -> Vec<String> {
+    let mut actions = Vec::new();
+    loop {
+        let frame = peer.recv_frame().await;
+        if frame[0] == json!(2) {
+            let action = frame[2].as_str().unwrap_or_default().to_owned();
+            let payload = match action.as_str() {
+                "BootNotification" => json!({
+                    "status": "Accepted", "currentTime": "2026-03-01T12:00:00Z", "interval": 300,
+                }),
+                "Heartbeat" => json!({"currentTime": "2026-03-01T12:00:00Z"}),
+                _ => json!({}),
+            };
+            peer.reply(&frame, payload).await;
+            actions.push(action);
+        }
+        if done(&frame) {
+            return actions;
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_changed_password_reconnects_with_it_and_keeps_the_registration() {
+    use crate::ws_support::{Negotiate, RawServer};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::STANDARD;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let mut server = RawServer::start(Negotiate::Select("ocpp2.0.1".into())).await;
+    let mut config = StationConfig::new(server.url("/ocpp"))
+        .with_charge_point_id("CP-PW")
+        .with_connectors(1)
+        .with_call_timeout_ms(2_000)
+        .with_heartbeat_interval_secs(300)
+        .with_reconnect(ReconnectConfig {
+            enabled: true,
+            initial_delay_ms: 30,
+            max_delay_ms: 100,
+            max_attempts: 0,
+        })
+        .without_persistence();
+    config.ws_ping_interval_secs = 0;
+    Protocol::V201
+        .token()
+        .clone_into(&mut config.ws_subprotocol);
+    config.protocol = Protocol::V201;
+    let (station, task) = Station2::spawn(config, Arc::new(ManualClock::new(Utc::now())));
+    station.connect().await.expect("connect");
+
+    let mut first = server.next_peer().await;
+    assert_eq!(first.authorization, None);
+    // The boot and the first status, answered.
+    let seen = serve_until(&mut first, |frame| frame[2] == json!("StatusNotification")).await;
+    assert_eq!(seen.first().map(String::as_str), Some("BootNotification"));
+    wait_booted(&station).await;
+
+    first
+        .send_json(&json!([2, "sv-1", "SetVariables", {"setVariableData": [
+            {"attributeValue": SECRET, "component": {"name": "SecurityCtrlr"},
+             "variable": {"name": "BasicAuthPassword"}},
+        ]}]))
+        .await;
+    // The answer reaches the CSMS first; then the station closes the link.
+    serve_until(&mut first, |frame| {
+        frame[0] == json!(3) && frame[1] == json!("sv-1")
+    })
+    .await;
+    loop {
+        match first.recv().await {
+            Some(Message::Close(_)) | None => break,
+            Some(_) => {}
+        }
+    }
+
+    // No manual reconnect: the next upgrade carries the new password.
+    let mut second = server.next_peer().await;
+    let expected = format!("Basic {}", STANDARD.encode(format!("CP-PW:{SECRET}")));
+    assert_eq!(second.authorization.as_deref(), Some(expected.as_str()));
+    // B04: the registration is kept, so the link resumes without a boot.
+    let resumed = serve_until(&mut second, |frame| frame[2] == json!("Heartbeat")).await;
+    assert!(
+        !resumed.iter().any(|a| a == "BootNotification"),
+        "{resumed:?}"
+    );
+    assert_eq!(
+        wait_snapshot(
+            &station,
+            "the registration",
+            kirby_ocpp_core::Snapshot2::booted
+        )
+        .await
+        .registration,
+        Some(kirby_ocpp_core::ocpp::v2::messages::RegistrationStatus::Accepted)
+    );
     stop(&station, task).await;
 }

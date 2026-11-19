@@ -242,6 +242,61 @@ async fn a_token_of_the_same_group_ends_the_authorization() {
     rig.stop().await;
 }
 
+#[tokio::test]
+async fn a_token_of_the_same_group_ends_the_authorization_without_a_cache() {
+    let rig = Rig::new().await;
+    rig.set_variable("AuthCacheCtrlr", "Enabled", "false").await;
+    rig.csms
+        .respond("Authorize", |_| info("Accepted", Some("FAMILY"), None));
+    rig.send(Command2::PlugIn { evse: 1 }).await;
+    rig.send(card(1, "PARENT")).await;
+    wait_running(&rig, 1).await;
+    let outcome = rig.send(card(1, "CHILD")).await;
+    assert!(matches!(outcome, Outcome2::Done), "{outcome:?}");
+    let ended = rig.wait_event("Ended").await;
+    assert_eq!(ended["triggerReason"], "StopAuthorized");
+    assert_eq!(ended["transactionInfo"]["stoppedReason"], "Local");
+    assert_eq!(ended["idToken"]["idToken"], "CHILD");
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_token_of_the_group_the_event_answer_named_ends_a_remote_start() {
+    let rig = Rig::new().await;
+    rig.csms
+        .respond("Authorize", |_| info("Accepted", Some("FAMILY"), None));
+    // The CSMS judges the central token in the answer to the event that carries it.
+    rig.csms.respond("TransactionEvent", |payload| {
+        if payload.get("idToken").is_some() {
+            info("Accepted", Some("FAMILY"), None)
+        } else {
+            Reply::Result(json!({}))
+        }
+    });
+    rig.send(Command2::PlugIn { evse: 1 }).await;
+    let reply = rig
+        .call(
+            "RequestStartTransaction",
+            json!({
+                "idToken": {"idToken": "REMOTE", "type": "Central"},
+                "remoteStartId": 3,
+                "evseId": 1,
+            }),
+        )
+        .await;
+    assert_eq!(reply["status"], "Accepted");
+    wait_running(&rig, 1).await;
+    rig.wait_event("Started").await;
+    // The answer to `Started` reaches the station before the answer to this CALL does.
+    rig.call("GetTransactionStatus", json!({})).await;
+    let outcome = rig.send(card(1, "CHILD")).await;
+    assert!(matches!(outcome, Outcome2::Done), "{outcome:?}");
+    let ended = rig.wait_event("Ended").await;
+    assert_eq!(ended["triggerReason"], "StopAuthorized");
+    assert_eq!(ended["idToken"]["idToken"], "CHILD");
+    rig.stop().await;
+}
+
 // ---- during a transaction ---------------------------------------------------------------
 
 #[tokio::test]

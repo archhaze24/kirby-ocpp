@@ -41,6 +41,9 @@ impl Station2Actor {
         if unavailable {
             return Err("Unavailable");
         }
+        if self.queue_full() {
+            return Err("QueueFull");
+        }
         // A transaction that is not authorized yet can be matched with the request.
         let authorized = self.active_tx(evse).is_some_and(|tx| tx.authorized)
             || self.authorized_token(evse).is_some();
@@ -101,12 +104,16 @@ impl Station2Actor {
                 );
                 return;
             }
-            if let Err(error) = actor.on_authorized(evse, presented, Some(remote_start_id), trigger)
-            {
-                actor.log(
+            let info = match decision {
+                AuthDecision::Accepted(info) => info,
+                _ => None,
+            };
+            match actor.on_authorized(evse, presented.clone(), Some(remote_start_id), trigger) {
+                Ok(()) => actor.note_authorization_group(evse, &presented, info.as_ref()),
+                Err(error) => actor.log(
                     LogLevel::Warn,
                     format!("remote start on EVSE {evse} failed: {error}"),
-                );
+                ),
             }
         });
     }

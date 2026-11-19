@@ -41,8 +41,9 @@ impl Station2Actor {
     pub(super) fn account_all_statuses(&mut self) {
         let station = self.state.availability_operative;
         for evse in &mut self.evses {
+            let evse_operative = evse.gate();
             for c in &mut evse.connectors {
-                c.accounted = derive_status(station, evse.operative, c);
+                c.accounted = derive_status(station, evse_operative, c);
             }
         }
     }
@@ -55,7 +56,7 @@ impl Station2Actor {
         let station = self.state.availability_operative;
         let mut changed = Vec::new();
         for evse in &mut self.evses {
-            let evse_operative = evse.operative;
+            let evse_operative = evse.gate();
             for c in &mut evse.connectors {
                 let current = derive_status(station, evse_operative, c);
                 if current != c.accounted {

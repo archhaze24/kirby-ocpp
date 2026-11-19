@@ -17,7 +17,9 @@ use crate::ocpp::v2::messages::{
 use crate::ocpp::v2::types::{AttributeType, StatusInfo};
 use crate::station::LogLevel;
 use crate::station2::actor::{Station2Actor, TimerKey2};
-use crate::station2::device_model::{Applied, DeviceModel, LiveFn, Lookup, ReportJob, SetFailure};
+use crate::station2::device_model::{
+    Applied, DeviceModel, LiveFn, Lookup, ReportJob, SetFailure, is_basic_auth_password,
+};
 use crate::station2::types::ItemsPer;
 
 fn status_info(reason: &str, info: impl Into<String>) -> StatusInfo {
@@ -145,6 +147,7 @@ pub(in crate::station2) fn set_variables(
     }
     let mut results = Vec::with_capacity(request.set_variable_data.len());
     let mut applied_any = false;
+    let mut password_changed = false;
     for data in &request.set_variable_data {
         let (result, applied) = answer_set(&mut actor.dm, data);
         if let Some(applied) = applied {
@@ -152,6 +155,7 @@ pub(in crate::station2) fn set_variables(
             if applied.weak_secret {
                 actor.log_weak_password();
             }
+            password_changed |= is_basic_auth_password(applied.spec);
             actor.apply_variable_effects(applied.spec);
         }
         results.push(result);
@@ -165,6 +169,10 @@ pub(in crate::station2) fn set_variables(
     );
     if applied_any {
         actor.mark_dirty();
+    }
+    if password_changed {
+        // A01: reconnect with the new password once the answer is queued.
+        actor.schedule_password_reconnect();
     }
 }
 

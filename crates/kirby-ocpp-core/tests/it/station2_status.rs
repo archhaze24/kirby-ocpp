@@ -458,6 +458,71 @@ async fn station_inoperative_during_a_transaction_waits_for_it() {
     rig.stop().await;
 }
 
+#[tokio::test]
+async fn station_inoperative_during_a_transaction_holds_the_idle_evses_at_once() {
+    let rig = Rig::new().await;
+    rig.start_transaction().await;
+    // Barrier: everything the start sent has arrived before the mark.
+    rig.statuses_after(0).await;
+    let mark = rig.csms.mark();
+    let body = json!({"operationalStatus": "Inoperative"});
+    assert_eq!(rig.change_availability(body).await, "Scheduled");
+    // The EVSE without a transaction is unavailable immediately; the busy one is left alone.
+    assert_eq!(rig.statuses_after(mark).await, [note(2, 1, "Unavailable")]);
+    let snapshot = rig.station.snapshot();
+    assert_eq!(connector_status(&snapshot, 2), ConnectorStatus::Unavailable);
+    assert_eq!(connector_status(&snapshot, 1), ConnectorStatus::Occupied);
+    assert!(snapshot.availability_operative);
+
+    // Nothing new starts: plug and token on EVSE 2 do not open a transaction.
+    let mark = rig.csms.mark();
+    rig.send(Command2::PlugIn { evse: 2 }).await;
+    let _ = rig
+        .station
+        .send(Command2::PresentToken {
+            evse: Some(2),
+            id_token: "TOKEN-2".to_owned(),
+            token_type: IdTokenType::Central,
+        })
+        .await;
+    assert_eq!(rig.statuses_after(mark).await, []);
+    assert!(
+        !rig.csms
+            .calls_since(mark)
+            .iter()
+            .any(|call| call.action == "TransactionEvent"),
+        "no transaction event after the request"
+    );
+    let snapshot = rig.station.snapshot();
+    assert!(snapshot.evse(2).is_some_and(|e| e.transaction.is_none()));
+    assert_eq!(connector_status(&snapshot, 2), ConnectorStatus::Unavailable);
+
+    // The busy EVSE turns unavailable when its own transaction ends.
+    let mark = rig.csms.mark();
+    rig.end_transaction().await;
+    wait_snapshot(&rig.station, "the station is inoperative", |s| {
+        !s.availability_operative
+    })
+    .await;
+    assert_eq!(
+        connector_status(&rig.station.snapshot(), 1),
+        ConnectorStatus::Unavailable
+    );
+    assert_eq!(
+        rig.statuses_after(mark).await.last(),
+        Some(&note(1, 1, "Unavailable"))
+    );
+
+    // Operative restores both EVSEs (both have an EV plugged in).
+    let body = json!({"operationalStatus": "Operative"});
+    assert_eq!(rig.change_availability(body).await, "Accepted");
+    let snapshot = rig.station.snapshot();
+    assert!(snapshot.availability_operative);
+    assert_eq!(connector_status(&snapshot, 1), ConnectorStatus::Occupied);
+    assert_eq!(connector_status(&snapshot, 2), ConnectorStatus::Occupied);
+    rig.stop().await;
+}
+
 /// A station whose clock the test advances.
 fn spawn_with_clock(csms: &MockCsms) -> (Station2Handle, JoinHandle<()>, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::new(Utc::now()));

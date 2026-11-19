@@ -24,6 +24,8 @@
 //!   period exceeded `OfflineThreshold`, otherwise those that changed), delivers the
 //!   transaction queue and sends a `Heartbeat`. Only `Disconnect` and a simulated reset clear
 //!   the registration, so the next connect boots.
+//! * A new `BasicAuthPassword` (URL without a password) closes the link once the answer is
+//!   queued and reconnects with it right away, on the same path: no boot, queue kept (A01).
 //! * A reconnect with a `Pending`, `Rejected` or missing registration boots again.
 //! * The reason of a boot is the reason of the reset in progress, else the reason of the last
 //!   boot that was not accepted (the retries repeat it), else `PowerUp`. `Command2::Boot`
@@ -88,6 +90,8 @@ pub(crate) struct Link2 {
     attempts: u32,
     /// A `BootNotification` CALL is in flight.
     boot_in_flight: bool,
+    /// A station-originated `Heartbeat` CALL is in flight; the timer skips its period.
+    heartbeat_in_flight: bool,
     /// The 2.0.1 schemas the connection validates against; built once.
     schemas: SchemaSet,
     /// When the link was lost; cleared once the statuses were re-sent.
@@ -109,6 +113,7 @@ impl Link2 {
             wanted: false,
             attempts: 0,
             boot_in_flight: false,
+            heartbeat_in_flight: false,
             schemas: SchemaSet::for_protocol(Protocol::V201)
                 .expect("bundled OCPP 2.0.1 schemas compile"),
             offline_since: None,
@@ -286,6 +291,38 @@ impl Station2Actor {
         self.start_connect();
     }
 
+    /// `BasicAuthPassword` changed while the link is up and the URL carries no password (the
+    /// URL wins): the answer to the CSMS is queued, so the next step is to drop the link and
+    /// open it again with the new password. The registration stays, so there is no boot.
+    pub(super) fn schedule_password_reconnect(&mut self) {
+        let url_has_password =
+            url::Url::parse(&self.config.url).map_or(true, |url| url.password().is_some());
+        if url_has_password || self.link.conn.is_none() {
+            return;
+        }
+        // The reconnect timer is otherwise armed only while no link is up, so a timer that
+        // fires with a link up is this one. It fires after the current handler returned, so
+        // the answer is queued before the close.
+        self.timers.set(TimerKey2::Reconnect, Duration::ZERO);
+    }
+
+    fn reconnect_with_new_password(&mut self) {
+        self.log(
+            LogLevel::Info,
+            "BasicAuthPassword changed; reconnecting with it".to_owned(),
+        );
+        let connection = self.link.conn.clone();
+        let mut events = self.link.events.take();
+        self.drain_buffered_events(events.as_mut());
+        self.finish_answered_calls();
+        self.link_down(&CallError::Closed { code: None });
+        close_in_background(connection, events);
+        self.link.attempts = 0;
+        if self.link.wanted && self.link.connecting.is_none() {
+            self.start_connect();
+        }
+    }
+
     fn start_connect(&mut self) {
         self.state.reconnect_stopped = None;
         self.link.generation += 1;
@@ -427,6 +464,7 @@ impl Station2Actor {
         self.link.generation += 1;
         self.link.conn = None;
         self.link.boot_in_flight = false;
+        self.link.heartbeat_in_flight = false;
         self.timers.cancel(&TimerKey2::Heartbeat);
         self.timers.cancel(&TimerKey2::BootRetry);
         self.queue_mark_offline();
@@ -476,6 +514,10 @@ impl Station2Actor {
 
     /// The reconnect delay elapsed.
     pub(super) fn on_reconnect_timer(&mut self) {
+        if self.link.conn.is_some() {
+            self.reconnect_with_new_password();
+            return;
+        }
         if !self.link.wanted || self.link.conn.is_some() || self.link.connecting.is_some() {
             return;
         }
@@ -642,34 +684,48 @@ impl Station2Actor {
             return;
         }
         self.arm_heartbeat();
+        // The connection sends one CALL at a time: another heartbeat would only queue up
+        // behind the unanswered one.
+        if self.link.heartbeat_in_flight {
+            return;
+        }
         self.send_heartbeat(Origin2::Station, None);
     }
 
     /// Sends `Heartbeat`; `reply` is answered with the CSMS's response.
     pub(super) fn send_heartbeat(&mut self, origin: Origin2, reply: Option<Reply2>) {
+        let tracked = origin == Origin2::Station && reply.is_none();
+        if tracked {
+            self.link.heartbeat_in_flight = true;
+        }
         self.call::<Heartbeat>(
             origin,
             &HeartbeatRequest { custom_data: None },
-            move |actor, result| match result {
-                Ok(response) => {
-                    let now = actor.clock.now_utc();
-                    actor.state.last_heartbeat_at = Some(now);
-                    actor.log(
-                        LogLevel::Success,
-                        format!(
-                            "Heartbeat accepted, CSMS time: {}; {}",
-                            response.current_time,
-                            describe_offset(response.current_time - now)
-                        ),
-                    );
-                    if let Some(reply) = reply {
-                        let payload = serde_json::to_value(&response).unwrap_or_default();
-                        let _ = reply.send(Ok(Outcome2::Response { payload }));
-                    }
+            move |actor, result| {
+                if tracked {
+                    actor.link.heartbeat_in_flight = false;
                 }
-                Err(error) => {
-                    if let Some(reply) = reply {
-                        let _ = reply.send(Err(call_failure(error)));
+                match result {
+                    Ok(response) => {
+                        let now = actor.clock.now_utc();
+                        actor.state.last_heartbeat_at = Some(now);
+                        actor.log(
+                            LogLevel::Success,
+                            format!(
+                                "Heartbeat accepted, CSMS time: {}; {}",
+                                response.current_time,
+                                describe_offset(response.current_time - now)
+                            ),
+                        );
+                        if let Some(reply) = reply {
+                            let payload = serde_json::to_value(&response).unwrap_or_default();
+                            let _ = reply.send(Ok(Outcome2::Response { payload }));
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(reply) = reply {
+                            let _ = reply.send(Err(call_failure(error)));
+                        }
                     }
                 }
             },

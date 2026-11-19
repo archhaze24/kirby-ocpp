@@ -282,6 +282,33 @@ async fn interval_changed_during_a_transaction_takes_effect() {
 }
 
 #[tokio::test]
+async fn no_periodic_event_is_sent_without_updated_measurands() {
+    let csms = v201_csms().await;
+    let (station, task) = booted(&csms).await;
+    set_variables(
+        &csms,
+        &[
+            ("TxCtrlr", "TxStartPoint", None, "EVConnected"),
+            ("SampledDataCtrlr", "TxUpdatedInterval", None, "1"),
+            ("SampledDataCtrlr", "TxUpdatedMeasurands", None, ""),
+        ],
+    )
+    .await;
+    send(&station, Command2::PlugIn { evse: 1 }).await;
+    wait_events(&csms, 1).await;
+    // The sample command and the timer share one handler. Calls leave in the order they were
+    // queued, so once the heartbeat is answered an event of the sample would be recorded.
+    send(&station, Command2::SampleMeter { evse: 1 }).await;
+    send(&station, Command2::Heartbeat).await;
+    let periodic = events(&csms)
+        .into_iter()
+        .filter(|event| event["triggerReason"] == "MeterValuePeriodic")
+        .count();
+    assert_eq!(periodic, 0, "an Updated event without any reading");
+    stop(&station, task).await;
+}
+
+#[tokio::test]
 async fn clock_aligned_samples_are_sent_during_a_transaction() {
     let csms = v201_csms().await;
     let (station, task) = booted(&csms).await;

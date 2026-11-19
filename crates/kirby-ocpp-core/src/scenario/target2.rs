@@ -140,6 +140,18 @@ impl ScenarioTarget for Station2Handle {
         // one is the step's.
         let mut result = Ok(Outcome2::Done);
         for command in commands {
+            // Outside a transaction `AdvanceMeter` already sent the reading; a sample would
+            // repeat it. The snapshot is read after `AdvanceMeter` was answered: the actor
+            // publishes after replying, so a snapshot read earlier can miss a transaction the
+            // previous step started.
+            if let Command2::SampleMeter { evse } = &command
+                && self
+                    .snapshot()
+                    .evse(*evse)
+                    .is_some_and(|evse| evse.transaction.is_none())
+            {
+                continue;
+            }
             result = self.send(command).await;
             if result.is_err() {
                 break;
