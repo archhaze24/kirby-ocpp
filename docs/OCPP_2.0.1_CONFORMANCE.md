@@ -157,6 +157,8 @@ The specification wins over 1.6 parity. Each entry is either backed by a require
 - `--count` above 1, `replay` and `scenarios from-recording` are not available for 2.0.1; `run` and `suite` are. The 1.6 response rules (`--rule`, `set_rule`, `clear_rules`) and `request_certificate` do not exist for 2.0.1.
 - No state is shared with 1.6: a station id used with both protocols keeps two independent file sets (`<id>.station2.json`, `<id>.station2.secrets.json`, own format version 1).
 - OCPP 2.1 is not supported (`--protocol ocpp2.1` exits 2).
+- Master pass (C16) is not implemented: there is no `MasterPassGroupId`, and a token of such a group is handled like any other token.
+- The hard limit of the `TransactionEvent` queue refuses new transactions only. `Updated` events that carry a once-only field are never thinned, so a long offline period with many local plug and unplug cycles on running transactions can still grow the queue past it.
 
 ## Conformance scenarios
 
