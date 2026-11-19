@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at, sleep_until, timeout};
+use tokio::time::{Instant, Interval, interval_at, sleep_until, timeout};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -164,11 +164,7 @@ impl Task {
         let mut ping = self
             .ping_interval
             .filter(|period| !period.is_zero())
-            .map(|period| {
-                let mut interval = interval_at(Instant::now() + period, period);
-                interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-                interval
-            });
+            .map(|period| interval_at(Instant::now() + period, period));
 
         let stop = loop {
             let deadline = self.next_deadline();
@@ -182,7 +178,7 @@ impl Task {
                 () = until(deadline) => Step::Timeouts,
                 () = tick(&mut ping) => Step::Ping,
             };
-            if let Err(stop) = self.handle(step, &mut sink).await {
+            if let Err(stop) = self.handle(step, &mut sink, &mut ping).await {
                 break stop;
             }
         };
@@ -191,7 +187,7 @@ impl Task {
             .await;
     }
 
-    async fn handle<W>(&mut self, step: Step, sink: &mut W) -> Flow
+    async fn handle<W>(&mut self, step: Step, sink: &mut W, ping: &mut Option<Interval>) -> Flow
     where
         W: Sink<Message, Error = WsError> + Unpin,
     {
@@ -216,7 +212,13 @@ impl Task {
                 by_us: false,
             }),
             Step::Timeouts => self.expire(sink).await,
-            Step::Ping => self.ping(sink).await,
+            Step::Ping => {
+                self.ping(sink).await?;
+                if let Some(interval) = ping {
+                    interval.reset();
+                }
+                Ok(())
+            }
         }
     }
 
@@ -361,7 +363,7 @@ impl Task {
                     frame: Value::String(redact_malformed_text(text, self.show_secrets)),
                 };
                 self.emit(ConnectionEvent::Frame(record)).await?;
-                self.warn(format!("invalid OCPP-J frame: {error}")).await?;
+                self.warn(error.to_string()).await?;
                 return match error.reply_for(self.schemas.registry().protocol()) {
                     Some(reply) => self.write(reply, None, sink).await,
                     None => Ok(()),
@@ -548,8 +550,9 @@ impl Task {
                 by_us: true,
             });
         }
+        self.send_message(sink, Message::Ping(Bytes::new())).await?;
         self.awaiting_pong = true;
-        self.send_message(sink, Message::Ping(Bytes::new())).await
+        Ok(())
     }
 
     /// Writes one message; a peer that stops reading ends the connection after
@@ -790,6 +793,69 @@ mod tests {
             assert_eq!(frame[0], 4, "a CALLERROR: {frame}");
             frame[2].as_str().unwrap().to_owned()
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_message_type_warning_and_record_hide_contents() {
+        let mut rig = rig(SchemaSet::default()).await;
+        rig.peer
+            .send(Message::Text(
+                r#"[{"vpn":{"password":"test-secret-sentinel"}},"id"]"#.into(),
+            ))
+            .await
+            .unwrap();
+        let record = timeout(DEADLINE, rig.events.recv()).await.unwrap().unwrap();
+        let warning = timeout(DEADLINE, rig.events.recv()).await.unwrap().unwrap();
+        assert!(
+            matches!(warning, ConnectionEvent::ProtocolWarning(ref text)
+            if !text.contains("test-secret-sentinel")),
+            "warning exposes a secret"
+        );
+        assert!(
+            matches!(record, ConnectionEvent::Frame(ref record)
+            if !record.frame.to_string().contains("test-secret-sentinel")),
+            "frame record exposes a secret"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn pong_deadline_starts_after_ping_write() {
+        use tokio::io::AsyncReadExt;
+
+        let (ours, mut peer) = tokio::io::duplex(1);
+        let ws = WebSocketStream::from_raw_socket(ours, Role::Client, None).await;
+        let period = Duration::from_secs(10);
+        let options = ConnectOptions {
+            ping_interval: Some(period),
+            write_timeout: period * 3,
+            ..ConnectOptions::default()
+        };
+        let (_open, _commands, mut events) = spawn(ws, &options);
+
+        // Read only the first byte, leaving the Ping write blocked on the tiny buffer.
+        assert_eq!(
+            timeout(period * 2, peer.read_u8()).await.unwrap().unwrap(),
+            0x89
+        );
+        tokio::time::advance(Duration::from_secs(8)).await;
+        // The client sends an empty Ping with a four-byte WebSocket mask.
+        let mut tail = [0; 5];
+        timeout(period, peer.read_exact(&mut tail))
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(
+            timeout(period.saturating_sub(Duration::from_secs(1)), events.recv())
+                .await
+                .is_err(),
+            "Pong watchdog fired before a full interval after the Ping write"
+        );
+        assert!(matches!(
+            timeout(Duration::from_secs(2), events.recv()).await.unwrap(),
+            Some(ConnectionEvent::Closed { reason, by_us: true, .. })
+                if reason == "WebSocket pong timed out"
+        ));
     }
 
     #[tokio::test]

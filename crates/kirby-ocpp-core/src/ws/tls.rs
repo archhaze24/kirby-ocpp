@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -90,15 +90,7 @@ async fn trust_roots(
     extra_pem: &[String],
 ) -> Result<Arc<RootCertStore>, ConnectError> {
     if ca_file.is_none() && extra_pem.is_empty() {
-        let roots = match NATIVE_ROOTS.get() {
-            Some(roots) => roots,
-            None => tokio::task::spawn_blocking(|| NATIVE_ROOTS.get_or_init(load_native_roots))
-                .await
-                .map_err(|e| {
-                    ConnectError::Tls(format!("cannot load system root certificates: {e}"))
-                })?,
-        };
-        return roots.clone().map_err(ConnectError::Tls);
+        return native_trust_roots(&NATIVE_ROOTS, load_native_roots).await;
     }
 
     let mut roots = RootCertStore::empty();
@@ -118,7 +110,29 @@ async fn trust_roots(
     Ok(Arc::new(roots))
 }
 
-static NATIVE_ROOTS: OnceLock<Result<Arc<RootCertStore>, String>> = OnceLock::new();
+static NATIVE_ROOTS: Mutex<Option<Arc<RootCertStore>>> = Mutex::new(None);
+
+async fn native_trust_roots(
+    cache: &'static Mutex<Option<Arc<RootCertStore>>>,
+    load: impl FnOnce() -> Result<Arc<RootCertStore>, String> + Send + 'static,
+) -> Result<Arc<RootCertStore>, ConnectError> {
+    if let Ok(cached) = cache.try_lock()
+        && let Some(roots) = cached.as_ref()
+    {
+        return Ok(Arc::clone(roots));
+    }
+    tokio::task::spawn_blocking(move || {
+        let mut cached = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(roots) = cached.as_ref() {
+            return Ok(Arc::clone(roots));
+        }
+        let roots = load().map_err(ConnectError::Tls)?;
+        *cached = Some(Arc::clone(&roots));
+        Ok(roots)
+    })
+    .await
+    .map_err(|e| ConnectError::Tls(format!("cannot load system root certificates: {e}")))?
+}
 
 fn load_native_roots() -> Result<Arc<RootCertStore>, String> {
     let mut roots = RootCertStore::empty();
@@ -355,6 +369,27 @@ mod tests {
         let url = Url::parse("wss://h/ocpp").unwrap();
         let error = server_name(&url, &tls_with_server_name(Some("not a name!"))).unwrap_err();
         assert!(matches!(error, ConnectError::Tls(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn failed_native_root_load_is_retried() {
+        static CACHE: Mutex<Option<Arc<RootCertStore>>> = Mutex::new(None);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            let first = native_trust_roots(&CACHE, || Err("temporary failure".to_owned())).await;
+            assert!(
+                matches!(first, Err(ConnectError::Tls(message)) if message == "temporary failure")
+            );
+
+            let second = native_trust_roots(&CACHE, || Ok(Arc::new(RootCertStore::empty())))
+                .await
+                .expect("the second native root load should succeed");
+            let third = native_trust_roots(&CACHE, || panic!("successful load must be cached"))
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&second, &third));
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

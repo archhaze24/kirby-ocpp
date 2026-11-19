@@ -19,6 +19,7 @@
 //! writes is the station's job, not the store's.
 
 use std::collections::BTreeMap;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -274,7 +275,7 @@ pub enum StoreError {
         supported: u32,
     },
     #[error(
-        "state file belongs to station \"{}\" (station ids differ only by case and share a file on case-insensitive file systems)",
+        "state file \"{}\" belongs to a station id that differs only by case on a case-insensitive file system",
         crate::text::escape_unsafe(.found)
     )]
     CaseCollision { found: String },
@@ -422,8 +423,8 @@ impl StationStore {
             Inspection::Missing => Ok(LoadOutcome::Missing),
             Inspection::Loaded(state) => Ok(LoadOutcome::Loaded(state)),
             Inspection::Unusable { reason } => {
-                self.check_companion_case_collision(&self.secrets_path())?;
-                self.quarantine(reason)
+                let backup = self.move_aside(&self.path, &self.secrets_path())?;
+                Ok(LoadOutcome::Quarantined { backup, reason })
             }
         }
     }
@@ -435,6 +436,7 @@ impl StationStore {
     }
 
     fn read_state(&self) -> Result<Inspection, StoreError> {
+        check_file_alias(&self.path)?;
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Inspection::Missing),
@@ -446,7 +448,7 @@ impl StationStore {
             Ok(value) => value,
             Err(e) => return unusable(format!("not valid JSON: {e}")),
         };
-        self.check_case_collision(&value)?;
+        self.check_case_collision(&self.path, &value)?;
         match value.get("version").and_then(Value::as_u64) {
             Some(found) if found > u64::from(STORE_VERSION) => {
                 return Err(StoreError::UnsupportedVersion {
@@ -465,7 +467,8 @@ impl StationStore {
         if state.charge_point_id != self.charge_point_id {
             return unusable(format!(
                 "belongs to charge point `{}`, expected `{}`",
-                state.charge_point_id, self.charge_point_id
+                crate::text::escape_unsafe(&state.charge_point_id),
+                crate::text::escape_unsafe(&self.charge_point_id),
             ));
         }
         Ok(Inspection::Loaded(Box::new(state)))
@@ -483,31 +486,29 @@ impl StationStore {
     pub fn owned_files(&self) -> Vec<PathBuf> {
         let state = self.path.clone();
         let secrets = self.secrets_path();
-        let backup = |path: &Path| {
-            let mut name = path.as_os_str().to_owned();
-            name.push(".bak");
-            PathBuf::from(name)
-        };
         vec![
             state.clone(),
-            backup(&state),
+            backup_path(&state),
             secrets.clone(),
-            backup(&secrets),
+            backup_path(&secrets),
         ]
     }
 
     /// Deletes the persisted state of this charge point (see [`StationStore::owned_files`])
     /// and returns the files that existed. Nothing is deleted when the state file or the
-    /// secrets file, or a `.bak` copy of either, was written by a newer version
-    /// ([`StoreError::UnsupportedVersion`]).
+    /// secrets file, or a `.bak` copy of either, has a case collision or was written
+    /// by a newer version.
     pub fn remove(&self) -> Result<Vec<PathBuf>, StoreError> {
         let files = self.owned_files();
+        check_file_aliases(&files)?;
         let supported = self.kind.version();
         for path in &files {
             let Ok(bytes) = fs::read(path) else { continue };
-            let found = serde_json::from_slice::<Value>(&bytes)
-                .ok()
-                .and_then(|value| value.get("version").and_then(Value::as_u64));
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            self.check_case_collision(path, &value)?;
+            let found = value.get("version").and_then(Value::as_u64);
             if let Some(found) = found.filter(|found| *found > u64::from(supported)) {
                 return Err(StoreError::UnsupportedVersion {
                     path: path.clone(),
@@ -540,8 +541,7 @@ impl StationStore {
             Inspection2::Missing => Ok(LoadOutcome2::Missing),
             Inspection2::Loaded(state) => Ok(LoadOutcome2::Loaded(state)),
             Inspection2::Unusable { reason } => {
-                self.check_companion_case_collision(&self.secrets_path())?;
-                let backup = move_aside(&self.path)?;
+                let backup = self.move_aside(&self.path, &self.secrets_path())?;
                 Ok(LoadOutcome2::Quarantined { backup, reason })
             }
         }
@@ -553,6 +553,7 @@ impl StationStore {
     }
 
     fn read_state2(&self) -> Result<Inspection2, StoreError> {
+        check_file_alias(&self.path)?;
         let bytes = match fs::read(&self.path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Inspection2::Missing),
@@ -563,7 +564,7 @@ impl StationStore {
             Ok(value) => value,
             Err(e) => return unusable(format!("not valid JSON: {e}")),
         };
-        self.check_case_collision(&value)?;
+        self.check_case_collision(&self.path, &value)?;
         match value.get("version").and_then(Value::as_u64) {
             Some(found) if found > u64::from(STORE2_VERSION) => {
                 return Err(StoreError::UnsupportedVersion {
@@ -582,7 +583,8 @@ impl StationStore {
         if state.charge_point_id != self.charge_point_id {
             return unusable(format!(
                 "belongs to charge point `{}`, expected `{}`",
-                state.charge_point_id, self.charge_point_id
+                crate::text::escape_unsafe(&state.charge_point_id),
+                crate::text::escape_unsafe(&self.charge_point_id),
             ));
         }
         Ok(Inspection2::Loaded(Box::new(state)))
@@ -607,6 +609,7 @@ impl StationStore {
 
     fn load_secrets_file<T: serde::de::DeserializeOwned + Default>(&self) -> Result<T, StoreError> {
         let path = self.secrets_path();
+        check_file_alias(&path)?;
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
@@ -615,7 +618,7 @@ impl StationStore {
         let supported = self.kind.version();
         let parsed = match serde_json::from_slice::<Value>(&bytes) {
             Ok(value) => {
-                self.check_case_collision(&value)?;
+                self.check_case_collision(&path, &value)?;
                 let version = value.get("version").and_then(Value::as_u64).unwrap_or(0);
                 if version > u64::from(supported) {
                     return Err(StoreError::UnsupportedVersion {
@@ -643,8 +646,7 @@ impl StationStore {
         match parsed {
             Ok(secrets) => Ok(secrets),
             Err(e) => {
-                self.check_companion_case_collision(&self.path)?;
-                let backup = move_aside(&path)?;
+                let backup = self.move_aside(&path, &self.path)?;
                 Err(StoreError::Io {
                     path,
                     source: io::Error::new(
@@ -661,11 +663,7 @@ impl StationStore {
     pub fn save_secrets2(&self, secrets: &StationSecrets2) -> Result<(), StoreError> {
         let path = self.secrets_path();
         if secrets.basic_auth_password.is_none() {
-            return match fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(source) => Err(StoreError::Io { path, source }),
-            };
+            return self.remove_secrets_file(path);
         }
         let mut copy = secrets.clone();
         copy.version = STORE2_VERSION;
@@ -673,19 +671,17 @@ impl StationStore {
         Self::write_atomic(&path, &json)
     }
 
-    /// Reads the secrets file; a missing or unreadable one is "no secrets".
+    /// Reads the secrets file. A missing file is "no secrets".
     pub fn load_secrets(&self) -> Result<StationSecrets, StoreError> {
         self.load_secrets_file()
     }
 
-    fn check_case_collision(&self, value: &Value) -> Result<(), StoreError> {
+    fn check_case_collision(&self, path: &Path, value: &Value) -> Result<(), StoreError> {
         if let Some(found) = value.get("charge_point_id").and_then(Value::as_str)
             && found != self.charge_point_id
             && found.to_lowercase() == self.charge_point_id.to_lowercase()
         {
-            return Err(StoreError::CaseCollision {
-                found: found.to_owned(),
-            });
+            return Err(case_collision(path.file_name().unwrap_or(path.as_os_str())));
         }
         Ok(())
     }
@@ -693,10 +689,18 @@ impl StationStore {
     /// Before moving an unusable file aside, check whether the other file identifies a
     /// station with a case-colliding ID.
     fn check_companion_case_collision(&self, path: &Path) -> Result<(), StoreError> {
-        if let Ok(bytes) = fs::read(path)
-            && let Ok(value) = serde_json::from_slice(&bytes)
-        {
-            self.check_case_collision(&value)?;
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(source) => {
+                return Err(StoreError::Io {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        };
+        if let Ok(value) = serde_json::from_slice(&bytes) {
+            self.check_case_collision(path, &value)?;
         }
         Ok(())
     }
@@ -705,16 +709,21 @@ impl StationStore {
     pub fn save_secrets(&self, secrets: &StationSecrets) -> Result<(), StoreError> {
         let path = self.secrets_path();
         if secrets.is_empty() {
-            return match fs::remove_file(&path) {
-                Ok(()) => Ok(()),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-                Err(source) => Err(StoreError::Io { path, source }),
-            };
+            return self.remove_secrets_file(path);
         }
         let mut copy = secrets.clone();
         copy.version = STORE_VERSION;
         let json = serde_json::to_vec_pretty(&copy).map_err(StoreError::Serialize)?;
         Self::write_atomic(&path, &json)
+    }
+
+    fn remove_secrets_file(&self, path: PathBuf) -> Result<(), StoreError> {
+        check_file_aliases(&self.owned_files())?;
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(source) => Err(StoreError::Io { path, source }),
+        }
     }
 
     /// Atomically replaces the state file (creating the directory if needed).
@@ -724,15 +733,17 @@ impl StationStore {
     }
 
     fn write_atomic(path: &Path, json: &[u8]) -> Result<(), StoreError> {
+        check_file_alias(path)?;
         crate::fs_util::write_atomic(path, json).map_err(|e| StoreError::Io {
             path: e.path,
             source: e.source,
         })
     }
 
-    fn quarantine(&self, reason: String) -> Result<LoadOutcome, StoreError> {
-        let backup = move_aside(&self.path)?;
-        Ok(LoadOutcome::Quarantined { backup, reason })
+    fn move_aside(&self, path: &Path, companion: &Path) -> Result<PathBuf, StoreError> {
+        check_file_aliases(&self.owned_files())?;
+        self.check_companion_case_collision(companion)?;
+        move_aside(path)
     }
 
     fn io_error(&self, source: io::Error) -> StoreError {
@@ -743,11 +754,96 @@ impl StationStore {
     }
 }
 
+fn check_file_aliases(paths: &[PathBuf]) -> Result<(), StoreError> {
+    paths.iter().try_for_each(|path| check_file_alias(path))
+}
+
+fn check_file_alias(path: &Path) -> Result<(), StoreError> {
+    match case_alias(path) {
+        Ok(Some(name)) => Err(case_collision(&name)),
+        Ok(None) => Ok(()),
+        Err(source) => Err(StoreError::Io {
+            path: path.to_owned(),
+            source,
+        }),
+    }
+}
+
+fn case_collision(name: &OsStr) -> StoreError {
+    StoreError::CaseCollision {
+        found: crate::text::escape_unsafe(&name.to_string_lossy()),
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static DIRECTORY_ENTRY_OVERRIDE: std::cell::RefCell<Option<(PathBuf, OsString)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn case_alias(path: &Path) -> io::Result<Option<OsString>> {
+    let (Some(parent), Some(wanted)) = (path.parent(), path.file_name()) else {
+        return Ok(None);
+    };
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    #[cfg(test)]
+    if let Some(name) = DIRECTORY_ENTRY_OVERRIDE.with(|entry| {
+        entry
+            .borrow()
+            .as_ref()
+            .and_then(|(overridden, name)| (overridden == path).then(|| name.clone()))
+    }) {
+        return Ok(alias_in([name], wanted));
+    }
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    let mut error = None;
+    let names = fs::read_dir(parent)?.map_while(|entry| match entry {
+        Ok(entry) => Some(entry.file_name()),
+        Err(e) => {
+            error = Some(e);
+            None
+        }
+    });
+    let alias = alias_in(names, wanted);
+    error.map_or(Ok(alias), Err)
+}
+
+fn alias_in(names: impl IntoIterator<Item = OsString>, wanted: &OsStr) -> Option<OsString> {
+    let mut alias = None;
+    let bytes = wanted.as_encoded_bytes();
+    for name in names {
+        if name == wanted {
+            return None;
+        }
+        if alias.is_none()
+            && (name.as_encoded_bytes().eq_ignore_ascii_case(bytes)
+                || ((!bytes.is_ascii() || !name.as_encoded_bytes().is_ascii())
+                    && name.to_string_lossy().to_lowercase()
+                        == wanted.to_string_lossy().to_lowercase()))
+        {
+            alias = Some(name);
+        }
+    }
+    alias
+}
+
+fn backup_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".bak");
+    PathBuf::from(name)
+}
+
 /// Moves `path` to `<path>.bak` (replacing an older one) and makes the backup private.
 fn move_aside(path: &Path) -> Result<PathBuf, StoreError> {
-    let mut backup = path.to_path_buf().into_os_string();
-    backup.push(".bak");
-    let backup = PathBuf::from(backup);
+    let backup = backup_path(path);
     // `rename` does not replace an existing file on Windows.
     match fs::remove_file(&backup) {
         Ok(()) => {}
@@ -860,6 +956,107 @@ mod tests {
     use crate::fs_util::dir_sync_unsupported;
     use crate::ids::TxId;
     use crate::station::transaction::ActiveTransaction;
+
+    #[test]
+    fn case_alias_requires_the_exact_directory_entry() {
+        let wanted = OsStr::new("cp-1.station.json");
+        let alias = OsString::from("CP-1.station.json");
+        assert_eq!(alias_in([alias.clone(), wanted.to_owned()], wanted), None);
+        assert_eq!(alias_in([alias.clone()], wanted), Some(alias));
+        assert_eq!(
+            alias_in([OsString::from("État.json")], OsStr::new("état.json")),
+            Some(OsString::from("État.json"))
+        );
+    }
+
+    #[test]
+    fn file_case_aliases_block_load_reset_and_quarantine() {
+        let mut missed = Vec::new();
+        for kind in [FileKind::V16, FileKind::V2] {
+            for index in 0..4 {
+                let dir = tempfile::tempdir().unwrap();
+                let store = StationStore::new_for(kind, dir.path(), "cp-1");
+                let files = store.owned_files();
+                let corrupt = |index| format!("{{ corrupt {index}");
+                for (index, path) in files.iter().enumerate() {
+                    fs::write(path, corrupt(index)).unwrap();
+                }
+                let path = &files[index];
+                let name = path.file_name().unwrap().to_ascii_uppercase();
+                DIRECTORY_ENTRY_OVERRIDE
+                    .with(|entry| entry.replace(Some((path.clone(), name.clone()))));
+                assert_eq!(case_alias(path).unwrap(), Some(name.clone()));
+                let expected = name.to_str().unwrap();
+                let error_matches = |error| matches!(error, StoreError::CaseCollision { found } if found == expected);
+                let state = match kind {
+                    FileKind::V16 => store.load().err(),
+                    FileKind::V2 => store.load2().err(),
+                };
+                let secrets = match kind {
+                    FileKind::V16 => store.load_secrets().err(),
+                    FileKind::V2 => store.load_secrets2().err(),
+                };
+                let reset = store.remove().err();
+                for (operation, error) in [
+                    ("load state", state),
+                    ("load secrets", secrets),
+                    ("reset", reset),
+                ] {
+                    if !error.is_some_and(error_matches) {
+                        missed.push(format!("{kind:?} {operation} with alias {expected}"));
+                    }
+                }
+                DIRECTORY_ENTRY_OVERRIDE.with(|entry| entry.replace(None));
+                for (index, path) in files.iter().enumerate() {
+                    if fs::read_to_string(path).ok().as_deref() != Some(&corrupt(index)) {
+                        missed.push(format!("{kind:?} modified {}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "case aliases must leave all files untouched: {missed:?}"
+        );
+    }
+
+    #[test]
+    fn file_case_aliases_block_reading_valid_state_and_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "cp-1");
+        store.save(&PersistedStation::new("cp-1")).unwrap();
+        let secrets = store.secrets_path();
+        fs::write(&secrets, br#"{"version":1,"authorization_key":"secret"}"#).unwrap();
+        for (path, state) in [(store.path(), true), (&secrets, false)] {
+            let name = path.file_name().unwrap().to_ascii_uppercase();
+            DIRECTORY_ENTRY_OVERRIDE
+                .with(|entry| entry.replace(Some((path.to_owned(), name.clone()))));
+            let error = if state {
+                store.load().err()
+            } else {
+                store.load_secrets().err()
+            };
+            DIRECTORY_ENTRY_OVERRIDE.with(|entry| entry.replace(None));
+            assert!(matches!(error, Some(StoreError::CaseCollision { found })
+                if Some(found.as_str()) == name.to_str()));
+        }
+    }
+
+    #[test]
+    fn unreadable_companion_blocks_quarantine() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "cp-1");
+        let secrets = store.secrets_path();
+        fs::write(&secrets, b"{ corrupt").unwrap();
+        fs::create_dir(store.path()).unwrap();
+
+        assert!(
+            matches!(store.load_secrets(), Err(StoreError::Io { path, .. }) if path == store.path()),
+            "expected an I/O error for the unreadable state path"
+        );
+        assert_eq!(fs::read(&secrets).unwrap(), b"{ corrupt");
+        assert!(!secrets.with_extension("json.bak").exists());
+    }
 
     /// The 1.6 file name; the tests below predate the file kinds.
     fn file_name(charge_point_id: &str) -> String {
@@ -1017,7 +1214,7 @@ mod tests {
             ..store
         };
         assert!(
-            matches!(alias.load(), Err(StoreError::CaseCollision { found }) if found == "CP-1")
+            matches!(alias.load(), Err(StoreError::CaseCollision { found }) if found == "CP-1.station.json")
         );
         assert_eq!(fs::read(alias.path()).unwrap(), original);
         assert!(!alias.path().with_extension("json.bak").exists());
@@ -1035,7 +1232,8 @@ mod tests {
                 FileKind::V16 => store.load_secrets().unwrap_err(),
                 FileKind::V2 => store.load_secrets2().unwrap_err(),
             };
-            assert!(matches!(rejected, StoreError::CaseCollision { found } if found == "CP-1"));
+            assert!(matches!(rejected, StoreError::CaseCollision { found }
+                if found == path.file_name().unwrap().to_str().unwrap()));
             assert_eq!(fs::read(&path).unwrap(), text);
             assert!(!path.with_extension("json.bak").exists());
         }
@@ -1054,7 +1252,7 @@ mod tests {
         fs::write(&path, b"{ torn").unwrap();
         assert!(matches!(
             alias.load_secrets(),
-            Err(StoreError::CaseCollision { found }) if found == "CP-1"
+            Err(StoreError::CaseCollision { found }) if found == "CP-1.station.json"
         ));
         assert_eq!(fs::read(&path).unwrap(), b"{ torn");
         assert!(!path.with_extension("json.bak").exists());

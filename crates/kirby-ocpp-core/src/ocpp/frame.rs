@@ -299,20 +299,25 @@ impl TryFrom<Value> for Frame {
         let Value::Array(mut items) = value else {
             return Err(FrameError::new(FrameErrorKind::NotAnArray));
         };
-        if items.is_empty() {
+        let Some(first) = items.first() else {
             return Err(FrameError::new(FrameErrorKind::EmptyArray));
-        }
+        };
 
-        let message_type = match items[0].as_u64() {
+        let message_type = match first.as_u64() {
             Some(2) => MESSAGE_TYPE_CALL,
             Some(3) => MESSAGE_TYPE_CALL_RESULT,
             Some(4) => MESSAGE_TYPE_CALL_ERROR,
             _ => {
-                // Not one of 2/3/4: report what was there. The id is still
-                // readable for logging, but there is nothing to reply to.
+                // The id is still readable for logging. Structured values in the
+                // type slot may contain credentials.
+                let kind = match first {
+                    Value::Object(_) => FrameErrorKind::StructuredMessageType("an object"),
+                    Value::Array(_) => FrameErrorKind::StructuredMessageType("an array"),
+                    _ => FrameErrorKind::UnknownMessageType(first.clone()),
+                };
                 let id = items.get(1).and_then(Value::as_str).map(str::to_owned);
                 return Err(FrameError {
-                    kind: FrameErrorKind::UnknownMessageType(items[0].clone()),
+                    kind,
                     message_type: None,
                     message_id: id,
                 });
@@ -415,6 +420,8 @@ pub enum FrameErrorKind {
     EmptyArray,
     #[error("unsupported message type {0}")]
     UnknownMessageType(Value),
+    #[error("message type is {0}")]
+    StructuredMessageType(&'static str),
     #[error("wrong number of elements: expected {expected}, got {actual}")]
     WrongLength { expected: usize, actual: usize },
     #[error("{field} must be {expected}")]
@@ -519,7 +526,12 @@ const SECRET_VARIABLES: [(&str, &str); 6] = [
 ];
 
 /// Secret fields relative to `SetNetworkProfile.connectionData`.
-const NETWORK_SECRET_PATHS: [&str; 3] = ["/apn/apnPassword", "/vpn/password", "/vpn/key"];
+const NETWORK_SECRET_PATHS: [&str; 4] = [
+    "/apn/apnPassword",
+    "/apn/simPin",
+    "/vpn/password",
+    "/vpn/key",
+];
 
 /// `true` when `fields` has a `component` and a `variable` naming a secret variable.
 pub(crate) fn names_secret_variable(fields: &serde_json::Map<String, Value>) -> bool {
@@ -621,6 +633,11 @@ pub fn redact_malformed_text(text: &str, show_secrets: bool) -> String {
     }
     match serde_json::from_str::<Value>(text) {
         Ok(mut value) => {
+            if let Value::Array(items) = &mut value
+                && let Some(first @ (Value::Object(_) | Value::Array(_))) = items.first_mut()
+            {
+                *first = Value::from(REDACTED);
+            }
             redact_payload(&mut value);
             value.to_string()
         }
@@ -894,6 +911,27 @@ mod tests {
     }
 
     #[test]
+    fn structured_message_type_errors_hide_contents() {
+        for (text, expected) in [
+            (
+                r#"[{"vpn":{"password":"test-secret-sentinel"}},"id"]"#,
+                "an object",
+            ),
+            (r#"[["test-secret-sentinel"],"id"]"#, "an array"),
+        ] {
+            let error = parse_err(text).to_string();
+            assert!(
+                !error.contains("test-secret-sentinel"),
+                "message type error exposes a secret"
+            );
+            assert_eq!(
+                error,
+                format!("invalid OCPP-J frame: message type is {expected}")
+            );
+        }
+    }
+
+    #[test]
     fn rejects_wrong_lengths() {
         for text in [
             r#"[2,"id","Heartbeat"]"#,
@@ -1081,7 +1119,7 @@ mod tests {
                 "SetNetworkProfile",
                 json!({
                     "connectionData": {
-                        "apn": {"apnPassword": SENTINEL},
+                        "apn": {"apnPassword": SENTINEL, "simPin": SENTINEL},
                         "vpn": {"password": SENTINEL, "key": SENTINEL}
                     }
                 }),

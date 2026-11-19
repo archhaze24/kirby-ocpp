@@ -814,7 +814,7 @@ impl StationActor {
                 .transaction_message_retry_interval()
                 .saturating_mul(self.sync_failed_rounds)
                 .max(MIN_SYNC_RETRY);
-            self.timers.set(TimerKey::SyncRetry, interval);
+            self.timers.set_if_idle(TimerKey::SyncRetry, interval);
         }
     }
 
@@ -1074,14 +1074,18 @@ mod tests {
             }
             actor.record_sync_failure(key, &timeout);
             actor.sync_finished();
+            let mut remaining = delay;
             if round == 0 {
+                tokio::task::yield_now().await;
+                tokio::time::advance(std::time::Duration::from_secs(30)).await;
+                remaining -= 30;
                 // An online stop failing while the timer is armed joins the pending round.
                 actor.record_sync_failure(other, &timeout);
                 actor.arm_sync_retry_if_idle();
             }
             assert!(
                 tokio::time::timeout(
-                    std::time::Duration::from_secs(delay - 1),
+                    std::time::Duration::from_secs(remaining - 1),
                     actor.timers.next(),
                 )
                 .await
