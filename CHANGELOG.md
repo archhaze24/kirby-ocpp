@@ -7,7 +7,24 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
-### Added
+## [0.7.0] - 2026-11-19
+
+**The OCPP 2.0.1 release: both tools speak OCPP 2.0.1 next to 1.6J, with a 2.0.1 station in the emulator, 2.0.1 sessions in `kirby-csms`, terminal UIs, scenarios and a conformance family for the new version, plus a round of fixes from two release reviews.**
+
+### 0.7.0 in numbers
+
+| Metric | Since 0.6.0 |
+| --- | --- |
+| 🧾 Commits | **56** in six days (14 to 19 November 2026) |
+| ✏️ Lines of code | **+65.5k / −1.8k** across 388 files; Rust grew from 118.7k to **165.8k** lines |
+| 🧪 Tests | **+731** tests in the `nextest` gate: 1,732 → **2,463** |
+| 📦 Crates | 7 → **7** (no new dependencies) |
+| 🔎 Reviews | An OCPP 2.0.1 specification review and a whole-project review, focused reviews of every fix, both terminal UIs exercised with the real binaries |
+| ✨ New features | **10** |
+| 🔧 Changes | **7** |
+| 🐛 Fixes and hardening | **25** |
+
+### ✨ Added
 
 - `kirby-csms` serves OCPP 2.0.1 stations next to 1.6 stations on the same listener. A 2.0.1 session gets default replies for the 25 actions a station sends (magic id tokens as in 1.6), validates payloads against the official 2.0.1 schemas, and tracks boot data, EVSE and connector status, and transactions keyed by station and transaction id (`TransactionEvent` sequence numbers, duplicates, late events and meter readings; `state.v2` in the API). CSMS-originated 2.0.1 calls use the existing stdin, script and HTTP paths with any action name. Station ids on 2.0.1 sessions are limited to 48 characters from `identifierString` without a colon.
 - `kirby-ocpp --protocol ocpp2.0.1` (`OCPP_PROTOCOL`, top-level `protocol` in the configuration file) runs a 2.0.1 station: boot with registration states, heartbeat, reconnect without a new boot, EVSE and connector status, `ChangeAvailability`, a device model with `GetVariables`, `SetVariables` and `GetBaseReport`, transactions driven by `TxStartPoint`/`TxStopPoint` (`TransactionEvent` with per-transaction sequence numbers, sampled and clock-aligned meter values, an ordered offline queue with retries per `MessageAttempts`, `GetTransactionStatus`), authorization with a cache and the offline options, `RequestStartTransaction`, `RequestStopTransaction`, `TriggerMessage`, `Reset` (boot reason `RemoteReset` or `ScheduledReset`), `UnlockConnector`, `ClearCache` and `DataTransfer`, the security events `StartupOfTheDevice` and `ResetOrReboot`, and its own state and secrets files (`state --protocol ocpp2.0.1`). Without `--ws-subprotocol` the emulator offers the token of `--protocol`. `check --protocol ocpp2.0.1` probes a 2.0.1 CSMS. Fleets and replay stay 1.6-only for now, and `--rule` and the other 1.6-only flags are refused with 2.0.1.
@@ -437,7 +454,8 @@ New binary `kirby-csms` (default listen `0.0.0.0:9000`) and the new crates `kirb
 - SIGTERM during `kirby-csms --script` still writes the JUnit report.
 - A scenario `lagged` failure no longer sticks for the rest of the run.
 
-[Unreleased]: https://github.com/archhaze24/kirby-ocpp/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/archhaze24/kirby-ocpp/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.3.0...v0.4.0
