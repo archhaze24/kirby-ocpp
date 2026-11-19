@@ -191,6 +191,9 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: write
+      # Build provenance attestations (Sigstore signing and the attestation store).
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
 
@@ -200,6 +203,14 @@ jobs:
           # The target artifacts only (their names contain a dash); `man` is inside the archives.
           pattern: "*-*"
           merge-multiple: true
+
+      # Verifiable with `gh attestation verify <archive> --repo archhaze24/kirby-ocpp`.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
 
       - name: Add OpenAPI document to release assets
         run: cp docs/kirby-csms-openapi.json dist/kirby-csms-openapi.json

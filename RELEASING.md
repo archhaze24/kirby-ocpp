@@ -73,6 +73,7 @@ npx kirby-csms@X.Y.Z --version
 cargo install kirby-ocpp --version X.Y.Z --force && kirby-ocpp --version
 cargo install kirby-csms --version X.Y.Z --force && kirby-csms --version
 ```
+Provenance: `gh release download vX.Y.Z -p '*x86_64-unknown-linux-gnu.tar.gz' && gh attestation verify kirby-ocpp-vX.Y.Z-x86_64-unknown-linux-gnu.tar.gz --repo archhaze24/kirby-ocpp`.
 Docker (from a logged-out machine, after the package is public): `docker run --rm ghcr.io/archhaze24/kirby-ocpp:X.Y.Z --version` and `docker run --rm ghcr.io/archhaze24/kirby-ocpp:X.Y.Z kirby-csms --version`.
 Then bump `main` to the next development version (e.g. `0.8.0-dev`) when you start the next cycle.
 
