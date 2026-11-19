@@ -1,6 +1,7 @@
 //! Terminal setup with guaranteed restore (RAII guard + panic hook).
 
 use std::io::{self, Stdout, Write};
+use std::mem::ManuallyDrop;
 use std::sync::Once;
 
 use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
@@ -34,9 +35,14 @@ fn install_panic_hook() {
 }
 
 /// Owns the terminal; restores it when dropped, on every exit path.
+///
+/// The ratatui `Terminal` is never dropped: its `Drop` prints to stderr with `eprintln!` when
+/// the cursor cannot be shown, which panics once the terminal is gone (SIGHUP after the
+/// window or SSH session closed) and, with `panic = "abort"`, would end the process before
+/// the clean shutdown. [`restore`] shows the cursor instead; the rest is freed at exit.
 #[derive(Debug)]
 pub struct TerminalGuard {
-    terminal: Tui,
+    terminal: ManuallyDrop<Tui>,
 }
 
 impl TerminalGuard {
@@ -49,7 +55,9 @@ impl TerminalGuard {
             return Err(e);
         }
         match Terminal::new(CrosstermBackend::new(out)) {
-            Ok(terminal) => Ok(Self { terminal }),
+            Ok(terminal) => Ok(Self {
+                terminal: ManuallyDrop::new(terminal),
+            }),
             Err(e) => {
                 restore();
                 Err(e)

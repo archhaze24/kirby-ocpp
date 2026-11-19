@@ -176,7 +176,10 @@ async fn run_server(
         match session.run(handle.clone(), tui_options(&cli)).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("error: {error}");
+                // The terminal may be gone (SIGHUP): `eprintln!` would panic and skip the
+                // shutdown below.
+                use std::io::Write as _;
+                let _ = writeln!(std::io::stderr(), "error: {error}");
                 ExitCode::FAILURE
             }
         }
