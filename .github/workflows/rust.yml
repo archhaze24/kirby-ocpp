@@ -52,7 +52,7 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Install nextest
-        uses: taiki-e/install-action@v2.90.1
+        uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: nextest
 
@@ -67,3 +67,23 @@ jobs:
       - name: Test (shared process)
         if: runner.os == 'Linux'
         run: cargo test --workspace --tests
+
+  # The `rust-version` declared in Cargo.toml must keep building with the locked dependencies.
+  msrv:
+    name: rust-version 1.88
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: "1.88"
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Check
+        run: cargo +1.88 check --workspace --locked

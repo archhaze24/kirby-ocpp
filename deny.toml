@@ -1,0 +1,17 @@
+# cargo-deny configuration. CI runs `cargo deny check advisories` (.github/workflows/audit.yml).
+# Licenses, bans and sources are not checked.
+
+[graph]
+all-features = true
+
+[advisories]
+# Unmaintained crates are reported for direct dependencies only; vulnerabilities and yanked
+# versions fail for every crate in the lock file.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = [
+    # chrono is unmaintained, with no known vulnerability. Moving to another date-time crate
+    # touches every timestamp in the state files, reports and the HTTP API; it is planned
+    # separately.
+    { id = "RUSTSEC-2026-0543", reason = "unmaintained, no vulnerability; replacement planned" },
+]
