@@ -14,6 +14,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use chrono::{DateTime, Utc};
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::messages::{
     BootNotificationRequest, BootNotificationResponse, CertificateHashData,
     DiagnosticsStatusNotificationRequest, FirmwareStatusNotificationRequest,
@@ -31,7 +32,7 @@ use kirby_ocpp_core::ocpp::types::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::state201::StationState2;
+use crate::state201::{DecodedCall201, StationState2};
 
 /// Most connector ids (including 0) tracked per station; reports for further ids are ignored.
 pub const MAX_CONNECTORS: usize = 1024;
@@ -82,10 +83,11 @@ pub struct StationState {
     /// The last answered `GetInstalledCertificateIds` per `certificateType` (the request's
     /// filter, as on the wire, e.g. `CentralSystemRootCertificate`).
     pub installed_certificates: BTreeMap<String, InstalledCertificates>,
-    /// The OCPP 2.0.1 read model (EVSEs, transactions, meter readings). `None`, and absent
-    /// from the JSON, for stations on any other protocol. Interpret `state` by the station's
-    /// protocol: the shared fields above are filled for both.
-    #[serde(skip_serializing_if = "Option::is_none", default)]
+    /// The OCPP 2.0.1 read model (EVSEs, transactions, meter readings). `None` (`null` in the
+    /// JSON) for stations on any other protocol and for a 2.0.1 station that has not sent a
+    /// message the fold reads yet. Interpret `state` by the station's protocol: the shared
+    /// fields above are filled for both.
+    #[serde(default)]
     pub v2: Option<Box<StationState2>>,
 }
 
@@ -368,9 +370,68 @@ impl StationState {
     }
 }
 
+/// The part of an answered CALL needed by the state fold.
+pub(crate) enum DecodedCall {
+    Boot(
+        Box<BootNotificationRequest>,
+        Option<BootNotificationResponse>,
+    ),
+    Heartbeat,
+    Status(StatusNotificationRequest),
+    Start(StartTransactionRequest, StartTransactionResponse),
+    Stop(StopTransactionRequest),
+    Meter(MeterValuesRequest),
+    Diagnostics(DiagnosticsStatusNotificationRequest),
+    Firmware(FirmwareStatusNotificationRequest),
+    SecurityEvent(SecurityEventNotificationRequest),
+    Log(LogStatusNotificationRequest),
+    SignedFirmware(SignedFirmwareStatusNotificationRequest),
+    SignCertificate(SignCertificateRequest),
+    V201(DecodedCall201),
+}
+
+impl DecodedCall {
+    pub(crate) fn decode(
+        protocol: Protocol,
+        action: &str,
+        request: &Value,
+        response: &Value,
+    ) -> Option<Self> {
+        match protocol {
+            Protocol::V16 => {}
+            Protocol::V201 => {
+                return DecodedCall201::decode(action, request, response).map(Self::V201);
+            }
+            _ => return None,
+        }
+        Some(match action {
+            "BootNotification" => {
+                Self::Boot(Box::new(decode_payload(request)?), decode_payload(response))
+            }
+            "Heartbeat" => Self::Heartbeat,
+            "StatusNotification" => Self::Status(decode_payload(request)?),
+            "StartTransaction" => Self::Start(decode_payload(request)?, decode_payload(response)?),
+            "StopTransaction" => Self::Stop(decode_payload(request)?),
+            "MeterValues" => Self::Meter(decode_payload(request)?),
+            "DiagnosticsStatusNotification" => Self::Diagnostics(decode_payload(request)?),
+            "FirmwareStatusNotification" => Self::Firmware(decode_payload(request)?),
+            "SecurityEventNotification" => Self::SecurityEvent(decode_payload(request)?),
+            "LogStatusNotification" => Self::Log(decode_payload(request)?),
+            "SignedFirmwareStatusNotification" => Self::SignedFirmware(decode_payload(request)?),
+            "SignCertificate" => Self::SignCertificate(decode_payload(request)?),
+            _ => return None,
+        })
+    }
+}
+
+pub(crate) fn decode_payload<'de, T: Deserialize<'de>>(payload: &'de Value) -> Option<T> {
+    #[cfg(test)]
+    crate::server::count_locked_bytes(|| payload.to_string().len());
+    T::deserialize(payload).ok()
+}
+
 impl StationState {
-    /// Folds one answered CALL into the state. `response` is the CALLRESULT payload we sent.
-    /// Returns whether the state changed.
+    #[cfg(test)]
     pub(crate) fn apply(
         &mut self,
         action: &str,
@@ -379,68 +440,65 @@ impl StationState {
         now: DateTime<Utc>,
         history_cap: usize,
     ) -> bool {
-        match action {
-            "BootNotification" => self.on_boot(request, response, now),
-            "Heartbeat" => {
+        DecodedCall::decode(Protocol::V16, action, request, response)
+            .is_some_and(|call| self.apply_decoded(call, now, history_cap))
+    }
+
+    /// Folds an answered CALL into the state and returns whether the state changed.
+    pub(crate) fn apply_decoded(
+        &mut self,
+        call: DecodedCall,
+        now: DateTime<Utc>,
+        history_cap: usize,
+    ) -> bool {
+        match call {
+            DecodedCall::Boot(req, res) => self.on_boot(*req, res, now),
+            DecodedCall::Heartbeat => {
                 // Recorded silently: a heartbeat is no state change worth an event (the
                 // frame event already tells subscribers), and they come constantly.
                 self.last_heartbeat_at = Some(now);
-                None
+                return false;
             }
-            "StatusNotification" => self.on_status(request, now),
-            "StartTransaction" => self.on_start(request, response),
-            "StopTransaction" => self.on_stop(request, history_cap),
-            "MeterValues" => self.on_meter(request),
-            "DiagnosticsStatusNotification" => {
-                DiagnosticsStatusNotificationRequest::deserialize(request)
-                    .map(|req| {
-                        self.diagnostics_status = Some(Reported {
-                            status: req.status,
-                            at: now,
-                        });
-                    })
-                    .ok()
+            DecodedCall::Status(req) => return self.on_status(req, now),
+            DecodedCall::Start(req, res) => self.on_start(&req, &res),
+            DecodedCall::Stop(req) => self.on_stop(&req, history_cap),
+            DecodedCall::Meter(req) => return self.on_meter(&req).is_some(),
+            DecodedCall::Diagnostics(req) => {
+                self.diagnostics_status = Some(Reported {
+                    status: req.status,
+                    at: now,
+                });
             }
-            "FirmwareStatusNotification" => FirmwareStatusNotificationRequest::deserialize(request)
-                .map(|req| {
-                    self.firmware_status = Some(Reported {
-                        status: req.status,
-                        at: now,
-                    });
-                })
-                .ok(),
-            "SecurityEventNotification" => self.on_security_event(request, now),
-            "LogStatusNotification" => LogStatusNotificationRequest::deserialize(request)
-                .map(|req| {
-                    self.log_status = Some(LogReport {
-                        status: req.status,
-                        request_id: req.request_id,
-                        at: now,
-                    });
-                })
-                .ok(),
-            "SignedFirmwareStatusNotification" => {
-                SignedFirmwareStatusNotificationRequest::deserialize(request)
-                    .map(|req| {
-                        self.signed_firmware_status = Some(SignedFirmwareReport {
-                            status: req.status,
-                            request_id: req.request_id,
-                            at: now,
-                        });
-                    })
-                    .ok()
+            DecodedCall::Firmware(req) => {
+                self.firmware_status = Some(Reported {
+                    status: req.status,
+                    at: now,
+                });
             }
-            "SignCertificate" => SignCertificateRequest::deserialize(request)
-                .map(|req| {
-                    self.certificate_request = Some(CertificateRequest {
-                        csr: truncate(req.csr, MAX_CERTIFICATE_LEN),
-                        received_at: now,
-                    });
-                })
-                .ok(),
-            _ => None,
+            DecodedCall::SecurityEvent(req) => self.on_security_event(req, now),
+            DecodedCall::Log(req) => {
+                self.log_status = Some(LogReport {
+                    status: req.status,
+                    request_id: req.request_id,
+                    at: now,
+                });
+            }
+            DecodedCall::SignedFirmware(req) => {
+                self.signed_firmware_status = Some(SignedFirmwareReport {
+                    status: req.status,
+                    request_id: req.request_id,
+                    at: now,
+                });
+            }
+            DecodedCall::SignCertificate(req) => {
+                self.certificate_request = Some(CertificateRequest {
+                    csr: truncate(req.csr, MAX_CERTIFICATE_LEN),
+                    received_at: now,
+                });
+            }
+            DecodedCall::V201(call) => return self.apply_decoded_v2(call, now, history_cap),
         }
-        .is_some()
+        true
     }
 
     /// Folds the answer of a CSMS-originated CALL into the state. `response` is the
@@ -495,8 +553,7 @@ impl StationState {
         Some(())
     }
 
-    fn on_security_event(&mut self, request: &Value, now: DateTime<Utc>) -> Option<()> {
-        let req = SecurityEventNotificationRequest::deserialize(request).ok()?;
+    fn on_security_event(&mut self, req: SecurityEventNotificationRequest, now: DateTime<Utc>) {
         self.security_events.push_back(SecurityEventRecord {
             event_type: truncate(req.event_type, MAX_SECURITY_EVENT_TYPE_LEN),
             timestamp: req.timestamp,
@@ -509,12 +566,14 @@ impl StationState {
             self.security_events.pop_front();
         }
         self.security_events_total += 1;
-        Some(())
     }
 
-    fn on_boot(&mut self, request: &Value, response: &Value, now: DateTime<Utc>) -> Option<()> {
-        let req = BootNotificationRequest::deserialize(request).ok()?;
-        let res = BootNotificationResponse::deserialize(response).ok();
+    fn on_boot(
+        &mut self,
+        req: BootNotificationRequest,
+        res: Option<BootNotificationResponse>,
+        now: DateTime<Utc>,
+    ) {
         let text = |value: Option<String>| value.map(|text| truncate(text, MAX_TEXT_LEN));
         self.boot = Some(BootInfo {
             vendor: truncate(req.charge_point_vendor, MAX_TEXT_LEN),
@@ -530,14 +589,12 @@ impl StationState {
             registration: res.as_ref().map(|res| res.status),
             interval: res.map(|res| res.interval),
         });
-        Some(())
     }
 
-    fn on_status(&mut self, request: &Value, now: DateTime<Utc>) -> Option<()> {
-        let req = StatusNotificationRequest::deserialize(request).ok()?;
+    fn on_status(&mut self, req: StatusNotificationRequest, now: DateTime<Utc>) -> bool {
         let id = req.connector_id.get();
         if !self.connectors.contains_key(&id) && self.connectors.len() >= MAX_CONNECTORS {
-            return None;
+            return false;
         }
         self.connectors.insert(
             id,
@@ -553,12 +610,10 @@ impl StationState {
                 received_at: now,
             },
         );
-        Some(())
+        true
     }
 
-    fn on_start(&mut self, request: &Value, response: &Value) -> Option<()> {
-        let req = StartTransactionRequest::deserialize(request).ok()?;
-        let res = StartTransactionResponse::deserialize(response).ok()?;
+    fn on_start(&mut self, req: &StartTransactionRequest, res: &StartTransactionResponse) {
         self.transactions.push(TransactionRecord {
             id: res.transaction_id,
             connector: req.connector_id.get(),
@@ -587,14 +642,12 @@ impl StationState {
         {
             self.transactions.remove(oldest);
         }
-        Some(())
     }
 
-    fn on_stop(&mut self, request: &Value, history_cap: usize) -> Option<()> {
-        let req = StopTransactionRequest::deserialize(request).ok()?;
+    fn on_stop(&mut self, req: &StopTransactionRequest, history_cap: usize) {
         let Some(tx) = self.active_mut(req.transaction_id) else {
             self.unknown_stops += 1;
-            return Some(());
+            return;
         };
         tx.status = TransactionStatus::Stopped;
         tx.meter_stop = Some(req.meter_stop);
@@ -616,13 +669,11 @@ impl StationState {
             self.transactions.remove(oldest);
             stopped -= 1;
         }
-        Some(())
     }
 
     /// `MeterValues` update the active transaction they name; readings without a
     /// transaction id, or for an unknown one, are not tracked.
-    fn on_meter(&mut self, request: &Value) -> Option<()> {
-        let req = MeterValuesRequest::deserialize(request).ok()?;
+    fn on_meter(&mut self, req: &MeterValuesRequest) -> Option<()> {
         let tx = self.active_mut(req.transaction_id?)?;
         let mut changed = false;
         for meter in &req.meter_value {

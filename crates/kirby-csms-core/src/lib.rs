@@ -1,4 +1,4 @@
-//! OCPP 1.6J central system (CSMS) engine: a multi-station WebSocket server with a station
+//! OCPP 1.6J and 2.0.1 central system (CSMS) engine: a multi-station WebSocket server with a station
 //! registry, bounded per-station frame history, an event stream, CSMS-originated CALLs and
 //! scripted replies. No UI; a terminal tool or a load test drives it through [`CsmsHandle`].
 //!

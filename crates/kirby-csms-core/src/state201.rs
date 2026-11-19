@@ -1,6 +1,6 @@
 //! Per-station state folded from OCPP 2.0.1 messages.
 //!
-//! [`StationState::apply_v2`] folds the CALLs the engine answered into the shared fields of
+//! [`StationState::apply_decoded_v2`] folds the CALLs the engine answered into the shared fields of
 //! [`StationState`] (boot, heartbeat, security events) and into [`StationState2`], which
 //! holds what only 2.0.1 has: EVSEs with their connectors, transactions keyed by the
 //! station-made transaction id, and meter readings.
@@ -33,12 +33,13 @@ use kirby_ocpp_core::ocpp::v2::types::{
     AuthorizationStatus, ChargingState, IdTokenType, Measurand, MeterValue, ReadingContext,
     SampledValue, StopReason, WireEnum,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 
 use crate::state::{
     ActiveTransaction, BootInfo, MAX_ACTIVE_TRANSACTIONS, MAX_CONNECTORS, MAX_SECURITY_EVENTS,
     SecurityEventRecord, StationState, TransactionId, TransactionRow, TransactionStatus,
+    decode_payload,
 };
 
 /// Most EVSEs (0 is the station) with a tracked meter reading.
@@ -157,11 +158,11 @@ impl StationState2 {
         true
     }
 
-    /// Folds one `TransactionEvent`. `answer` is our decoded response, if it decoded.
+    /// Folds one `TransactionEvent` with the authorization status from its response.
     fn fold_transaction_event(
         &mut self,
         req: TransactionEventRequest,
-        answer: Option<&TransactionEventResponse>,
+        id_token_status: Option<AuthorizationStatus>,
         history_cap: usize,
     ) -> bool {
         let id = req.transaction_info.transaction_id.clone();
@@ -184,7 +185,7 @@ impl StationState2 {
         let latest = tx.status == TransactionStatus::Active
             && highest.is_none_or(|highest| req.seq_no >= highest);
         let was_active = tx.status == TransactionStatus::Active;
-        tx.fold_event(req, answer, latest);
+        tx.fold_event(req, id_token_status, latest);
         let stopped = was_active && tx.status == TransactionStatus::Stopped;
         self.counters.transaction_events += 1;
         if created || stopped {
@@ -362,7 +363,7 @@ impl Tx2Record {
     fn fold_event(
         &mut self,
         req: TransactionEventRequest,
-        answer: Option<&TransactionEventResponse>,
+        id_token_status: Option<AuthorizationStatus>,
         latest: bool,
     ) {
         self.started_at = self.started_at.min(req.timestamp);
@@ -397,10 +398,7 @@ impl Tx2Record {
             }
             self.id_token = Some(token_id);
             self.id_token_type = Some(token.kind);
-            let status = answer
-                .and_then(|answer| answer.id_token_info.as_ref())
-                .map(|info| info.status);
-            merge(&mut self.id_token_status, status, true);
+            merge(&mut self.id_token_status, id_token_status, true);
         }
         for meter in req.meter_value.iter().flatten() {
             self.fold_meter(meter);
@@ -637,9 +635,11 @@ fn legacy_registration(status: RegistrationStatus) -> LegacyRegistrationStatus {
     }
 }
 
+type ConnectorEvent = (u32, u32, ConnectorStatus, DateTime<Utc>);
+
 /// A `NotifyEvent` entry that reports a connector state
 /// (`Connector.AvailabilityState`, trigger `Delta`): EVSE, connector, status, event time.
-fn connector_event(event: &Value) -> Option<(u32, u32, ConnectorStatus, DateTime<Utc>)> {
+fn connector_event(event: &Value) -> Option<ConnectorEvent> {
     let component = event.get("component")?;
     if component.get("name")?.as_str()? != "Connector"
         || event.get("variable")?.get("name")?.as_str()? != "AvailabilityState"
@@ -661,12 +661,65 @@ fn connector_event(event: &Value) -> Option<(u32, u32, ConnectorStatus, DateTime
     Some((evse, connector, status, timestamp))
 }
 
+pub(crate) enum DecodedCall201 {
+    Boot(
+        Box<BootNotificationRequest>,
+        Option<(RegistrationStatus, i32)>,
+    ),
+    Heartbeat,
+    Status(StatusNotificationRequest),
+    NotifyEvent(Vec<ConnectorEvent>),
+    Transaction(Box<TransactionEventRequest>, Option<AuthorizationStatus>),
+    Meter(MeterValuesRequest),
+    SecurityEvent(SecurityEventNotificationRequest),
+    NotifyReport {
+        request_id: i32,
+        seq_no: i32,
+        tbc: bool,
+    },
+}
+
+impl DecodedCall201 {
+    pub(crate) fn decode(action: &str, request: &Value, response: &Value) -> Option<Self> {
+        Some(match action {
+            "BootNotification" => {
+                let req = decode_payload(request)?;
+                let registration = decode_payload::<BootNotificationResponse>(response)
+                    .map(|res| (res.status, res.interval));
+                Self::Boot(Box::new(req), registration)
+            }
+            "Heartbeat" => Self::Heartbeat,
+            "StatusNotification" => Self::Status(decode_payload(request)?),
+            "NotifyEvent" => {
+                #[cfg(test)]
+                crate::server::count_locked_bytes(|| request.to_string().len());
+                let events = request.get("eventData")?.as_array()?;
+                Self::NotifyEvent(events.iter().filter_map(connector_event).collect())
+            }
+            "TransactionEvent" => {
+                let req = decode_payload(request)?;
+                let id_token_status = decode_payload::<TransactionEventResponse>(response)
+                    .and_then(|res| res.id_token_info)
+                    .map(|info| info.status);
+                Self::Transaction(Box::new(req), id_token_status)
+            }
+            "MeterValues" => Self::Meter(decode_payload(request)?),
+            "SecurityEventNotification" => Self::SecurityEvent(decode_payload(request)?),
+            "NotifyReport" => {
+                let req: NotifyReportRequest = decode_payload(request)?;
+                Self::NotifyReport {
+                    request_id: req.request_id,
+                    seq_no: req.seq_no,
+                    tbc: req.tbc.unwrap_or(false),
+                }
+            }
+            _ => return None,
+        })
+    }
+}
+
 impl StationState {
-    /// Folds one answered CALL of a station on OCPP 2.0.1 into the state. `response` is the
-    /// CALLRESULT payload we sent. Returns whether the state changed.
-    ///
-    /// Updates that only bump a counter (a rejected or repeated `TransactionEvent`) and
-    /// heartbeats do not count as a change. `protocol` other than 2.0.1 folds nothing.
+    #[cfg(test)]
     pub(crate) fn apply_v2(
         &mut self,
         protocol: Protocol,
@@ -679,20 +732,37 @@ impl StationState {
         if protocol != Protocol::V201 {
             return false;
         }
-        match action {
-            "BootNotification" => self.v2_boot(request, response, now),
-            "Heartbeat" => {
+        DecodedCall201::decode(action, request, response)
+            .is_some_and(|call| self.apply_decoded_v2(call, now, history_cap))
+    }
+
+    /// Folds an answered 2.0.1 CALL into the state. Heartbeats and updates that only bump
+    /// counters do not count as changes.
+    pub(crate) fn apply_decoded_v2(
+        &mut self,
+        call: DecodedCall201,
+        now: DateTime<Utc>,
+        history_cap: usize,
+    ) -> bool {
+        match call {
+            DecodedCall201::Boot(req, res) => self.v2_boot(*req, res, now),
+            DecodedCall201::Heartbeat => {
                 // Recorded silently, as in 1.6: heartbeats come constantly.
                 self.last_heartbeat_at = Some(now);
                 false
             }
-            "StatusNotification" => self.v2_status(request, now),
-            "NotifyEvent" => self.v2_notify_event(request, now),
-            "TransactionEvent" => self.v2_transaction_event(request, response, history_cap),
-            "MeterValues" => self.v2_meter_values(request),
-            "SecurityEventNotification" => self.v2_security_event(request, now),
-            "NotifyReport" => self.v2_notify_report(request, now),
-            _ => false,
+            DecodedCall201::Status(req) => self.v2_status(&req, now),
+            DecodedCall201::NotifyEvent(events) => self.v2_notify_event(events, now),
+            DecodedCall201::Transaction(req, id_token_status) => {
+                self.v2_transaction_event(*req, id_token_status, history_cap)
+            }
+            DecodedCall201::Meter(req) => self.v2_meter_values(&req),
+            DecodedCall201::SecurityEvent(req) => self.v2_security_event(req, now),
+            DecodedCall201::NotifyReport {
+                request_id,
+                seq_no,
+                tbc,
+            } => self.v2_notify_report(request_id, seq_no, tbc, now),
         }
     }
 
@@ -701,11 +771,12 @@ impl StationState {
             .get_or_insert_with(|| Box::new(StationState2::new(Protocol::V201)))
     }
 
-    fn v2_boot(&mut self, request: &Value, response: &Value, now: DateTime<Utc>) -> bool {
-        let Ok(req) = BootNotificationRequest::deserialize(request) else {
-            return false;
-        };
-        let res = BootNotificationResponse::deserialize(response).ok();
+    fn v2_boot(
+        &mut self,
+        req: BootNotificationRequest,
+        registration: Option<(RegistrationStatus, i32)>,
+        now: DateTime<Utc>,
+    ) -> bool {
         let station = req.charging_station;
         let text = |value: Option<String>, max: usize| value.map(|text| truncate(text, max));
         let (iccid, imsi) = station
@@ -722,17 +793,14 @@ impl StationState {
             meter_type: None,
             meter_serial_number: None,
             booted_at: now,
-            registration: res.as_ref().map(|res| legacy_registration(res.status)),
-            interval: res.map(|res| res.interval),
+            registration: registration.map(|(status, _)| legacy_registration(status)),
+            interval: registration.map(|(_, interval)| interval),
         });
         self.v2_mut().boot_reason = Some(req.reason);
         true
     }
 
-    fn v2_status(&mut self, request: &Value, now: DateTime<Utc>) -> bool {
-        let Ok(req) = StatusNotificationRequest::deserialize(request) else {
-            return false;
-        };
+    fn v2_status(&mut self, req: &StatusNotificationRequest, now: DateTime<Utc>) -> bool {
         let (Some(evse), Some(connector)) = (positive(req.evse_id), positive(req.connector_id))
         else {
             return false;
@@ -744,12 +812,9 @@ impl StationState {
     /// A station may report a connector's state as a `NotifyEvent` on
     /// `Connector.AvailabilityState` instead of a `StatusNotification`. Only that event is
     /// folded; nothing else of the message is kept.
-    fn v2_notify_event(&mut self, request: &Value, now: DateTime<Utc>) -> bool {
-        let Some(events) = request.get("eventData").and_then(Value::as_array) else {
-            return false;
-        };
+    fn v2_notify_event(&mut self, events: Vec<ConnectorEvent>, now: DateTime<Utc>) -> bool {
         let mut changed = false;
-        for (evse, connector, status, timestamp) in events.iter().filter_map(connector_event) {
+        for (evse, connector, status, timestamp) in events {
             changed |= self
                 .v2_mut()
                 .set_connector(evse, connector, status, timestamp, now);
@@ -759,28 +824,21 @@ impl StationState {
 
     fn v2_transaction_event(
         &mut self,
-        request: &Value,
-        response: &Value,
+        req: TransactionEventRequest,
+        id_token_status: Option<AuthorizationStatus>,
         history_cap: usize,
     ) -> bool {
-        let Ok(req) = TransactionEventRequest::deserialize(request) else {
-            return false;
-        };
         let id_len = req.transaction_info.transaction_id.chars().count();
         if id_len == 0 || id_len > MAX_TRANSACTION_ID_LEN {
             self.v2_mut().counters.rejected_events += 1;
             return false;
         }
-        let answer = TransactionEventResponse::deserialize(response).ok();
         self.v2_mut()
-            .fold_transaction_event(req, answer.as_ref(), history_cap)
+            .fold_transaction_event(req, id_token_status, history_cap)
     }
 
     /// `MeterValues` outside a transaction: latest energy and power per EVSE.
-    fn v2_meter_values(&mut self, request: &Value) -> bool {
-        let Ok(req) = MeterValuesRequest::deserialize(request) else {
-            return false;
-        };
+    fn v2_meter_values(&mut self, req: &MeterValuesRequest) -> bool {
         let Ok(evse) = u32::try_from(req.evse_id) else {
             return false;
         };
@@ -810,10 +868,11 @@ impl StationState {
         changed
     }
 
-    fn v2_security_event(&mut self, request: &Value, now: DateTime<Utc>) -> bool {
-        let Ok(req) = SecurityEventNotificationRequest::deserialize(request) else {
-            return false;
-        };
+    fn v2_security_event(
+        &mut self,
+        req: SecurityEventNotificationRequest,
+        now: DateTime<Utc>,
+    ) -> bool {
         self.security_events.push_back(SecurityEventRecord {
             event_type: truncate(req.kind, MAX_EVENT_TYPE_LEN),
             timestamp: req.timestamp,
@@ -829,16 +888,19 @@ impl StationState {
 
     /// Counts the report. Device-model values are never stored: the state leaves through
     /// the API unredacted.
-    fn v2_notify_report(&mut self, request: &Value, now: DateTime<Utc>) -> bool {
-        let Ok(req) = NotifyReportRequest::deserialize(request) else {
-            return false;
-        };
+    fn v2_notify_report(
+        &mut self,
+        request_id: i32,
+        seq_no: i32,
+        tbc: bool,
+        now: DateTime<Utc>,
+    ) -> bool {
         let v2 = self.v2_mut();
         v2.counters.notify_reports += 1;
         v2.last_report = Some(ReportInfo {
-            request_id: req.request_id,
-            seq_no: req.seq_no,
-            tbc: req.tbc.unwrap_or(false),
+            request_id,
+            seq_no,
+            tbc,
             at: now,
         });
         true
@@ -986,7 +1048,9 @@ mod tests {
         const GOLDEN: &str = r#"{"boot":{"vendor":"Acme","model":"C1","charge_point_serial_number":"SN-1","charge_box_serial_number":null,"firmware_version":"1.0","iccid":null,"imsi":null,"meter_type":null,"meter_serial_number":null,"booted_at":"2026-01-01T00:00:00Z","registration":"Accepted","interval":300},"connectors":{"1":{"status":"Charging","error_code":"NoError","info":null,"vendor_id":null,"vendor_error_code":null,"timestamp":"2026-01-01T00:00:01Z","received_at":"2026-01-01T00:00:00Z"}},"transactions":[{"id":7,"connector":1,"id_tag":"TAG-A","id_tag_status":"Accepted","meter_start":10,"started_at":"2026-01-01T00:00:02Z","status":"active","meter_stop":null,"stopped_at":null,"stop_reason":null,"energy_wh":1500.0,"power_w":7000.0,"last_meter_at":"2026-01-01T00:10:00Z"},{"id":8,"connector":1,"id_tag":"TAG-B","id_tag_status":"Accepted","meter_start":10,"started_at":"2026-01-01T00:00:02Z","status":"stopped","meter_stop":99,"stopped_at":"2026-01-01T01:00:00Z","stop_reason":"Remote","energy_wh":null,"power_w":null,"last_meter_at":null}],"last_heartbeat_at":"2026-01-01T00:00:00Z","diagnostics_status":null,"firmware_status":null,"failed_calls":0,"unknown_stops":0,"security_events":[{"event_type":"SettingSystemTime","timestamp":"2026-01-01T00:00:03Z","tech_info":"x","received_at":"2026-01-01T00:00:00Z"}],"security_events_total":1,"log_status":null,"signed_firmware_status":null,"certificate_request":null,"installed_certificates":{}}"#;
         let state = legacy_state();
         assert!(state.v2.is_none());
-        assert_eq!(serde_json::to_string(&state).unwrap(), GOLDEN);
+        // The only addition is the 2.0.1 section, an explicit null on a 1.6 station.
+        let expected = format!("{},\"v2\":null}}", GOLDEN.strip_suffix('}').unwrap());
+        assert_eq!(serde_json::to_string(&state).unwrap(), expected);
     }
 
     #[test]

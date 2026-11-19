@@ -372,7 +372,7 @@ async fn an_ocpp_2_0_1_station_shows_up_in_stdin_the_api_and_calls() {
     assert!(station["state"]["v2"].is_object(), "{station}");
     assert_eq!(station["state"]["v2"]["transactions"][0]["id"], "tx-1");
     let (_, legacy) = csms.get("/v1/stations/CP-16").await;
-    assert!(legacy["state"].get("v2").is_none(), "{legacy}");
+    assert_eq!(legacy["state"].get("v2"), Some(&Value::Null), "{legacy}");
 
     // The transaction list.
     let (status, listed) = csms.get("/v1/transactions").await;

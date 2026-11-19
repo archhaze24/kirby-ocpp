@@ -2,8 +2,8 @@
 //!
 //! Resolution order for one CALL from a station: station-scoped faults, then global faults
 //! (each in injection order, one occurrence consumed), then schema validation, then the
-//! station's rule, then a global rule with a protocol, then a global responder, then the
-//! default answer.
+//! station's rule, then the global rule of the station's protocol, then a global responder,
+//! then the default answer.
 
 use std::collections::HashMap;
 
@@ -18,7 +18,7 @@ pub const MAX_FAULTS_PER_STATION: usize = 100;
 /// Most bytes of action and payload text kept over all faults by the capped methods.
 pub const MAX_FAULT_BYTES: usize = 8 * 1024 * 1024;
 /// Most scoped rules kept over all stations (a rule is one action of one station, or one
-/// action with a protocol and no station).
+/// action with a protocol and no station, per protocol).
 pub const MAX_SCOPED_RULES: usize = 1000;
 /// Most scoped rules kept for one station.
 pub const MAX_RULES_PER_STATION: usize = 64;
@@ -119,7 +119,18 @@ struct StoredRule {
     bytes: usize,
 }
 
-type RuleKey = (Option<String>, String);
+/// Station, protocol and action. The protocol is part of the key only for rules without a
+/// station (one global rule per action and protocol); a station rule keeps it in the value.
+type RuleKey = (Option<String>, Option<String>, String);
+
+fn rule_key(station: Option<&str>, protocol: Option<&str>, action: &str) -> RuleKey {
+    let protocol = if station.is_none() { protocol } else { None };
+    (
+        station.map(str::to_owned),
+        protocol.map(str::to_owned),
+        action.to_owned(),
+    )
+}
 
 /// The scoped faults and rules of the engine (behind the engine's state lock).
 #[derive(Default)]
@@ -239,19 +250,21 @@ impl Scripted {
             .collect()
     }
 
-    /// Stores or replaces the rule of (`scope.station`, `action`); capped.
+    /// Stores or replaces the rule of (`scope.station`, `action`), or of (`scope.protocol`,
+    /// `action`) for a global rule; capped.
     pub(crate) fn set_rule(
         &mut self,
         scope: &Scope,
         action: &str,
         payload: Value,
     ) -> Result<(), String> {
-        let key = (scope.station.clone(), action.to_owned());
+        let key = rule_key(scope.station.as_deref(), scope.protocol.as_deref(), action);
         let bytes = payload
             .to_string()
             .len()
             .saturating_add(action.len())
-            .saturating_add(scope.station.as_ref().map_or(0, String::len));
+            .saturating_add(scope.station.as_ref().map_or(0, String::len))
+            .saturating_add(scope.protocol.as_ref().map_or(0, String::len));
         let replaced = self.rules.get(&key).map_or(0, |rule| rule.bytes);
         if replaced == 0 {
             if self.rules.len() >= MAX_SCOPED_RULES {
@@ -263,7 +276,7 @@ impl Scripted {
                 let held = self
                     .rules
                     .keys()
-                    .filter(|(held, _)| held.as_ref() == Some(station))
+                    .filter(|(held, _, _)| held.as_ref() == Some(station))
                     .count();
                 if held >= MAX_RULES_PER_STATION {
                     return Err(format!(
@@ -294,9 +307,32 @@ impl Scripted {
         Ok(())
     }
 
+    /// Removes the rule of `station` for `action`; without a station, every global rule for
+    /// `action`, whatever its protocol.
     pub(crate) fn clear_rule(&mut self, station: Option<&str>, action: &str) -> bool {
-        let key = (station.map(str::to_owned), action.to_owned());
-        match self.rules.remove(&key) {
+        if station.is_some() {
+            return self.remove_rule(&rule_key(station, None, action));
+        }
+        let keys: Vec<RuleKey> = self
+            .rules
+            .keys()
+            .filter(|(owner, _, held)| owner.is_none() && held == action)
+            .cloned()
+            .collect();
+        let mut removed = false;
+        for key in &keys {
+            removed |= self.remove_rule(key);
+        }
+        removed
+    }
+
+    /// Removes only the global rule of `protocol` for `action`.
+    pub(crate) fn clear_global_rule_for_protocol(&mut self, action: &str, protocol: &str) -> bool {
+        self.remove_rule(&rule_key(None, Some(protocol), action))
+    }
+
+    fn remove_rule(&mut self, key: &RuleKey) -> bool {
+        match self.rules.remove(key) {
             Some(rule) => {
                 self.rule_bytes = self.rule_bytes.saturating_sub(rule.bytes);
                 true
@@ -305,33 +341,23 @@ impl Scripted {
         }
     }
 
-    /// Clears the global rule for `action` only when it names `protocol`.
-    pub(crate) fn clear_global_rule_for_protocol(&mut self, action: &str, protocol: &str) -> bool {
-        let key = (None, action.to_owned());
-        let matches = self
-            .rules
-            .get(&key)
-            .is_some_and(|rule| rule.protocol.as_deref() == Some(protocol));
-        matches && self.clear_rule(None, action)
-    }
-
     pub(crate) fn clear_rules(&mut self) {
         self.rules.clear();
         self.rule_bytes = 0;
     }
 
     /// The payload of the rule that answers `action` from `station`: the station's own rule
-    /// first, then a global rule that names a protocol.
+    /// first, then the global rule of the session's protocol, then a global rule without a
+    /// protocol.
     pub(crate) fn rule_payload(
         &self,
         station: &str,
         protocol: Option<&str>,
         action: &str,
     ) -> Option<Value> {
-        let find = |owner: Option<&str>| {
-            let key = (owner.map(str::to_owned), action.to_owned());
+        let find = |owner: Option<&str>, scope_protocol: Option<&str>| {
             self.rules
-                .get(&key)
+                .get(&rule_key(owner, scope_protocol, action))
                 .filter(|rule| {
                     rule.protocol
                         .as_deref()
@@ -339,7 +365,9 @@ impl Scripted {
                 })
                 .map(|rule| rule.payload.clone())
         };
-        find(Some(station)).or_else(|| find(None))
+        find(Some(station), None)
+            .or_else(|| protocol.and_then(|p| find(None, Some(p))))
+            .or_else(|| find(None, None))
     }
 
     /// The rules of one scope owner (`Some(station)`), or of every owner (`None`), sorted by
@@ -348,8 +376,8 @@ impl Scripted {
         let mut list: Vec<RuleInfo> = self
             .rules
             .iter()
-            .filter(|((owner, _), _)| station.is_none_or(|id| owner.as_deref() == Some(id)))
-            .map(|((owner, action), rule)| RuleInfo {
+            .filter(|((owner, _, _), _)| station.is_none_or(|id| owner.as_deref() == Some(id)))
+            .map(|((owner, _, action), rule)| RuleInfo {
                 scope: Scope {
                     station: owner.clone(),
                     protocol: rule.protocol.clone(),
@@ -358,12 +386,18 @@ impl Scripted {
                 payload: rule.payload.clone(),
             })
             .collect();
-        list.sort_by(|a, b| (&a.scope.station, &a.action).cmp(&(&b.scope.station, &b.action)));
+        list.sort_by(|a, b| {
+            (&a.scope.station, &a.action, &a.scope.protocol).cmp(&(
+                &b.scope.station,
+                &b.action,
+                &b.scope.protocol,
+            ))
+        });
         list
     }
 
     pub(crate) fn rule(&self, station: &str, action: &str) -> Option<RuleInfo> {
-        let key = (Some(station.to_owned()), action.to_owned());
+        let key = rule_key(Some(station), None, action);
         self.rules.get(&key).map(|rule| RuleInfo {
             scope: Scope {
                 station: Some(station.to_owned()),
@@ -465,6 +499,71 @@ mod tests {
             .unwrap();
         s.clear_rules();
         assert_eq!(s.rule_bytes, 0);
+    }
+
+    #[test]
+    fn global_rules_of_two_protocols_coexist_for_one_action() {
+        let mut s = Scripted::default();
+        s.set_rule(
+            &Scope::global().protocol("ocpp1.6"),
+            "Authorize",
+            json!({"idTagInfo": {"status": "Accepted"}}),
+        )
+        .unwrap();
+        s.set_rule(
+            &Scope::global().protocol("ocpp2.0.1"),
+            "Authorize",
+            json!({"idTokenInfo": {"status": "Accepted"}}),
+        )
+        .unwrap();
+        let listed = s.rules(None);
+        assert_eq!(listed.len(), 2, "{listed:?}");
+        assert_eq!(
+            s.rule_payload("A", Some("ocpp1.6"), "Authorize"),
+            Some(json!({"idTagInfo": {"status": "Accepted"}}))
+        );
+        assert_eq!(
+            s.rule_payload("A", Some("ocpp2.0.1"), "Authorize"),
+            Some(json!({"idTokenInfo": {"status": "Accepted"}}))
+        );
+        assert_eq!(s.rule_payload("A", None, "Authorize"), None);
+        // A station rule wins over both; setting a protocol again replaces only that one.
+        s.set_rule(&Scope::station("A"), "Authorize", json!({"a": 1}))
+            .unwrap();
+        assert_eq!(
+            s.rule_payload("A", Some("ocpp2.0.1"), "Authorize"),
+            Some(json!({"a": 1}))
+        );
+        s.set_rule(
+            &Scope::global().protocol("ocpp1.6"),
+            "Authorize",
+            json!({"v": 2}),
+        )
+        .unwrap();
+        assert_eq!(s.rules(None).len(), 3);
+        assert_eq!(
+            s.rule_payload("B", Some("ocpp1.6"), "Authorize"),
+            Some(json!({"v": 2}))
+        );
+        // Deleting one protocol leaves the other.
+        assert!(s.clear_global_rule_for_protocol("Authorize", "ocpp1.6"));
+        assert!(!s.clear_global_rule_for_protocol("Authorize", "ocpp1.6"));
+        assert_eq!(s.rule_payload("B", Some("ocpp1.6"), "Authorize"), None);
+        assert!(
+            s.rule_payload("B", Some("ocpp2.0.1"), "Authorize")
+                .is_some()
+        );
+        // A global rule without a protocol answers when no protocol rule matches.
+        s.set_rule(&Scope::global(), "Authorize", json!({"any": 1}))
+            .unwrap();
+        assert_eq!(
+            s.rule_payload("B", Some("ocpp1.6"), "Authorize"),
+            Some(json!({"any": 1}))
+        );
+        assert_eq!(
+            s.rule_payload("B", Some("ocpp2.0.1"), "Authorize"),
+            Some(json!({"idTokenInfo": {"status": "Accepted"}}))
+        );
     }
 
     #[test]

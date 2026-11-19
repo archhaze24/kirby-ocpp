@@ -989,6 +989,50 @@ payload = '{"idTagInfo":{"status":"Blocked"}}'
     let _ = station.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rule_blocks_of_both_protocols_for_one_action_both_apply() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(
+        dir.path(),
+        "csms.toml",
+        r#"
+[listener]
+listen = "127.0.0.1:0"
+
+[[rule]]
+action = "Authorize"
+behavior = "respond"
+payload = '{"idTokenInfo":{"status":"Invalid"}}'
+protocol = "ocpp2.0.1"
+
+[[rule]]
+action = "Authorize"
+behavior = "respond"
+payload = '{"idTagInfo":{"status":"Blocked"}}'
+protocol = "ocpp1.6"
+"#,
+    );
+    let mut server = Server::start(&file, &[]);
+    let station = station(&server.addr.clone(), "CP-1", None).await;
+    booted(&station).await;
+    let _ = station.authorize(IdTag::new("TAG1").unwrap()).await;
+    server.wait(|v| v["type"] == "frame" && v.to_string().contains("Blocked"));
+    let _ = station.shutdown().await;
+    // The 2.0.1 block was not replaced by the 1.6 one: both are installed.
+    let stdin = server.child.stdin.as_mut().unwrap();
+    std::io::Write::write_all(stdin, b"{\"cmd\":\"rules\"}\n").unwrap();
+    std::io::Write::flush(stdin).unwrap();
+    let listed = server.wait(|v| v["type"] == "rules");
+    let mut protocols: Vec<&str> = listed["scoped"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|rule| rule["protocol"].as_str())
+        .collect();
+    protocols.sort_unstable();
+    assert_eq!(protocols, ["ocpp1.6", "ocpp2.0.1"], "{listed}");
+}
+
 /// A rule the engine refuses stops the start with exit code 2, before anything is announced.
 #[test]
 fn a_refused_rule_block_fails_the_start_before_listening() {

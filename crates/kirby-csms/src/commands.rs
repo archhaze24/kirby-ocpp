@@ -548,6 +548,8 @@ pub fn set_rule(
 pub fn clear_rule(handle: &CsmsHandle, scope: &Scope, action: &str) -> bool {
     if *scope == Scope::global() {
         handle.clear_responder(action)
+    } else if let (None, Some(protocol)) = (&scope.station, &scope.protocol) {
+        handle.clear_global_rule_for_protocol(action, protocol)
     } else {
         handle.clear_scoped_rule(scope.station.as_deref(), action)
     }

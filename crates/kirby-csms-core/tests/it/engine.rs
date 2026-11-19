@@ -1176,6 +1176,31 @@ async fn refused_station_ids_are_reported() {
 }
 
 #[tokio::test]
+async fn binary_websocket_messages_emit_malformed_event() {
+    timeout(STEP, async {
+        let csms = start(|_| {}).await;
+        let mut events = csms.subscribe();
+        let mut raw = raw_connect(&csms, "/CP-BINARY").await;
+        raw.send(Message::binary(vec![0, 1, 255])).await.unwrap();
+        loop {
+            if let CsmsEvent::Malformed { station, text } = events.recv().await.unwrap() {
+                assert_eq!(station, "CP-BINARY");
+                assert_eq!(
+                    text,
+                    "binary WebSocket message of 3 bytes ignored (OCPP-J uses text frames)"
+                );
+                break;
+            }
+        }
+        raw_send(&mut raw, r#"[2,"still-connected","Heartbeat",{}]"#).await;
+        assert!(matches!(raw_recv(&mut raw).await, Frame::CallResult { .. }));
+        csms.shutdown().await;
+    })
+    .await
+    .expect("binary event and heartbeat reply");
+}
+
+#[tokio::test]
 async fn malformed_events_do_not_carry_the_authorization_key() {
     use kirby_ocpp_core::recording::{self, Entry, RecordOptions, Recording, Role};
 

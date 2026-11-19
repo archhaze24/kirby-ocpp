@@ -19,8 +19,8 @@ pub struct CsmsConfig {
     pub heartbeat_interval: u32,
     /// Transaction id allocation for the default `StartTransaction` answer. Default `Fixed(123)`.
     pub transaction_ids: TransactionIds,
-    /// Default timeout of [`crate::CsmsHandle::call`], counted from the moment the CALL is
-    /// written to the socket. Default 30 seconds.
+    /// Default timeout of [`crate::CsmsHandle::call`], counted from the call and including
+    /// time in the queue. Default 30 seconds.
     pub call_timeout: Duration,
     /// Frames kept per station (oldest dropped first). `0` keeps none. Default 1000.
     pub history_cap: usize,

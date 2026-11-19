@@ -1013,6 +1013,41 @@ async fn ocpp_2_0_1_scoped_global_rules_are_listed_set_and_removed() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn global_rules_of_both_protocols_coexist_for_one_action() {
+    use kirby_ocpp_core::station::Command;
+    let csms = Csms::start(&[]);
+    let station = station(&csms.station_addr, "CP-1").await;
+    let addr = &csms.api_addr;
+    let v16 = "/v1/rules/Heartbeat?protocol=ocpp1.6";
+    let v201 = "/v1/rules/Heartbeat?protocol=ocpp2.0.1";
+    let time = "2031-02-03T04:05:06Z";
+    let body = json!({"currentTime": time}).to_string();
+    for path in [v16, v201] {
+        let put = http(addr, "PUT", path, &[], Some(&body)).await;
+        assert_eq!(put.0, 200, "{path}: {}", put.1);
+    }
+    assert_eq!(
+        csms.get("/v1/rules").await.1,
+        json!({"rules": [], "protocol_rules": [
+            {"action": "Heartbeat", "protocol": "ocpp1.6"},
+            {"action": "Heartbeat", "protocol": "ocpp2.0.1"},
+        ]})
+    );
+    assert_eq!(heartbeat_time(station.send(Command::Heartbeat).await), time);
+
+    // Deleting one protocol keeps the other.
+    let (status, body) = http(addr, "DELETE", v16, &[], None).await;
+    assert_eq!((status, body["cleared"].as_bool()), (200, Some(true)));
+    assert_eq!(
+        csms.get("/v1/rules").await.1,
+        json!({"rules": [], "protocol_rules": [{"action": "Heartbeat", "protocol": "ocpp2.0.1"}]})
+    );
+    assert_ne!(heartbeat_time(station.send(Command::Heartbeat).await), time);
+    let (_, body) = http(addr, "DELETE", v201, &[], None).await;
+    assert_eq!(body["cleared"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn faults_round_trip() {
     use kirby_ocpp_core::station::Command;
     let csms = Csms::start(&[]);
@@ -1899,6 +1934,8 @@ async fn listed_methods_are_the_routers_methods() {
     }
 }
 
+// One test pins every shape so that a key change shows up in one place.
+#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn golden_key_sets_of_the_shapes() {
     const STATION: [&str; 10] = [
@@ -1970,9 +2007,10 @@ async fn golden_key_sets_of_the_shapes() {
             "signed_firmware_status",
             "transactions",
             "unknown_stops",
+            "v2",
         ]
     );
-    assert_eq!(detail["state"]["log_status"], Value::Null);
+    assert!(detail["state"]["log_status"].is_null() && detail["state"]["v2"].is_null());
 
     // History frames and events.
     let (_, history) = csms.get("/v1/stations/CP-1/history").await;

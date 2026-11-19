@@ -35,7 +35,7 @@ use crate::observe::{self, MAX_OBSERVED_ID_TAG, Observation, ObserveSender, Obse
 use crate::policy::TransactionIdAllocator;
 use crate::rules::{FaultInfo, RuleInfo, Scope, Scripted};
 use crate::schemas::{EngineSchemas, session_protocol};
-use crate::state::StationState;
+use crate::state::{DecodedCall, StationState};
 
 const SEC_WEBSOCKET_PROTOCOL: HeaderName = HeaderName::from_static("sec-websocket-protocol");
 /// Time a new socket gets for the TLS and WebSocket handshakes.
@@ -60,7 +60,7 @@ const MALFORMED_TEXT_CHARS: usize = 512;
 /// Close code for injected closes (internal error), as in the test mock.
 const CLOSE_CODE_ERROR: u16 = 1011;
 
-/// Entry point: starts a multi-station OCPP 1.6J central system.
+/// Entry point: starts a multi-station OCPP 1.6J and 2.0.1 central system.
 ///
 /// # Station identity
 ///
@@ -818,13 +818,13 @@ impl CsmsHandle {
         self.inner.lock().scripted.set_rule(scope, action, payload)
     }
 
-    /// Removes the scoped rule of `station` (`None`: the global rule with a protocol) for
-    /// `action`; returns whether there was one.
+    /// Removes the scoped rule of `station` for `action` (`None`: the global rules with a
+    /// protocol for `action`, of every protocol); returns whether there was one.
     pub fn clear_scoped_rule(&self, station: Option<&str>, action: &str) -> bool {
         self.inner.lock().scripted.clear_rule(station, action)
     }
 
-    /// Clears the global rule for `action` only when it names `protocol`, under one lock.
+    /// Clears the global rule of `protocol` for `action`; the rules of other protocols stay.
     pub fn clear_global_rule_for_protocol(&self, action: &str, protocol: &str) -> bool {
         self.inner
             .lock()
@@ -1024,9 +1024,56 @@ enum RegisterError {
     TooManyStations,
 }
 
+#[cfg(test)]
+thread_local! {
+    static ENGINE_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static BYTES_PROCESSED_UNDER_LOCK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+struct TestStateGuard<'a>(MutexGuard<'a, State>);
+
+#[cfg(test)]
+impl std::ops::Deref for TestStateGuard<'_> {
+    type Target = State;
+
+    fn deref(&self) -> &State {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+impl std::ops::DerefMut for TestStateGuard<'_> {
+    fn deref_mut(&mut self) -> &mut State {
+        &mut self.0
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestStateGuard<'_> {
+    fn drop(&mut self) {
+        ENGINE_LOCK_HELD.set(false);
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn count_locked_bytes(bytes: impl FnOnce() -> usize) {
+    if ENGINE_LOCK_HELD.get() {
+        BYTES_PROCESSED_UNDER_LOCK.set(BYTES_PROCESSED_UNDER_LOCK.get() + bytes());
+    }
+}
+
 impl Inner {
+    #[cfg(not(test))]
     fn lock(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    #[cfg(test)]
+    fn lock(&self) -> TestStateGuard<'_> {
+        let guard = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        ENGINE_LOCK_HELD.set(true);
+        TestStateGuard(guard)
     }
 
     /// Sends an event. Callers hold the state lock where order matters.
@@ -1247,9 +1294,29 @@ impl Inner {
         direction: Direction,
         frame: &Frame,
     ) {
+        let recording = self.recording.as_ref().map(|sink| {
+            #[cfg(test)]
+            count_locked_bytes(|| frame.to_json_string().len());
+            (sink, frame.to_value())
+        });
+        let redacted;
+        let visible = if self.config.show_secrets {
+            frame
+        } else {
+            #[cfg(test)]
+            count_locked_bytes(|| frame.to_json_string().len());
+            redacted = redact_secrets(frame);
+            &redacted
+        };
+        let cap = self.config.history_cap;
+        let bytes_cap = self.config.history_bytes_cap;
+        let history = (cap > 0).then(|| history_frame(visible, bytes_cap));
+        let event = (self.events.receiver_count() > 0).then(|| event_frame(visible));
+
         let mut guard = self.lock();
         let state = &mut *guard;
-        if let Some(sink) = &self.recording {
+        // Record in engine order, including frames from replaced or forgotten sessions.
+        if let Some((sink, frame)) = recording {
             sink.frame_for_session(
                 station,
                 subprotocol,
@@ -1262,7 +1329,7 @@ impl Inner {
                     },
                     msg_id: None,
                     action: None,
-                    frame: frame.to_value(),
+                    frame,
                 },
             );
         }
@@ -1287,22 +1354,7 @@ impl Inner {
                 };
             *by_action.entry(key.to_owned()).or_insert(0) += 1;
         }
-        let redacted;
-        let frame = if self.config.show_secrets {
-            frame
-        } else {
-            redacted = redact_secrets(frame);
-            &redacted
-        };
-        let cap = self.config.history_cap;
-        if cap > 0 {
-            let bytes_cap = self.config.history_bytes_cap;
-            let mut stored = frame.clone();
-            let mut bytes = stored.to_json_string().len();
-            if bytes > bytes_cap {
-                stored = truncated_frame(frame, bytes);
-                bytes = stored.to_json_string().len();
-            }
+        if let Some((stored, bytes)) = history {
             while rec.history.len() >= cap
                 || (rec.history_bytes.saturating_add(bytes) > bytes_cap && !rec.history.is_empty())
             {
@@ -1328,11 +1380,11 @@ impl Inner {
                 state.history_dropped += 1;
             }
         }
-        if self.events.receiver_count() > 0 {
+        if let Some(frame) = event {
             self.emit(CsmsEvent::Frame {
                 station: station.to_owned(),
                 direction,
-                frame: event_frame(frame),
+                frame,
             });
         }
     }
@@ -1353,6 +1405,9 @@ impl Inner {
         let Reply::Result(response) = reply else {
             return;
         };
+        let Some(call) = DecodedCall::decode(protocol, action, request, response) else {
+            return;
+        };
         let mut state = self.lock();
         let Some(rec) = state.stations.get_mut(station) else {
             return;
@@ -1362,14 +1417,7 @@ impl Inner {
         }
         let cap = self.config.transaction_history_cap;
         let now = Utc::now();
-        let changed = match protocol {
-            Protocol::V16 => rec.state.apply(action, request, response, now, cap),
-            Protocol::V201 => rec
-                .state
-                .apply_v2(protocol, action, request, response, now, cap),
-            _ => false,
-        };
-        if changed {
+        if rec.state.apply_decoded(call, now, cap) {
             self.emit(CsmsEvent::StateChanged {
                 station: station.to_owned(),
             });
@@ -1417,15 +1465,23 @@ impl Inner {
         action: &str,
         payload: &Value,
     ) -> Reply {
-        let mut state = self.lock();
-        if let Some(reply) = state.scripted.take_fault(station, subprotocol, action) {
+        let fault = self
+            .lock()
+            .scripted
+            .take_fault(station, subprotocol, action);
+        if let Some(reply) = fault {
             return reply;
+        }
+        #[cfg(test)]
+        if self.config.validate_inbound {
+            count_locked_bytes(|| payload.to_string().len());
         }
         if self.config.validate_inbound
             && let Some((code, errors)) = self.schemas.inbound_violation(protocol, action, payload)
         {
             return Reply::Error(code, truncate_chars(&errors, MAX_ERROR_DESCRIPTION));
         }
+        let mut state = self.lock();
         if let Some(payload) = state.scripted.rule_payload(station, subprotocol, action) {
             return Reply::Result(payload);
         }
@@ -1435,6 +1491,7 @@ impl Inner {
             return (*responder)(payload);
         }
         if !is_charge_point_action_for(protocol, action) {
+            drop(state);
             return match unhandled_code(protocol, action) {
                 ErrorCode::NotSupported => Reply::Error(
                     ErrorCode::NotSupported,
@@ -1447,6 +1504,7 @@ impl Inner {
             };
         }
         let transaction_id = (action == "StartTransaction").then(|| state.tx_ids.allocate());
+        drop(state);
         default_reply_for(
             protocol,
             action,
@@ -1720,6 +1778,16 @@ where
                     }
                     match inbound {
                         Some(Ok(Message::Text(text))) => self.on_text(text.as_str()).await,
+                        Some(Ok(Message::Binary(bytes))) => {
+                            self.inner.emit(CsmsEvent::Malformed {
+                                station: self.station.clone(),
+                                text: format!(
+                                    "binary WebSocket message of {} bytes ignored (OCPP-J uses text frames)",
+                                    bytes.len()
+                                ),
+                            });
+                            None
+                        }
                         Some(Ok(Message::Close(_))) => {
                             // RFC 6455 5.5.1: answer a Close with a Close. tungstenite queued
                             // the reply when it read the frame; flushing writes it.
@@ -2032,12 +2100,30 @@ const EVENT_FRAME_MAX_BYTES: usize = 64 * 1024;
 /// `event_frame(&entry.frame)` with the event's frame.
 #[must_use]
 pub fn event_frame(frame: &Frame) -> Frame {
-    let bytes = frame.to_json_string().len();
+    let bytes = frame_json_len(frame);
     if bytes > EVENT_FRAME_MAX_BYTES && !is_truncated_marker(frame) {
         truncated_frame(frame, bytes)
     } else {
         frame.clone()
     }
+}
+
+fn history_frame(frame: &Frame, bytes_cap: usize) -> (Frame, usize) {
+    let bytes = frame_json_len(frame);
+    if bytes > bytes_cap {
+        let stored = truncated_frame(frame, bytes);
+        let bytes = frame_json_len(&stored);
+        (stored, bytes)
+    } else {
+        (frame.clone(), bytes)
+    }
+}
+
+fn frame_json_len(frame: &Frame) -> usize {
+    let bytes = frame.to_json_string().len();
+    #[cfg(test)]
+    count_locked_bytes(|| bytes);
+    bytes
 }
 
 /// Whether the frame already carries the truncation marker.
@@ -2216,6 +2302,53 @@ mod tests {
                 Arc::new(CallSlots::default()),
             )
             .unwrap_or_else(|_| panic!("registered"))
+    }
+
+    #[tokio::test]
+    async fn inbound_payload_processing_does_not_hold_engine_lock() {
+        let mut config = CsmsConfig::new("127.0.0.1:0".parse().unwrap());
+        config.validate_inbound = true;
+        let csms = timeout(Duration::from_secs(10), CsmsServer::start(config))
+            .await
+            .unwrap()
+            .unwrap();
+        let _events = csms.subscribe();
+        let inner = &csms.inner;
+        let session = register(inner, "ocpp1.6");
+        BYTES_PROCESSED_UNDER_LOCK.set(0);
+        for (action, payload) in [
+            (
+                "DataTransfer",
+                json!({"vendorId": "vendor", "data": "x".repeat(1024 * 1024 - 128)}),
+            ),
+            (
+                "MeterValues",
+                json!({
+                    "connectorId": 1,
+                    "transactionId": 1,
+                    "meterValue": [{
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "sampledValue": [{"value": "1000"}]
+                    }]
+                }),
+            ),
+        ] {
+            let reply = inner.decide("CP", Some("ocpp1.6"), Protocol::V16, action, &payload);
+            assert!(matches!(reply, Reply::Result(_)));
+            inner.record_frame(
+                "CP",
+                Some("ocpp1.6"),
+                session,
+                Direction::In,
+                &Frame::call("id", action, payload.clone()),
+            );
+            inner.track("CP", session, Protocol::V16, action, &payload, &reply);
+        }
+        assert_eq!(
+            BYTES_PROCESSED_UNDER_LOCK.get(),
+            0,
+            "payload bytes processed under the engine lock"
+        );
     }
 
     /// A session decides with the protocol it negotiated, whatever the registry says now.
