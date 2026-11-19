@@ -135,12 +135,12 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 
 * **One reply per inbound CALL.** The `Responder<A>` takes `self` on every reply method, so the compiler enforces at most one reply; if a handler drops it, `Drop` sends CALLERROR `InternalError` (best effort). `ReplyHandle::abandon` is the explicit no-reply path (`ignore` / `drop` rules).
 * **Outbound CALLs are serialized**: the next CALL goes out only after the current one resolved (result, error or timeout). `ConnectOptions::serialize_calls = false` exists for negative tests. A dropped `call()` future withdraws a not yet written CALL.
-* **Schema validation both ways** with the embedded schemas of the session's protocol (OCPP 1.6J or 2.0.1); violations map to `OccurenceConstraintViolation` / `TypeConstraintViolation` / `PropertyConstraintViolation` / `FormationViolation`.
+* **Schema validation both ways** with the embedded schemas of the session's protocol (OCPP 1.6J or 2.0.1); violations map to `OccurenceConstraintViolation` / `TypeConstraintViolation` / `PropertyConstraintViolation` / `FormationViolation` on 1.6 and to `OccurrenceConstraintViolation` / `TypeConstraintViolation` / `PropertyConstraintViolation` / `FormatViolation` on 2.0.1.
 * **State file format changes only with a `STORE_VERSION` bump** (now 9, `store.rs`). Older files load with serde defaults; newer ones are refused. No compatibility with the old TypeScript state files.
 * **Redaction:** `AuthorizationKey` values are replaced by `***` in recorded frames, logs and the config log (`ocpp::frame::redact_secrets`) unless `--show-secrets`. Session recordings (`--record`) are redacted by the recorder itself, always, and URL passwords too. Secrets never go into the main state file. Station ids and payloads are attacker-controlled: sanitize before printing (control characters become `·`).
 * **No `unsafe`; no `unwrap`/`expect`/indexing on external data** (clippy pedantic is on).
 * **Bounded memory** everywhere external input grows: log buffers, frame history, scenario CALL backlog (10 000 / ~16 MiB), stdin lines (1 MiB), stdout/log-file helper threads drop lines instead of blocking. The one known exception: CSMS station records are never evicted (`forget()` only), bounded per station and by `max_stations` (see [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md)).
-* **Spec wins over TS parity.** Intentional deviations are listed in [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md).
+* **Spec wins over TS parity.** Intentional deviations are listed in [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md) and [OCPP_2.0.1_CONFORMANCE.md](OCPP_2.0.1_CONFORMANCE.md).
 * Keep public shapes (docs, scenarios, the HTTP API) free of 1.6J-only assumptions where it is cheap. OCPP 2.0.1 is served by the CSMS engine (action table, canned replies, state fold, station-id rule); the emulator speaks it with `--protocol ocpp2.0.1` (`station2/`, headless and terminal UI), and 2.1 is not supported.
 
 ## Where each concern lives
@@ -178,7 +178,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 
 ## Related pages
 
-* [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md): protocol coverage and deviations.
+* [OCPP_1.6J_CONFORMANCE.md](OCPP_1.6J_CONFORMANCE.md), [OCPP_2.0.1_CONFORMANCE.md](OCPP_2.0.1_CONFORMANCE.md): protocol coverage and deviations.
 * [RELEASING.md](../RELEASING.md): release runbook.
 * [CHANGELOG.md](../CHANGELOG.md): per-version changes.
 * [README.md](../README.md): user-facing overview and option tables.

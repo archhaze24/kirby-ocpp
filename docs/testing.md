@@ -86,7 +86,7 @@ RUSTFLAGS='-D warnings' cargo clippy --workspace --all-targets -- -D warnings
 
 ## CI
 
-`.github/workflows/rust.yml` runs on pushes to `main`, `ci-check/**` and `dev-*`, on pull requests and manually. One matrix job named by OS (`ubuntu-latest`, `macos-latest`, `windows-latest`, `fail-fast: false`, 40 min timeout), with `RUSTFLAGS=-D warnings`:
+`.github/workflows/rust.yml` runs on pushes to `main`, `ci-check/**` and `dev-*`, on pull requests and manually. A matrix job named by OS (`ubuntu-latest`, `macos-latest`, `windows-latest`, `fail-fast: false`, 40 min timeout), with `RUSTFLAGS=-D warnings`:
 
 1. `git config --global core.autocrlf false` (keep line endings as committed).
 2. Checkout, stable Rust with `clippy` and `rustfmt`, `Swatinem/rust-cache`.
@@ -96,6 +96,10 @@ RUSTFLAGS='-D warnings' cargo clippy --workspace --all-targets -- -D warnings
 6. `cargo nextest run --workspace --profile ci`
 7. `cargo test --workspace --doc`
 8. On Linux only: `cargo test --workspace --tests`, one run in the shared-process mode of `cargo test` (see [Nextest vs cargo test](#nextest-vs-cargo-test)).
+
+A second job, `rust-version 1.88`, runs `cargo +1.88 check --workspace --locked` so the declared `rust-version` keeps building.
+
+`.github/workflows/audit.yml` runs `cargo deny check advisories` (configuration in `deny.toml`) on pushes to `main`, `ci-check/**` and `dev-*`, weekly and manually.
 
 ### The `ci` nextest profile
 

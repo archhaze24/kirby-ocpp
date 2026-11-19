@@ -347,7 +347,7 @@ Same engine features as the script steps `respond` and `inject_fault` ([csms.md]
 1. a fault of that station (injection order), then a global fault (injection order); a fault with a `protocol` applies only to stations that negotiated it; one CALL uses up one occurrence of one fault;
 2. schema validation, when enabled;
 3. the rule of that station for the action (a `protocol` on the rule must match the station's protocol);
-4. a global rule that names a protocol (set from a `[[rule]]` block of the configuration file), when the protocol matches;
+4. the global rule that names the station's protocol (set by `PUT /v1/rules/{action}?protocol=`, a `[[rule]]` block with `protocol`, stdin or a script; one per action and protocol);
 5. the global rule of `/v1/rules` without a protocol (one per action; setting it again replaces it);
 6. the default answer.
 

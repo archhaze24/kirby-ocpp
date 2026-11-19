@@ -16,7 +16,8 @@
 //! meter timers are re-armed and the statuses re-sent: start (real id assigned, TxProfiles of the
 //! local id cleared), then stop with the real id. Each entry is an independent chain, so one
 //! failure never aborts the others. An entry the CSMS fails to process is tried again while the
-//! link is up (`TransactionMessageRetryInterval`, at most `TransactionMessageAttempts` retry rounds);
+//! link is up (the k-th failed round after `TransactionMessageRetryInterval` times k, at most
+//! `TransactionMessageAttempts` retry rounds);
 //! then a stop-only entry is dropped and a start stays queued for the next boot. The queue is
 //! bounded ([`MAX_QUEUED_TRANSACTIONS`]). Transaction-related `MeterValues` samples taken while
 //! they cannot be sent wait in a separate [`SampleQueue`] (bounded by [`MAX_QUEUED_SAMPLES`], oldest

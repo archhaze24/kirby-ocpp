@@ -17,8 +17,8 @@
 //!   in the order the calls were sent.
 //! * **Retries** for `StartTransaction` / `StopTransaction` / `MeterValues`
 //!   ([`is_transaction_message`]): the reply future loops
-//!   `TransactionMessageAttempts` times with `TransactionMessageRetryInterval` between
-//!   attempts (values read when the call is made). A retry is queued behind CALLs made
+//!   `TransactionMessageAttempts` times, waiting `TransactionMessageRetryInterval` times the
+//!   number of transmissions so far before each retry (values read when the call is made). A retry is queued behind CALLs made
 //!   since the first attempt, so retries may reorder; only a `MeterValues` retry is dropped
 //!   once the `StopTransaction` of its transaction was queued ([`RetryGuard`]). CALLERROR, timeout and schema violations
 //!   are retried, a closed connection is not. The future is aborted when the connection

@@ -17,8 +17,8 @@
 //!   idle again. Stops while offline are queued at once.
 //! * **Sync** after boot `Accepted` runs before meter timers and status re-sends. A queued
 //!   message the CSMS fails to process (CALLERROR, timeout; each CALL already tried
-//!   `TransactionMessageAttempts` times, `TransactionMessageRetryInterval` apart) is tried
-//!   again while the link is up, after `TransactionMessageRetryInterval`, for at most
+//!   `TransactionMessageAttempts` times with a growing wait) is tried again while the link
+//!   is up, the k-th failed round after `TransactionMessageRetryInterval` times k, for at most
 //!   `TransactionMessageAttempts` retry rounds. Then a queued `StopTransaction` is dropped with a
 //!   warning (the Charge Point gives up after its configured attempts); a queued
 //!   `StartTransaction` stays queued until the next connection. The queue holds at most
