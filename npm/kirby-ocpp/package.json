@@ -1,7 +1,7 @@
 {
   "name": "kirby-ocpp",
   "version": "0.0.0-template",
-  "description": "Terminal OCPP 1.6J charge point emulator for testing a CSMS (TUI, headless and scenarios)",
+  "description": "Terminal OCPP 1.6J and 2.0.1 charge point emulator for testing a CSMS (TUI, headless and scenarios)",
   "keywords": ["ocpp", "ocpp16", "ev", "charge-point", "emulator", "csms", "tui"],
   "license": "MIT",
   "author": "archhaze24",

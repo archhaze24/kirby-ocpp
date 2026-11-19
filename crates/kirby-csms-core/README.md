@@ -1,6 +1,6 @@
 # kirby-csms-core
 
-OCPP 1.6J central system (CSMS) engine, no UI. It is the engine behind the [`kirby-csms`](https://crates.io/crates/kirby-csms) tool. It builds on `kirby-ocpp-core` (frames, schemas, WebSocket layer).
+OCPP 1.6J and 2.0.1 central system (CSMS) engine, no UI. It is the engine behind the [`kirby-csms`](https://crates.io/crates/kirby-csms) tool. It builds on `kirby-ocpp-core` (frames, schemas, WebSocket layer).
 
 **Most users want the binary**, not this library:
 

@@ -1,6 +1,6 @@
 [package]
 name = "kirby-ocpp-core"
-description = "OCPP 1.6J charge point emulator core: frames, station actor, connection layer (no UI)"
+description = "OCPP 1.6J and 2.0.1 charge point emulator core: frames, station actors, connection layer (no UI)"
 readme = "README.md"
 version.workspace = true
 edition.workspace = true

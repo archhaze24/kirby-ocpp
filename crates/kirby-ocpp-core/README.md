@@ -1,6 +1,6 @@
 # kirby-ocpp-core
 
-UI-free OCPP 1.6J charge point emulator core. It is the engine behind the [`kirby-ocpp`](https://crates.io/crates/kirby-ocpp) terminal tool and the base of the whole workspace: `kirby-csms-core` reuses its frames, schemas and WebSocket layer.
+UI-free OCPP 1.6J and 2.0.1 charge point emulator core. It is the engine behind the [`kirby-ocpp`](https://crates.io/crates/kirby-ocpp) terminal tool and the base of the whole workspace: `kirby-csms-core` reuses its frames, schemas and WebSocket layer.
 
 **Most users want the binaries**, not this library:
 
@@ -10,8 +10,9 @@ cargo install kirby-ocpp kirby-csms    # or: npm install -g kirby-ocpp kirby-csm
 
 ## What it is
 
-- Typed OCPP 1.6J frames and 39 messages (core profiles plus the Security Whitepaper set), checked against the embedded official JSON schemas.
+- Typed OCPP 1.6J frames and 39 messages (core profiles plus the Security Whitepaper set) and typed OCPP 2.0.1 messages, checked against the embedded official JSON schemas of each version.
 - A single `StationActor` that owns all station state: transactions, metering, smart charging, local list, reservations, configuration, certificates, security events.
+- `Station2`, the OCPP 2.0.1 station: EVSEs, `TransactionEvent` with its offline queue, authorization cache, device model.
 - A WebSocket connection layer: rustls TLS including mTLS, a serialized CALL queue, a ping watchdog.
 - TOML scenarios with a runner and JUnit renderer, a fleet runner (`fleet::Fleet`) and an atomic versioned state store.
 
@@ -45,7 +46,7 @@ Pre-1.0: the API may change between minor versions.
 ## Docs
 
 - [Architecture](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/architecture.md) (crate map, layer contracts, invariants)
-- [Emulator guide](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/emulator.md), [scenarios](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/scenarios.md), [conformance notes](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_1.6J_CONFORMANCE.md)
+- [Emulator guide](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/emulator.md), [scenarios](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/scenarios.md), conformance notes for [1.6J](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_1.6J_CONFORMANCE.md) and [2.0.1](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_2.0.1_CONFORMANCE.md)
 - API reference: <https://docs.rs/kirby-ocpp-core>
 
 ## License

@@ -1,6 +1,6 @@
 # kirby-csms
 
-`kirby-csms` is a terminal OCPP 1.6J central system (CSMS) for charge point firmware development and load tests. It accepts any number of stations, answers their CALLs with canned replies, prints everything that happens and sends commands to stations. On an interactive terminal it opens a terminal UI; otherwise it runs headless.
+`kirby-csms` is a terminal OCPP 1.6J and 2.0.1 central system (CSMS) for charge point firmware development and load tests. It accepts any number of stations, answers their CALLs with canned replies, prints everything that happens and sends commands to stations. On an interactive terminal it opens a terminal UI; otherwise it runs headless.
 
 Contents: [Quick start](#quick-start) · [Connecting stations](#connecting-stations) · [Output](#output) · [Terminal UI](#terminal-ui) · [Commands on stdin](#commands-on-stdin) · [HTTP API](#http-api) · [Response rules and fault injection](#response-rules-and-fault-injection) · [Headless behavior](#headless-behavior) · [Exit codes](#exit-codes) · [Use as a library](#use-as-a-library) · [Related pages](#related-pages)
 
@@ -215,8 +215,8 @@ For one CALL the engine picks, first match wins:
 1. a fault of that station, then a global fault; each group in the order the faults were injected, and a CALL uses up one occurrence of one fault;
 2. schema validation, when `validate_inbound` is on (a fault still wins over it);
 3. the rule of that station for the action;
-4. a global rule that names a protocol (from a `[[rule]]` block with `protocol`), when the station negotiated it;
-5. the global rule (one per action; setting it again replaces it);
+4. the global rule that names the station's protocol (from a `[[rule]]` block with `protocol`; one per action and protocol, so a block per protocol for the same action all stay);
+5. the global rule without a protocol (one per action; setting it again replaces it);
 6. the default answer.
 
 A rule or fault with a `protocol` applies only to stations that negotiated it; a station that negotiated no subprotocol matches only rules and faults without a `protocol`. A rule or fault without a `protocol` applies to every protocol by action name, and the payload of a rule is sent as given. When one listener serves OCPP 1.6 and 2.0.1, give a rule whose payload has the shape of one version (an `Authorize` answer with `idTagInfo`, or one with `idTokenInfo`) a `protocol`, otherwise it also answers stations of the other version. Rules and faults of a station stay when the station is forgotten. Faults are listed with an opaque id (`f1`, ...) that stays valid until the fault is used up or removed; remove one by id over the API, stdin or a script.
@@ -280,7 +280,7 @@ Exit codes: 0 when every CALL was answered as recorded (a CALLRESULT where the r
 - Events go to stdout (text or `--json`); `--log-file` also gets them.
 - Stdin commands are read when stdin is not a terminal and there is no `--script` (or always with `--stdin`).
 - `--script FILE` runs a TOML script against the stations that connect, prints the report (`--json` for JSON), writes `--report` (JSON) and `--junit` (XML), then exits. `--timeout SECONDS` (default 60) bounds the run. Script syntax (steps, `[vars]`, `--var`, `capture`, `expect_payload`): [scenarios.md](scenarios.md#csms-scripts).
-- SIGINT or SIGTERM shuts the server down gracefully. During `--script`, SIGTERM still writes the `--junit` file (one failed suite, `interrupted`) and exits 1; SIGINT exits 130 without a report.
+- SIGINT or SIGTERM shuts the server down gracefully (SIGHUP and a closed console window on Windows count as SIGTERM). During `--script`, SIGTERM still writes the `--junit` file (one failed suite, `interrupted`) and exits 1; SIGINT exits 130 without a report.
 - `--ping-interval` / `--pong-timeout`: a WebSocket ping goes to each station after this much silence; a station that sends nothing for the timeout after a ping is dropped (disconnect reason `ping_timeout`). A non-zero ping interval below the pong timeout is a usage error.
 
 ## Exit codes

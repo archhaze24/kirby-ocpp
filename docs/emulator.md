@@ -137,7 +137,7 @@ One `Run: <name>` action per built-in scenario (keys `o`, `w`, `s`, `i` for the 
 
 ## Headless mode and exit codes
 
-Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints events until SIGINT or SIGTERM, then closes the WebSocket cleanly and exits 0. Human lines look like `12:00:01.234 -> [2,"...","Heartbeat",{}]` (`->` sent, `<-` received) and `12:00:01.300 [Info] text`.
+Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints events until SIGINT or SIGTERM (SIGHUP and a closed console window on Windows count as SIGTERM), then closes the WebSocket cleanly and exits 0. Human lines look like `12:00:01.234 -> [2,"...","Heartbeat",{}]` (`->` sent, `<-` received) and `12:00:01.300 [Info] text`.
 - With `--json` each line is one JSON object with a `type` of `frame` (carries a `payload` field next to the raw `frame`), `log` or `state_changed`. If the stdout reader is too slow, events are dropped and a `note` line says how many.
 - Text that comes from the CSMS is sanitized (control characters replaced or escaped) before it is printed.
 
@@ -213,7 +213,7 @@ Human output (not `--json`, not the terminal UI) colors PASS green, FAIL red and
 
 ## Version, completions and validation
 
-* `kirby-ocpp --version` prints one line. `kirby-ocpp version` prints the version, git commit, build date, target triple and supported protocols (`OCPP 1.6J`); `kirby-ocpp version --json` prints them as one JSON object (`protocols` holds display names, `protocol_tokens` the subprotocol tokens such as `ocpp1.6`).
+* `kirby-ocpp --version` prints one line. `kirby-ocpp version` prints the version, git commit, build date, target triple and supported protocols (`OCPP 1.6J, OCPP 2.0.1`); `kirby-ocpp version --json` prints them as one JSON object (`protocols` holds display names, `protocol_tokens` the subprotocol tokens such as `ocpp1.6`).
 * `kirby-ocpp scenarios validate FILE|DIR|NAME...` parses scenarios without connecting and without `--url`: `ok PATH (N steps)` per valid scenario, the load error with the path otherwise, exit 0 or 2. A directory is scanned like `suite` does. A file named twice is checked once, a scenario name used by two files gives a `warning:` line (exit stays 0), and `*.toml` entries that are not regular files (dangling symlinks) are skipped with a `note:` line.
 
 ### Shell completions
@@ -373,7 +373,7 @@ The WebSocket subprotocol offered is `ocpp2.0.1` unless `--ws-subprotocol` says 
 
 What the 2.0.1 station does:
 
-* Device model: `GetVariables`, `SetVariables` and `GetBaseReport` over the controller components the station implements (`OCPPCommCtrlr`, `TxCtrlr`, `AuthCtrlr`, `AuthCacheCtrlr`, `SampledDataCtrlr`, `AlignedDataCtrlr`, `SecurityCtrlr` and others). `SecurityCtrlr.BasicAuthPassword` is write-only and applies at the next connect.
+* Device model: `GetVariables`, `SetVariables` and `GetBaseReport` over the controller components the station implements (`OCPPCommCtrlr`, `TxCtrlr`, `AuthCtrlr`, `AuthCacheCtrlr`, `SampledDataCtrlr`, `AlignedDataCtrlr`, `SecurityCtrlr` and others). `SecurityCtrlr.BasicAuthPassword` is write-only. Set by the CSMS, it makes the station reconnect with the new password right after the answer, keeping its registration (unless the URL carries a password); set locally, it applies at the next connect.
 * Transactions start and end at the points set by `TxCtrlr.TxStartPoint` (default `PowerPathClosed`) and `TxCtrlr.TxStopPoint` (default `EVConnected,Authorized`). Transaction ids are UUIDs; `seqNo` counts from 0 per transaction. `TransactionEvent`s carry the sampled values of `SampledDataCtrlr` and, with `AlignedDataCtrlr.Interval` above 0, clock-aligned values. Intervals are read when a transaction starts and re-arm the timers of a running one when they change.
 * The `Ended` event carries the `Transaction.Begin` and `Transaction.End` samples of `SampledDataCtrlr.TxEndedMeasurands`. With `SampledDataCtrlr.TxEndedInterval` above 0 it also carries one `Sample.Periodic` value per interval since the start, and with `AlignedDataCtrlr.TxEndedInterval` above 0 one `Sample.Clock` value per clock-aligned interval of `AlignedDataCtrlr.TxEndedMeasurands`, oldest first. At most 120 intermediate values per kind are kept: when the list is full, every second value is dropped and the spacing doubles, so a long transaction stays bounded. Intermediate values are not sent anywhere else and do not survive a restart. Empty `TxEndedMeasurands` put no sampled values into the event.
 * The energy register of each EVSE grows while it charges and survives a restart.
@@ -442,9 +442,9 @@ Per charge point id, one JSON file `<state dir>/<id>.station.json` holds everyth
 
 Secrets (such as private keys) live in a separate `<id>.station.secrets.json`.
 
-The state directory is `--state-dir` (`KIRBY_OCPP_STATE_DIR`), else `~/.kirby-ocpp/stations` (`%USERPROFILE%` on Windows). Special characters in the id are percent-escaped in the file name; an id whose escaped name would exceed 100 bytes is shortened and gets a hash suffix (`...~<16 hex>.station.json`) so the name always fits the filesystem limit.
+The state directory is `--state-dir` (`KIRBY_OCPP_STATE_DIR`), else `~/.kirby-ocpp/stations` (`%USERPROFILE%` on Windows). Special characters in the id are percent-escaped in the file name; an id whose escaped name would exceed 100 bytes is shortened and gets a hash suffix (`...~<16 hex>.station.json`) so the name always fits the filesystem limit. On Windows, an id that is a reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9`, in any case and with any extension) gets the hash suffix too.
 
-Files are `0600` on Unix, versioned, and written atomically (temp file plus rename, then the directory is fsynced). A file with a newer version than the binary supports is an error and is left alone. A corrupt file, or one that belongs to another charge point, is moved to `<file>.bak` and the station starts clean. `--no-persist` disables both loading and saving. Response rules are never saved.
+Files are `0600` on Unix, versioned, and written atomically (temp file plus rename, then the directory is fsynced). A file with a newer version than the binary supports is an error and is left alone. A corrupt file, or one that belongs to another charge point, is moved to `<file>.bak` and the station starts clean. Two cases leave the file untouched and run the station without persistence, with a warning: a file that exists but cannot be read, and a file of a station id that differs from this one only by case (such ids share one file on the case-insensitive file systems of macOS and Windows). `--no-persist` disables both loading and saving. Response rules are never saved.
 
 **OCPP 2.0.1.** A station started with `--protocol ocpp2.0.1` uses its own files, `<id>.station2.json` and `<id>.station2.secrets.json`, with their own format version (1). The same id used with both protocols keeps two independent file sets: neither protocol reads, moves aside or deletes the files of the other. The 2.0.1 state file holds:
 

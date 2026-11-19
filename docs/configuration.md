@@ -390,7 +390,7 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | --- | --- | --- | --- |
 | `--transaction-ids <POLICY>` | `KIRBY_CSMS_TRANSACTION_IDS` | `fixed:123` | StartTransaction ids: `fixed:ID` (every transaction gets `ID`) or `incrementing:FIRST` |
 | `--heartbeat-interval <SECONDS>` | `KIRBY_CSMS_HEARTBEAT_INTERVAL` | `300` | `interval` in the BootNotification answer (at least 1) |
-| `--validate-inbound <BOOL>` | `KIRBY_CSMS_VALIDATE_INBOUND` | `true` | Validate inbound CALLs against the OCPP 1.6J schemas; an invalid one gets a CALLERROR instead of the canned reply. A scripted fault on the same action still wins; unknown actions are not checked |
+| `--validate-inbound <BOOL>` | `KIRBY_CSMS_VALIDATE_INBOUND` | `true` | Validate inbound CALLs against the schemas of the session's protocol (OCPP 1.6J or 2.0.1); an invalid one gets a CALLERROR instead of the canned reply. A scripted fault on the same action still wins; unknown actions are not checked |
 | `--ping-interval <SECONDS>` | `KIRBY_CSMS_PING_INTERVAL` | `30` | WebSocket ping to each station this often; `0` disables the watchdog |
 | `--pong-timeout <SECONDS>` | `KIRBY_CSMS_PONG_TIMEOUT` | `10` | Drop a station that sends nothing this long after a ping (disconnect reason `ping_timeout`); at least 1. A non-zero `--ping-interval` below this value is a usage error (exit 2) |
 | `--call-timeout <SECONDS>` | `KIRBY_CSMS_CALL_TIMEOUT` | `30` | How long a command to a station may wait for its answer, 1 to 86400 |
@@ -659,7 +659,7 @@ The options apply to every `ctl` command and may stand before or after it.
 
 ## Exit codes
 
-This section is the single reference for exit codes; other pages link here. Code `2` always means a usage or configuration error found before the run starts (bad flag, bad value, invalid scenario or script file). Code `130` is SIGINT; SIGTERM ends a run with `1`.
+This section is the single reference for exit codes; other pages link here. Code `2` always means a usage or configuration error found before the run starts (bad flag, bad value, invalid scenario or script file). Code `130` is SIGINT; SIGTERM ends a run with `1`. SIGHUP (the terminal or SSH session goes away) and closing the console window on Windows are handled like SIGTERM in both tools and in the terminal UIs: the same clean shutdown, reports and exit code.
 
 ### kirby-ocpp, plain station
 

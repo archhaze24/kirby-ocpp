@@ -9,7 +9,8 @@ use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Parser};
 use kirby_csms_core::{CsmsConfig, SecurityProfile, SubprotocolPolicy, TransactionIds};
 
-/// Terminal OCPP 1.6J central system (CSMS) for charge point firmware development and load tests.
+/// Terminal OCPP 1.6J and 2.0.1 central system (CSMS) for charge point firmware development and
+/// load tests.
 ///
 /// Accepts any number of charge points on `ws(s)://HOST:PORT/<any prefix>/<station id>`, prints
 /// what happens and takes commands as JSON lines on stdin. With --script it runs a TOML script
@@ -181,8 +182,8 @@ pub struct Cli {
     )]
     pub show_secrets: bool,
 
-    /// Validate inbound CALL payloads against the OCPP 1.6J schemas and answer invalid ones with a
-    /// CALLERROR (true/false)
+    /// Validate inbound CALL payloads against the schemas of the session's protocol and answer
+    /// invalid ones with a CALLERROR (true/false)
     #[arg(
         long, env = "KIRBY_CSMS_VALIDATE_INBOUND", value_name = "BOOL", default_value_t = true,
         action = ArgAction::Set, value_parser = BoolishValueParser::new()

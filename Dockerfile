@@ -11,7 +11,7 @@ ARG VERSION=dev
 ARG REVISION=unknown
 
 LABEL org.opencontainers.image.title="kirby-ocpp" \
-      org.opencontainers.image.description="OCPP 1.6J charge point emulator (kirby-ocpp) and central system (kirby-csms)" \
+      org.opencontainers.image.description="OCPP 1.6J and 2.0.1 charge point emulator (kirby-ocpp) and central system (kirby-csms)" \
       org.opencontainers.image.source="https://github.com/archhaze24/kirby-ocpp" \
       org.opencontainers.image.url="https://github.com/archhaze24/kirby-ocpp" \
       org.opencontainers.image.licenses="MIT" \

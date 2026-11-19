@@ -93,7 +93,7 @@ Components and variables the station reports and accepts. Only the `Actual` attr
 | `DeviceDataCtrlr` | `ItemsPerMessage` and `BytesPerMessage` for `GetReport`, `GetVariables`, `SetVariables` | Read-only; the limits for `GetVariables` and `SetVariables` are enforced |
 | `SecurityCtrlr` | `SecurityProfile`, `OrganizationName`, `CertificateEntries`, `BasicAuthPassword` | `SecurityProfile` is read-only |
 
-- `BasicAuthPassword` is write-only: a read answers `Rejected` with reason `WriteOnly`, and it never appears in a report, a snapshot, a log or the state file (it is kept in the separate secrets file). A new value applies at the next connect. A value below 16 characters is accepted with a warning (see deviations); the longest accepted value is 64 characters.
+- `BasicAuthPassword` is write-only: a read answers `Rejected` with reason `WriteOnly`, and it never appears in a report, a snapshot, a log or the state file (it is kept in the separate secrets file). A new value set by the CSMS (`SetVariables`) is put to use at once when the URL carries no password (A01): after the answer the station closes the link and connects with the new password, keeping its registration (no new `BootNotification`, queued messages kept). A value set locally (terminal UI, scenario step) applies at the next connect. A value below 16 characters is accepted with a warning (see deviations); the longest accepted value is 64 characters.
 - `HeartbeatInterval` takes effect at once on a running timer.
 - The other variables are read when the next transaction, queue delivery or message needs them (for example `TxUpdatedInterval` arms the periodic timer when a transaction starts).
 
@@ -141,6 +141,7 @@ The specification wins over 1.6 parity. Each entry is either backed by a require
 | Local Authorization List, reservation | Not implemented; `RebootRequired` is not used | C, H |
 | EVSE reset | `Reset` with an `evseId` is `Rejected` (`EVSE.AllowReset` is `false`) | B11.FR.09 |
 | `BasicAuthPassword` | Below 16 characters accepted with a warning | A00.FR.205, A00.FR.304 |
+| Unreadable frames | A CALL whose RPC frame is broken but whose message id is readable gets `RpcFrameworkError` (station and CSMS); a frame without a readable message id is dropped and logged instead of answered with message id `"-1"`, which the specification allows | OCPP-J 2.0.1 section 4.2.3 |
 | Smart charging | `chargingProfile` in `RequestStartTransaction` is ignored with a warning | |
 | `GetReport` | Answers `NotSupported` (no custom reports, no component criteria); no monitoring, certificate management, firmware or log operations; `SecurityProfile` is read-only | Advanced Device Management |
 | Reconnect back-off | `OCPPCommCtrlr.RetryBackOffWaitMinimum`, `RetryBackOffRandomRange` and `RetryBackOffRepeatTimes` are not in the device model; the back-off follows the `--reconnect-*` flags | B01, B02 |

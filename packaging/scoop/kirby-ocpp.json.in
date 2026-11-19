@@ -1,6 +1,6 @@
 {
     "version": "@VERSION@",
-    "description": "OCPP 1.6J charge point emulator (kirby-ocpp) and central system (kirby-csms) for testing",
+    "description": "OCPP 1.6J and 2.0.1 charge point emulator (kirby-ocpp) and central system (kirby-csms) for testing",
     "homepage": "https://github.com/archhaze24/kirby-ocpp",
     "license": "MIT",
     "architecture": {

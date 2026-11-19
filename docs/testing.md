@@ -19,16 +19,16 @@ Contents: [Quick commands](#quick-commands) · [Layout](#layout) · [Mock CSMS](
 * Unit tests sit next to the code in `#[cfg(test)]` modules. Time goes through `Clock` (`ManualClock` in tests); timers use `tokio::time`.
 * Integration tests: one binary per crate. `crates/<crate>/tests/it/main.rs` (target `it`) holds one `mod <name>;` per file `tests/it/<name>.rs`, plus shared helper modules declared once there and used as `crate::station_support::...`. One binary instead of one per file keeps link time down (a test binary per file made builds dominated by linking).
 * To add a test file: create `tests/it/<name>.rs` and add `mod <name>;` to `tests/it/main.rs`.
-* `kirby-csms` is the exception: a single `crates/kirby-csms/tests/cli.rs`.
+* `kirby-csms` is the exception: one test binary per file in `crates/kirby-csms/tests/`.
 * Tests of one crate share one process under `cargo test`: no globals, no cwd changes, no environment changes.
 
 | Crate | Integration tests | Helpers |
 | --- | --- | --- |
 | `kirby-ocpp-core` | `tests/it/`: `station_*.rs` (lifecycle, transactions, power, sampling, security, TLS, persistence, response rules, ...), `station2_*.rs` (the OCPP 2.0.1 station: lifecycle, device model, status, transactions, transaction queue, authorization, remote control, persistence), `ws_*.rs` (connection, calls, TLS), `scenario_runner.rs`, `scenario_reply.rs`, `scenario2_runner.rs` (the scenario runner on a 2.0.1 station: step kinds, `wait_for` conditions, evidence redaction, report and JUnit shapes), `fleet.rs` | `station_support/`, `station2_support/`, `ws_support/` |
-| `kirby-csms-core` | `tests/it/`: `engine.rs`, `security.rs`, `state.rs`, `redaction.rs` | `common/` where present |
+| `kirby-csms-core` | `tests/it/`: `engine.rs`, `security.rs`, `state.rs`, `redaction.rs`, `observe.rs`, `protocols.rs`, `probe_close.rs`, `automation_sessions.rs`, `v201_engine.rs` (2.0.1 sessions) | `v201_support.rs` |
 | `kirby-ocpp-tui` | `tests/it/`: `model_flow.rs`, `fleet_flow.rs`, `model_flow2.rs` (2.0.1 station) | |
 | `kirby-ocpp` | `tests/it/`: `cli.rs`, `config_file.rs`, `fleet.rs`, `headless.rs`, `hardening.rs` | |
-| `kirby-csms` | `tests/cli.rs` | |
+| `kirby-csms` | `tests/`: `cli.rs`, `api.rs`, `api_tls.rs`, `config_file.rs`, `conformance.rs`, `conformance_v201.rs`, `ctl.rs`, `v201.rs` (one binary each) | |
 | `kirby-ocpp-testkit` | `tests/it/` (tests of the mock itself) | |
 
 ## Mock CSMS (`kirby-ocpp-testkit`)

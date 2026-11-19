@@ -2,7 +2,7 @@
 # Lives in the tap repo archhaze24/homebrew-tap as Formula/kirby-ocpp.rb.
 # Linux uses the static musl builds, so no particular glibc is required.
 class KirbyOcpp < Formula
-  desc "OCPP 1.6J charge point emulator (kirby-ocpp) and central system (kirby-csms) for testing"
+  desc "OCPP 1.6J and 2.0.1 charge point emulator (kirby-ocpp) and central system (kirby-csms) for testing"
   homepage "https://github.com/archhaze24/kirby-ocpp"
   version "@VERSION@"
   license "MIT"
