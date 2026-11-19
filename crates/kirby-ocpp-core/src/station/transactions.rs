@@ -731,6 +731,9 @@ impl StationActor {
 
     fn sync_finished(&mut self) {
         self.sync_outstanding = 0;
+        if !self.sync_failed {
+            self.sync_failed_rounds = 0;
+        }
         if std::mem::take(&mut self.sync_boot) {
             self.finish_boot_accepted();
         }
@@ -739,7 +742,7 @@ impl StationActor {
 
     /// Retry rounds an entry gets after its first failed round (`TransactionMessageAttempts`,
     /// at least one). Each round is itself a CALL with up to `TransactionMessageAttempts`
-    /// attempts, `TransactionMessageRetryInterval` apart.
+    /// attempts with increasing delays based on `TransactionMessageRetryInterval`.
     fn sync_round_limit(&self) -> u32 {
         self.registry.transaction_message_attempts().max(1)
     }
@@ -753,19 +756,24 @@ impl StationActor {
         ) {
             return;
         }
-        *self.sync_failures.entry(key).or_insert(0) += 1;
+        let failures = self.sync_failures.entry(key).or_default();
+        *failures = failures.saturating_add(1);
         self.sync_failed = true;
     }
 
     fn arm_sync_retry_if_idle(&mut self) {
         if self.sync_outstanding == 0 && std::mem::take(&mut self.sync_failed) {
+            if !self.timers.is_armed(&TimerKey::SyncRetry) {
+                self.sync_failed_rounds = self.sync_failed_rounds.saturating_add(1);
+            }
             self.arm_sync_retry();
         }
     }
 
     /// While the link is up, queued messages the CSMS failed to process are tried again after
-    /// `TransactionMessageRetryInterval`, for at most `TransactionMessageAttempts` retry rounds
-    /// per entry. Then a queued `StopTransaction` is dropped (OCPP 1.6: the Charge Point gives up
+    /// `TransactionMessageRetryInterval` times the consecutive failed rounds, for at most
+    /// `TransactionMessageAttempts` retry rounds per entry. Then a queued `StopTransaction` is
+    /// dropped (OCPP 1.6: the Charge Point gives up
     /// after the configured attempts; this also bounds what a hostile CSMS can leave queued);
     /// a queued `StartTransaction` stays for the next connection, its transaction is running.
     fn arm_sync_retry(&mut self) {
@@ -804,6 +812,7 @@ impl StationActor {
             let interval = self
                 .registry
                 .transaction_message_retry_interval()
+                .saturating_mul(self.sync_failed_rounds)
                 .max(MIN_SYNC_RETRY);
             self.timers.set(TimerKey::SyncRetry, interval);
         }
@@ -1015,6 +1024,78 @@ fn unkept_start_stop_reason(tag_accepted: bool) -> StopReason {
 mod tests {
     use super::*;
     use chrono::DateTime;
+
+    #[tokio::test(start_paused = true)]
+    async fn offline_sync_wait_grows_with_each_failed_round() {
+        let (_, commands) = tokio::sync::mpsc::channel(1);
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let (mut actor, _) = StationActor::new(
+            crate::config::StationConfig::new("ws://localhost/ocpp").without_persistence(),
+            std::sync::Arc::new(crate::clock::SystemClock),
+            commands,
+            events,
+            None,
+        );
+        let (connection, _) = crate::ws::Connection::test_reply_channel();
+        actor.link.conn = Some(connection);
+        actor.state.registration = Some(RegistrationStatus::Accepted);
+        actor.registry.change("TransactionMessageAttempts", "3");
+        actor
+            .registry
+            .change("TransactionMessageRetryInterval", "60");
+        let mut queue_stop = |tx_id| {
+            actor.queue_stop(
+                ConnectorId::new(1),
+                TxId::Csms(tx_id),
+                IdTag::new("TAG").unwrap(),
+                DateTime::UNIX_EPOCH,
+                0,
+                StopInfo {
+                    id_tag: None,
+                    meter_stop_wh: 12,
+                    timestamp: DateTime::UNIX_EPOCH,
+                    reason: StopReason::Local,
+                    transaction_data: Vec::new(),
+                },
+            )
+        };
+        let key = queue_stop(7);
+        let other = queue_stop(8);
+        let timeout = CallError::Timeout {
+            action: "StopTransaction".to_owned(),
+            after: std::time::Duration::from_secs(1),
+        };
+
+        for (round, delay) in [60, 120, 60].into_iter().enumerate() {
+            if round == 2 {
+                // A successful sync clears the backoff for the next failure.
+                actor.sync_failures.clear();
+                actor.sync_finished();
+            }
+            actor.record_sync_failure(key, &timeout);
+            actor.sync_finished();
+            if round == 0 {
+                // An online stop failing while the timer is armed joins the pending round.
+                actor.record_sync_failure(other, &timeout);
+                actor.arm_sync_retry_if_idle();
+            }
+            assert!(
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(delay - 1),
+                    actor.timers.next(),
+                )
+                .await
+                .is_err(),
+                "SyncRetry fired before the {delay}s retry delay elapsed"
+            );
+            assert_eq!(
+                tokio::time::timeout(std::time::Duration::from_secs(2), actor.timers.next())
+                    .await
+                    .expect("SyncRetry missed the expected deadline"),
+                TimerKey::SyncRetry
+            );
+        }
+    }
 
     #[test]
     fn an_unkept_start_is_deauthorized_only_when_the_tag_was_refused() {

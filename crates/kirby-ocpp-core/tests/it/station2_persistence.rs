@@ -615,3 +615,23 @@ async fn a_restored_register_wins_over_the_start_value_of_a_transaction() {
     station.shutdown().await.unwrap();
     timeout(STEP, join).await.unwrap().unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_state_file_that_cannot_be_read_is_never_overwritten_by_a_running_station() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let csms = v201_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    let content = format!(r#"{{"version": 1, "charge_point_id": "{ID}"}}"#);
+    fs::write(store.path(), &content).unwrap();
+    fs::set_permissions(store.path(), fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::File::open(store.path()).is_ok() {
+        // Running as root: the mode does not keep the file unreadable.
+        return;
+    }
+    run_and_stop(&csms, dir.path()).await;
+    fs::set_permissions(store.path(), fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read_to_string(store.path()).unwrap(), content);
+}

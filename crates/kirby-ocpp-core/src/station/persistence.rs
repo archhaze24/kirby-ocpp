@@ -89,6 +89,13 @@ impl Persistence {
         let store = StationStore::new(&dir, &config.charge_point_id);
         match store.load_secrets() {
             Ok(secrets) => this.loaded_secrets = Some(secrets),
+            Err(error @ StoreError::CaseCollision { .. }) => {
+                logs.push((
+                    LogLevel::Warn,
+                    format!("{error}; state is not persisted during this run"),
+                ));
+                return this;
+            }
             Err(error) => {
                 // A corrupt file was moved aside (reported as `InvalidData`), so writing is
                 // safe; anything else leaves the original in place and must not be replaced.
@@ -132,13 +139,18 @@ impl Persistence {
                 LogLevel::Error,
                 format!("{error}; state is not persisted during this run"),
             )),
-            Err(error) => {
+            Err(error @ StoreError::CaseCollision { .. }) => {
+                this.loaded_secrets = None;
                 logs.push((
                     LogLevel::Warn,
-                    format!("could not read the station state: {error}"),
+                    format!("{error}; state is not persisted during this run"),
                 ));
-                this.store = Some(store);
             }
+            // The file exists but cannot be read: a save would replace it by rename.
+            Err(error) => logs.push((
+                LogLevel::Warn,
+                format!("could not read the station state: {error}; state is not persisted during this run"),
+            )),
         }
         this
     }

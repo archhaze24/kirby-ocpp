@@ -14,7 +14,7 @@
 
 use std::fmt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use rustls::client::WebPkiServerVerifier;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -48,12 +48,11 @@ pub(super) async fn client_config(tls: &TlsConfig) -> Result<Arc<ClientConfig>, 
         if tls.allow_wildcard_certificates {
             builder.with_root_certificates(roots)
         } else {
-            let inner =
-                WebPkiServerVerifier::builder_with_provider(Arc::new(roots), Arc::clone(&provider))
-                    .build()
-                    .map_err(|e| {
-                        ConnectError::Tls(format!("cannot build the certificate verifier: {e}"))
-                    })?;
+            let inner = WebPkiServerVerifier::builder_with_provider(roots, Arc::clone(&provider))
+                .build()
+                .map_err(|e| {
+                    ConnectError::Tls(format!("cannot build the certificate verifier: {e}"))
+                })?;
             builder
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoWildcards { inner }))
@@ -85,11 +84,23 @@ pub(super) fn server_name(url: &Url, tls: &TlsConfig) -> Result<ServerName<'stat
 
 /// The trust anchors: installed Central System roots (`extra_pem`) and the `ca_file`. Only when
 /// both are absent the system roots are used: once a Central System root is installed, a server
-/// certificate that chains only to a system root is refused. (Deliberate, not a bug.)
+/// certificate that chains only to a system root is refused.
 async fn trust_roots(
     ca_file: Option<&Path>,
     extra_pem: &[String],
-) -> Result<RootCertStore, ConnectError> {
+) -> Result<Arc<RootCertStore>, ConnectError> {
+    if ca_file.is_none() && extra_pem.is_empty() {
+        let roots = match NATIVE_ROOTS.get() {
+            Some(roots) => roots,
+            None => tokio::task::spawn_blocking(|| NATIVE_ROOTS.get_or_init(load_native_roots))
+                .await
+                .map_err(|e| {
+                    ConnectError::Tls(format!("cannot load system root certificates: {e}"))
+                })?,
+        };
+        return roots.clone().map_err(ConnectError::Tls);
+    }
+
     let mut roots = RootCertStore::empty();
     for pem in extra_pem {
         for certificate in CertificateDer::pem_slice_iter(pem.as_bytes()).flatten() {
@@ -103,16 +114,19 @@ async fn trust_roots(
                 .add(certificate)
                 .map_err(|e| file_error(path, format!("not a usable CA certificate: {e}")))?;
         }
-    } else if extra_pem.is_empty() {
-        let loaded = rustls_native_certs::load_native_certs();
-        roots.add_parsable_certificates(loaded.certs);
-        if roots.is_empty() {
-            return Err(ConnectError::Tls(
-                "no system root certificates found; set tls ca_file".to_owned(),
-            ));
-        }
     }
-    Ok(roots)
+    Ok(Arc::new(roots))
+}
+
+static NATIVE_ROOTS: OnceLock<Result<Arc<RootCertStore>, String>> = OnceLock::new();
+
+fn load_native_roots() -> Result<Arc<RootCertStore>, String> {
+    let mut roots = RootCertStore::empty();
+    roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+    if roots.is_empty() {
+        return Err("no system root certificates found; set tls ca_file".to_owned());
+    }
+    Ok(Arc::new(roots))
 }
 
 async fn client_identity(
@@ -341,5 +355,17 @@ mod tests {
         let url = Url::parse("wss://h/ocpp").unwrap();
         let error = server_name(&url, &tls_with_server_name(Some("not a name!"))).unwrap_err();
         assert!(matches!(error, ConnectError::Tls(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn native_trust_roots_share_one_allocation() {
+        let roots = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(trust_roots(None, &[]), trust_roots(None, &[]))
+        })
+        .await
+        .unwrap();
+        let first = roots.0.unwrap();
+        let second = roots.1.unwrap();
+        assert!(Arc::ptr_eq(&first, &second), "native roots must be shared");
     }
 }

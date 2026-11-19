@@ -82,6 +82,14 @@ impl Persistence2 {
         let store = StationStore::new_for(FileKind::V2, &dir, &config.charge_point_id);
         match store.load_secrets2() {
             Ok(secrets) => this.loaded_secrets = Some(secrets),
+            Err(error @ StoreError::CaseCollision { .. }) => {
+                logs.push((
+                    LogLevel::Warn,
+                    format!("{error}; state is not persisted during this run"),
+                ));
+                this.boot_count = 1;
+                return this;
+            }
             Err(error) => {
                 // A corrupt file was moved aside (reported as `InvalidData`), so writing is
                 // safe; anything else leaves the original in place and must not be replaced.
@@ -125,13 +133,18 @@ impl Persistence2 {
                 LogLevel::Error,
                 format!("{error}; state is not persisted during this run"),
             )),
-            Err(error) => {
+            Err(error @ StoreError::CaseCollision { .. }) => {
+                this.loaded_secrets = None;
                 logs.push((
                     LogLevel::Warn,
-                    format!("could not read the station state: {error}"),
+                    format!("{error}; state is not persisted during this run"),
                 ));
-                this.store = Some(store);
             }
+            // The file exists but cannot be read: a save would replace it by rename.
+            Err(error) => logs.push((
+                LogLevel::Warn,
+                format!("could not read the station state: {error}; state is not persisted during this run"),
+            )),
         }
         this.boot_count = this
             .loaded
@@ -322,7 +335,7 @@ impl Station2Actor {
 /// Adapters between the state file and the parts that own the data.
 ///
 /// Each part owns one slice of the persisted state and must give it out and take it back; the
-/// bodies forward to the owner's file (`device_model.rs`, `transactions.rs`, `tx_queue.rs`,
+/// bodies forward to the module that holds the data (`device_model.rs`, `transactions.rs`, `tx_queue.rs`,
 /// `authorization.rs`; `evse.rs` provides `availability_snapshot` and `restore_availability`).
 /// Restoring transactions includes ending each restored active transaction with `PowerLoss` /
 /// `AbnormalCondition` as the first queued event after an accepted boot.

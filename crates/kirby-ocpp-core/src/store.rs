@@ -273,6 +273,11 @@ pub enum StoreError {
         found: u64,
         supported: u32,
     },
+    #[error(
+        "state file belongs to station \"{}\" (station ids differ only by case and share a file on case-insensitive file systems)",
+        crate::text::escape_unsafe(.found)
+    )]
+    CaseCollision { found: String },
 }
 
 /// Result of [`StationStore::load`].
@@ -416,7 +421,10 @@ impl StationStore {
         match self.read_state()? {
             Inspection::Missing => Ok(LoadOutcome::Missing),
             Inspection::Loaded(state) => Ok(LoadOutcome::Loaded(state)),
-            Inspection::Unusable { reason } => self.quarantine(reason),
+            Inspection::Unusable { reason } => {
+                self.check_companion_case_collision(&self.secrets_path())?;
+                self.quarantine(reason)
+            }
         }
     }
 
@@ -438,6 +446,7 @@ impl StationStore {
             Ok(value) => value,
             Err(e) => return unusable(format!("not valid JSON: {e}")),
         };
+        self.check_case_collision(&value)?;
         match value.get("version").and_then(Value::as_u64) {
             Some(found) if found > u64::from(STORE_VERSION) => {
                 return Err(StoreError::UnsupportedVersion {
@@ -520,9 +529,7 @@ impl StationStore {
 
     /// Path of the secrets file next to the state file.
     pub fn secrets_path(&self) -> PathBuf {
-        let text = self.path.to_string_lossy();
-        let base = text.strip_suffix(self.kind.state_suffix()).unwrap_or(&text);
-        PathBuf::from(format!("{base}{}", self.kind.secrets_suffix()))
+        self.path.with_extension("secrets.json")
     }
 
     /// Reads the state file of a [`FileKind::V2`] store. Same recovery rules as
@@ -533,6 +540,7 @@ impl StationStore {
             Inspection2::Missing => Ok(LoadOutcome2::Missing),
             Inspection2::Loaded(state) => Ok(LoadOutcome2::Loaded(state)),
             Inspection2::Unusable { reason } => {
+                self.check_companion_case_collision(&self.secrets_path())?;
                 let backup = move_aside(&self.path)?;
                 Ok(LoadOutcome2::Quarantined { backup, reason })
             }
@@ -555,6 +563,7 @@ impl StationStore {
             Ok(value) => value,
             Err(e) => return unusable(format!("not valid JSON: {e}")),
         };
+        self.check_case_collision(&value)?;
         match value.get("version").and_then(Value::as_u64) {
             Some(found) if found > u64::from(STORE2_VERSION) => {
                 return Err(StoreError::UnsupportedVersion {
@@ -593,33 +602,48 @@ impl StationStore {
     /// A corrupt file is moved aside (reported as `InvalidData`); a newer one is left untouched
     /// ([`StoreError::UnsupportedVersion`]).
     pub fn load_secrets2(&self) -> Result<StationSecrets2, StoreError> {
+        self.load_secrets_file()
+    }
+
+    fn load_secrets_file<T: serde::de::DeserializeOwned + Default>(&self) -> Result<T, StoreError> {
         let path = self.secrets_path();
         let bytes = match fs::read(&path) {
             Ok(bytes) => bytes,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                return Ok(StationSecrets2::default());
-            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
             Err(source) => return Err(StoreError::Io { path, source }),
         };
-        let parsed = serde_json::from_slice::<Value>(&bytes)
-            .map_err(|e| e.to_string())
-            .and_then(|value| {
-                let found = value.get("version").and_then(Value::as_u64).unwrap_or(0);
-                if found > u64::from(STORE2_VERSION) {
-                    return Ok(Err(found));
+        let supported = self.kind.version();
+        let parsed = match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => {
+                self.check_case_collision(&value)?;
+                let version = value.get("version").and_then(Value::as_u64).unwrap_or(0);
+                if version > u64::from(supported) {
+                    return Err(StoreError::UnsupportedVersion {
+                        path,
+                        found: version,
+                        supported,
+                    });
                 }
-                serde_json::from_value::<StationSecrets2>(value)
-                    .map(Ok)
-                    .map_err(|e| e.to_string())
-            });
+                if let Some(found) = value
+                    .get("charge_point_id")
+                    .and_then(Value::as_str)
+                    .filter(|found| *found != self.charge_point_id)
+                {
+                    Err(format!(
+                        "belongs to charge point `{}`, expected `{}`",
+                        crate::text::escape_unsafe(found),
+                        crate::text::escape_unsafe(&self.charge_point_id),
+                    ))
+                } else {
+                    serde_json::from_value(value).map_err(|e| e.to_string())
+                }
+            }
+            Err(e) => Err(e.to_string()),
+        };
         match parsed {
-            Ok(Ok(secrets)) => Ok(secrets),
-            Ok(Err(found)) => Err(StoreError::UnsupportedVersion {
-                path,
-                found,
-                supported: STORE2_VERSION,
-            }),
+            Ok(secrets) => Ok(secrets),
             Err(e) => {
+                self.check_companion_case_collision(&self.path)?;
                 let backup = move_aside(&path)?;
                 Err(StoreError::Io {
                     path,
@@ -651,41 +675,30 @@ impl StationStore {
 
     /// Reads the secrets file; a missing or unreadable one is "no secrets".
     pub fn load_secrets(&self) -> Result<StationSecrets, StoreError> {
-        let path = self.secrets_path();
-        match fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes)
-                .map_err(|e| e.to_string())
-                .and_then(|value| {
-                    // A newer build wrote it: leave it untouched, like the state file.
-                    let found = value.get("version").and_then(Value::as_u64).unwrap_or(0);
-                    if found > u64::from(STORE_VERSION) {
-                        return Ok(Err(found));
-                    }
-                    serde_json::from_value(value)
-                        .map(Ok)
-                        .map_err(|e| e.to_string())
-                }) {
-                Ok(Ok(secrets)) => Ok(secrets),
-                Ok(Err(found)) => Err(StoreError::UnsupportedVersion {
-                    path,
-                    found,
-                    supported: STORE_VERSION,
-                }),
-                Err(e) => {
-                    // Keep the broken file: the next save would overwrite it.
-                    let backup = move_aside(&path)?;
-                    Err(StoreError::Io {
-                        path,
-                        source: io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            format!("{e}; the file was moved to {}", backup.display()),
-                        ),
-                    })
-                }
-            },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(StationSecrets::default()),
-            Err(source) => Err(StoreError::Io { path, source }),
+        self.load_secrets_file()
+    }
+
+    fn check_case_collision(&self, value: &Value) -> Result<(), StoreError> {
+        if let Some(found) = value.get("charge_point_id").and_then(Value::as_str)
+            && found != self.charge_point_id
+            && found.to_lowercase() == self.charge_point_id.to_lowercase()
+        {
+            return Err(StoreError::CaseCollision {
+                found: found.to_owned(),
+            });
         }
+        Ok(())
+    }
+
+    /// Before moving an unusable file aside, check whether the other file identifies a
+    /// station with a case-colliding ID.
+    fn check_companion_case_collision(&self, path: &Path) -> Result<(), StoreError> {
+        if let Ok(bytes) = fs::read(path)
+            && let Ok(value) = serde_json::from_slice(&bytes)
+        {
+            self.check_case_collision(&value)?;
+        }
+        Ok(())
     }
 
     /// Atomically replaces the secrets file (removes it when `secrets` is empty).
@@ -771,6 +784,10 @@ const MAX_ESCAPED_LEN: usize = 100;
 /// `~` plus the FNV-1a hash of the whole id. `~` is always escaped in plain names, so a
 /// shortened name cannot collide with an unshortened one.
 fn file_name(kind: FileKind, charge_point_id: &str) -> String {
+    file_name_for_platform(kind, charge_point_id, cfg!(windows))
+}
+
+fn file_name_for_platform(kind: FileKind, charge_point_id: &str, windows: bool) -> String {
     let mut name = String::with_capacity(charge_point_id.len().min(MAX_ESCAPED_LEN) + 32);
     let mut kept = 0;
     let mut truncated = false;
@@ -794,13 +811,38 @@ fn file_name(kind: FileKind, charge_point_id: &str) -> String {
     }
     if truncated {
         name.truncate(kept);
-        let _ = write!(name, "~{:016x}", fnv1a_64(charge_point_id.as_bytes()));
+    }
+    let device = windows && is_windows_device_name(charge_point_id);
+    if truncated || device {
+        let tail = format!("~{:016x}", fnv1a_64(charge_point_id.as_bytes()));
+        // Windows interprets the part before the first dot as a possible device name.
+        let end = if device {
+            name.find('.').unwrap_or(name.len())
+        } else {
+            name.len()
+        };
+        name.insert_str(end, &tail);
     }
     if name.is_empty() {
         name.push_str("%00empty");
     }
     name.push_str(kind.state_suffix());
     name
+}
+
+fn is_windows_device_name(id: &str) -> bool {
+    let name = id.split('.').next().unwrap_or_default();
+    ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|device| name.eq_ignore_ascii_case(device))
+        || (name.len() == 4
+            && name
+                .as_bytes()
+                .last()
+                .is_some_and(|b| matches!(b, b'1'..=b'9'))
+            && name.get(..3).is_some_and(|prefix| {
+                prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT")
+            }))
 }
 
 /// FNV-1a, 64 bit: a stable hash (unlike `DefaultHasher`) that needs no dependency.
@@ -962,6 +1004,91 @@ mod tests {
             store.load().unwrap(),
             LoadOutcome::Quarantined { .. }
         ));
+    }
+
+    #[test]
+    fn case_collision_does_not_quarantine_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        store.save(&PersistedStation::new("CP-1")).unwrap();
+        let original = fs::read(store.path()).unwrap();
+        let alias = StationStore {
+            charge_point_id: "cp-1".to_owned(),
+            ..store
+        };
+        assert!(
+            matches!(alias.load(), Err(StoreError::CaseCollision { found }) if found == "CP-1")
+        );
+        assert_eq!(fs::read(alias.path()).unwrap(), original);
+        assert!(!alias.path().with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn case_collision_leaves_secrets_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        for kind in [FileKind::V16, FileKind::V2] {
+            let store = StationStore::new_for(kind, dir.path(), "cp-1");
+            let text = br#"{"version":1,"charge_point_id":"CP-1"}"#;
+            let path = store.secrets_path();
+            fs::write(&path, text).unwrap();
+            let rejected = match kind {
+                FileKind::V16 => store.load_secrets().unwrap_err(),
+                FileKind::V2 => store.load_secrets2().unwrap_err(),
+            };
+            assert!(matches!(rejected, StoreError::CaseCollision { found } if found == "CP-1"));
+            assert_eq!(fs::read(&path).unwrap(), text);
+            assert!(!path.with_extension("json.bak").exists());
+        }
+    }
+
+    #[test]
+    fn case_collision_prevents_quarantining_the_companion_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = StationStore::new(dir.path(), "CP-1");
+        store.save(&PersistedStation::new("CP-1")).unwrap();
+        let alias = StationStore {
+            charge_point_id: "cp-1".to_owned(),
+            ..store
+        };
+        let path = alias.secrets_path();
+        fs::write(&path, b"{ torn").unwrap();
+        assert!(matches!(
+            alias.load_secrets(),
+            Err(StoreError::CaseCollision { found }) if found == "CP-1"
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"{ torn");
+        assert!(!path.with_extension("json.bak").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn secrets_path_keeps_the_non_utf8_state_directory() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join(std::ffi::OsStr::from_bytes(b"st\xffate"));
+        let store = StationStore::new(&dir, "CP-1");
+        assert_eq!(store.secrets_path().parent(), store.path().parent());
+    }
+
+    #[test]
+    fn windows_names_avoid_reserved_devices_with_or_without_extensions() {
+        for id in ["CON", "nul", "Com7", "LPT9.log"] {
+            assert!(is_windows_device_name(id));
+            let name = file_name_for_platform(FileKind::V16, id, true);
+            let stem = name.split('.').next().unwrap();
+            assert!(
+                stem.contains('~'),
+                "{name} needs a hash before the first dot to avoid a Windows device name"
+            );
+        }
+        for id in ["CONSOLE", "COM0", "COM10", "CP-1"] {
+            assert!(!is_windows_device_name(id));
+            assert_eq!(
+                file_name_for_platform(FileKind::V16, id, true),
+                format!("{id}.station.json")
+            );
+        }
     }
 
     #[test]

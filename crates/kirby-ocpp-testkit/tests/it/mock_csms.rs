@@ -225,7 +225,7 @@ async fn malformed_call_error_spelling_follows_the_protocol() {
     .await;
     assert_eq!(
         broken_call_code(&csms, "ocpp2.0.1").await,
-        "FormatViolation"
+        "RpcFrameworkError"
     );
     assert_eq!(
         broken_call_code(&csms, "ocpp1.6").await,

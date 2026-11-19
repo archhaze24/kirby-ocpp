@@ -242,6 +242,7 @@ impl StationActor {
         self.sync_keys.clear();
         self.sync_boot = false;
         self.sync_failed = false;
+        self.sync_failed_rounds = 0;
         self.sync_failures.clear();
         self.timers.cancel(&TimerKey::SyncRetry);
         self.reset_status_tracking();
@@ -458,6 +459,15 @@ impl StationActor {
             return;
         }
         self.arm_heartbeat();
+        // The connection sends one CALL at a time: another heartbeat would only queue up
+        // behind the unanswered one. Pending calls end with the link, so none outlives it.
+        let in_flight = self
+            .calls
+            .values()
+            .any(|call| call.action == "Heartbeat" && matches!(call.origin, Origin::Station));
+        if in_flight {
+            return;
+        }
         self.send_heartbeat(Origin::Station, None);
     }
 

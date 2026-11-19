@@ -159,7 +159,8 @@ async fn each_session_is_validated_against_its_own_schemas_with_the_protocol_err
         "OccurrenceConstraintViolation"
     );
 
-    // A CALL without a payload is a formation error in 1.6 and a format error in 2.x.
+    // A CALL without a payload is a formation error in 1.6 and an RPC framework error in 2.x
+    // (OCPP-J 2.0.1 section 4.2.3).
     let broken = r#"[2,"b2","Heartbeat"]"#;
     assert_eq!(
         call_error_code(&mut old, broken).await.as_str(),
@@ -167,7 +168,7 @@ async fn each_session_is_validated_against_its_own_schemas_with_the_protocol_err
     );
     assert_eq!(
         call_error_code(&mut new, broken).await.as_str(),
-        "FormatViolation"
+        "RpcFrameworkError"
     );
     csms.shutdown().await;
 }

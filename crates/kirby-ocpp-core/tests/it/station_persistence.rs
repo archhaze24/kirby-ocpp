@@ -467,3 +467,35 @@ async fn a_secrets_file_that_cannot_be_read_is_never_overwritten() {
 
     assert_eq!(fs::read_to_string(&secrets_path).unwrap(), newer);
 }
+
+/// Makes `path` unreadable; `false` when the process can read it anyway (running as root).
+#[cfg(unix)]
+fn make_unreadable(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::File::open(path).is_err()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_state_file_that_cannot_be_read_is_never_overwritten() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = test_config("ws://127.0.0.1:9/ocpp", &dir);
+    let store = StationStore::new(dir.path(), &config.charge_point_id);
+    let content = br#"{"version":1,"connector_count":7}"#;
+    fs::write(store.path(), content).unwrap();
+    if !make_unreadable(store.path()) {
+        return;
+    }
+
+    let (station, join) = Station::spawn(config, Arc::new(ManualClock::new(t0())));
+    let mut observed = Observed::new(station.subscribe());
+    observed.wait_log("not persisted").await;
+    station.send(Command::AddConnector).await.unwrap();
+    station.shutdown().await.unwrap();
+    join.await.unwrap();
+    fs::set_permissions(store.path(), fs::Permissions::from_mode(0o600)).unwrap();
+    assert_eq!(fs::read(store.path()).unwrap(), content);
+}

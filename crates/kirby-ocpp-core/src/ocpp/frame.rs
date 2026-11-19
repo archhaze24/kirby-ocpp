@@ -451,13 +451,26 @@ impl FrameError {
         self.reply_for(Protocol::V16)
     }
 
-    /// Like [`FrameError::reply`] with the spelling of `protocol`: `FormationViolation`
-    /// for 1.6, `FormatViolation` for 2.x.
+    /// Like [`FrameError::reply`]. OCPP 2.x uses `RpcFrameworkError` for malformed CALL
+    /// envelopes and `FormatViolation` for invalid payloads.
     pub fn reply_for(&self, protocol: Protocol) -> Option<Frame> {
         match (self.message_type, &self.message_id) {
             (Some(MESSAGE_TYPE_CALL), Some(id)) => Some(Frame::call_error(
                 id.clone(),
-                ErrorCode::formation_violation(protocol),
+                if protocol != Protocol::V16
+                    && matches!(
+                        self.kind,
+                        FrameErrorKind::WrongLength { .. }
+                            | FrameErrorKind::InvalidField {
+                                field: "action",
+                                ..
+                            }
+                    )
+                {
+                    ErrorCode::from_wire("RpcFrameworkError")
+                } else {
+                    ErrorCode::formation_violation(protocol)
+                },
                 self.kind.to_string(),
             )),
             _ => None,
@@ -468,11 +481,8 @@ impl FrameError {
 /// Marker that replaces a secret value in recorded frames.
 pub const REDACTED: &str = "***";
 
-/// Returns `frame` with `AuthorizationKey` values in `ChangeConfiguration` CALLs and
-/// reply payloads replaced by [`REDACTED`]. Used only for the recorded copy of a frame
-/// (logs, history, UI); the wire bytes are never touched.
-///
-/// The key is matched case-insensitively, like the station's configuration registry.
+/// Returns a copy of `frame` with credential values replaced by [`REDACTED`] for logs,
+/// history and display.
 pub fn redact_secrets(frame: &Frame) -> Frame {
     let mut copy = frame.clone();
     match &mut copy {
@@ -480,7 +490,11 @@ pub fn redact_secrets(frame: &Frame) -> Frame {
             action, payload, ..
         } if matches!(
             action.as_str(),
-            "ChangeConfiguration" | "SetVariables" | "NotifyReport"
+            "ChangeConfiguration"
+                | "SetVariables"
+                | "NotifyReport"
+                | "NotifyEvent"
+                | "SetNetworkProfile"
         ) =>
         {
             redact_payload(payload);
@@ -504,6 +518,9 @@ const SECRET_VARIABLES: [(&str, &str); 6] = [
     ("WebPaymentsCtrlr", "SharedSecret"),
 ];
 
+/// Secret fields relative to `SetNetworkProfile.connectionData`.
+const NETWORK_SECRET_PATHS: [&str; 3] = ["/apn/apnPassword", "/vpn/password", "/vpn/key"];
+
 /// `true` when `fields` has a `component` and a `variable` naming a secret variable.
 pub(crate) fn names_secret_variable(fields: &serde_json::Map<String, Value>) -> bool {
     let name = |key: &str| {
@@ -522,13 +539,15 @@ pub(crate) fn names_secret_variable(fields: &serde_json::Map<String, Value>) -> 
 
 /// Replaces the values of a secret device-model variable in one JSON object:
 /// `attributeValue` (SetVariables request, GetVariables result) and every
-/// `variableAttribute[].value` (NotifyReport), whatever the attribute type.
+/// `variableAttribute[].value` (NotifyReport), and `actualValue` (NotifyEvent).
 fn redact_variable_values(fields: &mut serde_json::Map<String, Value>) {
     if !names_secret_variable(fields) {
         return;
     }
-    if let Some(value) = fields.get_mut("attributeValue") {
-        *value = Value::from(REDACTED);
+    for key in ["attributeValue", "actualValue"] {
+        if let Some(value) = fields.get_mut(key) {
+            *value = Value::from(REDACTED);
+        }
     }
     if let Some(Value::Array(attributes)) = fields.get_mut("variableAttribute") {
         for attribute in attributes {
@@ -539,14 +558,20 @@ fn redact_variable_values(fields: &mut serde_json::Map<String, Value>) {
     }
 }
 
-/// `true` when a payload holds a value of a secret device-model variable. Schema
+/// `true` when a payload holds a secret device-model or network profile value. Schema
 /// diagnostics use it to avoid quoting the offending value.
 pub(crate) fn carries_device_model_secret(payload: &Value) -> bool {
     match payload {
         Value::Object(fields) => {
             (names_secret_variable(fields)
-                && (fields.contains_key("attributeValue")
-                    || fields.contains_key("variableAttribute")))
+                && ["attributeValue", "variableAttribute", "actualValue"]
+                    .iter()
+                    .any(|key| fields.contains_key(*key)))
+                || fields.get("connectionData").is_some_and(|data| {
+                    NETWORK_SECRET_PATHS
+                        .iter()
+                        .any(|path| data.pointer(path).is_some())
+                })
                 || fields.values().any(carries_device_model_secret)
         }
         Value::Array(items) => items.iter().any(carries_device_model_secret),
@@ -555,14 +580,19 @@ pub(crate) fn carries_device_model_secret(payload: &Value) -> bool {
 }
 
 /// Replaces secret values anywhere in a JSON payload with [`REDACTED`]: the `value`
-/// beside a case-insensitive `"key": "AuthorizationKey"` (1.6) and the values of the
-/// `BasicAuthPassword` variables of `SecurityCtrlr` and `NetworkConfiguration` (2.0.1).
-/// The 2.0.1 variables are found by shape, so no action name is needed. Other keys and
-/// values are preserved.
+/// beside a case-insensitive `"key": "AuthorizationKey"` (1.6), and secret device-model
+/// and network profile values (2.0.1). These are found by shape without an action name.
 pub fn redact_payload(payload: &mut Value) {
     match payload {
         Value::Object(fields) => {
             redact_variable_values(fields);
+            if let Some(data) = fields.get_mut("connectionData") {
+                for path in NETWORK_SECRET_PATHS {
+                    if let Some(value) = data.pointer_mut(path) {
+                        *value = Value::from(REDACTED);
+                    }
+                }
+            }
             if fields
                 .get("key")
                 .and_then(Value::as_str)
@@ -931,6 +961,16 @@ mod tests {
             assert_eq!(code.as_str(), "FormatViolation");
             assert_eq!(code, ErrorCode::from_wire("FormatViolation"));
         }
+        for text in [r#"[2,"id"]"#, r#"[2,"id",7,{}]"#] {
+            let err = parse_err(text);
+            assert_eq!(
+                code(err.reply_for(Protocol::V16)),
+                ErrorCode::FormationViolation
+            );
+            for protocol in [Protocol::V201, Protocol::V21] {
+                assert_eq!(code(err.reply_for(protocol)).as_str(), "RpcFrameworkError");
+            }
+        }
         assert!(
             parse_err(r"[2]").reply_for(Protocol::V201).is_none(),
             "no readable id, no reply"
@@ -1035,6 +1075,48 @@ mod tests {
             assert!(!text.contains(SENTINEL), "{text}");
             assert!(text.contains(REDACTED), "{text}");
         }
+        let frames = [
+            Frame::call(
+                "network",
+                "SetNetworkProfile",
+                json!({
+                    "connectionData": {
+                        "apn": {"apnPassword": SENTINEL},
+                        "vpn": {"password": SENTINEL, "key": SENTINEL}
+                    }
+                }),
+            ),
+            Frame::call(
+                "event",
+                "NotifyEvent",
+                json!({
+                    "eventData": [{
+                        "component": {"name": "SecurityCtrlr"},
+                        "variable": {"name": "BasicAuthPassword"},
+                        "actualValue": SENTINEL
+                    }, {
+                        "component": {"name": "SecurityCtrlr"},
+                        "variable": {"name": "Identity"},
+                        "actualValue": "keep-me"
+                    }]
+                }),
+            ),
+        ];
+        let mut leaks = Vec::new();
+        for frame in frames {
+            let text = redact_secrets(&frame).to_json_string();
+            if text.contains(SENTINEL) || !text.contains(REDACTED) {
+                leaks.push(text.clone());
+            }
+            if frame.action() == Some("NotifyEvent") {
+                assert!(text.contains("keep-me"), "{text}");
+            }
+            let text = redacted(frame.to_value()).to_string();
+            if text.contains(SENTINEL) {
+                leaks.push(text);
+            }
+        }
+        assert!(leaks.is_empty(), "unredacted frames or payloads: {leaks:?}");
     }
 
     #[test]

@@ -131,14 +131,15 @@ impl Attempts {
             let outcome = queued?.wait().await;
             match outcome {
                 Err(error) if attempt < attempts && retryable(&error) => {
+                    let delay = interval.saturating_mul(attempt);
                     let _ = log.send(Internal::Log(
                         LogLevel::Warn,
                         format!(
                             "{name} attempt {attempt}/{attempts} failed: {error}; retrying in {}s",
-                            interval.as_secs()
+                            delay.as_secs()
                         ),
                     ));
-                    tokio::time::sleep(interval).await;
+                    tokio::time::sleep(delay).await;
                     attempt += 1;
                     let enqueue =
                         || connection.enqueue(name, payload.clone(), Some(timeout), validate);
@@ -535,6 +536,55 @@ mod tests {
         }
         assert!(actor.calls.is_empty());
         assert!(actor.call_results.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transaction_retry_wait_grows_with_each_failed_transmission() {
+        let mut actor = actor();
+        let (connection, mut reply) = Connection::test_reply_channel();
+        actor.link.conn = Some(connection.clone());
+        actor.state.registration = Some(RegistrationStatus::Accepted);
+        actor.registry.change("TransactionMessageAttempts", "3");
+        actor
+            .registry
+            .change("TransactionMessageRetryInterval", "60");
+        actor.call_raw(
+            Origin::Station,
+            "MeterValues",
+            serde_json::json!({"transactionId": 7}),
+            false,
+            Box::new(|_, _| {}),
+        );
+
+        for delay in [60, 120] {
+            reply()
+                .send(Err(CallError::Timeout {
+                    action: "MeterValues".to_owned(),
+                    after: Duration::from_secs(1),
+                }))
+                .unwrap();
+            assert!(actor.call_results.next().now_or_never().is_none());
+            tokio::time::advance(Duration::from_secs(delay - 1)).await;
+            assert!(actor.call_results.next().now_or_never().is_none());
+
+            // A newly queued CALL must be next in line until the retry deadline.
+            let marker = connection
+                .enqueue("Heartbeat", serde_json::json!({}), None, false)
+                .unwrap();
+            reply().send(Ok(serde_json::json!({}))).unwrap();
+            assert!(
+                matches!(marker.wait().now_or_never(), Some(Ok(_))),
+                "transaction resent before the {delay}s retry delay elapsed"
+            );
+
+            tokio::time::advance(Duration::from_secs(1)).await;
+            assert!(actor.call_results.next().now_or_never().is_none());
+        }
+        reply().send(Ok(serde_json::json!({}))).unwrap();
+        assert!(matches!(
+            actor.call_results.next().now_or_never(),
+            Some(Some(_))
+        ));
     }
 
     #[tokio::test(start_paused = true)]

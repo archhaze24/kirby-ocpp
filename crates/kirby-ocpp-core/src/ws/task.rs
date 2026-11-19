@@ -18,7 +18,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::Value;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Instant, Interval, interval_at, sleep_until, timeout};
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at, sleep_until, timeout};
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
@@ -164,7 +164,11 @@ impl Task {
         let mut ping = self
             .ping_interval
             .filter(|period| !period.is_zero())
-            .map(|period| interval_at(Instant::now() + period, period));
+            .map(|period| {
+                let mut interval = interval_at(Instant::now() + period, period);
+                interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+                interval
+            });
 
         let stop = loop {
             let deadline = self.next_deadline();

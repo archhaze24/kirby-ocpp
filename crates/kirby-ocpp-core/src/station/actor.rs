@@ -218,6 +218,8 @@ pub(crate) struct StationActor {
     pub(super) sync_boot: bool,
     /// A queued message failed in the running sync: arm a retry when it ends.
     pub(super) sync_failed: bool,
+    /// Consecutive failed sync rounds on the current link.
+    pub(super) sync_failed_rounds: u32,
     /// Rounds each queued message failed in this connection (not persisted).
     pub(super) sync_failures: HashMap<u64, u32>,
     /// Boot attempts left after a `Reset` (`ResetRetries`).
@@ -347,6 +349,7 @@ impl StationActor {
             sync_keys: VecDeque::new(),
             sync_boot: false,
             sync_failed: false,
+            sync_failed_rounds: 0,
             sync_failures: HashMap::new(),
             reset_retries: None,
             hard_reset_deadline: None,
