@@ -30,7 +30,9 @@ use crate::station::actor::{StationActor, TimerKey};
 use crate::station::authorization::known_parent;
 use crate::station::command::Outcome;
 use crate::station::event::LogLevel;
-use crate::station::reservation::{can_remote_start, clear_reservation, remote_start_usable};
+use crate::station::reservation::{
+    can_remote_start, clear_reservation, remote_start_usable, reserved_for_other,
+};
 use crate::station::transactions::{Done, ignore};
 
 pub(super) fn remote_start(
@@ -40,8 +42,11 @@ pub(super) fn remote_start(
 ) {
     let now = actor.clock.now_utc();
     let id_tag = request.id_tag;
+    let parent = known_parent(&id_tag, now, &actor.local_list, &actor.auth_cache);
     let target: Option<ConnectorId> = match request.connector_id {
         Some(id) if !id.is_station() => Some(id),
+        // The first free connector; a connector held for this idTag (connector-0 reservation)
+        // counts as free for it.
         _ => actor
             .state
             .connectors
@@ -49,11 +54,13 @@ pub(super) fn remote_start(
             .find(|c| {
                 c.transaction.is_idle()
                     && c.availability == crate::ocpp::types::AvailabilityType::Operative
-                    && c.status == crate::ocpp::types::ConnectorStatus::Available
+                    && (c.status == crate::ocpp::types::ConnectorStatus::Available
+                        || (c.status == crate::ocpp::types::ConnectorStatus::Reserved
+                            && !reserved_for_other(c, &id_tag, parent.as_ref(), now)
+                            && c.reservation.is_some()))
             })
             .map(|c| c.id),
     };
-    let parent = known_parent(&id_tag, now, &actor.local_list, &actor.auth_cache);
     let connector = target.and_then(|id| actor.connector(id).ok());
     let profile_ok = request.charging_profile.as_ref().is_none_or(|p| {
         p.charging_profile_purpose == ChargingProfilePurposeType::TxProfile
@@ -229,6 +236,11 @@ impl StationActor {
             }
             self.timers.cancel(&TimerKey::ReservationExpiry(id));
             self.status_changed(id);
+        }
+        // A connector-0 reservation goes too (its held connector was cleared above).
+        if self.state.charge_point.reservation.take().is_some() {
+            self.timers
+                .cancel(&TimerKey::ReservationExpiry(ConnectorId::STATION));
         }
         self.state.registration = None;
         self.reset_retries = Some(self.registry.reset_retries());

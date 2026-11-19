@@ -759,17 +759,25 @@ impl<T: ScenarioTarget> Ctx<'_, T> {
                         expected["match"] = super::redacted(matches);
                     }
                     self.evidence.expected = Some(expected);
-                    // The latest frame of that action that did not match, if any.
-                    self.evidence.actual = self
+                    // The latest frame of that action that did not match, else the latest
+                    // CALL of any kept action. A frame kept without its payload shows its
+                    // action and direction instead.
+                    let seen = self
                         .frames
                         .iter()
                         .rev()
                         .find(|(record, _)| record.frame.get(2).and_then(Value::as_str) == Some(call))
-                        .map(|(record, _)| {
-                            vars::clip_json(&super::redacted(
-                                record.frame.get(3).unwrap_or(&Value::Null),
-                            ))
-                        });
+                        .or_else(|| self.frames.back());
+                    self.evidence.actual = seen.map(|(record, _)| {
+                        let same = record.frame.get(2).and_then(Value::as_str) == Some(call);
+                        match record.frame.get(3) {
+                            Some(payload) if same => vars::clip_json(&super::redacted(payload)),
+                            _ => vars::clip_json(&serde_json::json!({
+                                "call": record.frame.get(2).and_then(Value::as_str),
+                                "direction": record.direction,
+                            })),
+                        }
+                    });
                     return Err(format!("timed out after {timeout_ms} ms waiting for a {call} CALL"));
                 }
                 () = self.cancel.cancelled() => return Err("cancelled".to_owned()),
@@ -1306,6 +1314,37 @@ mod tests {
             assert_eq!(ctx.frames.len(), 1);
             ctx.expect_call("Heartbeat", None, None, 50).await.unwrap();
             assert!(ctx.frames.is_empty() && ctx.frame_bytes == 0);
+        });
+    }
+
+    #[test]
+    fn a_timeout_names_what_was_seen_when_no_payload_was_kept() {
+        with_ctx(async |ctx| {
+            // Nothing received: no `actual`.
+            ctx.expect_call("Heartbeat", None, None, 20)
+                .await
+                .unwrap_err();
+            assert_eq!(ctx.evidence.actual, None);
+
+            // A kept frame of the wanted action (wrong direction) holds no payload: its
+            // action and direction are shown.
+            ctx.record(call_event("Heartbeat", "1"));
+            ctx.expect_call("Heartbeat", Some(crate::station::Direction::Out), None, 20)
+                .await
+                .unwrap_err();
+            let actual = ctx.evidence.actual.take().unwrap();
+            assert_eq!(actual, r#"{"call":"Heartbeat","direction":"in"}"#);
+
+            // Only other actions were seen: the latest one is named.
+            ctx.wanted.insert("StatusNotification".to_owned(), false);
+            ctx.frames.clear();
+            ctx.frame_bytes = 0;
+            ctx.record(call_event("StatusNotification", "2"));
+            ctx.expect_call("Heartbeat", None, None, 20)
+                .await
+                .unwrap_err();
+            let actual = ctx.evidence.actual.take().unwrap();
+            assert!(actual.contains("StatusNotification"), "{actual}");
         });
     }
 

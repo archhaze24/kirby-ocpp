@@ -28,6 +28,14 @@ pub struct EvseAvail {
     /// have ended.
     #[serde(default)]
     pub station_inoperative_pending: bool,
+    /// An EVSE-level `Inoperative` request waits for the transaction on this EVSE to end
+    /// (added in format version 2).
+    #[serde(default)]
+    pub evse_inoperative_pending: bool,
+    /// Connectors with a connector-level `Inoperative` request waiting for the transaction
+    /// to end (added in format version 2).
+    #[serde(default)]
+    pub connectors_inoperative_pending: Vec<u32>,
 }
 
 /// One connector.
@@ -313,6 +321,13 @@ impl Station2Actor {
                 operative: e.operative,
                 connectors: e.connectors.iter().map(|c| (c.id, c.operative)).collect(),
                 station_inoperative_pending: station_pending,
+                evse_inoperative_pending: e.pending_inoperative,
+                connectors_inoperative_pending: e
+                    .connectors
+                    .iter()
+                    .filter(|c| c.pending_inoperative)
+                    .map(|c| c.id)
+                    .collect(),
             })
             .collect()
     }
@@ -336,9 +351,13 @@ impl Station2Actor {
                 continue;
             };
             evse.operative = entry.operative;
+            // A request only waits while the level is still operative.
+            evse.pending_inoperative = entry.operative && entry.evse_inoperative_pending;
             for &(id, operative) in &entry.connectors {
                 if let Some(c) = evse.connectors.iter_mut().find(|c| c.id == id) {
                     c.operative = operative;
+                    c.pending_inoperative =
+                        operative && entry.connectors_inoperative_pending.contains(&id);
                 }
             }
         }

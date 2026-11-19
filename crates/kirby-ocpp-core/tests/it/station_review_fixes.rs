@@ -290,62 +290,8 @@ async fn a_refused_authorize_does_not_stop_the_running_transaction() {
     rig.shutdown().await;
 }
 
-#[tokio::test]
-async fn a_refused_start_keeps_the_transaction_until_the_energy_limit() {
-    let rig = booted().await;
-    rig.cfg("StopTransactionOnInvalidId", "false").await;
-    rig.cfg("MaxEnergyOnInvalidId", "50").await;
-    let outcome = rig.begin(1, "BLOCKSTART").await;
-    assert!(
-        matches!(outcome, Outcome::TransactionStarted { .. }),
-        "{outcome:?}"
-    );
-    let mark = rig.csms.mark();
-    rig.send(Command::MeterValues {
-        connector: C1,
-        wh_delta: 30,
-        measurands: None,
-    })
-    .await;
-    barrier(&rig).await;
-    rig.assert_no_calls("StopTransaction", mark);
-    assert!(!conn1(&rig).transaction.is_idle(), "below the limit");
-    rig.send(Command::MeterValues {
-        connector: C1,
-        wh_delta: 30,
-        measurands: None,
-    })
-    .await;
-    let stop = rig
-        .csms
-        .wait_for_call_after(mark, "StopTransaction", |_| true, STEP)
-        .await
-        .unwrap();
-    assert_eq!(stop["reason"], "DeAuthorized");
-    rig.shutdown().await;
-}
-
-#[tokio::test]
-async fn a_refused_start_without_an_energy_limit_goes_on() {
-    let rig = booted().await;
-    rig.cfg("StopTransactionOnInvalidId", "false").await;
-    let outcome = rig.begin(1, "CONCURRENTSTART").await;
-    assert!(
-        matches!(outcome, Outcome::TransactionStarted { .. }),
-        "{outcome:?}"
-    );
-    let mark = rig.csms.mark();
-    rig.send(Command::MeterValues {
-        connector: C1,
-        wh_delta: 100_000,
-        measurands: None,
-    })
-    .await;
-    barrier(&rig).await;
-    rig.assert_no_calls("StopTransaction", mark);
-    assert!(!conn1(&rig).transaction.is_idle());
-    rig.shutdown().await;
-}
+// `StopTransactionOnInvalidId=false` (delivery stops, the transaction stays open) is covered
+// in `station_invalid_id.rs`.
 
 #[tokio::test]
 async fn a_refused_start_stops_at_once_with_stop_transaction_on_invalid_id() {

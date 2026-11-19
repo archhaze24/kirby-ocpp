@@ -308,7 +308,9 @@ impl StationActor {
             ));
         }
         let resumes = !connector.transaction.is_idle();
-        let status = if resumes {
+        let status = if resumes && self.delivery_blocked.contains(&id) {
+            ConnectorStatus::SuspendedEVSE // the idTag was refused: no energy
+        } else if resumes {
             ConnectorStatus::Charging // a suspended transaction resumes
         } else if connector.reservation.is_some() {
             ConnectorStatus::Reserved
@@ -413,6 +415,10 @@ impl StationActor {
             .ok_or(StationError::UnknownConnector(id))?;
         let status = if id.is_station() {
             charge_point_status(connector.availability, ConnectorStatus::Available)
+        } else if self.delivery_blocked.contains(&id)
+            && status_after_fault_clear(connector) == ConnectorStatus::Charging
+        {
+            ConnectorStatus::SuspendedEVSE
         } else {
             status_after_fault_clear(connector)
         };

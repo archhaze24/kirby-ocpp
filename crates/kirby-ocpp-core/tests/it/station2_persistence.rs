@@ -90,12 +90,16 @@ fn sample() -> PersistedStation2 {
             operative: true,
             connectors: vec![(1, true)],
             station_inoperative_pending: false,
+            evse_inoperative_pending: true,
+            connectors_inoperative_pending: vec![1],
         },
         EvseAvail {
             evse: 2,
             operative: false,
             connectors: vec![(1, false)],
             station_inoperative_pending: false,
+            evse_inoperative_pending: false,
+            connectors_inoperative_pending: Vec::new(),
         },
     ];
     state
@@ -403,6 +407,8 @@ async fn availability_survives_a_restart() {
         operative: false,
         connectors: vec![(1, true)],
         station_inoperative_pending: false,
+        evse_inoperative_pending: false,
+        connectors_inoperative_pending: Vec::new(),
     }];
     store(dir.path()).save2(&state).unwrap();
     let (station, join) = spawn(&csms, dir.path());
@@ -536,6 +542,33 @@ fn device_model_values_are_plain_strings_in_the_file() {
     assert_eq!(value["device_model"]["values"]["K"], "v");
     assert_eq!(value["version"], STORE2_VERSION);
     assert_eq!(value["protocol"], "ocpp2.0.1");
+}
+
+#[test]
+fn a_version_1_file_without_pending_request_fields_loads_with_none_waiting() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(dir.path());
+    store.save2(&sample()).unwrap();
+    let mut value: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+    assert_eq!(
+        value["evse_availability"][0]["connectors_inoperative_pending"],
+        json!([1])
+    );
+    value["version"] = 1.into();
+    for entry in value["evse_availability"].as_array_mut().unwrap() {
+        let entry = entry.as_object_mut().unwrap();
+        entry.remove("evse_inoperative_pending");
+        entry.remove("connectors_inoperative_pending");
+    }
+    fs::write(store.path(), serde_json::to_vec(&value).unwrap()).unwrap();
+    let state = loaded2(store.load2().unwrap());
+    assert!(
+        state
+            .evse_availability
+            .iter()
+            .all(|e| !e.evse_inoperative_pending && e.connectors_inoperative_pending.is_empty())
+    );
+    assert_eq!(state.evse_availability.len(), 2);
 }
 
 #[test]

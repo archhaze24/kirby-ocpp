@@ -12,9 +12,7 @@
 //!
 //! Checks run in this order; the first failure is the answer:
 //!
-//! 1. connector `0`: `Rejected` when `ReserveConnectorZeroSupported=false`,
-//!    otherwise the first connector that is idle, operative and `Available`
-//!    (TS `findAvailable`); no such connector -> `Unavailable`;
+//! 1. connector `0` is not handled here, see [`reserve_zero`];
 //! 2. no such connector -> `Unavailable`;
 //! 3. `Occupied`: an active transaction, a live reservation with another id, or
 //!    a status of `Preparing`, `Charging`, `SuspendedEV`, `SuspendedEVSE`,
@@ -30,6 +28,15 @@
 //!
 //! Replacement: a request with the reservation id that is already on this
 //! connector replaces it (not `Occupied`), which is the TS bug fix.
+//!
+//! ## Connector 0
+//!
+//! A reservation on connector 0 locks no connector. It is stored on the charge point
+//! (`Snapshot::charge_point.reservation`, persisted as a connector entry with id `0`) and [`sync_zero_hold`]
+//! keeps one connector available: while exactly one connector is free it carries a copy of the
+//! reservation and shows `Reserved`, so every rule of a connector reservation (start gate,
+//! RemoteStart, status) applies to it unchanged. The reserved idTag (or its parent) may start
+//! on any connector; that consumes the reservation.
 //!
 //! ## Matching a tag (`accepts`)
 //!
@@ -172,9 +179,8 @@ pub fn reserve_now(
     connectors: &mut [ConnectorSnapshot],
     request: &ReserveNowRequest,
     now: DateTime<Utc>,
-    connector_zero_supported: bool,
 ) -> Result<ConnectorId, ReservationStatus> {
-    let index = target_index(connectors, request.connector_id, connector_zero_supported)?;
+    let index = target_index(connectors, request.connector_id)?;
 
     let connector = &connectors[index];
     let same_reservation = connector
@@ -261,24 +267,163 @@ pub fn clear_reservation(connector: &mut ConnectorSnapshot) -> Option<Reservatio
     Some(released)
 }
 
+/// A connector that is idle, operative, unreserved and `Available`.
+fn is_free(connector: &ConnectorSnapshot) -> bool {
+    connector.transaction.is_idle()
+        && connector.availability == AvailabilityType::Operative
+        && connector.reservation.is_none()
+        && connector.status == ConnectorStatus::Available
+}
+
+/// Decides and applies a `ReserveNow` on connector 0: the reservation is stored on
+/// `charge_point` (connector 0) and locks no connector (OCPP 1.6 section 5.13);
+/// [`sync_zero_hold`] keeps a connector available for it.
+///
+/// Order of the answers: `Rejected` without `ReserveConnectorZeroSupported`; `Occupied` when
+/// connector 0 already holds a reservation (the caller releases one with the same id first, which
+/// replaces it) or no connector is free; `Faulted` / `Unavailable` for the charge point, or
+/// when every connector is; `Rejected` for an expiry that is not in the future or a
+/// reservation id that is live on a connector. Nothing changes on `Err`.
+pub fn reserve_zero(
+    connectors: &[ConnectorSnapshot],
+    charge_point: &mut ConnectorSnapshot,
+    request: &ReserveNowRequest,
+    now: DateTime<Utc>,
+    connector_zero_supported: bool,
+) -> Result<(), ReservationStatus> {
+    if !connector_zero_supported {
+        return Err(ReservationStatus::Rejected);
+    }
+    if charge_point.reservation.is_some() {
+        return Err(ReservationStatus::Occupied);
+    }
+    if charge_point.status == ConnectorStatus::Faulted {
+        return Err(ReservationStatus::Faulted);
+    }
+    if charge_point.availability == AvailabilityType::Inoperative
+        || charge_point.status == ConnectorStatus::Unavailable
+    {
+        return Err(ReservationStatus::Unavailable);
+    }
+    let usable = |c: &&ConnectorSnapshot| {
+        c.availability == AvailabilityType::Operative
+            && !matches!(
+                c.status,
+                ConnectorStatus::Faulted | ConnectorStatus::Unavailable
+            )
+    };
+    if !connectors.iter().any(|c| usable(&c)) {
+        let all_faulted = !connectors.is_empty()
+            && connectors
+                .iter()
+                .all(|c| c.status == ConnectorStatus::Faulted);
+        return Err(if all_faulted {
+            ReservationStatus::Faulted
+        } else {
+            ReservationStatus::Unavailable
+        });
+    }
+    if !connectors.iter().any(is_free) {
+        return Err(ReservationStatus::Occupied);
+    }
+    if request.expiry_date <= now {
+        return Err(ReservationStatus::Rejected);
+    }
+    let id_in_use = connectors.iter().any(|c| {
+        c.reservation
+            .as_ref()
+            .is_some_and(|reservation| reservation.id == request.reservation_id)
+    });
+    if id_in_use {
+        return Err(ReservationStatus::Rejected);
+    }
+    charge_point.reservation = Some(Reservation {
+        id: request.reservation_id,
+        id_tag: request.id_tag.clone(),
+        parent_id_tag: request.parent_id_tag.clone(),
+        expiry: request.expiry_date,
+    });
+    Ok(())
+}
+
+/// Keeps one connector available for the live connector-0 reservation `zero`: when exactly one
+/// connector is free it is held, that is it gets a copy of the reservation (same id) and the
+/// status `Reserved`, so the usual rules refuse other idTags on it. With two or more free
+/// connectors, or none, no connector is held. Returns the connectors whose hold changed.
+pub fn sync_zero_hold(
+    connectors: &mut [ConnectorSnapshot],
+    zero: Option<&Reservation>,
+    now: DateTime<Utc>,
+) -> Vec<ConnectorId> {
+    let Some(zero) = zero.filter(|reservation| !reservation.is_expired(now)) else {
+        return Vec::new();
+    };
+    let holds = |c: &ConnectorSnapshot| {
+        c.reservation
+            .as_ref()
+            .is_some_and(|reservation| reservation.id == zero.id)
+    };
+    let available = |c: &ConnectorSnapshot| {
+        is_free(c)
+            || (holds(c)
+                && c.transaction.is_idle()
+                && c.availability == AvailabilityType::Operative
+                && c.status == ConnectorStatus::Reserved)
+    };
+    let mut free = connectors.iter().filter(|c| available(c)).map(|c| c.id);
+    let holder = match (free.next(), free.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    };
+    let mut changed = Vec::new();
+    for connector in connectors.iter_mut() {
+        if Some(connector.id) == holder {
+            if !holds(connector) {
+                connector.reservation = Some(zero.clone());
+                connector.status = ConnectorStatus::Reserved;
+                changed.push(connector.id);
+            }
+        } else if holds(connector) {
+            clear_reservation(connector);
+            changed.push(connector.id);
+        }
+    }
+    changed
+}
+
+/// Releases the reservation with this id wherever it is: on connectors (also the held copy of
+/// a connector-0 reservation) and on connector 0. Returns the connectors released, `0` last.
+pub fn cancel_all(
+    connectors: &mut [ConnectorSnapshot],
+    charge_point: &mut ConnectorSnapshot,
+    id: ReservationId,
+) -> Vec<ConnectorId> {
+    let mut released = Vec::new();
+    for connector in connectors.iter_mut() {
+        if connector
+            .reservation
+            .as_ref()
+            .is_some_and(|reservation| reservation.id == id)
+        {
+            clear_reservation(connector);
+            released.push(connector.id);
+        }
+    }
+    if charge_point
+        .reservation
+        .as_ref()
+        .is_some_and(|reservation| reservation.id == id)
+    {
+        charge_point.reservation = None;
+        released.push(charge_point.id);
+    }
+    released
+}
+
 fn target_index(
     connectors: &[ConnectorSnapshot],
     requested: ConnectorId,
-    connector_zero_supported: bool,
 ) -> Result<usize, ReservationStatus> {
-    if requested.is_station() {
-        if !connector_zero_supported {
-            return Err(ReservationStatus::Rejected);
-        }
-        return connectors
-            .iter()
-            .position(|connector| {
-                connector.transaction.is_idle()
-                    && connector.availability == AvailabilityType::Operative
-                    && connector.status == ConnectorStatus::Available
-            })
-            .ok_or(ReservationStatus::Unavailable);
-    }
     connectors
         .iter()
         .position(|connector| connector.id == requested)
@@ -368,7 +513,16 @@ mod tests {
         list: &mut [ConnectorSnapshot],
         req: &ReserveNowRequest,
     ) -> Result<ConnectorId, ReservationStatus> {
-        reserve_now(list, req, now(), true)
+        reserve_now(list, req, now())
+    }
+
+    fn busy_transaction() -> TransactionState {
+        TransactionState::Active(ActiveTransaction {
+            tx_id: TxId::Csms(5),
+            id_tag: tag("DRIVER"),
+            started_at: now(),
+            meter_start_wh: 0,
+        })
     }
 
     fn connector(list: &mut [ConnectorSnapshot], id: u32) -> &mut ConnectorSnapshot {
@@ -562,22 +716,65 @@ mod tests {
         );
     }
 
-    #[test]
-    fn connector_zero_picks_the_first_available_connector() {
-        let mut list = connectors(3);
-        connector(&mut list, 1).status = ConnectorStatus::Charging;
-        assert_eq!(
-            reserve_now(&mut list, &request(0, 11, "TAG1", future()), now(), true),
-            Ok(ConnectorId::new(2))
-        );
+    fn no_ids() -> Vec<ConnectorId> {
+        Vec::new()
+    }
+
+    fn station() -> ConnectorSnapshot {
+        ConnectorSnapshot::new(ConnectorId::STATION)
+    }
+
+    fn reserve_zero_on(
+        list: &mut [ConnectorSnapshot],
+        cp: &mut ConnectorSnapshot,
+        req: &ReserveNowRequest,
+        supported: bool,
+    ) -> Result<(), ReservationStatus> {
+        reserve_zero(list, cp, req, now(), supported)
     }
 
     #[test]
-    fn connector_zero_without_a_free_connector_is_unavailable() {
+    fn connector_zero_locks_no_connector() {
+        let mut list = connectors(3);
+        let mut cp = station();
+        connector(&mut list, 1).status = ConnectorStatus::Charging;
+        assert_eq!(
+            reserve_zero_on(&mut list, &mut cp, &request(0, 11, "TAG1", future()), true),
+            Ok(())
+        );
+        assert!(list.iter().all(|c| c.reservation.is_none()));
+        assert_eq!(cp.reservation.as_ref().unwrap().id, ReservationId::new(11));
+    }
+
+    #[test]
+    fn connector_zero_without_a_free_connector_is_occupied() {
         let mut list = connectors(1);
+        let mut cp = station();
         connector(&mut list, 1).status = ConnectorStatus::Preparing;
         assert_eq!(
-            reserve_now(&mut list, &request(0, 11, "TAG1", future()), now(), true),
+            reserve_zero_on(&mut list, &mut cp, &request(0, 11, "TAG1", future()), true),
+            Err(ReservationStatus::Occupied)
+        );
+        assert!(cp.reservation.is_none());
+    }
+
+    #[test]
+    fn connector_zero_answers_faulted_and_unavailable() {
+        let mut list = connectors(2);
+        let mut cp = station();
+        cp.status = ConnectorStatus::Faulted;
+        let req = request(0, 11, "TAG1", future());
+        assert_eq!(
+            reserve_zero_on(&mut list, &mut cp, &req, true),
+            Err(ReservationStatus::Faulted)
+        );
+        cp.status = ConnectorStatus::Available;
+        for c in &mut list {
+            c.availability = AvailabilityType::Inoperative;
+            c.status = ConnectorStatus::Unavailable;
+        }
+        assert_eq!(
+            reserve_zero_on(&mut list, &mut cp, &req, true),
             Err(ReservationStatus::Unavailable)
         );
     }
@@ -585,11 +782,70 @@ mod tests {
     #[test]
     fn connector_zero_is_rejected_when_not_supported() {
         let mut list = connectors(2);
+        let mut cp = station();
         assert_eq!(
-            reserve_now(&mut list, &request(0, 11, "TAG1", future()), now(), false),
+            reserve_zero_on(&mut list, &mut cp, &request(0, 11, "TAG1", future()), false),
             Err(ReservationStatus::Rejected)
         );
+        assert!(cp.reservation.is_none());
+    }
+
+    #[test]
+    fn the_last_free_connector_is_held_for_the_reservation() {
+        let mut list = connectors(2);
+        let zero = reservation(11, "RES", None, future());
+        // Two free connectors: nothing is held.
+        assert_eq!(sync_zero_hold(&mut list, Some(&zero), now()), no_ids());
         assert!(list.iter().all(|c| c.reservation.is_none()));
+        // One left: it is held and shown `Reserved`.
+        connector(&mut list, 1).status = ConnectorStatus::Charging;
+        connector(&mut list, 1).transaction = busy_transaction();
+        assert_eq!(
+            sync_zero_hold(&mut list, Some(&zero), now()),
+            vec![ConnectorId::new(2)]
+        );
+        assert_eq!(connector(&mut list, 2).status, ConnectorStatus::Reserved);
+        assert_eq!(sync_zero_hold(&mut list, Some(&zero), now()), no_ids());
+        // The reserved tag may start there, another one may not.
+        let held = connector(&mut list, 2).clone();
+        assert!(reserved_for_other(&held, &tag("OTHER"), None, now()));
+        assert!(!reserved_for_other(&held, &tag("RES"), None, now()));
+        // A connector frees up again: the hold is released.
+        connector(&mut list, 1).status = ConnectorStatus::Available;
+        connector(&mut list, 1).transaction = TransactionState::Idle;
+        assert_eq!(
+            sync_zero_hold(&mut list, Some(&zero), now()),
+            vec![ConnectorId::new(2)]
+        );
+        assert_eq!(connector(&mut list, 2).status, ConnectorStatus::Available);
+        assert!(connector(&mut list, 2).reservation.is_none());
+    }
+
+    #[test]
+    fn no_hold_without_a_live_reservation() {
+        let mut list = connectors(1);
+        let expired = reservation(11, "RES", None, now() - Duration::minutes(1));
+        assert_eq!(sync_zero_hold(&mut list, Some(&expired), now()), no_ids());
+        assert_eq!(sync_zero_hold(&mut list, None, now()), no_ids());
+        assert_eq!(connector(&mut list, 1).status, ConnectorStatus::Available);
+    }
+
+    #[test]
+    fn cancel_all_releases_the_reservation_and_its_held_connector() {
+        let mut list = connectors(1);
+        let mut cp = station();
+        cp.reservation = Some(reservation(11, "RES", None, future()));
+        sync_zero_hold(&mut list, cp.reservation.as_ref(), now());
+        assert_eq!(
+            cancel_all(&mut list, &mut cp, ReservationId::new(11)),
+            vec![ConnectorId::new(1), ConnectorId::STATION]
+        );
+        assert!(cp.reservation.is_none());
+        assert_eq!(connector(&mut list, 1).status, ConnectorStatus::Available);
+        assert_eq!(
+            cancel_all(&mut list, &mut cp, ReservationId::new(11)),
+            no_ids()
+        );
     }
 
     // ---- matching, remote start, start gating -----------------------------------

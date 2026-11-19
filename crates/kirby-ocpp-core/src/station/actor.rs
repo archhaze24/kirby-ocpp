@@ -206,8 +206,11 @@ pub(crate) struct StationActor {
     pub(super) local_list_dirty: bool,
     /// Counter for station-local transaction ids and queue keys.
     pub(super) next_local: u64,
-    /// Energy (Wh) after which a transaction with an invalidated idTag is stopped.
+    /// Meter value (Wh) at which energy delivery stops for a transaction whose idTag the
+    /// CSMS refused (`StopTransactionOnInvalidId=false`, `MaxEnergyOnInvalidId` above 0).
     pub(super) invalid_limits: HashMap<ConnectorId, u64>,
+    /// Connectors whose transaction stays open but delivers no energy (idTag refused).
+    pub(super) delivery_blocked: std::collections::HashSet<ConnectorId>,
     /// Energy integration state per connector (see `power.rs`).
     pub(super) meters: HashMap<ConnectorId, super::power::MeterRuntime>,
     /// Offline syncs of queue entries still running.
@@ -344,6 +347,7 @@ impl StationActor {
             // Never reuse a key still present in the restored queue (the wall clock may jump back).
             next_local: u64::try_from(clock_seed).unwrap_or(1).max(queue_high_water),
             invalid_limits: HashMap::new(),
+            delivery_blocked: std::collections::HashSet::new(),
             meters: HashMap::new(),
             sync_outstanding: 0,
             sync_keys: VecDeque::new(),
@@ -427,6 +431,8 @@ impl StationActor {
                 Wake::Internal(internal) => self.on_internal(internal),
                 Wake::Timer(key) => self.on_timer(key),
             }
+            // Any event can change which connector a connector-0 reservation has to hold.
+            self.sync_zero_hold();
             // A handler may have changed a connector's status without settling afterwards
             // (unplug, plug-in resume, manual status, fault clear): record the new status now,
             // so the next span is integrated with it and not with the stale one.

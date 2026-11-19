@@ -59,7 +59,7 @@ The footer always ends with the `? help` and `: palette` hints, even in a narrow
 
 #### Monochrome
 
-Color is never the only cue. `--color never`, or a non-empty `NO_COLOR` (`--color always` wins over it), draws the UI without color: the connection chips, the active tab and selections are reverse video, errors and warnings are bold, dim text stays dim, and log lines and notices start with a marker (`i` info, `+` success, `!` warning, `x` error) instead of `●`. Frame rows already carry `CALL`/`RES`/`ERR` and `→`/`←`. `--time utc|local|none` sets the clock in front of log rows (default `utc`); copy and export always use UTC.
+Color is never the only cue. `--color never`, or a non-empty `NO_COLOR` (`--color always` wins over it), draws the UI without color: the connection chips, the active tab and selections are reverse video, errors and warnings are bold, and log lines and notices start with a marker (`i` info, `+` success, `!` warning, `x` error) instead of `●`. Frame rows already carry `CALL`/`RES`/`ERR` and `→`/`←`. `--time utc|local|none` sets the clock in front of log rows (default `utc`); copy and export always use UTC.
 
 First steps: the station connects and boots at startup, and the header shows the connection state. On the Station tab `x` disconnects and `c` connects again (pressing `c` while connected says so). Press `:` and type an action name (BootNotification, Heartbeat, StartTransaction) to run it, or open the Scenarios tab (`7`). Every frame lands in the log. The help popup (`?`) opens with the same hints; it wraps to the terminal width.
 
@@ -446,9 +446,9 @@ The state directory is `--state-dir` (`KIRBY_OCPP_STATE_DIR`), else `~/.kirby-oc
 
 Files are `0600` on Unix, versioned, and written atomically (temp file plus rename, then the directory is fsynced). A file with a newer version than the binary supports is an error and is left alone. A corrupt file, or one that belongs to another charge point, is moved to `<file>.bak` and the station starts clean. Two cases leave the file untouched and run the station without persistence, with a warning: a file that exists but cannot be read, and a file of a station id that differs from this one only by case (such ids share one file on the case-insensitive file systems of macOS and Windows). `state reset` deletes nothing in that second case. `--no-persist` disables both loading and saving. Response rules are never saved.
 
-**OCPP 2.0.1.** A station started with `--protocol ocpp2.0.1` uses its own files, `<id>.station2.json` and `<id>.station2.secrets.json`, with their own format version (1). The same id used with both protocols keeps two independent file sets: neither protocol reads, moves aside or deletes the files of the other. The 2.0.1 state file holds:
+**OCPP 2.0.1.** A station started with `--protocol ocpp2.0.1` uses its own files, `<id>.station2.json` and `<id>.station2.secrets.json`, with their own format version (2; files of version 1 load). The same id used with both protocols keeps two independent file sets: neither protocol reads, moves aside or deletes the files of the other. The 2.0.1 state file holds:
 
-* availability of the station, each EVSE and each connector;
+* availability of the station, each EVSE and each connector, and an `Inoperative` request at any of these levels that waits for a transaction to end;
 * device-model values that differ from their defaults (the `BasicAuthPassword` goes to the secrets file only);
 * the authorization cache (expired entries are dropped at start);
 * transactions in progress and the ids of recently stopped ones;

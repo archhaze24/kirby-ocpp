@@ -31,7 +31,9 @@ use super::connector::{charge_point_status, new_connector};
 use super::event::LogLevel;
 use super::snapshot::Snapshot;
 use crate::config::StationConfig;
+use crate::ids::ConnectorId;
 use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
+use crate::station::TransactionState;
 use crate::station::config_registry::ConfigSnapshot;
 use crate::station::security::{MAX_QUEUED_EVENTS, PendingSecurityEvent};
 use crate::store::{
@@ -222,6 +224,12 @@ impl Persistence {
             ConnectorStatus::Available,
         );
         for saved in persisted.connectors {
+            // Connector `0` holds the connector-0 reservation (no format change: older
+            // builds skip the entry).
+            if saved.id.is_station() {
+                state.charge_point.reservation = saved.reservation;
+                continue;
+            }
             let Some(connector) = state.connectors.iter_mut().find(|c| c.id == saved.id) else {
                 continue;
             };
@@ -339,9 +347,21 @@ impl StationActor {
             connector_count: u32::try_from(self.state.connectors.len()).unwrap_or(u32::MAX),
             connectors: self
                 .state
-                .connectors
+                .charge_point
+                .reservation
                 .iter()
-                .map(|c| PersistedConnector {
+                .map(|reservation| PersistedConnector {
+                    id: ConnectorId::STATION,
+                    status: self.state.charge_point.status,
+                    availability: self.state.charge_point.availability,
+                    pending_availability: None,
+                    ev_connected: false,
+                    meter_wh: 0,
+                    last_id_tag: None,
+                    reservation: Some(reservation.clone()),
+                    transaction: TransactionState::Idle,
+                })
+                .chain(self.state.connectors.iter().map(|c| PersistedConnector {
                     id: c.id,
                     status: c.status,
                     availability: c.availability,
@@ -351,7 +371,7 @@ impl StationActor {
                     last_id_tag: c.last_id_tag.clone(),
                     reservation: c.reservation.clone(),
                     transaction: c.transaction.clone(),
-                })
+                }))
                 .collect(),
             local_authorization_list: self.local_list.clone(),
             authorization_cache: self.auth_cache.clone(),

@@ -47,7 +47,7 @@ use crate::station::authorization::{
     apply_online_id_tag_info, authorize_offline, known_parent, pre_authorize,
 };
 use crate::station::config_registry::{STOP_TXN_ALIGNED_DATA, STOP_TXN_SAMPLED_DATA};
-use crate::station::reservation::{clear_reservation, reserved_for_other};
+use crate::station::reservation::{cancel_all, clear_reservation, reserved_for_other};
 
 /// Shortest pause before a queued message is tried again (a zero
 /// `TransactionMessageRetryInterval` must not spin).
@@ -149,7 +149,8 @@ impl StationActor {
 
     /// The Central System refused the idTag of a started transaction (non-`Accepted`
     /// `StartTransaction.conf`) while `StopTransactionOnInvalidId` is `false`: the transaction
-    /// goes on, limited to `MaxEnergyOnInvalidId` Wh when that is set (`0` = no limit).
+    /// stays open but only stops delivering energy (OCPP 1.6 section 3.5.2): at once, or
+    /// after `MaxEnergyOnInvalidId` Wh when that is above 0.
     fn limit_energy_on_invalid_id(
         &mut self,
         id: ConnectorId,
@@ -164,18 +165,20 @@ impl StationActor {
         if max == 0 {
             self.log(
                 LogLevel::Warn,
-                format!("idTag {id_tag} was refused ({status}); the transaction on connector {id} continues (StopTransactionOnInvalidId=false, no MaxEnergyOnInvalidId)"),
+                format!("idTag {id_tag} was refused ({status}); energy delivery on connector {id} stops, the transaction stays open (StopTransactionOnInvalidId=false)"),
             );
+            self.block_delivery(id);
             return;
         }
         self.invalid_limits.insert(id, meter.saturating_add(max));
         self.log(
             LogLevel::Warn,
-            format!("idTag {id_tag} was refused ({status}); connector {id} will stop after {max}Wh (MaxEnergyOnInvalidId)"),
+            format!("idTag {id_tag} was refused ({status}); energy delivery on connector {id} stops after {max}Wh (MaxEnergyOnInvalidId)"),
         );
     }
 
-    /// After the meter advanced: stop a transaction that used up its `MaxEnergyOnInvalidId`.
+    /// After the meter advanced: stop the energy delivery of a transaction that used up its
+    /// `MaxEnergyOnInvalidId`. The transaction stays open.
     pub(super) fn check_energy_limit(&mut self, id: ConnectorId) {
         let Some(limit) = self.invalid_limits.get(&id).copied() else {
             return;
@@ -184,9 +187,30 @@ impl StationActor {
             return;
         };
         if connector.meter_wh >= limit && !connector.transaction.is_idle() {
-            let tag = connector.last_id_tag.clone();
-            self.invalid_limits.remove(&id);
-            self.stop_transaction(id, StopReason::DeAuthorized, tag, ignore());
+            self.log(
+                LogLevel::Warn,
+                format!("MaxEnergyOnInvalidId used up on connector {id}; energy delivery stops, the transaction stays open"),
+            );
+            self.block_delivery(id);
+        }
+    }
+
+    /// The transaction on `id` stays open without delivering energy: `SuspendedEVSE`, no power.
+    fn block_delivery(&mut self, id: ConnectorId) {
+        self.invalid_limits.remove(&id);
+        self.delivery_blocked.insert(id);
+        // Energy up to now still counts: settle the meters before leaving `Charging`.
+        self.flush_meters();
+        let changed = self.find_connector_mut(id).is_some_and(|connector| {
+            let charging = connector.status == ConnectorStatus::Charging;
+            if charging {
+                connector.status = ConnectorStatus::SuspendedEVSE;
+            }
+            charging
+        });
+        if changed {
+            self.mark_dirty();
+            self.status_changed(id);
         }
     }
 
@@ -274,7 +298,11 @@ impl StationActor {
 
         let key = self.next_key();
         let local = TxId::Local(key);
-        let reservation_id = connector.reservation.as_ref().map(|r| r.id);
+        // A connector-0 reservation is consumed by its idTag on any connector.
+        let reservation_id = match connector.reservation.as_ref() {
+            Some(reservation) => Some(reservation.id),
+            None => self.zero_reservation_for(&id_tag, parent.as_ref()),
+        };
         let meter_start_wh = connector.meter_wh;
         let pending = PendingStart {
             tx_id: local,
@@ -292,6 +320,7 @@ impl StationActor {
             connector.transaction = TransactionState::PendingStart(pending.clone());
         }
         self.invalid_limits.remove(&id);
+        self.delivery_blocked.remove(&id);
 
         if !online {
             self.begin_charging(id, &id_tag);
@@ -434,10 +463,12 @@ impl StationActor {
                 meter_start_wh: pending.meter_start_wh,
             });
         }
-        self.begin_charging(id, &pending.id_tag);
         if lenient {
+            // Before `begin_charging`, so that a connector without an energy allowance never
+            // reports `Charging`.
             self.limit_energy_on_invalid_id(id, &pending.id_tag, decision.id_tag_info.status);
         }
+        self.begin_charging(id, &pending.id_tag);
         done(
             self,
             Ok(Outcome::TransactionStarted {
@@ -449,12 +480,38 @@ impl StationActor {
 
     /// Connector goes `Charging`; reservation consumed; meters armed.
     fn begin_charging(&mut self, id: ConnectorId, id_tag: &IdTag) {
+        let blocked = self.delivery_blocked.contains(&id);
+        let now = self.clock.now_utc();
+        let parent = known_parent(id_tag, now, &self.local_list, &self.auth_cache);
+        let zero = self.zero_reservation_for(id_tag, parent.as_ref());
+        let mut consumed_zero = false;
         if let Some(connector) = self.find_connector_mut(id) {
+            // Holding the connector-0 reservation, or without a reservation of its own.
+            consumed_zero = zero.is_some_and(|zero| {
+                connector
+                    .reservation
+                    .as_ref()
+                    .is_none_or(|own| own.id == zero)
+            });
             clear_reservation(connector);
-            connector.status = ConnectorStatus::Charging;
+            connector.status = if blocked {
+                ConnectorStatus::SuspendedEVSE
+            } else {
+                ConnectorStatus::Charging
+            };
             connector.last_id_tag = Some(id_tag.clone());
         }
         self.timers.cancel(&TimerKey::ReservationExpiry(id));
+        if let (true, Some(zero)) = (consumed_zero, zero) {
+            for released in cancel_all(
+                &mut self.state.connectors,
+                &mut self.state.charge_point,
+                zero,
+            ) {
+                self.timers.cancel(&TimerKey::ReservationExpiry(released));
+                self.status_changed(released);
+            }
+        }
         self.flush_now();
         self.reschedule_metering();
         self.status_changed(id);
@@ -557,6 +614,7 @@ impl StationActor {
         }
         self.timers.cancel(&TimerKey::MeterPeriodic(id));
         self.invalid_limits.remove(&id);
+        self.delivery_blocked.remove(&id);
 
         let queue_it = tx.is_local() || !self.can_talk();
         if queue_it {

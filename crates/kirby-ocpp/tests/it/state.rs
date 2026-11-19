@@ -561,7 +561,10 @@ fn v201_show_reads_the_2_x_file_and_never_prints_secrets() {
     assert_eq!(value["protocol"], "ocpp2.0.1");
     assert_eq!(value["status"], "found");
     assert_eq!(value["secrets_file"], true);
-    assert_eq!(value["supported_store_version"], 1);
+    assert_eq!(
+        value["supported_store_version"],
+        kirby_ocpp_core::store::STORE2_VERSION
+    );
     assert_eq!(value["state"]["boot_count"], 4);
     assert_eq!(
         value["state"]["device_model"]["SecurityCtrlr.BasicAuthPassword"],
