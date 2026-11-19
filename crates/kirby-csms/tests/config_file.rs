@@ -566,6 +566,16 @@ fn file_errors_exit_2_with_the_file_and_the_key_path() {
     let message = rejected(&["--config", &range, "--check-config"], &[]);
     assert!(message.contains("--heartbeat-interval"), "{message}");
     assert!(message.contains("behavior.heartbeat_interval"), "{message}");
+
+    let token = write(
+        dir.path(),
+        "token.toml",
+        "[listener]\nsubprotocol = \"select:ocpp 1.6\"\n",
+    );
+    let message = rejected(&["--config", &token, "--check-config"], &[]);
+    assert!(message.contains("--subprotocol"), "{message}");
+    assert!(message.contains("listener.subprotocol"), "{message}");
+    assert!(message.contains("RFC 6455 token"), "{message}");
 }
 
 #[test]

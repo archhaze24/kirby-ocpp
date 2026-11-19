@@ -997,6 +997,8 @@ fn bad_input_exits_2() {
     for args in [
         vec!["--listen", "not-an-address"],
         vec!["--subprotocol", "bogus"],
+        vec!["--subprotocol", "select:ocpp 1.6"],
+        vec!["--subprotocol", "require:ocpp1.6,a b"],
         vec!["--tls-cert", junk.as_str()],
         vec!["--tls-cert", junk.as_str(), "--tls-key", junk.as_str()],
         vec![

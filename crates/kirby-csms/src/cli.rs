@@ -800,8 +800,18 @@ fn parse_policy(value: &str) -> Result<SubprotocolPolicy, String> {
         Some((kind, name)) => (kind, Some(name)),
         None => (value, None),
     };
+    let token = |name: &str| {
+        if kirby_ocpp_core::config::is_http_token(name) {
+            Ok(name.to_owned())
+        } else {
+            Err(format!(
+                "subprotocol name `{}` is not an RFC 6455 token (letters, digits and !#$%&'*+-.^_`|~ only)",
+                name.escape_debug()
+            ))
+        }
+    };
     let named = |name: Option<&str>| match name {
-        Some(name) if !name.is_empty() => Ok(name.to_owned()),
+        Some(name) if !name.is_empty() => token(name),
         _ => Err(format!(
             "`{kind}` needs a protocol name, e.g. {kind}:ocpp1.6"
         )),
@@ -817,8 +827,9 @@ fn parse_policy(value: &str) -> Result<SubprotocolPolicy, String> {
                             .to_owned(),
                     );
                 }
-                if !listed.iter().any(|known| known == part) {
-                    listed.push(part.to_owned());
+                let part = token(part)?;
+                if !listed.contains(&part) {
+                    listed.push(part);
                 }
             }
             Ok(match <[String; 1]>::try_from(listed) {
@@ -1067,7 +1078,20 @@ mod tests {
         ] {
             assert!(parse_policy(bad).is_err(), "{bad}");
         }
-        assert!(parse_policy("select:a,b").is_ok());
+        assert!(parse_policy("select:a").is_ok());
+        for bad in [
+            "select:a,b",
+            "select:ocpp 1.6",
+            "select:a\"b",
+            "select:ocpp1.6\r\nX: y",
+            "select:ocpp1.6é",
+            "require:ocpp 1.6",
+            "require:ocpp1.6,a b",
+            "require:ocpp1.6\tx",
+        ] {
+            let error = parse_policy(bad).unwrap_err();
+            assert!(error.contains("RFC 6455 token"), "{bad}: {error}");
+        }
     }
 
     #[test]

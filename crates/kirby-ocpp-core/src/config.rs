@@ -578,7 +578,7 @@ pub fn default_state_dir() -> Option<PathBuf> {
 }
 
 /// RFC 7230 token: non-empty, visible ASCII without separators.
-fn is_http_token(value: &str) -> bool {
+pub fn is_http_token(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()

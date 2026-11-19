@@ -39,6 +39,19 @@ fn note(id: u64, kind: &str, text: &str) -> Event {
         .data(escape_json_unsafe(&body.to_string()))
 }
 
+/// Text of the lag note. The count is of events lost from the shared log; a stream filtered by
+/// station cannot tell which of them were its own, so the text says so.
+fn lag_text(skipped: u64, filtered: bool) -> String {
+    if filtered {
+        format!(
+            "{skipped} events of all stations were dropped from the shared stream; \
+             some may belong to other stations"
+        )
+    } else {
+        format!("{skipped} events were dropped")
+    }
+}
+
 fn entry_event(entry: &Entry) -> Event {
     Event::default()
         .id(entry.id.to_string())
@@ -74,7 +87,7 @@ impl StreamState {
             self.queue.push_back(note(
                 resumed_at - 1,
                 "note",
-                &format!("{skipped} events were dropped"),
+                &lag_text(skipped, self.filter.is_some()),
             ));
         }
         for entry in &batch.entries {
@@ -199,6 +212,17 @@ mod tests {
     use axum::http::HeaderValue;
 
     use super::*;
+
+    #[test]
+    fn a_filtered_lag_note_says_the_count_covers_all_stations() {
+        assert_eq!(lag_text(5, false), "5 events were dropped");
+        let text = lag_text(5, true);
+        assert!(
+            text.starts_with("5 events of all stations were dropped"),
+            "{text}"
+        );
+        assert!(text.contains("other stations"), "{text}");
+    }
 
     #[test]
     fn the_header_wins_over_the_query_and_a_bad_header_is_a_resync() {
