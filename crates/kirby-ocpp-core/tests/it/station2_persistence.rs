@@ -89,11 +89,13 @@ fn sample() -> PersistedStation2 {
             evse: 1,
             operative: true,
             connectors: vec![(1, true)],
+            station_inoperative_pending: false,
         },
         EvseAvail {
             evse: 2,
             operative: false,
             connectors: vec![(1, false)],
+            station_inoperative_pending: false,
         },
     ];
     state
@@ -400,6 +402,7 @@ async fn availability_survives_a_restart() {
         evse: 2,
         operative: false,
         connectors: vec![(1, true)],
+        station_inoperative_pending: false,
     }];
     store(dir.path()).save2(&state).unwrap();
     let (station, join) = spawn(&csms, dir.path());

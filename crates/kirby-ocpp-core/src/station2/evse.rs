@@ -23,6 +23,11 @@ pub struct EvseAvail {
     pub operative: bool,
     /// `(connector id, operative)` for each connector.
     pub connectors: Vec<(u32, bool)>,
+    /// A station-level `Inoperative` request waits for a transaction to end. The same value
+    /// is written to every EVSE entry; the request applies once the restored transactions
+    /// have ended.
+    #[serde(default)]
+    pub station_inoperative_pending: bool,
 }
 
 /// One connector.
@@ -300,20 +305,32 @@ impl Station2Actor {
 
     /// The availability flags for the state file.
     pub(super) fn availability_snapshot(&self) -> Vec<EvseAvail> {
+        let station_pending = self.evses.iter().any(|e| e.pending_station_inoperative);
         self.evses
             .iter()
             .map(|e| EvseAvail {
                 evse: e.id,
                 operative: e.operative,
                 connectors: e.connectors.iter().map(|c| (c.id, c.operative)).collect(),
+                station_inoperative_pending: station_pending,
             })
             .collect()
     }
 
     /// Restores the availability flags from the state file; unknown EVSEs and connectors are
     /// ignored. Statuses are recorded without a notification: the boot sends them all.
+    ///
+    /// A waiting station-level request is kept as pending on every EVSE; the restore of the
+    /// transactions applies it ([`Self::release_restored_requests`]).
     pub(super) fn restore_availability(&mut self, station_operative: bool, saved: &[EvseAvail]) {
         self.state.availability_operative = station_operative;
+        let station_pending =
+            station_operative && saved.iter().any(|e| e.station_inoperative_pending);
+        if station_pending {
+            for evse in &mut self.evses {
+                evse.pending_station_inoperative = true;
+            }
+        }
         for entry in saved {
             let Some(evse) = self.evse_mut(entry.evse) else {
                 continue;
@@ -344,12 +361,12 @@ impl Station2Actor {
                 })
                 .collect();
             if let Some(entry) = self.state.evses.iter_mut().find(|e| e.id == evse.id) {
-                entry.operative = evse.operative;
+                entry.operative = evse.gate();
                 entry.connectors = connectors;
             } else {
                 self.state.evses.push(EvseSnapshot {
                     id: evse.id,
-                    operative: evse.operative,
+                    operative: evse.gate(),
                     connectors,
                     transaction: None,
                     meter_wh: 0,
@@ -402,12 +419,15 @@ impl Station2Actor {
         let result = self.plug(evse, false);
         if result.is_ok() {
             self.on_ev_disconnected(evse);
+            // After the transaction ended: a request that waited for it is applied by now, so
+            // the CSMS gets the final status only.
+            self.after_model_change();
         }
         let _ = reply.send(result.map(|()| Outcome2::Done));
     }
 
-    /// Connects or disconnects the EV on the (only) connector of `evse` and reports the
-    /// status change.
+    /// Connects or disconnects the EV on the (only) connector of `evse`. Plugging in reports
+    /// the status change here; the unplug command reports it after the transaction handling.
     fn plug(&mut self, evse: u32, connected: bool) -> Result<(), StationError> {
         let ids = self.target_connectors(evse, None)?;
         let already = self
@@ -424,7 +444,9 @@ impl Station2Actor {
             });
         }
         self.edit_connectors(evse, &ids, |c| c.ev_connected = connected);
-        self.after_model_change();
+        if connected {
+            self.after_model_change();
+        }
         Ok(())
     }
 
@@ -468,6 +490,25 @@ impl Station2Actor {
         if release_pending(&mut self.evses, &mut station, evse) {
             self.state.availability_operative = station;
             self.after_model_change();
+        }
+    }
+
+    /// The transactions of the previous run have ended: applies what waited for them. The
+    /// statuses are recorded without a notification, the boot sends them all.
+    pub(super) fn release_restored_requests(&mut self) {
+        let ids: Vec<u32> = self.evses.iter().map(|e| e.id).collect();
+        let mut station = self.state.availability_operative;
+        let mut changed = false;
+        for id in ids {
+            if !self.evse_busy(id) {
+                changed |= release_pending(&mut self.evses, &mut station, id);
+            }
+        }
+        if changed {
+            self.state.availability_operative = station;
+            self.account_all_statuses();
+            self.sync_evse_snapshot();
+            self.mark_dirty();
         }
     }
 

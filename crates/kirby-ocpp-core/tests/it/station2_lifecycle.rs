@@ -828,3 +828,87 @@ async fn an_unanswered_heartbeat_is_not_followed_by_a_backlog() {
     assert!(gap >= chrono::Duration::milliseconds(500), "{times:?}");
     stop(&station, task).await;
 }
+
+#[tokio::test]
+async fn a_waiting_station_inoperative_request_survives_a_restart() {
+    let csms = v201_csms().await;
+    let dir = tempfile::tempdir().expect("state dir");
+    let persistent = |config: &mut StationConfig| {
+        config.persist = true;
+        config.state_dir = Some(dir.path().to_owned());
+        "CP-LIFECYCLE".clone_into(&mut config.charge_point_id);
+    };
+    let (station, task) = spawn_with(csms.url(), persistent, None);
+    station.connect().await.expect("connect");
+    wait_booted(&station).await;
+    station
+        .send(Command2::PlugIn { evse: 1 })
+        .await
+        .expect("plug in");
+    station
+        .send(Command2::PresentToken {
+            evse: Some(1),
+            id_token: "TOKEN-1".to_owned(),
+            token_type: kirby_ocpp_core::ocpp::v2::types::IdTokenType::Central,
+        })
+        .await
+        .expect("token");
+    wait_snapshot(&station, "a transaction on EVSE 1", |s| {
+        s.evse(1).is_some_and(|e| e.transaction.is_some())
+    })
+    .await;
+    let answer = csms
+        .send_call(
+            "ChangeAvailability",
+            json!({"operationalStatus": "Inoperative"}),
+        )
+        .await
+        .expect("call answered");
+    match answer {
+        Frame::CallResult { payload, .. } => assert_eq!(payload["status"], "Scheduled"),
+        other => panic!("unexpected reply {other:?}"),
+    }
+    stop(&station, task).await;
+
+    // The restart ends the restored transaction with PowerLoss; the request waited for it, so
+    // the station is inoperative when it boots and reports every connector as unavailable.
+    let mark = csms.mark();
+    let (station, task) = spawn_with(csms.url(), persistent, None);
+    station.connect().await.expect("connect");
+    wait_booted(&station).await;
+    csms.wait_for_call_count_after(mark, "StatusNotification", 2, |_| true, STEP)
+        .await
+        .expect("a status per connector");
+    let snapshot = station.snapshot();
+    assert!(
+        !snapshot.availability_operative,
+        "the waiting request is applied after the restore"
+    );
+    let reported: Vec<(i64, String)> = csms
+        .calls_since(mark)
+        .into_iter()
+        .filter(|call| call.action == "StatusNotification")
+        .map(|call| {
+            (
+                call.payload["evseId"].as_i64().expect("evseId"),
+                call.payload["connectorStatus"]
+                    .as_str()
+                    .expect("connectorStatus")
+                    .to_owned(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reported,
+        [(1, "Unavailable".to_owned()), (2, "Unavailable".to_owned())]
+    );
+    csms.wait_for_call_after(
+        mark,
+        "TransactionEvent",
+        |payload| payload["eventType"] == "Ended",
+        STEP,
+    )
+    .await
+    .expect("the restored transaction ends");
+    stop(&station, task).await;
+}

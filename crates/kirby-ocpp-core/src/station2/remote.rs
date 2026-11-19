@@ -41,7 +41,8 @@ impl Station2Actor {
         if unavailable {
             return Err("Unavailable");
         }
-        if self.queue_full() {
+        // A running transaction adds no start event, so only an EVSE without one is refused.
+        if self.active_tx(evse).is_none() && self.queue_full() {
             return Err("QueueFull");
         }
         // A transaction that is not authorized yet can be matched with the request.
@@ -215,4 +216,56 @@ pub(super) fn request_stop_transaction(
         },
     );
     actor.remote_stop(evse);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::Utc;
+    use tokio::sync::{broadcast, mpsc};
+
+    use super::*;
+    use crate::clock::ManualClock;
+    use crate::config::StationConfig;
+    use crate::ocpp::Protocol;
+    use crate::station2::transactions::StartSpec;
+
+    /// A station without a connection and without persistence.
+    fn actor() -> Station2Actor {
+        let mut config = StationConfig::new("ws://127.0.0.1:1")
+            .with_connectors(2)
+            .without_persistence();
+        config.protocol = Protocol::V201;
+        let (_commands, receiver) = mpsc::channel(4);
+        let (events, _) = broadcast::channel(64);
+        Station2Actor::new(
+            config,
+            Arc::new(ManualClock::new(Utc::now())),
+            receiver,
+            events,
+            None,
+        )
+        .0
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_refuses_only_an_evse_without_a_transaction() {
+        let mut a = actor();
+        a.set_queue_cap(1);
+        a.begin_transaction(
+            1,
+            StartSpec {
+                token: None,
+                remote_start_id: None,
+                trigger: TriggerReason::CablePluggedIn,
+                authorized: false,
+            },
+        )
+        .expect("started");
+        assert!(a.queue_full(), "the started event fills the queue");
+        assert_eq!(a.remote_start_refusal(2), Err("QueueFull"));
+        // The transaction exists already: the request only authorizes it and adds no start.
+        assert_eq!(a.remote_start_refusal(1), Ok(()));
+    }
 }

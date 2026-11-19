@@ -478,6 +478,9 @@ impl Station2Actor {
 
     /// Arms the next reconnect attempt, or gives up when the attempts are used up.
     fn schedule_reconnect(&mut self) {
+        // A zero-delay timer of a password reconnect that did not fire before the link closed
+        // must not outlive the close and reconnect against the policy.
+        self.timers.cancel(&TimerKey2::Reconnect);
         if !self.link.wanted {
             return;
         }
@@ -890,6 +893,25 @@ mod tests {
         let (reply, _answer) = tokio::sync::oneshot::channel();
         actor.cmd_disconnect(reply);
         assert!(actor.reset.is_none(), "the next connect is a power-up");
+    }
+
+    #[tokio::test]
+    async fn a_close_cancels_a_password_reconnect_that_has_not_fired() {
+        let (mut actor, _observed, _ids) = actor_with_buffered_events(0);
+        actor.config.reconnect.enabled = false;
+        actor.link.wanted = true;
+        actor.schedule_password_reconnect();
+        assert!(actor.timers.is_armed(&TimerKey2::Reconnect));
+        actor.on_connection_event(ConnectionEvent::Closed {
+            code: None,
+            reason: String::new(),
+            by_us: false,
+        });
+        assert!(
+            !actor.timers.is_armed(&TimerKey2::Reconnect),
+            "the policy forbids a reconnect, so no timer may survive the close"
+        );
+        assert!(actor.link.connecting.is_none());
     }
 
     #[tokio::test]

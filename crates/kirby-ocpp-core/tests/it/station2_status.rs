@@ -473,6 +473,9 @@ async fn station_inoperative_during_a_transaction_holds_the_idle_evses_at_once()
     assert_eq!(connector_status(&snapshot, 2), ConnectorStatus::Unavailable);
     assert_eq!(connector_status(&snapshot, 1), ConnectorStatus::Occupied);
     assert!(snapshot.availability_operative);
+    // The EVSE snapshot agrees with the status: a held EVSE is not operative.
+    assert!(!snapshot.evse(2).expect("EVSE").operative);
+    assert!(snapshot.evse(1).expect("EVSE").operative);
 
     // Nothing new starts: plug and token on EVSE 2 do not open a transaction.
     let mark = rig.csms.mark();
@@ -520,6 +523,115 @@ async fn station_inoperative_during_a_transaction_holds_the_idle_evses_at_once()
     assert!(snapshot.availability_operative);
     assert_eq!(connector_status(&snapshot, 1), ConnectorStatus::Occupied);
     assert_eq!(connector_status(&snapshot, 2), ConnectorStatus::Occupied);
+    rig.stop().await;
+}
+
+impl Rig {
+    /// Makes the cable alone a start point, so no token and no energy offer is needed.
+    async fn start_at_the_cable(&self) {
+        let frame = self
+            .csms
+            .send_call(
+                "SetVariables",
+                json!({"setVariableData": [{
+                    "attributeValue": "EVConnected",
+                    "component": {"name": "TxCtrlr"},
+                    "variable": {"name": "TxStartPoint"},
+                }]}),
+            )
+            .await
+            .expect("call answered");
+        match frame {
+            Frame::CallResult { payload, .. } => {
+                assert_eq!(
+                    payload["setVariableResult"][0]["attributeStatus"],
+                    "Accepted"
+                );
+            }
+            other => panic!("unexpected reply {other:?}"),
+        }
+    }
+
+    /// Whether the CSMS received a `TransactionEvent` after `mark`, once everything the
+    /// station did so far has been reported.
+    async fn transaction_events_after(&self, mark: usize) -> usize {
+        self.statuses_after(0).await;
+        self.csms
+            .calls_since(mark)
+            .iter()
+            .filter(|call| call.action == "TransactionEvent")
+            .count()
+    }
+}
+
+#[tokio::test]
+async fn a_held_evse_starts_no_transaction_at_the_cable() {
+    let rig = Rig::new().await;
+    rig.start_at_the_cable().await;
+    rig.send(Command2::PlugIn { evse: 1 }).await;
+    wait_snapshot(&rig.station, "a transaction on EVSE 1", |s| {
+        s.evse(1).is_some_and(|e| e.transaction.is_some())
+    })
+    .await;
+    // The start of the first transaction has reached the CSMS before the mark.
+    rig.csms
+        .wait_for_call("TransactionEvent", STEP)
+        .await
+        .expect("the start is reported");
+    let body = json!({"operationalStatus": "Inoperative"});
+    assert_eq!(rig.change_availability(body).await, "Scheduled");
+    let mark = rig.csms.mark();
+    rig.send(Command2::PlugIn { evse: 2 }).await;
+    assert_eq!(rig.transaction_events_after(mark).await, 0);
+    assert!(
+        rig.station
+            .snapshot()
+            .evse(2)
+            .is_some_and(|e| e.transaction.is_none()),
+        "the held EVSE stays without a transaction"
+    );
+    rig.end_transaction().await;
+    let snapshot = wait_snapshot(&rig.station, "the station is inoperative", |s| {
+        !s.availability_operative
+    })
+    .await;
+    assert!(snapshot.evses.iter().all(|e| e.transaction.is_none()));
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn an_inoperative_evse_starts_no_transaction_at_the_cable() {
+    let rig = Rig::new().await;
+    rig.start_at_the_cable().await;
+    let body = json!({"evse": {"id": 1}, "operationalStatus": "Inoperative"});
+    assert_eq!(rig.change_availability(body).await, "Accepted");
+    let mark = rig.csms.mark();
+    rig.send(Command2::PlugIn { evse: 1 }).await;
+    assert_eq!(rig.transaction_events_after(mark).await, 0);
+    assert!(
+        rig.station
+            .snapshot()
+            .evse(1)
+            .is_some_and(|e| e.transaction.is_none())
+    );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn an_unplug_that_ends_the_waiting_transaction_reports_unavailable_once() {
+    let rig = Rig::new().await;
+    rig.start_transaction().await;
+    let body = json!({"operationalStatus": "Inoperative"});
+    assert_eq!(rig.change_availability(body).await, "Scheduled");
+    // Barrier: the hold of EVSE 2 has been reported before the mark.
+    rig.statuses_after(0).await;
+    let mark = rig.csms.mark();
+    rig.send(Command2::Unplug { evse: 1 }).await;
+    wait_snapshot(&rig.station, "the station is inoperative", |s| {
+        !s.availability_operative
+    })
+    .await;
+    assert_eq!(rig.statuses_after(mark).await, [note(1, 1, "Unavailable")]);
     rig.stop().await;
 }
 

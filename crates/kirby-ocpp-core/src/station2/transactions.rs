@@ -1050,7 +1050,13 @@ impl Station2Actor {
         }
         let connected = self.evse_connected(evse);
         let can_charge = connected && self.connector_ready(evse);
-        if let Some(reached) = start_reached(&self.tx_start_points(), connected, true, can_charge) {
+        // An EVSE that is held or inoperative reaches no start point; the authorization waits.
+        let reached = if self.evse_operative(evse) {
+            start_reached(&self.tx_start_points(), connected, true, can_charge)
+        } else {
+            None
+        };
+        if let Some(reached) = reached {
             let (trigger, initial) = if reached == Reached::Energy {
                 (
                     TriggerReason::ChargingStateChanged,
@@ -1115,8 +1121,13 @@ impl Station2Actor {
         let pending = self.tx.pending.get(&evse).cloned();
         let authorized = pending.is_some();
         let can_charge = authorized && self.connector_ready(evse);
-        let Some(reached) = start_reached(&self.tx_start_points(), true, authorized, can_charge)
-        else {
+        // An EVSE that is held or inoperative reaches no start point.
+        let reached = if self.evse_operative(evse) {
+            start_reached(&self.tx_start_points(), true, authorized, can_charge)
+        } else {
+            None
+        };
+        let Some(reached) = reached else {
             // A waiting authorization keeps its timer: it still has to expire.
             if !authorized {
                 self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
@@ -1148,7 +1159,11 @@ impl Station2Actor {
                     self.tx.groups.insert(evse, group);
                 }
             }
-            Err(error) => self.log(LogLevel::Warn, format!("transaction not started: {error}")),
+            Err(error) => {
+                // The connect timeout is cancelled, so a kept authorization would never expire.
+                self.tx.pending.remove(&evse);
+                self.log(LogLevel::Warn, format!("transaction not started: {error}"));
+            }
         }
     }
 
@@ -1648,6 +1663,7 @@ impl Station2Actor {
                 );
             }
         }
+        self.release_restored_requests();
         self.sync_tx_snapshot();
     }
 }
@@ -2163,6 +2179,27 @@ mod tests {
         let last = a.queued_events().pop().expect("event");
         assert_eq!(last.kind, TransactionEventKind::Ended);
         assert_eq!(a.state.queued_events as usize, a.queued_events().len());
+    }
+
+    #[tokio::test]
+    async fn a_start_refused_for_a_full_queue_drops_the_waiting_authorization() {
+        let mut a = actor();
+        a.set_queue_cap(1);
+        // A token waits for the cable of EVSE 1 (the default start point needs the EV).
+        a.on_authorized(1, token("TAG"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(a.tx.pending.contains_key(&1));
+        // One event fills the queue.
+        plug(&mut a, 2);
+        a.on_authorized(2, token("OTHER"), None, TriggerReason::Authorized)
+            .expect("authorized");
+        assert!(a.queue_full(), "the second EVSE filled the queue");
+        plug(&mut a, 1);
+        assert!(!a.tx.active.contains_key(&1), "the start was refused");
+        assert!(
+            !a.tx.pending.contains_key(&1),
+            "a refused start must not keep an authorization without a timeout"
+        );
     }
 
     fn restored(seq: i32) -> ActiveTx {
