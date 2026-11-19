@@ -208,7 +208,7 @@ Rules:
 
 Both apply to CALLs sent by stations (not to commands sent by the CSMS). By default they apply to all stations, not to the selected one; a rule or fault can be limited to one station (exact id), to one protocol (`ocpp1.6`) or to both.
 
-- Response rule (`m`): answer every CALL of one action with a fixed CALLRESULT payload, for example `{"status":"Rejected"}` for `Authorize`. The payload is not validated, so it can break the schema on purpose. The form's last field limits it to one station (empty means all stations). Remove one rule from the palette (rules of a station are listed as `Action@station`); `M` clears all, rules of stations included.
+- Response rule (`m`): answer every CALL of one action with a fixed CALLRESULT payload, for example `{"status":"Rejected"}` for `Authorize`. The payload is not validated, so it can break the schema on purpose. The form's last field limits it to one station (empty means all stations). Remove one rule from the palette (rules of a station are listed as `Action@station`, rules limited to one protocol as `Action [protocol]`); `M` clears all, rules of stations included.
 - Fault (`i`): for the next N occurrences of an action (N up to 1 000 000) do something else than the normal answer. Faults win over rules and over the canned replies. The form has the same optional station field.
 
 For one CALL the engine picks, first match wins:

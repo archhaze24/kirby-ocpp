@@ -242,6 +242,7 @@ pub enum Submitted {
     RemoveScopedRule {
         station: Option<String>,
         action: String,
+        protocol: Option<String>,
     },
 }
 
@@ -302,9 +303,9 @@ pub struct Form {
     pub error: Option<String>,
     /// Transaction ids behind the options of a `RemoteStop` form.
     tx_ids: Vec<i32>,
-    /// Behind the options of a `RemoveRule` form: whether the rule is scoped (a station or a
-    /// protocol), its station and its action.
-    targets: Vec<(bool, Option<String>, String)>,
+    /// Behind the options of a `RemoveRule` form: the scoped rule (a station's or a
+    /// protocol's) an option stands for, `None` for a global rule.
+    targets: Vec<Option<ScopedRule>>,
     /// The protocol whose schemas check the payload of a `Raw` or `Spec` form.
     protocol: Protocol,
     /// The registry entry a `Spec` form was generated from.
@@ -1141,12 +1142,8 @@ impl Form {
         );
         form.targets = actions
             .iter()
-            .map(|action| (false, None, action.clone()))
-            .chain(
-                scoped
-                    .iter()
-                    .map(|rule| (true, rule.station.clone(), rule.action.clone())),
-            )
+            .map(|_| None)
+            .chain(scoped.iter().cloned().map(Some))
             .collect();
         form
     }
@@ -1613,12 +1610,12 @@ impl Form {
                 }
             }
             FormKind::RemoveRule => match self.targets.get(self.fields.first()?.option) {
-                Some((true, station, action)) => Submitted::RemoveScopedRule {
-                    station: station.clone(),
-                    action: action.clone(),
+                Some(Some(rule)) => Submitted::RemoveScopedRule {
+                    station: rule.station.clone(),
+                    action: rule.action.clone(),
+                    protocol: rule.protocol.clone(),
                 },
-                Some((false, _, action)) => Submitted::RemoveRule(action.clone()),
-                None => Submitted::RemoveRule(chosen(0)?),
+                Some(None) | None => Submitted::RemoveRule(chosen(0)?),
             },
         };
         if let Submitted::Send(command) = &submitted

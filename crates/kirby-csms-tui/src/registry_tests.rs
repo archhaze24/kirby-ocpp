@@ -237,6 +237,7 @@ fn the_remove_rule_form_lists_station_rules_next_to_global_ones() {
     let scoped = [ScopedRule {
         station: Some("CP-1".to_owned()),
         action: "Reset".to_owned(),
+        protocol: None,
     }];
     let mut form = Form::remove_rule_scoped(&["Authorize".to_owned()], &scoped);
     let options: Vec<&str> = form.fields[0].options.iter().map(String::as_str).collect();
@@ -250,7 +251,8 @@ fn the_remove_rule_form_lists_station_rules_next_to_global_ones() {
         form.submit(),
         Some(Submitted::RemoveScopedRule {
             station: Some("CP-1".to_owned()),
-            action: "Reset".to_owned()
+            action: "Reset".to_owned(),
+            protocol: None,
         })
     );
 }

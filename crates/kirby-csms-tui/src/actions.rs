@@ -417,14 +417,17 @@ pub struct ScopedRule {
     /// The station it answers; `None` for a global rule limited to a protocol.
     pub station: Option<String>,
     pub action: String,
+    /// The subprotocol a global rule is limited to; `None` for a station's rule.
+    pub protocol: Option<String>,
 }
 
 impl ScopedRule {
-    /// `Action@station` (or the plain action for a protocol-limited global rule).
+    /// `Action@station`, or `Action [protocol]` for a protocol-limited global rule.
     pub fn label(&self) -> String {
-        match &self.station {
-            Some(station) => format!("{}@{station}", self.action),
-            None => self.action.clone(),
+        match (&self.station, &self.protocol) {
+            (Some(station), _) => format!("{}@{station}", self.action),
+            (None, Some(protocol)) => format!("{} [{protocol}]", self.action),
+            (None, None) => self.action.clone(),
         }
     }
 }
@@ -1039,9 +1042,20 @@ impl App {
                 fx.push(Effect::RemoveRule(action.clone()));
                 self.notify(NoticeLevel::Success, format!("rule removed for {action}"));
             }
-            Submitted::RemoveScopedRule { station, action } => {
-                let target = scope_text(&action, station.as_deref());
-                fx.push(Effect::RemoveScopedRule { station, action });
+            Submitted::RemoveScopedRule {
+                station,
+                action,
+                protocol,
+            } => {
+                let target = match (&station, &protocol) {
+                    (None, Some(protocol)) => format!("{action} [{}]", sanitize(protocol)),
+                    _ => scope_text(&action, station.as_deref()),
+                };
+                fx.push(Effect::RemoveScopedRule {
+                    station,
+                    action,
+                    protocol,
+                });
                 self.notify(NoticeLevel::Success, format!("rule removed for {target}"));
             }
         }

@@ -613,6 +613,7 @@ mod commands {
             scoped: vec![crate::actions::ScopedRule {
                 station: Some("CP-1".into()),
                 action: "Reset".into(),
+                protocol: None,
             }],
             faults: 2,
         };

@@ -384,10 +384,11 @@ pub enum Effect {
         scope: Scope,
     },
     RemoveRule(String),
-    /// Remove the rule of one station (`None`: a global rule that names a protocol).
+    /// Remove the rule of one station, or (no station) the global rule of one protocol.
     RemoveScopedRule {
         station: Option<String>,
         action: String,
+        protocol: Option<String>,
     },
     /// Drop every response rule and pending fault.
     ClearRules,

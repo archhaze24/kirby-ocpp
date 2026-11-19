@@ -636,7 +636,8 @@ async fn executor_scopes_rules_and_faults_to_one_station() {
         after.scoped,
         [crate::actions::ScopedRule {
             station: Some("CP-1".into()),
-            action: "Heartbeat".into()
+            action: "Heartbeat".into(),
+            protocol: None,
         }]
     );
     let after = rules(
@@ -660,6 +661,7 @@ async fn executor_scopes_rules_and_faults_to_one_station() {
             Effect::RemoveScopedRule {
                 station: Some("CP-1".into()),
                 action: "Heartbeat".into(),
+                protocol: None,
             },
             &csms,
             &mut exec,
@@ -972,4 +974,57 @@ fn an_unconnected_fixture_is_not_selectable_for_commands() {
     );
     assert!(app.reason_for(ActionId::Raw).is_some());
     assert!(app.reason_for(ActionId::Forget).is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn removing_one_protocol_rule_keeps_the_other_protocols_rule() {
+    use crate::form::Form;
+    use kirby_csms_core::Scope;
+
+    let csms = start_engine().await;
+    let (mut exec, _rx) = Exec::new();
+    let mut last = Vec::new();
+    for protocol in ["ocpp1.6", "ocpp2.0.1"] {
+        last = execute(
+            Effect::RespondScoped {
+                action: "Heartbeat".into(),
+                payload: json!({}),
+                scope: Scope {
+                    station: None,
+                    protocol: Some(protocol.into()),
+                },
+            },
+            &csms,
+            &mut exec,
+        )
+        .await;
+    }
+    let Some(Msg::Rules(rules)) = last.pop() else {
+        panic!("expected the rules");
+    };
+    let mut form = Form::remove_rule_scoped(&rules.actions, &rules.scoped);
+    let options = form.fields[0].options.clone();
+    assert_eq!(options.len(), 2);
+    assert_ne!(options[0], options[1], "the entries are told apart");
+    assert!(options.iter().any(|o| o == "Heartbeat [ocpp2.0.1]"));
+
+    let removed = options
+        .iter()
+        .position(|o| o.contains("ocpp2.0.1"))
+        .unwrap();
+    form.fields[0].option = removed;
+    let submitted = form.submit().expect("a choice");
+    let (mut app, _) = app_with(&[]);
+    let mut effects = Vec::new();
+    app.submitted("", submitted, &mut effects);
+    let mut after = Vec::new();
+    for effect in effects {
+        after = execute(effect, &csms, &mut exec).await;
+    }
+    let Some(Msg::Rules(after)) = after.pop() else {
+        panic!("expected the rules");
+    };
+    assert_eq!(after.scoped.len(), 1);
+    assert_eq!(after.scoped[0].label(), "Heartbeat [ocpp1.6]");
+    csms.shutdown().await;
 }

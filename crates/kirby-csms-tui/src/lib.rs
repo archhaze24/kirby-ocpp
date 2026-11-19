@@ -158,6 +158,7 @@ fn rules_msg(handle: &CsmsHandle) -> Msg {
             .scoped_rules(None)
             .into_iter()
             .map(|rule| ScopedRule {
+                protocol: rule.scope.protocol.filter(|_| rule.scope.station.is_none()),
                 station: rule.scope.station,
                 action: rule.action,
             })
@@ -256,8 +257,19 @@ async fn execute(effect: Effect, handle: &CsmsHandle, exec: &mut Exec) -> Vec<Ms
             handle.clear_responder(&action);
             vec![rules_msg(handle)]
         }
-        Effect::RemoveScopedRule { station, action } => {
-            handle.clear_scoped_rule(station.as_deref(), &action);
+        Effect::RemoveScopedRule {
+            station,
+            action,
+            protocol,
+        } => {
+            match (&station, &protocol) {
+                (None, Some(protocol)) => {
+                    handle.clear_global_rule_for_protocol(&action, protocol);
+                }
+                _ => {
+                    handle.clear_scoped_rule(station.as_deref(), &action);
+                }
+            }
             vec![rules_msg(handle)]
         }
         Effect::ClearRules => {
