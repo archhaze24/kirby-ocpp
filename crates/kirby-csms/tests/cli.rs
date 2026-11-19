@@ -419,6 +419,26 @@ async fn logs_a_station_and_stops_cleanly_on_sigterm() {
     let _ = station.shutdown().await;
 }
 
+/// SIGHUP (the terminal went away) takes the same clean shutdown as SIGTERM.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stops_cleanly_on_sighup() {
+    let mut csms = Csms::start(&[]);
+    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    csms.wait(|v| v["type"] == "connected" && v["station"] == "CP-1");
+
+    let pid = csms.child.id().to_string();
+    let killed = Command::new("kill").args(["-HUP", &pid]).status().unwrap();
+    assert!(killed.success());
+    let (code, lines, _) = csms.finish();
+    assert_eq!(code, 0, "{lines:#?}");
+    assert!(
+        lines.iter().any(|l| l.contains("\"reason\":\"shutdown\"")),
+        "{lines:#?}"
+    );
+    let _ = station.shutdown().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stdin_commands_round_trip() {
     let mut csms = Csms::start(&[]);

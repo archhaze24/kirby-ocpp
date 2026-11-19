@@ -1,4 +1,4 @@
-//! `kirby-csms`: terminal OCPP 1.6J central system for charge point firmware development and
+//! `kirby-csms`: terminal OCPP 1.6J and 2.0.1 central system for charge point firmware development and
 //! load tests. A terminal UI on an interactive terminal, headless otherwise.
 
 mod api;
@@ -566,12 +566,17 @@ fn read_tls(
     tls.map_err(|e| e.to_string())
 }
 
-/// SIGINT and SIGTERM, registered up front so no signal is lost between startup and the wait.
+/// SIGINT, SIGTERM and SIGHUP (Ctrl-C and a closed console window on Windows), registered up
+/// front so no signal is lost between startup and the wait.
 struct Shutdown {
     #[cfg(unix)]
     term: Option<tokio::signal::unix::Signal>,
     #[cfg(unix)]
     int: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    hup: Option<tokio::signal::unix::Signal>,
+    #[cfg(windows)]
+    close: Option<tokio::signal::windows::CtrlClose>,
 }
 
 impl Shutdown {
@@ -582,15 +587,21 @@ impl Shutdown {
             Self {
                 term: signal(SignalKind::terminate()).ok(),
                 int: signal(SignalKind::interrupt()).ok(),
+                hup: signal(SignalKind::hangup()).ok(),
             }
         }
         #[cfg(not(unix))]
         {
-            Self {}
+            Self {
+                #[cfg(windows)]
+                close: tokio::signal::windows::ctrl_close().ok(),
+            }
         }
     }
 
-    /// Resolves on SIGINT or SIGTERM; `true` means SIGINT (Ctrl-C).
+    /// Resolves on the next signal; `true` means SIGINT (Ctrl-C). SIGHUP and a closed console
+    /// window are handled like SIGTERM.
+    #[cfg_attr(not(unix), allow(clippy::unused_self))]
     async fn wait(&mut self) -> bool {
         #[cfg(unix)]
         {
@@ -607,17 +618,37 @@ impl Shutdown {
                 return tokio::select! {
                     _ = tokio::signal::ctrl_c() => true,
                     () = recv(&mut self.term) => false,
+                    () = recv(&mut self.hup) => false,
                 };
             }
             tokio::select! {
                 () = recv(&mut self.int) => true,
                 () = recv(&mut self.term) => false,
+                () = recv(&mut self.hup) => false,
             }
         }
         #[cfg(not(unix))]
         {
-            let _ = tokio::signal::ctrl_c().await;
-            true
+            #[cfg(windows)]
+            {
+                async fn closed(close: &mut Option<tokio::signal::windows::CtrlClose>) {
+                    match close {
+                        Some(close) => {
+                            close.recv().await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                }
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => true,
+                    () = closed(&mut self.close) => false,
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+                true
+            }
         }
     }
 }

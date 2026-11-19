@@ -74,20 +74,42 @@ pub enum TuiError {
     Terminal(#[from] std::io::Error),
 }
 
-/// Resolves on SIGINT or SIGTERM (Ctrl-C only on non-Unix).
+/// Resolves on SIGINT, SIGTERM or SIGHUP; on Windows on Ctrl-C or when the console window is
+/// closed.
 pub async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
-        if let Ok(mut term) = signal(SignalKind::terminate()) {
+        use tokio::signal::unix::{Signal, SignalKind, signal};
+        async fn next(signal: Option<&mut Signal>) {
+            match signal {
+                Some(signal) => {
+                    signal.recv().await;
+                }
+                None => std::future::pending().await,
+            }
+        }
+        let mut term = signal(SignalKind::terminate()).ok();
+        let mut hup = signal(SignalKind::hangup()).ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            () = next(term.as_mut()) => {}
+            () = next(hup.as_mut()) => {}
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(mut close) = tokio::signal::windows::ctrl_close() {
             tokio::select! {
-                _ = term.recv() => {}
                 _ = tokio::signal::ctrl_c() => {}
+                _ = close.recv() => {}
             }
             return;
         }
     }
-    let _ = tokio::signal::ctrl_c().await;
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 /// Runs the UI for one station until the user quits. Does not shut the station down; the

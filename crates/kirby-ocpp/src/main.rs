@@ -1,4 +1,4 @@
-//! `kirby-ocpp`: terminal OCPP 1.6J charge point emulator.
+//! `kirby-ocpp`: terminal OCPP 1.6J and 2.0.1 charge point emulator.
 
 /// Stderr lines are written whole and in one piece. The std macro issues several small
 /// writes per line, which interleave with the stdout lines when both streams share a pipe
@@ -647,13 +647,18 @@ pub(crate) fn retarget_for(
     Ok(())
 }
 
-/// SIGINT/SIGTERM streams created once: a signal that arrives while nobody awaits is kept
-/// and delivered by the next [`Shutdown::recv`].
+/// SIGINT/SIGTERM/SIGHUP streams created once: a signal that arrives while nobody awaits is
+/// kept and delivered by the next [`Shutdown::recv`]. On Windows, Ctrl-C and closing the
+/// console window.
 pub(crate) struct Shutdown {
     #[cfg(unix)]
     int: Option<tokio::signal::unix::Signal>,
     #[cfg(unix)]
     term: Option<tokio::signal::unix::Signal>,
+    #[cfg(unix)]
+    hup: Option<tokio::signal::unix::Signal>,
+    #[cfg(windows)]
+    close: Option<tokio::signal::windows::CtrlClose>,
 }
 
 impl Shutdown {
@@ -664,44 +669,68 @@ impl Shutdown {
             Self {
                 int: signal(SignalKind::interrupt()).ok(),
                 term: signal(SignalKind::terminate()).ok(),
+                hup: signal(SignalKind::hangup()).ok(),
             }
         }
         #[cfg(not(unix))]
         {
-            Self {}
+            Self {
+                #[cfg(windows)]
+                close: tokio::signal::windows::ctrl_close().ok(),
+            }
         }
     }
 
-    /// Resolves on the next signal; `true` means SIGINT (Ctrl-C).
+    /// Resolves on the next signal; `true` means SIGINT (Ctrl-C). SIGHUP and a closed console
+    /// window end the run like SIGTERM.
     #[cfg_attr(not(unix), allow(clippy::unused_self))]
     pub(crate) async fn recv(&mut self) -> bool {
         #[cfg(unix)]
         {
-            match (self.int.as_mut(), self.term.as_mut()) {
-                (Some(int), Some(term)) => {
-                    tokio::select! {
-                        _ = int.recv() => true,
-                        _ = term.recv() => false,
+            async fn next(signal: &mut Option<tokio::signal::unix::Signal>) {
+                match signal {
+                    Some(signal) => {
+                        signal.recv().await;
                     }
+                    None => std::future::pending().await,
                 }
-                (Some(int), None) => {
-                    int.recv().await;
-                    true
-                }
-                (None, Some(term)) => {
-                    term.recv().await;
-                    false
-                }
-                (None, None) => {
-                    let _ = tokio::signal::ctrl_c().await;
-                    true
-                }
+            }
+            if self.int.is_none() {
+                // No SIGINT stream: fall back to the lazy Ctrl-C future.
+                return tokio::select! {
+                    _ = tokio::signal::ctrl_c() => true,
+                    () = next(&mut self.term) => false,
+                    () = next(&mut self.hup) => false,
+                };
+            }
+            tokio::select! {
+                () = next(&mut self.int) => true,
+                () = next(&mut self.term) => false,
+                () = next(&mut self.hup) => false,
             }
         }
         #[cfg(not(unix))]
         {
-            let _ = tokio::signal::ctrl_c().await;
-            true
+            #[cfg(windows)]
+            {
+                async fn closed(close: &mut Option<tokio::signal::windows::CtrlClose>) {
+                    match close {
+                        Some(close) => {
+                            close.recv().await;
+                        }
+                        None => std::future::pending().await,
+                    }
+                }
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => true,
+                    () = closed(&mut self.close) => false,
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = tokio::signal::ctrl_c().await;
+                true
+            }
         }
     }
 }

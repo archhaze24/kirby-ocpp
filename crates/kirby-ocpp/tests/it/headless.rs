@@ -279,6 +279,30 @@ async fn headless_logs_jsonl_and_shuts_down_on_sigterm() {
     csms.shutdown().await;
 }
 
+// SIGHUP (the terminal went away) takes the same clean shutdown as SIGTERM.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn headless_shuts_down_cleanly_on_sighup() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let args = station_args(&csms, &["--json"]);
+    let child = crate::support::ChildGuard::spawn(
+        command(&args.iter().map(String::as_str).collect::<Vec<_>>())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    );
+    let pid = child.id().to_string();
+    csms.wait_for_call("StatusNotification", STEP)
+        .await
+        .unwrap();
+
+    let status = Command::new("kill").args(["-HUP", &pid]).status().unwrap();
+    assert!(status.success());
+    let output = crate::support::finish(child).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    csms.wait_for_disconnect(STEP).await.unwrap();
+    csms.shutdown().await;
+}
+
 // `run` interrupted by SIGINT exits 130 and still closes the WebSocket.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
