@@ -7,6 +7,25 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### Added
+
+- Release archives carry a build provenance attestation; check one with `gh attestation verify <archive> --repo archhaze24/kirby-ocpp`.
+
+### Changed
+
+- Both terminal UIs draw labels, hints and inactive items in ANSI gray instead of bright black, so they stay readable on dark themes. With `--color never` this text is no longer dimmed.
+- `kirby-csms` forms show the hint of the focused field under it.
+- The lag note of a `GET /v1/events?station=ID` stream says that its count covers events of all stations lost from the shared stream.
+- The state file of OCPP 2.0.1 stations is format version 2; files of version 1 still load.
+
+### Fixed
+
+- OCPP 1.6: `StopTransactionOnInvalidId=false` stops only the energy delivery of a transaction whose idTag the Central System refused (`SuspendedEVSE`, the transaction stays open); `MaxEnergyOnInvalidId` is the energy that may still be delivered (`0` = none). Before, the transaction was stopped after the allowance, or ran on without a limit at `0`.
+- OCPP 1.6: `ReserveNow` on connector 0 no longer locks the first free connector; it keeps one connector available for the reserved idTag, which may start on any connector.
+- OCPP 2.0.1: a waiting EVSE-level or connector-level `Inoperative` (answered `Scheduled`) survives a restart and applies when the transaction ends, like a station-level one; cancelling it with `Operative` is kept too.
+- A timed-out `expect_call` names the action and direction of the CALL it saw in the failure evidence `actual` instead of `null`.
+- `kirby-csms --subprotocol` (and the `listener.subprotocol` key) refuses names that are not RFC 6455 tokens with exit 2.
+
 ## [0.7.0] - 2026-11-19
 
 **The OCPP 2.0.1 release: both tools speak OCPP 2.0.1 next to 1.6J, with a 2.0.1 station in the emulator, 2.0.1 sessions in `kirby-csms`, terminal UIs, scenarios and a conformance family for the new version, plus a round of fixes from two release reviews.**
