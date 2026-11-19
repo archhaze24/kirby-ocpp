@@ -55,6 +55,10 @@ use super::security_events::PendingSecurityEvent;
 use super::types::{Origin2, Reply2};
 use crate::config::StationConfig;
 use crate::error::CallError;
+use crate::link_driver::{
+    Drained, MIN_PERIOD, ReconnectPlan, close_in_background, describe_close, drain_buffered,
+    open_connection, period_of_secs, plan_reconnect, redact_url,
+};
 use crate::ocpp::Protocol;
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::responder::ReplyHandle;
@@ -67,14 +71,6 @@ use crate::station::LogLevel;
 use crate::ws::{
     ConnectError, ConnectOptions, Connection, ConnectionEvent, ConnectionState, SchemaSet,
 };
-
-/// Smallest delay between two boot attempts or heartbeats the station ever schedules.
-const MIN_PERIOD: Duration = Duration::from_secs(1);
-
-/// Most buffered events taken from a link that is being dropped. The connection task buffers
-/// at most `ws::EVENT_CAPACITY` (64); the bound also covers a task that keeps emitting while
-/// the actor drains.
-const DRAIN_LIMIT: usize = 256;
 
 /// The connection to the CSMS and everything about keeping it.
 pub(crate) struct Link2 {
@@ -346,14 +342,7 @@ impl Station2Actor {
         let internal = self.internal_tx.clone();
         let options = self.connect_options();
         self.link.connecting = Some(tokio::spawn(async move {
-            let result = Connection::connect(
-                &config.url,
-                &config.charge_point_id,
-                &config.tls,
-                &config.ws_subprotocol,
-                options,
-            )
-            .await;
+            let result = open_connection(&config, options).await;
             let _ = internal.send(Internal2::Connected { generation, result });
         }));
     }
@@ -437,14 +426,10 @@ impl Station2Actor {
                 by_us,
             } => {
                 self.finish_answered_calls();
-                let shown = code.map_or_else(String::new, |c| format!(" ({c})"));
-                let why = if reason.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", sanitize(&reason))
-                };
-                let who = if by_us { " by the station" } else { "" };
-                self.log(LogLevel::Warn, format!("disconnected{who}{shown}{why}"));
+                self.log(
+                    LogLevel::Warn,
+                    describe_close(code, &sanitize(&reason), by_us),
+                );
                 self.link.events = None;
                 self.link_down(&CallError::Closed { code });
                 self.state.connection = ConnectionState::Disconnected;
@@ -484,35 +469,23 @@ impl Station2Actor {
         if !self.link.wanted {
             return;
         }
-        let attempt = self.link.attempts + 1;
-        let policy = self.config.reconnect.clone();
-        if !policy.allows_attempt(attempt) {
-            let reason = if policy.enabled {
-                format!("after {} failed attempt(s)", self.link.attempts)
-            } else {
-                "automatic reconnect is disabled".to_owned()
-            };
-            self.log(LogLevel::Error, format!("reconnect stopped: {reason}"));
-            self.state.connection = ConnectionState::Disconnected;
-            self.state.reconnect_stopped = Some(reason);
-            return;
+        match plan_reconnect(&self.config.reconnect, self.link.attempts) {
+            ReconnectPlan::Stop { reason } => {
+                self.log(LogLevel::Error, format!("reconnect stopped: {reason}"));
+                self.state.connection = ConnectionState::Disconnected;
+                self.state.reconnect_stopped = Some(reason);
+            }
+            ReconnectPlan::Retry {
+                attempt,
+                delay,
+                message,
+            } => {
+                self.link.attempts = attempt;
+                self.log(LogLevel::Warn, message);
+                self.state.connection = ConnectionState::Backoff { attempt };
+                self.timers.set(TimerKey2::Reconnect, delay);
+            }
         }
-        self.link.attempts = attempt;
-        let delay = policy.delay_for_attempt(attempt);
-        let limit = if policy.max_attempts > 0 {
-            format!("/{}", policy.max_attempts)
-        } else {
-            String::new()
-        };
-        self.log(
-            LogLevel::Warn,
-            format!(
-                "reconnect attempt {attempt}{limit} in {}ms",
-                delay.as_millis()
-            ),
-        );
-        self.state.connection = ConnectionState::Backoff { attempt };
-        self.timers.set(TimerKey2::Reconnect, delay);
     }
 
     /// The reconnect delay elapsed.
@@ -658,7 +631,7 @@ impl Station2Actor {
     /// Period to wait after a boot problem when the CSMS gave none: `HeartbeatInterval`, at
     /// least a second.
     fn retry_period(&self) -> Duration {
-        Duration::from_secs(u64::from(self.heartbeat_secs())).max(MIN_PERIOD)
+        period_of_secs(self.heartbeat_secs())
     }
 
     // ---- Heartbeat -------------------------------------------------------------
@@ -675,10 +648,7 @@ impl Station2Actor {
     fn arm_heartbeat(&mut self) {
         let secs = self.heartbeat_secs();
         self.state.heartbeat_interval_secs = secs;
-        self.timers.set(
-            TimerKey2::Heartbeat,
-            Duration::from_secs(u64::from(secs)).max(MIN_PERIOD),
-        );
+        self.timers.set(TimerKey2::Heartbeat, period_of_secs(secs));
     }
 
     /// The heartbeat period elapsed.
@@ -759,58 +729,13 @@ impl Station2Actor {
 
     // ---- draining ----------------------------------------------------------------
 
-    /// Publishes the events the connection task buffered before the link is dropped, so the
-    /// frames already received show up in logs, recordings and the UI the way the ones
-    /// handled before them did. Does not wait: the close handshake is not part of it.
-    ///
-    /// A buffered `CALL` is not dispatched on a link that is going away; dropping it makes
-    /// the connection answer `InternalError` if the socket is still writable. `Closed` ends
-    /// the drain.
+    /// Publishes the events the connection task buffered before the link is dropped (see
+    /// [`drain_buffered`]).
     fn drain_buffered_events(&mut self, events: Option<&mut mpsc::Receiver<ConnectionEvent>>) {
-        let Some(events) = events else {
-            return;
-        };
-        for _ in 0..DRAIN_LIMIT {
-            match events.try_recv() {
-                Ok(ConnectionEvent::Frame(record)) => self.emit_frame(record),
-                Ok(ConnectionEvent::ProtocolWarning(text)) => {
-                    self.log(LogLevel::Warn, format!("protocol: {}", sanitize(&text)));
-                }
-                Ok(ConnectionEvent::Call(_)) => {}
-                Ok(ConnectionEvent::Closed { .. }) | Err(_) => break,
-            }
-        }
-    }
-}
-
-/// The URL without credentials, for log lines.
-fn redact_url(url: &str) -> String {
-    match url::Url::parse(url) {
-        Ok(mut parsed) => {
-            let _ = parsed.set_username("");
-            let _ = parsed.set_password(None);
-            parsed.to_string()
-        }
-        Err(_) => "<invalid url>".to_owned(),
-    }
-}
-
-/// Closes `connection` and lets the close handshake finish in the background; its events
-/// are not needed.
-fn close_in_background(
-    connection: Option<Connection>,
-    events: Option<mpsc::Receiver<ConnectionEvent>>,
-) {
-    let Some(connection) = connection else {
-        return;
-    };
-    connection.close();
-    if let Some(mut events) = events {
-        tokio::spawn(async move {
-            while let Some(event) = events.recv().await {
-                if matches!(event, ConnectionEvent::Closed { .. }) {
-                    break;
-                }
+        drain_buffered(events, |drained| match drained {
+            Drained::Frame(record) => self.emit_frame(record),
+            Drained::Warning(text) => {
+                self.log(LogLevel::Warn, format!("protocol: {}", sanitize(&text)));
             }
         });
     }
@@ -823,6 +748,7 @@ mod tests {
     use tokio::sync::broadcast;
 
     use super::*;
+    use crate::link_driver::DRAIN_LIMIT;
     use crate::ocpp::frame::{Direction, FrameRecord};
     use crate::station::Event;
 
@@ -936,15 +862,6 @@ mod tests {
         // The warning in the buffer uses one of the steps.
         assert_eq!(seen.len(), DRAIN_LIMIT - 1);
         assert_eq!(seen, ids[..seen.len()]);
-    }
-
-    #[test]
-    fn urls_are_logged_without_credentials() {
-        assert_eq!(
-            redact_url("ws://user:secret@host:9000/ocpp"),
-            "ws://host:9000/ocpp"
-        );
-        assert_eq!(redact_url("not a url"), "<invalid url>");
     }
 
     #[test]

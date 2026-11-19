@@ -22,10 +22,9 @@
 //! event queue (every entry flagged `offline`: the process was down), the stopped ids and the
 //! energy register of every EVSE.
 
-use std::time::Duration;
+use std::path::Path;
 
 use chrono::{DateTime, Utc};
-use tokio::task::JoinHandle;
 
 use super::actor::{Internal2, Station2Actor, TimerKey2};
 use super::authorization::AuthCachePersist;
@@ -33,34 +32,50 @@ use super::device_model::DeviceModelPersist;
 use super::transactions::TxPersist;
 use super::tx_queue::QueuePersist;
 use crate::config::StationConfig;
+use crate::persist_driver::{FLUSH_DELAY, LoadedState, StateFiles, StateWriter};
 use crate::station::LogLevel;
 use crate::store::{
     FileKind, LoadOutcome2, PersistedStation2, StationSecrets2, StationStore, StoreError,
 };
 
-/// Debounce between the first change and the write.
-const FLUSH_DELAY: Duration = Duration::from_millis(200);
+/// The 2.x state and secrets files.
+#[derive(Clone)]
+struct Files2(StationStore);
+
+impl StateFiles for Files2 {
+    type State = PersistedStation2;
+    type Secrets = StationSecrets2;
+
+    fn path(&self) -> &Path {
+        self.0.path()
+    }
+
+    fn load_secrets(&self) -> Result<StationSecrets2, StoreError> {
+        self.0.load_secrets2()
+    }
+
+    fn load_state(&self) -> Result<LoadedState<PersistedStation2>, StoreError> {
+        Ok(match self.0.load2()? {
+            LoadOutcome2::Loaded(state) => LoadedState::Loaded(state),
+            LoadOutcome2::Quarantined { backup, reason } => {
+                LoadedState::Quarantined { backup, reason }
+            }
+            _ => LoadedState::Missing,
+        })
+    }
+
+    fn save_secrets(&self, secrets: &StationSecrets2) -> Result<(), StoreError> {
+        self.0.save_secrets2(secrets)
+    }
+
+    fn save_state(&self, state: &PersistedStation2) -> Result<(), StoreError> {
+        self.0.save2(state)
+    }
+}
 
 /// The state file of the station and the write bookkeeping.
-#[derive(Debug, Default)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "independent write-scheduling flags"
-)]
 pub(crate) struct Persistence2 {
-    /// `None` when persistence is off, or the file must not be touched during this run.
-    store: Option<StationStore>,
-    loaded: Option<PersistedStation2>,
-    /// Secrets read at startup (restored once).
-    loaded_secrets: Option<StationSecrets2>,
-    /// The secrets file exists but could not be read (permissions, newer format): never
-    /// overwrite it during this run.
-    secrets_locked: bool,
-    /// The secrets file has to be rewritten with the next write.
-    secrets_dirty: bool,
-    dirty: bool,
-    in_flight: Option<JoinHandle<()>>,
-    queued: bool,
+    writer: StateWriter<Files2>,
     boot_count: u64,
 }
 
@@ -68,90 +83,22 @@ impl Persistence2 {
     /// Opens the store of `config` (if persistence is on) and reads the state and secrets
     /// files. Messages for the log are appended to `logs`.
     pub(super) fn open(config: &StationConfig, logs: &mut Vec<(LogLevel, String)>) -> Self {
-        let mut this = Self::default();
-        if !config.persist {
-            return this;
-        }
-        let Some(dir) = config.state_dir_or_default() else {
-            logs.push((
-                LogLevel::Warn,
-                "no state directory could be determined; state is not persisted".to_owned(),
-            ));
-            return this;
+        let writer = StateWriter::open_with(
+            config,
+            |dir, id| Files2(StationStore::new_for(FileKind::V2, dir, id)),
+            logs,
+        );
+        // Without persistence (or a state directory) the count stays 0.
+        let boot_count = if writer.files_probed {
+            writer
+                .loaded
+                .as_ref()
+                .map_or(0, |state| state.boot_count)
+                .saturating_add(1)
+        } else {
+            0
         };
-        let store = StationStore::new_for(FileKind::V2, &dir, &config.charge_point_id);
-        match store.load_secrets2() {
-            Ok(secrets) => this.loaded_secrets = Some(secrets),
-            Err(error @ StoreError::CaseCollision { .. }) => {
-                logs.push((
-                    LogLevel::Warn,
-                    format!("{error}; state is not persisted during this run"),
-                ));
-                this.boot_count = 1;
-                return this;
-            }
-            Err(error) => {
-                // A corrupt file was moved aside (reported as `InvalidData`), so writing is
-                // safe; anything else leaves the original in place and must not be replaced.
-                let moved_aside = matches!(
-                    &error,
-                    StoreError::Io { source, .. } if source.kind() == std::io::ErrorKind::InvalidData
-                );
-                this.secrets_locked = !moved_aside;
-                let note = if moved_aside {
-                    ""
-                } else {
-                    "; secrets are not persisted during this run"
-                };
-                logs.push((
-                    LogLevel::Warn,
-                    format!("could not read the station secrets: {error}{note}"),
-                ));
-            }
-        }
-        match store.load2() {
-            Ok(LoadOutcome2::Loaded(state)) => {
-                logs.push((
-                    LogLevel::Info,
-                    format!("restored station state from {}", store.path().display()),
-                ));
-                this.loaded = Some(*state);
-                this.store = Some(store);
-            }
-            Ok(LoadOutcome2::Missing) => this.store = Some(store),
-            Ok(LoadOutcome2::Quarantined { backup, reason }) => {
-                logs.push((
-                    LogLevel::Warn,
-                    format!(
-                        "state file was unusable ({reason}); moved to {} and starting fresh",
-                        backup.display()
-                    ),
-                ));
-                this.store = Some(store);
-            }
-            Err(error @ StoreError::UnsupportedVersion { .. }) => logs.push((
-                LogLevel::Error,
-                format!("{error}; state is not persisted during this run"),
-            )),
-            Err(error @ StoreError::CaseCollision { .. }) => {
-                this.loaded_secrets = None;
-                logs.push((
-                    LogLevel::Warn,
-                    format!("{error}; state is not persisted during this run"),
-                ));
-            }
-            // The file exists but cannot be read: a save would replace it by rename.
-            Err(error) => logs.push((
-                LogLevel::Warn,
-                format!("could not read the station state: {error}; state is not persisted during this run"),
-            )),
-        }
-        this.boot_count = this
-            .loaded
-            .as_ref()
-            .map_or(0, |state| state.boot_count)
-            .saturating_add(1);
-        this
+        Self { writer, boot_count }
     }
 }
 
@@ -166,10 +113,10 @@ impl Station2Actor {
     /// Applies the state read by [`Persistence2::open`] to the freshly built actor. Call it
     /// once, after the EVSEs and the device model exist.
     pub(super) fn restore_persisted(&mut self) {
-        if let Some(secrets) = self.persistence.loaded_secrets.take() {
+        if let Some(secrets) = self.persistence.writer.loaded_secrets.take() {
             self.restore_basic_auth_password(secrets.basic_auth_password);
         }
-        let Some(mut persisted) = self.persistence.loaded.take() else {
+        let Some(mut persisted) = self.persistence.writer.loaded.take() else {
             self.mark_dirty();
             return;
         };
@@ -210,26 +157,18 @@ impl Station2Actor {
         }
     }
 
-    /// Takes the "secrets changed" flag; always false while the secrets file is locked.
-    fn take_secrets_dirty(&mut self) -> bool {
-        let dirty = std::mem::take(&mut self.persistence.secrets_dirty);
-        dirty && !self.persistence.secrets_locked
-    }
-
     /// A secret (the `BasicAuthPassword`) changed: write the secrets file soon.
     pub(super) fn mark_secrets_dirty(&mut self) {
-        self.persistence.secrets_dirty = true;
+        self.persistence.writer.secrets_dirty = true;
         self.mark_dirty();
     }
 
     /// Something worth persisting changed: write soon (debounced).
     pub(super) fn mark_dirty(&mut self) {
-        if self.persistence.store.is_none() {
-            return;
+        if self.persistence.writer.mark_dirty() {
+            self.timers
+                .set_if_idle(TimerKey2::PersistFlush, FLUSH_DELAY);
         }
-        self.persistence.dirty = true;
-        self.timers
-            .set_if_idle(TimerKey2::PersistFlush, FLUSH_DELAY);
     }
 
     /// An important change: write now (still off the actor task, and still one at a time).
@@ -246,46 +185,29 @@ impl Station2Actor {
 
     /// Starts a write if there is something to write and none is running.
     fn flush_persistence(&mut self) {
-        let Some(store) = self.persistence.store.clone() else {
+        let Some(due) = self.persistence.writer.begin_write() else {
             return;
         };
-        if !self.persistence.dirty {
-            return;
-        }
-        if self.persistence.in_flight.is_some() {
-            self.persistence.queued = true;
-            return;
-        }
-        self.persistence.dirty = false;
         let data = self.build_persisted();
-        let secrets = self.take_secrets_dirty().then(|| self.build_secrets());
+        let secrets = due.with_secrets.then(|| self.build_secrets());
         let internal = self.internal_tx.clone();
-        self.persistence.in_flight = Some(tokio::task::spawn_blocking(move || {
-            // Secrets first: a crash in between leaves a password without its state, not the
-            // reverse.
-            let mut result = Ok(());
-            if let Some(secrets) = secrets {
-                result = store.save_secrets2(&secrets);
-            }
-            let result = result.and_then(|()| store.save2(&data));
-            let _ = internal.send(Internal2::Saved(result));
-        }));
+        self.persistence
+            .writer
+            .spawn_write(due.files, data, secrets, move |result| {
+                let _ = internal.send(Internal2::Saved(result));
+            });
     }
 
     /// A state file write finished.
     pub(super) fn on_store_saved(&mut self, result: Result<(), StoreError>) {
-        self.persistence.in_flight = None;
-        if let Err(error) = result {
-            // Keep the data marked dirty so a later change retries the write.
-            self.persistence.dirty = true;
-            self.persistence.secrets_dirty = true;
+        let (error, rerun) = self.persistence.writer.finish_write(result);
+        if let Some(error) = error {
             self.log(
                 LogLevel::Error,
                 format!("could not save station state: {error}"),
             );
         }
-        if self.persistence.queued {
-            self.persistence.queued = false;
+        if rerun {
             self.flush_persistence();
         }
     }
@@ -293,42 +215,19 @@ impl Station2Actor {
     /// Final write at shutdown: wait for the one in flight, then write what is dirty.
     pub(super) async fn finish_persistence(&mut self) {
         self.timers.cancel(&TimerKey2::PersistFlush);
-        let mut had_in_flight = false;
-        if let Some(handle) = self.persistence.in_flight.take() {
-            let _ = handle.await;
-            // Its result message is never processed, so do not trust it: write again.
-            had_in_flight = true;
-        }
-        let Some(store) = self.persistence.store.clone() else {
+        let Some(due) = self.persistence.writer.begin_final_write().await else {
             return;
         };
-        let needs_write = self.persistence.dirty
-            || self.persistence.queued
-            || had_in_flight
-            || self.persistence.secrets_dirty;
-        if !needs_write {
-            return;
-        }
         let data = self.build_persisted();
-        let secrets_changed = self.take_secrets_dirty();
-        let secrets = ((secrets_changed || had_in_flight) && !self.persistence.secrets_locked)
-            .then(|| self.build_secrets());
-        let write = move || match secrets {
-            Some(secrets) => store
-                .save_secrets2(&secrets)
-                .and_then(|()| store.save2(&data)),
-            None => store.save2(&data),
-        };
-        match tokio::task::spawn_blocking(write).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => self.log(
-                LogLevel::Error,
-                format!("could not save station state: {error}"),
-            ),
-            Err(error) => self.log(LogLevel::Error, format!("state writer failed: {error}")),
+        let secrets = due.with_secrets.then(|| self.build_secrets());
+        if let Some(message) = self
+            .persistence
+            .writer
+            .run_final_write(due.files, data, secrets)
+            .await
+        {
+            self.log(LogLevel::Error, message);
         }
-        self.persistence.dirty = false;
-        self.persistence.queued = false;
     }
 }
 
