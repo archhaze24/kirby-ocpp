@@ -47,7 +47,9 @@ pub use self::read::{CommandLine, End, Entry, FrameLine, Header, Recording};
 pub use self::redact::{holds_redacted, redact_value};
 pub use self::replay::{ReplayOptions, ReplayPlan, plan_replay};
 pub use self::scenario::{ScenarioConversion, to_scenario};
-pub use self::write::{RecordOptions, RecordSink, RecordingGuard, RecordingSummary, start};
+pub use self::write::{
+    PreparedFrame, RecordOptions, RecordSink, RecordingGuard, RecordingSummary, start,
+};
 
 /// Format version written and understood by this build.
 pub const SCHEMA: u32 = 1;

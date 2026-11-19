@@ -1028,6 +1028,18 @@ enum RegisterError {
 thread_local! {
     static ENGINE_LOCK_HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static BYTES_PROCESSED_UNDER_LOCK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static AFTER_VALIDATION: TestHook = const { std::cell::RefCell::new(None) };
+    static AFTER_FRAME_PREPARATION: TestHook = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+type TestHook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+
+#[cfg(test)]
+fn run_hook(hook: &'static std::thread::LocalKey<TestHook>) {
+    if let Some(run) = hook.with(std::cell::RefCell::take) {
+        run();
+    }
 }
 
 #[cfg(test)]
@@ -1297,7 +1309,22 @@ impl Inner {
         let recording = self.recording.as_ref().map(|sink| {
             #[cfg(test)]
             count_locked_bytes(|| frame.to_json_string().len());
-            (sink, frame.to_value())
+            let prepared = RecordSink::prepare_frame(
+                Some(station),
+                subprotocol,
+                session_id,
+                &FrameRecord {
+                    ts: Utc::now(),
+                    direction: match direction {
+                        Direction::In => RecordDirection::In,
+                        Direction::Out => RecordDirection::Out,
+                    },
+                    msg_id: None,
+                    action: None,
+                    frame: frame.to_value(),
+                },
+            );
+            (sink, prepared)
         });
         let redacted;
         let visible = if self.config.show_secrets {
@@ -1311,27 +1338,15 @@ impl Inner {
         let cap = self.config.history_cap;
         let bytes_cap = self.config.history_bytes_cap;
         let history = (cap > 0).then(|| history_frame(visible, bytes_cap));
-        let event = (self.events.receiver_count() > 0).then(|| event_frame(visible));
+        let event = event_frame(visible);
 
+        #[cfg(test)]
+        run_hook(&AFTER_FRAME_PREPARATION);
         let mut guard = self.lock();
         let state = &mut *guard;
         // Record in engine order, including frames from replaced or forgotten sessions.
-        if let Some((sink, frame)) = recording {
-            sink.frame_for_session(
-                station,
-                subprotocol,
-                session_id,
-                &FrameRecord {
-                    ts: Utc::now(),
-                    direction: match direction {
-                        Direction::In => RecordDirection::In,
-                        Direction::Out => RecordDirection::Out,
-                    },
-                    msg_id: None,
-                    action: None,
-                    frame,
-                },
-            );
+        if let Some((sink, prepared)) = recording {
+            sink.push_prepared(prepared);
         }
         let Some(rec) = state.stations.get_mut(station) else {
             return;
@@ -1380,13 +1395,11 @@ impl Inner {
                 state.history_dropped += 1;
             }
         }
-        if let Some(frame) = event {
-            self.emit(CsmsEvent::Frame {
-                station: station.to_owned(),
-                direction,
-                frame,
-            });
-        }
+        self.emit(CsmsEvent::Frame {
+            station: station.to_owned(),
+            direction,
+            frame: event,
+        });
     }
 
     /// Folds an answered inbound CALL into the station's state.
@@ -1465,23 +1478,26 @@ impl Inner {
         action: &str,
         payload: &Value,
     ) -> Reply {
-        let fault = self
-            .lock()
-            .scripted
-            .take_fault(station, subprotocol, action);
-        if let Some(reply) = fault {
+        let violation = if self.config.validate_inbound {
+            #[cfg(test)]
+            count_locked_bytes(|| payload.to_string().len());
+            self.schemas
+                .inbound_violation(protocol, action, payload)
+                .map(|(code, errors)| {
+                    Reply::Error(code, truncate_chars(&errors, MAX_ERROR_DESCRIPTION))
+                })
+        } else {
+            None
+        };
+        #[cfg(test)]
+        run_hook(&AFTER_VALIDATION);
+        let mut state = self.lock();
+        if let Some(reply) = state.scripted.take_fault(station, subprotocol, action) {
             return reply;
         }
-        #[cfg(test)]
-        if self.config.validate_inbound {
-            count_locked_bytes(|| payload.to_string().len());
+        if let Some(reply) = violation {
+            return reply;
         }
-        if self.config.validate_inbound
-            && let Some((code, errors)) = self.schemas.inbound_violation(protocol, action, payload)
-        {
-            return Reply::Error(code, truncate_chars(&errors, MAX_ERROR_DESCRIPTION));
-        }
-        let mut state = self.lock();
         if let Some(payload) = state.scripted.rule_payload(station, subprotocol, action) {
             return Reply::Result(payload);
         }
@@ -2306,21 +2322,48 @@ mod tests {
 
     #[tokio::test]
     async fn inbound_payload_processing_does_not_hold_engine_lock() {
+        use kirby_ocpp_core::recording::{self, RecordOptions, Role};
+
         let mut config = CsmsConfig::new("127.0.0.1:0".parse().unwrap());
         config.validate_inbound = true;
-        let csms = timeout(Duration::from_secs(10), CsmsServer::start(config))
+        let dir = tempfile::tempdir().unwrap();
+        let (sink, guard) = recording::start(
+            &dir.path().join("frames.jsonl"),
+            "1.6",
+            Role::Csms,
+            "",
+            &RecordOptions::default(),
+        )
+        .unwrap();
+        let csms = timeout(Duration::from_secs(10), CsmsServer::start(config.clone()))
             .await
             .unwrap()
             .unwrap();
+        probe_inbound_payload_processing(&csms);
+        let csms = timeout(
+            Duration::from_secs(10),
+            CsmsServer::start_recorded(config, sink),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        probe_inbound_payload_processing(&csms);
+
+        // The oversized second frame must seal the recording after the first one.
+        let result = guard.finish();
+        assert_eq!(result.frames, 1);
+        assert_eq!(
+            result.incomplete.as_deref(),
+            Some("a frame exceeded the recording size limit")
+        );
+    }
+
+    fn probe_inbound_payload_processing(csms: &CsmsHandle) {
         let _events = csms.subscribe();
         let inner = &csms.inner;
         let session = register(inner, "ocpp1.6");
         BYTES_PROCESSED_UNDER_LOCK.set(0);
         for (action, payload) in [
-            (
-                "DataTransfer",
-                json!({"vendorId": "vendor", "data": "x".repeat(1024 * 1024 - 128)}),
-            ),
             (
                 "MeterValues",
                 json!({
@@ -2331,6 +2374,10 @@ mod tests {
                         "sampledValue": [{"value": "1000"}]
                     }]
                 }),
+            ),
+            (
+                "DataTransfer",
+                json!({"vendorId": "vendor", "data": "x".repeat(1024 * 1024 - 128)}),
             ),
         ] {
             let reply = inner.decide("CP", Some("ocpp1.6"), Protocol::V16, action, &payload);
@@ -2349,6 +2396,97 @@ mod tests {
             0,
             "payload bytes processed under the engine lock"
         );
+    }
+
+    #[tokio::test]
+    async fn fault_installed_after_validation_wins_over_rule() {
+        let mut config = CsmsConfig::new("127.0.0.1:0".parse().unwrap());
+        config.validate_inbound = true;
+        let csms = timeout(Duration::from_secs(10), CsmsServer::start(config))
+            .await
+            .unwrap()
+            .unwrap();
+        let rule = json!({"currentTime": "2026-01-01T00:00:00Z"});
+        AFTER_VALIDATION.set(Some(Box::new({
+            let csms = csms.clone();
+            let rule = rule.clone();
+            move || {
+                let scope = Scope::station("CP");
+                csms.inject_scoped(Fault::silence("Heartbeat"), scope.clone())
+                    .unwrap();
+                csms.respond_scoped(&scope, "Heartbeat", rule).unwrap();
+            }
+        })));
+        let decide = || {
+            csms.inner.decide(
+                "CP",
+                Some("ocpp1.6"),
+                Protocol::V16,
+                "Heartbeat",
+                &json!({}),
+            )
+        };
+        assert_eq!(decide(), Reply::Silence);
+        assert_eq!(csms.faults_remaining(), 0);
+        assert_eq!(decide(), Reply::Result(rule));
+    }
+
+    #[tokio::test]
+    async fn subscriber_attaching_before_frame_commit_receives_event() {
+        let csms = timeout(
+            Duration::from_secs(10),
+            CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let session = register(&csms.inner, "ocpp1.6");
+        let (tx, mut rx) = oneshot::channel();
+        AFTER_FRAME_PREPARATION.set(Some(Box::new({
+            let csms = csms.clone();
+            move || {
+                let events = csms.subscribe();
+                assert_eq!(csms.history("CP"), Some(Vec::new()));
+                tx.send(events).unwrap();
+            }
+        })));
+        let frame = Frame::call("id", "Heartbeat", json!({}));
+        csms.inner
+            .record_frame("CP", Some("ocpp1.6"), session, Direction::In, &frame);
+        let mut events = rx.try_recv().unwrap();
+        assert_eq!(
+            events.try_recv(),
+            Ok(CsmsEvent::Frame {
+                station: "CP".to_owned(),
+                direction: Direction::In,
+                frame
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn consuming_last_fault_does_not_serialize_payload_under_engine_lock() {
+        let csms = timeout(
+            Duration::from_secs(10),
+            CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let payload = json!({"data": "x".repeat(4096)});
+        csms.inject(Fault::invalid_payload("Heartbeat", payload.clone()));
+        BYTES_PROCESSED_UNDER_LOCK.set(0);
+        assert_eq!(
+            csms.inner.decide(
+                "CP",
+                Some("ocpp1.6"),
+                Protocol::V16,
+                "Heartbeat",
+                &json!({})
+            ),
+            Reply::Result(payload)
+        );
+        assert_eq!(BYTES_PROCESSED_UNDER_LOCK.get(), 0);
     }
 
     /// A session decides with the protocol it negotiated, whatever the registry says now.

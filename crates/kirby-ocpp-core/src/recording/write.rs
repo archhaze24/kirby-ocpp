@@ -71,7 +71,17 @@ enum Kind {
 #[derive(Debug)]
 pub(super) struct Line {
     kind: Kind,
-    text: String,
+    seq: u64,
+    elapsed_ms: u64,
+    body: String,
+}
+
+/// A redacted recording entry awaiting sequence and timestamp assignment.
+#[derive(Debug)]
+#[must_use]
+pub struct PreparedFrame {
+    /// Absent when a CSMS frame exceeds the recording size limit.
+    body: Option<String>,
 }
 
 #[derive(Debug)]
@@ -296,14 +306,23 @@ fn write_loop(
                 {
                     continue;
                 }
-                let size = line.text.len() as u64 + 1;
+                let entry_type = match line.kind {
+                    Kind::Frame => "frame",
+                    Kind::Command => "command",
+                };
+                let prefix = format!(
+                    "{{\"type\":\"{entry_type}\",\"seq\":{},\"elapsed_ms\":{}",
+                    line.seq, line.elapsed_ms
+                );
+                let size = (prefix.len() + line.body.len()) as u64 + 1;
                 if bytes + size > limit {
                     shared.fail(format!("the size limit of {limit} bytes was reached"));
                     stopped = true;
                     continue;
                 }
                 let written = out
-                    .write_all(line.text.as_bytes())
+                    .write_all(prefix.as_bytes())
+                    .and_then(|()| out.write_all(line.body.as_bytes()))
                     .and_then(|()| out.write_all(b"\n"));
                 if let Err(error) = written {
                     shared.fail(format!("writing failed: {}", error.kind()));
@@ -356,12 +375,12 @@ impl RecordSink {
     /// Records a frame as it crossed the wire, `session` being the connection it belongs to.
     /// Secrets are redacted here, whatever the frame record holds.
     pub fn frame(&self, session: u64, record: &FrameRecord) {
-        self.write_frame(None, None, session, record);
+        self.push_prepared(Self::prepare_frame(None, None, session, record));
     }
 
     /// Records a CSMS frame with its station and connection identity.
     pub fn frame_for_station(&self, station: &str, session: u64, record: &FrameRecord) {
-        self.write_frame(Some(station), None, session, record);
+        self.frame_for_session(station, None, session, record);
     }
 
     /// Like [`RecordSink::frame_for_station`], with the WebSocket subprotocol the session
@@ -373,16 +392,22 @@ impl RecordSink {
         session: u64,
         record: &FrameRecord,
     ) {
-        self.write_frame(Some(station), protocol, session, record);
+        self.push_prepared(Self::prepare_frame(
+            Some(station),
+            protocol,
+            session,
+            record,
+        ));
     }
 
-    fn write_frame(
-        &self,
+    /// Redacts and serializes a frame for later submission. Pass the station for a CSMS
+    /// frame. An oversized CSMS frame seals the recording when submitted.
+    pub fn prepare_frame(
         station: Option<&str>,
         protocol: Option<&str>,
         session: u64,
         record: &FrameRecord,
-    ) {
+    ) -> PreparedFrame {
         let direction = match record.direction {
             Direction::In => "in",
             Direction::Out => "out",
@@ -396,18 +421,7 @@ impl RecordSink {
                 let text = value.to_string();
                 if text.len() > MAX_FRAME_BYTES {
                     if station.is_some() {
-                        let _producer = self
-                            .shared
-                            .producer
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner);
-                        if self.shared.halted.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        self.shared.overflowed.store(true, Ordering::SeqCst);
-                        self.shared
-                            .fail("a frame exceeded the recording size limit");
-                        return;
+                        return PreparedFrame { body: None };
                     }
                     ("null".to_owned(), Some(("truncated_bytes", text.len())))
                 } else {
@@ -426,34 +440,35 @@ impl RecordSink {
                 frame_parts(&record.frame).and_then(|(_, _, action)| action.map(str::to_owned))
             })
         });
-        self.submit(Kind::Frame, |seq, elapsed_ms| {
-            let mut line = format!(
-                "{{\"type\":\"frame\",\"seq\":{seq},\"elapsed_ms\":{elapsed_ms},\"session\":{session},\"direction\":\"{direction}\""
-            );
-            if let Some(station) = station {
-                line.push_str(",\"station\":");
-                line.push_str(&Value::from(station).to_string());
-            }
-            if let Some(protocol) = protocol {
-                line.push_str(",\"protocol\":");
-                line.push_str(&Value::from(protocol).to_string());
-            }
-            if let Some(id) = &msg_id {
-                line.push_str(",\"msg_id\":");
-                line.push_str(&Value::from(id.as_str()).to_string());
-            }
-            if let Some(action) = &action {
-                line.push_str(",\"action\":");
-                line.push_str(&Value::from(action.as_str()).to_string());
-            }
-            line.push_str(",\"frame\":");
-            line.push_str(&frame);
-            if let Some((key, size)) = marker {
-                let _ = write!(line, ",\"{key}\":{size}");
-            }
-            line.push('}');
-            line
-        });
+        let mut body = format!(",\"session\":{session},\"direction\":\"{direction}\"");
+        if let Some(station) = station {
+            body.push_str(",\"station\":");
+            body.push_str(&Value::from(station).to_string());
+        }
+        if let Some(protocol) = protocol {
+            body.push_str(",\"protocol\":");
+            body.push_str(&Value::from(protocol).to_string());
+        }
+        if let Some(id) = &msg_id {
+            body.push_str(",\"msg_id\":");
+            body.push_str(&Value::from(id.as_str()).to_string());
+        }
+        if let Some(action) = &action {
+            body.push_str(",\"action\":");
+            body.push_str(&Value::from(action.as_str()).to_string());
+        }
+        body.push_str(",\"frame\":");
+        body.push_str(&frame);
+        if let Some((key, size)) = marker {
+            let _ = write!(body, ",\"{key}\":{size}");
+        }
+        body.push('}');
+        PreparedFrame { body: Some(body) }
+    }
+
+    /// Submits a prepared frame in recording order, without processing its payload.
+    pub fn push_prepared(&self, frame: PreparedFrame) {
+        self.submit(Kind::Frame, frame.body);
     }
 
     /// Records a command given to the emulator (any serializable command object).
@@ -466,16 +481,12 @@ impl RecordSink {
         } else {
             (text, None)
         };
-        self.submit(Kind::Command, |seq, elapsed_ms| {
-            let mut line = format!(
-                "{{\"type\":\"command\",\"seq\":{seq},\"elapsed_ms\":{elapsed_ms},\"session\":{session},\"command\":{body}"
-            );
-            if let Some(size) = marker {
-                let _ = write!(line, ",\"truncated_bytes\":{size}");
-            }
-            line.push('}');
-            line
-        });
+        let mut body = format!(",\"session\":{session},\"command\":{body}");
+        if let Some(size) = marker {
+            let _ = write!(body, ",\"truncated_bytes\":{size}");
+        }
+        body.push('}');
+        self.submit(Kind::Command, Some(body));
     }
 
     /// Why the recording is incomplete, once: the first call after a failure returns the
@@ -489,7 +500,7 @@ impl RecordSink {
         None
     }
 
-    fn submit(&self, kind: Kind, build: impl FnOnce(u64, u64) -> String) {
+    fn submit(&self, kind: Kind, body: Option<String>) {
         if self.shared.halted.load(Ordering::SeqCst) {
             return;
         }
@@ -502,9 +513,17 @@ impl RecordSink {
         if self.shared.halted.load(Ordering::SeqCst) {
             return;
         }
+        let Some(body) = body else {
+            self.shared.overflowed.store(true, Ordering::SeqCst);
+            self.shared
+                .fail("a frame exceeded the recording size limit");
+            return;
+        };
         let line = Line {
             kind,
-            text: build(producer.seq, self.shared.elapsed_ms()),
+            seq: producer.seq,
+            elapsed_ms: self.shared.elapsed_ms(),
+            body,
         };
         match producer.queue.try_send(line) {
             Ok(()) => producer.seq += 1,

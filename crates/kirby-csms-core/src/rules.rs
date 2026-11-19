@@ -100,7 +100,12 @@ pub fn reply_kind(reply: &Reply) -> &'static str {
 
 fn fault_bytes(fault: &Fault) -> usize {
     let reply = match &fault.reply {
-        Reply::Result(value) => value.to_string().len(),
+        Reply::Result(value) => {
+            let bytes = value.to_string().len();
+            #[cfg(test)]
+            crate::server::count_locked_bytes(|| bytes);
+            bytes
+        }
         Reply::Error(_, text) => text.len(),
         _ => 0,
     };
@@ -111,6 +116,7 @@ struct StoredFault {
     id: String,
     scope: Scope,
     fault: Fault,
+    bytes: usize,
 }
 
 struct StoredRule {
@@ -181,6 +187,7 @@ impl Scripted {
             id: id.clone(),
             scope,
             fault,
+            bytes: added,
         });
         Ok(id)
     }
@@ -208,13 +215,13 @@ impl Scripted {
             .or_else(|| self.faults.iter().position(|stored| applies(stored, false)))?;
         let stored = self.faults.get_mut(at)?;
         stored.fault.remaining -= 1;
-        let reply = stored.fault.reply.clone();
         if stored.fault.remaining == 0 {
-            let freed = fault_bytes(&stored.fault);
-            self.fault_bytes = self.fault_bytes.saturating_sub(freed);
-            self.faults.remove(at);
+            let consumed = self.faults.remove(at);
+            self.fault_bytes = self.fault_bytes.saturating_sub(consumed.bytes);
+            Some(consumed.fault.reply)
+        } else {
+            Some(stored.fault.reply.clone())
         }
-        Some(reply)
     }
 
     pub(crate) fn remove_fault(&mut self, id: &str) -> bool {
@@ -222,7 +229,7 @@ impl Scripted {
             return false;
         };
         let stored = self.faults.remove(at);
-        self.fault_bytes = self.fault_bytes.saturating_sub(fault_bytes(&stored.fault));
+        self.fault_bytes = self.fault_bytes.saturating_sub(stored.bytes);
         true
     }
 
@@ -465,6 +472,33 @@ mod tests {
         assert!(s.remove_fault(&b));
         assert!(!s.remove_fault(&b));
         assert_eq!(s.fault_bytes, 0);
+    }
+
+    #[test]
+    fn consuming_payload_fault_restores_byte_budget() {
+        let mut s = Scripted::default();
+        s.add_fault(Fault::silence("Authorize"), Scope::global(), true)
+            .unwrap();
+        let before = (s.fault_bytes, s.faults_remaining());
+        let payload = json!({"data": "\"\\é".repeat(32)});
+        s.add_fault(
+            Fault::invalid_payload("Heartbeat", payload.clone()).times(2),
+            Scope::global(),
+            true,
+        )
+        .unwrap();
+        let charged = before.0 + "Heartbeat".len() + payload.to_string().len();
+        assert_eq!(s.fault_bytes, charged);
+        assert_eq!(
+            s.take_fault("CP", None, "Heartbeat"),
+            Some(Reply::Result(payload.clone()))
+        );
+        assert_eq!(s.fault_bytes, charged);
+        assert_eq!(
+            s.take_fault("CP", None, "Heartbeat"),
+            Some(Reply::Result(payload))
+        );
+        assert_eq!((s.fault_bytes, s.faults_remaining()), before);
     }
 
     #[test]
