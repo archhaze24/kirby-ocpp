@@ -9,6 +9,7 @@ Contents: [Toolchain](#toolchain) · [Build and test](#build-and-test) · [Defin
 * Rust edition 2024. MSRV: `rust-version = "1.88"` in `Cargo.toml`; do not use newer language or std features without raising it.
 * `rust-toolchain.toml` pins `stable` with `clippy` and `rustfmt`.
 * Workspace: 7 crates under `crates/` (see [Architecture](architecture.md#crate-map)); `kirby-ocpp-testkit` is not in `default-members` and is not published.
+* Dependency updates: Dependabot (`.github/dependabot.yml`) opens weekly pull requests for Cargo crates, GitHub Actions and the Docker base images; minor and patch updates are grouped per ecosystem. Check that a crate update keeps the MSRV before merging it.
 
 ## Build and test
 
