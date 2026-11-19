@@ -19,12 +19,9 @@ use crate::app::{App, Focus, LogView, Summary, filter_label};
 const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
 fn block(title: String, focused: bool) -> Block<'static> {
-    let style = if focused {
-        Style::new().fg(Color::Cyan)
-    } else {
-        dim()
-    };
-    Block::bordered().border_style(style).title(title)
+    Block::bordered()
+        .border_style(kirby_ocpp_tui::theme::border(focused))
+        .title(title)
 }
 
 fn status_color(status: &str) -> Color {
@@ -32,7 +29,7 @@ fn status_color(status: &str) -> Color {
         "Available" => Color::Green,
         "Charging" | "Occupied" => Color::Cyan,
         "Faulted" => Color::Red,
-        "Unavailable" => Color::DarkGray,
+        "Unavailable" => kirby_ocpp_tui::theme::SECONDARY,
         _ => Color::Yellow,
     }
 }
@@ -66,7 +63,7 @@ fn station_row(s: &Summary, inner_w: usize, selected: bool, mono: bool) -> Line<
     } else if s.connected {
         ("●", Color::Green)
     } else {
-        ("○", Color::DarkGray)
+        ("○", kirby_ocpp_tui::theme::SECONDARY)
     };
     let tx = if s.active_tx > 0 {
         format!(" tx{}", s.active_tx)

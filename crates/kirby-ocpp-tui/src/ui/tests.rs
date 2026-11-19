@@ -46,6 +46,23 @@ fn app() -> App {
     app
 }
 
+#[test]
+fn views_use_no_dark_gray_or_dim() {
+    let mut a = app();
+    for connection in [ConnectionState::Disconnected, ConnectionState::Connected] {
+        a.snapshot.connection = connection;
+        for (w, h) in [(60, 20), (110, 30), (160, 40)] {
+            let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+            term.draw(|f| draw(f, &a)).unwrap();
+            for c in term.backend().buffer().content() {
+                assert_ne!(c.fg, ratatui::style::Color::DarkGray, "{c:?}");
+                assert_ne!(c.bg, ratatui::style::Color::DarkGray, "{c:?}");
+                assert!(!c.modifier.contains(ratatui::style::Modifier::DIM), "{c:?}");
+            }
+        }
+    }
+}
+
 fn render(app: &App, w: u16, h: u16) -> String {
     let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
     term.draw(|f| draw(f, app)).unwrap();

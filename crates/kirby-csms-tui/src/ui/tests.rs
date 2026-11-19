@@ -557,6 +557,22 @@ mod commands {
     }
 
     #[test]
+    fn main_views_use_no_dark_gray_or_dim() {
+        let apps = [loaded(), app_v2()];
+        for app in &apps {
+            for (w, h) in [(60, 20), (100, 30), (160, 40)] {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                terminal.draw(|f| draw(f, app)).unwrap();
+                for c in terminal.backend().buffer().content() {
+                    assert_ne!(c.fg, Color::DarkGray, "{c:?}");
+                    assert_ne!(c.bg, Color::DarkGray, "{c:?}");
+                    assert!(!c.modifier.contains(Modifier::DIM), "{c:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn confirm_and_results_overlays() {
         let mut app = loaded();
         open(&mut app, 'R');

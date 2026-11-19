@@ -82,10 +82,10 @@ With a terminal on both stdin and stdout and none of `--no-tui`, `--json`, `--sc
 
 Layout:
 
-- Left: the stations (`●` green connected, dim `○` disconnected, yellow `●` replaced by a newer connection; vendor and model; `txN` active transactions). The header shows the listen address, connected/total stations and frame counters.
+- Left: the stations (`●` green connected, gray `○` disconnected, yellow `●` replaced by a newer connection; vendor and model; `txN` active transactions). The header shows the listen address, connected/total stations and frame counters.
 - Right, top: details of the selected station (boot info, remote address, subprotocol, connectors, transactions with energy and power, last heartbeat, firmware and diagnostics status, counters).
 - Right, bottom: the frame log of that station with CALL/RESULT correlation and round-trip times.
-- Before any station has connected the details pane shows the listen address, a station URL to copy (`ws://<this-host>:9000/<station id>` for an unspecified listen host; a path prefix before the id is accepted) and, at security profile 0, a dim note that any peer can connect. The footer always ends with the `? help` and `: actions` hints, even in a narrow terminal, and the help popup opens with a short "First steps" paragraph.
+- Before any station has connected the details pane shows the listen address, a station URL to copy (`ws://<this-host>:9000/<station id>` for an unspecified listen host; a path prefix before the id is accepted) and, at security profile 0, a secondary-text note that any peer can connect. The footer always ends with the `? help` and `: actions` hints, even in a narrow terminal, and the help popup opens with a short "First steps" paragraph.
 - The UI needs at least 24 columns by 8 rows; a smaller terminal shows `need 24x8, have WxH` until it is resized. The help popup wraps to the terminal width, and long station ids are shortened in the middle so ids with a common prefix stay apart.
 - Header chips: `security profile N`, `N auth failures` (refused connections also show as a status-line notice, at most one per second), `N pending` commands, and the pending fault count and rule actions while any is active.
 

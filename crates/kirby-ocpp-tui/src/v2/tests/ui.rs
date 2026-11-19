@@ -143,6 +143,21 @@ fn draw_buffer(app: &App2, w: u16, h: u16) -> Buffer {
     term.backend().buffer().clone()
 }
 
+#[test]
+fn v2_views_use_no_dark_gray_or_dim() {
+    let mut a = app();
+    for connection in [ConnectionState::Disconnected, ConnectionState::Connected] {
+        a.snapshot.connection = connection;
+        for (w, h) in [(60, 20), (110, 30), (160, 40)] {
+            for c in draw_buffer(&a, w, h).content() {
+                assert_ne!(c.fg, ratatui::style::Color::DarkGray, "{c:?}");
+                assert_ne!(c.bg, ratatui::style::Color::DarkGray, "{c:?}");
+                assert!(!c.modifier.contains(ratatui::style::Modifier::DIM), "{c:?}");
+            }
+        }
+    }
+}
+
 fn render(app: &App2, w: u16, h: u16) -> String {
     let buf = draw_buffer(app, w, h);
     (0..h)
@@ -419,7 +434,7 @@ fn actions_are_dimmed_and_explained_when_disabled() {
     assert!(
         buf.content()
             .iter()
-            .any(|c| c.fg == ratatui::style::Color::DarkGray),
+            .any(|c| c.fg == crate::theme::SECONDARY),
         "a dimmed row"
     );
     a.snapshot.connection = ConnectionState::Connected;

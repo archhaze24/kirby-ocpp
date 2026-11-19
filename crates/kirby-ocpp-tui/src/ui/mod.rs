@@ -22,8 +22,9 @@ use crate::theme::{Level, level_mark};
 pub const WIDE: u16 = 110;
 pub const MIN_SIZE: (u16, u16) = (24, 8);
 
+/// Secondary text style (labels, hints, inactive items): readable, not dimmed.
 pub fn dim() -> Style {
-    Style::new().fg(Color::DarkGray)
+    crate::theme::secondary()
 }
 
 pub fn draw(f: &mut Frame<'_>, app: &App) {
@@ -193,7 +194,7 @@ fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
     let (reg_text, reg_color) = match s.registration {
         Some(r) if s.booted() => (r.to_string(), Color::Green),
         Some(r) => (r.to_string(), Color::Yellow),
-        None => ("not booted".to_owned(), Color::DarkGray),
+        None => ("not booted".to_owned(), crate::theme::SECONDARY),
     };
     let w = usize::from(area.width);
     let conn_chip = chip(&conn_text, conn_color);

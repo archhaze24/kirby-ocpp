@@ -786,6 +786,57 @@ fn dotted_keys_nest_and_the_whole_request_is_checked() {
     );
 }
 
+fn drawn(app: &App) -> (String, bool) {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::style::Color;
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| crate::ui::draw(f, app)).unwrap();
+    let buf = terminal.backend().buffer();
+    let text: String = buf
+        .content()
+        .iter()
+        .map(ratatui::buffer::Cell::symbol)
+        .collect();
+    let dark = buf.content().iter().any(|c| c.fg == Color::DarkGray);
+    (text, dark)
+}
+
+#[test]
+fn a_form_draws_the_hint_of_the_focused_field_only() {
+    const VENDOR: &str = "at most 255 characters";
+    const MESSAGE: &str = "at most 50 characters";
+    let mut app = station201();
+    let mut form = open(&mut app, "DataTransfer");
+    assert_eq!(form.focus, 0);
+    // A valid value: an error under the field would take the line of the hint.
+    set(&mut form, "vendorId", "vendor");
+    form.validate_all();
+    app.mode = Mode::Form(Box::new(form.clone()));
+    let (text, dark) = drawn(&app);
+    assert!(text.contains(VENDOR), "{text}");
+    assert!(!text.contains(MESSAGE), "{text}");
+    assert!(!dark);
+    form.focus = 1;
+    app.mode = Mode::Form(Box::new(form));
+    let (text, _) = drawn(&app);
+    assert!(text.contains(MESSAGE), "{text}");
+    assert!(!text.contains(VENDOR), "{text}");
+}
+
+#[test]
+fn a_field_without_a_hint_draws_nothing_under_it() {
+    let mut app = station201();
+    let mut form = open(&mut app, "DataTransfer");
+    set(&mut form, "vendorId", "vendor");
+    form.validate_all();
+    form.fields[0].hint = "";
+    app.mode = Mode::Form(Box::new(form));
+    let (text, _) = drawn(&app);
+    assert!(!text.contains("at most"), "{text}");
+    assert!(!text.contains("required"), "{text}");
+}
+
 #[test]
 fn data_transfer_data_takes_a_string_a_number_and_an_array() {
     let mut app = station201();

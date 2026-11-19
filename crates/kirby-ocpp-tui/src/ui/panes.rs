@@ -18,12 +18,9 @@ use crate::theme::{Level, level_mark};
 use kirby_ocpp_core::timefmt::TimeMode;
 
 fn block(title: String, focused: bool) -> Block<'static> {
-    let style = if focused {
-        Style::new().fg(Color::Cyan)
-    } else {
-        dim()
-    };
-    Block::bordered().border_style(style).title(title)
+    Block::bordered()
+        .border_style(crate::theme::border(focused))
+        .title(title)
 }
 
 fn status_color(s: ConnectorStatus) -> Color {
@@ -31,7 +28,7 @@ fn status_color(s: ConnectorStatus) -> Color {
         ConnectorStatus::Available => Color::Green,
         ConnectorStatus::Charging => Color::Cyan,
         ConnectorStatus::Faulted => Color::Red,
-        ConnectorStatus::Unavailable => Color::DarkGray,
+        ConnectorStatus::Unavailable => crate::theme::SECONDARY,
         _ => Color::Yellow,
     }
 }
@@ -304,7 +301,7 @@ fn scenario_lines(app: &App) -> Vec<Line<'static>> {
     ])];
     for (i, (name, st)) in sc.steps.iter().enumerate() {
         let (mark, color, extra) = match st {
-            StepState::Pending => (" ", Color::DarkGray, String::new()),
+            StepState::Pending => (" ", crate::theme::SECONDARY, String::new()),
             StepState::Running => (">", Color::Cyan, String::new()),
             StepState::Passed(ms) => ("+", Color::Green, format!(" ({ms} ms)")),
             StepState::Failed(why) => (
@@ -315,7 +312,7 @@ fn scenario_lines(app: &App) -> Vec<Line<'static>> {
                     sanitize(crate::text::without_step_prefix(name, why))
                 ),
             ),
-            StepState::Skipped => ("-", Color::DarkGray, " skipped".to_owned()),
+            StepState::Skipped => ("-", crate::theme::SECONDARY, " skipped".to_owned()),
         };
         v.push(Line::styled(
             format!("{mark} {}. {}{extra}", i + 1, sanitize(name)),

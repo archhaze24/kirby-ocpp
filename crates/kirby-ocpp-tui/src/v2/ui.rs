@@ -93,7 +93,7 @@ fn draw_header(f: &mut Frame<'_>, app: &App2, area: Rect) {
     let (reg_text, reg_color) = match s.registration {
         Some(r) if s.booted() => (r.as_str().to_owned(), Color::Green),
         Some(r) => (r.as_str().to_owned(), Color::Yellow),
-        None => ("not booted".to_owned(), Color::DarkGray),
+        None => ("not booted".to_owned(), crate::theme::SECONDARY),
     };
     // The chips in the order they give way to a narrow terminal: the connection and the
     // registration always stay.

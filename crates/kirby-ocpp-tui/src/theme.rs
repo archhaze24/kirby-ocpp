@@ -2,17 +2,35 @@
 //!
 //! Colors carry no information on their own: every state is also a word or a marker in the
 //! text. In monochrome mode ([`apply_monochrome`]) the remaining color cues become text
-//! modifiers: filled chips and selections are reversed, red and yellow text is bold, dim gray
-//! stays dim, and every color is cleared.
+//! modifiers: filled chips and selections are reversed, red and yellow text is bold, and every
+//! color is cleared.
 
 use ratatui::buffer::Buffer;
-use ratatui::style::{Color, Modifier};
+use ratatui::style::{Color, Modifier, Style};
+
+/// Palette: secondary text (labels, hints, inactive items, idle markers). ANSI 7, never the
+/// bright-black ANSI 8, which is barely readable on common dark themes.
+pub const SECONDARY: Color = Color::Gray;
+
+/// Palette: the focus accent (focused pane border, popup border).
+pub const ACCENT: Color = Color::Cyan;
+
+/// Secondary text style. Not dimmed: it has to stay readable.
+#[must_use]
+pub const fn secondary() -> Style {
+    Style::new().fg(SECONDARY)
+}
+
+/// Pane border: the accent when focused, secondary otherwise.
+#[must_use]
+pub const fn border(focused: bool) -> Style {
+    Style::new().fg(if focused { ACCENT } else { SECONDARY })
+}
 
 /// Rewrites every cell of a drawn frame so that it carries no color.
 ///
 /// - a colored background (status chips, the active tab) becomes reverse video;
 /// - red, yellow and cyan text (errors, warnings, the focused pane) becomes bold;
-/// - dark gray text becomes dim;
 /// - foreground and background are reset.
 pub fn apply_monochrome(buf: &mut Buffer) {
     for cell in &mut buf.content {
@@ -24,7 +42,6 @@ pub fn apply_monochrome(buf: &mut Buffer) {
             Color::Red | Color::Yellow | Color::LightRed | Color::LightYellow | Color::Cyan => {
                 add |= Modifier::BOLD;
             }
-            Color::DarkGray => add |= Modifier::DIM,
             _ => {}
         }
         // A chip draws black text on a colored fill: reversed video already swaps them.
@@ -67,12 +84,12 @@ mod tests {
         let mut buf = Buffer::empty(area);
         buf[(0, 0)].set_style(Style::new().fg(Color::Black).bg(Color::Green));
         buf[(1, 0)].set_style(Style::new().fg(Color::Red));
-        buf[(2, 0)].set_style(Style::new().fg(Color::DarkGray));
+        buf[(2, 0)].set_style(secondary());
         buf[(3, 0)].set_style(Style::new().fg(Color::Blue));
         apply_monochrome(&mut buf);
         assert!(buf[(0, 0)].modifier.contains(Modifier::REVERSED));
         assert!(buf[(1, 0)].modifier.contains(Modifier::BOLD));
-        assert!(buf[(2, 0)].modifier.contains(Modifier::DIM));
+        assert_eq!(buf[(2, 0)].modifier, Modifier::empty());
         assert_eq!(buf[(3, 0)].modifier, Modifier::empty());
         for cell in &buf.content {
             assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset));

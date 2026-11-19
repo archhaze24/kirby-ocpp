@@ -300,7 +300,7 @@ fn scenario_lines(app: &App2) -> Vec<Line<'static>> {
     ])];
     for (i, (name, st)) in sc.steps.iter().enumerate() {
         let (mark, color, extra) = match st {
-            StepState::Pending => (" ", Color::DarkGray, String::new()),
+            StepState::Pending => (" ", crate::theme::SECONDARY, String::new()),
             StepState::Running => (">", Color::Cyan, String::new()),
             StepState::Passed(ms) => ("+", Color::Green, format!(" ({ms} ms)")),
             StepState::Failed(why) => (
@@ -311,7 +311,7 @@ fn scenario_lines(app: &App2) -> Vec<Line<'static>> {
                     sanitize(crate::text::without_step_prefix(name, why))
                 ),
             ),
-            StepState::Skipped => ("-", Color::DarkGray, " skipped".to_owned()),
+            StepState::Skipped => ("-", crate::theme::SECONDARY, " skipped".to_owned()),
         };
         v.push(Line::styled(
             format!("{mark} {}. {}{extra}", i + 1, sanitize(name)),

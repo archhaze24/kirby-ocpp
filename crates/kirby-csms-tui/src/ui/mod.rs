@@ -135,7 +135,7 @@ fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
     let color = if conn > 0 {
         Color::Green
     } else {
-        Color::DarkGray
+        kirby_ocpp_tui::theme::SECONDARY
     };
     let mut spans = vec![
         chip(&format!("{conn}/{total} connected"), color),

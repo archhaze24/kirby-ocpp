@@ -83,8 +83,9 @@ fn field_value(fl: &Field, w: usize, focused: bool, secret: bool) -> (String, Op
     }
 }
 
-/// Lines under a field: its error wrapped to three lines, or the hint of a hidden value.
-fn field_notes(fl: &Field, secret: bool, w: usize) -> Vec<(String, bool)> {
+/// Lines under a field: its error wrapped to three lines, the hint of a hidden value, or the
+/// hint of the focused field.
+fn field_notes(fl: &Field, secret: bool, focused: bool, w: usize) -> Vec<(String, bool)> {
     if let Some(err) = &fl.error {
         wrap_text(&sanitize(err), w, 3)
             .into_iter()
@@ -92,6 +93,8 @@ fn field_notes(fl: &Field, secret: bool, w: usize) -> Vec<(String, bool)> {
             .collect()
     } else if secret {
         vec![(truncate(SECRET_HINT, w), false)]
+    } else if focused && !fl.hint.is_empty() {
+        vec![(truncate(&sanitize(fl.hint), w), false)]
     } else {
         vec![(String::new(), false)]
     }
@@ -113,7 +116,7 @@ pub(super) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
         .fields
         .iter()
         .enumerate()
-        .map(|(i, fl)| field_notes(fl, form.is_secret(i), note_w))
+        .map(|(i, fl)| field_notes(fl, form.is_secret(i), i == form.focus, note_w))
         .collect();
     let form_error: Vec<String> = form
         .error
