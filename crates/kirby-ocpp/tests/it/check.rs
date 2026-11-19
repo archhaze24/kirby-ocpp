@@ -212,11 +212,11 @@ async fn text_output_lists_the_steps_and_a_verdict() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refused_connection_fails_tcp_and_skips_the_rest() {
-    let port = {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.local_addr().unwrap().port()
-    };
-    let url = format!("ws://127.0.0.1:{port}/ocpp");
+    // Bound without `listen` for the whole test: connections are refused and a parallel test
+    // cannot take the port over.
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let url = format!("ws://{}/ocpp", socket.local_addr().unwrap());
     let output = check(&["check", "--url", &url, "--json"]).await;
     assert_eq!(output.status.code(), Some(1));
     let report = parsed(&output);

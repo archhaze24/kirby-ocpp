@@ -42,12 +42,14 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
-/// A URL nothing listens on.
+/// A URL nothing listens on. The port stays bound without `listen` until the test process
+/// ends, so connections are refused and a parallel test cannot take the port over.
 fn dead_url() -> String {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    format!("ws://127.0.0.1:{port}/ocpp")
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    std::mem::forget(socket);
+    format!("ws://{addr}/ocpp")
 }
 
 const REFUSED_HINT: &str = "check the host and port and that the CSMS is running";

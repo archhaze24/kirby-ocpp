@@ -849,9 +849,11 @@ async fn a_new_certificate_answered_with_403_alternates() {
 
 #[tokio::test]
 async fn an_outage_alternates_at_most_once_per_three_failures_and_discards_nothing() {
-    let unused = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bound without `listen` for the whole test: connections are refused and a parallel test
+    // cannot take the port over.
+    let unused = tokio::net::TcpSocket::new_v4().unwrap();
+    unused.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let port = unused.local_addr().unwrap().port();
-    drop(unused);
     let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
     let ca = ca("Client CA");
     let new = client_pair(&ca, true);

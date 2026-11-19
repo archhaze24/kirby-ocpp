@@ -1418,11 +1418,14 @@ mod tests {
         config
     }
 
-    async fn unused_url() -> String {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        format!("ws://127.0.0.1:{port}/ocpp")
+    /// The port stays bound without `listen` until the test process ends, so connections are
+    /// refused and a parallel test cannot take the port over.
+    fn unused_url() -> String {
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = socket.local_addr().unwrap();
+        std::mem::forget(socket);
+        format!("ws://{addr}/ocpp")
     }
 
     #[test]
@@ -1492,7 +1495,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_boot_wait_fails_at_once_when_no_reconnect_is_left() {
-        let url = unused_url().await;
+        let url = unused_url();
         let (handle, join) = Station2::spawn(
             config_for(&url, Protocol::V201, false),
             Arc::new(SystemClock),
@@ -1511,7 +1514,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn the_boot_wait_timeout_names_the_last_connection_error() {
-        let url = unused_url().await;
+        let url = unused_url();
         let (handle, join) = Station2::spawn(
             config_for(&url, Protocol::V201, true),
             Arc::new(SystemClock),

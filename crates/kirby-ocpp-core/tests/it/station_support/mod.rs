@@ -247,12 +247,14 @@ pub async fn wait_state(
     }
 }
 
-/// An address nothing listens on (bound, then released).
+/// An address nothing listens on. The port stays bound without `listen` until the test process
+/// ends, so connections are refused and a parallel test cannot take the port over.
 pub async fn dead_url() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    format!("ws://127.0.0.1:{port}/ocpp")
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    std::mem::forget(socket);
+    format!("ws://{addr}/ocpp")
 }
 
 // ---- helpers shared by the transaction/feature tests -----------------------------

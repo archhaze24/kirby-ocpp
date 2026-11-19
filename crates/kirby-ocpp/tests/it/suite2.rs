@@ -83,12 +83,14 @@ fn path_str(path: &Path) -> &str {
     path.to_str().unwrap()
 }
 
-/// A URL nothing listens on.
-async fn unused_url() -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    format!("ws://127.0.0.1:{port}/ocpp")
+/// A URL nothing listens on. The port stays bound without `listen` until the test process
+/// ends, so connections are refused and a parallel test cannot take the port over.
+fn unused_url() -> String {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    std::mem::forget(socket);
+    format!("ws://{addr}/ocpp")
 }
 
 // run
@@ -148,7 +150,7 @@ async fn run_resolves_a_built_in_for_2_0_1_and_retargets_the_token() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn run_rejects_a_token_longer_than_36_characters_for_2_0_1() {
-    let url = unused_url().await;
+    let url = unused_url();
     let long = "T".repeat(37);
     let output = kirby(station(
         &url,
@@ -165,7 +167,7 @@ async fn run_rejects_a_token_longer_than_36_characters_for_2_0_1() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_setup_error_names_2_0_1_in_the_junit_file() {
-    let url = unused_url().await;
+    let url = unused_url();
     let dir = tempfile::tempdir().unwrap();
     let file = write(dir.path(), "plain.toml", PLAIN);
     let junit = dir.path().join("j.xml");
@@ -243,7 +245,7 @@ async fn suite_runs_a_directory_of_2_0_1_files_and_selects_by_tag() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_suite_with_a_scenario_of_another_version_is_a_usage_error() {
-    let url = unused_url().await;
+    let url = unused_url();
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "a-plain.toml", PLAIN);
     let old = write(dir.path(), "b-old.toml", V16);
@@ -294,7 +296,7 @@ async fn suite_runs_the_built_ins_of_2_0_1() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_suite_setup_error_names_2_0_1_in_the_reports() {
-    let url = unused_url().await;
+    let url = unused_url();
     let dir = tempfile::tempdir().unwrap();
     let file = write(dir.path(), "plain.toml", PLAIN);
     let (report, junit) = (dir.path().join("r.json"), dir.path().join("j.xml"));
