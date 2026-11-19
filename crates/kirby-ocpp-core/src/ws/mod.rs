@@ -614,17 +614,15 @@ mod tests {
         assert_eq!(default, SchemaSet::for_protocol(Protocol::V16).unwrap());
         assert_eq!(default.registry().protocol(), Protocol::V16);
         assert_eq!(format!("{default:?}"), r#"SchemaSet("ocpp1.6")"#);
-        assert!(matches!(
-            SchemaSet::for_protocol(Protocol::V21),
-            Err(SchemaError::Unavailable(Protocol::V21))
-        ));
-        assert_eq!(
-            SchemaSet::for_protocol(Protocol::V201)
-                .unwrap()
-                .registry()
-                .protocol(),
-            Protocol::V201
-        );
+        for protocol in [Protocol::V201, Protocol::V21] {
+            assert_eq!(
+                SchemaSet::for_protocol(protocol)
+                    .unwrap()
+                    .registry()
+                    .protocol(),
+                protocol
+            );
+        }
     }
 
     #[test]

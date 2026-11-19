@@ -9,6 +9,7 @@ pub mod protocol;
 pub mod responder;
 pub mod schema;
 mod schema_v201;
+mod schema_v21;
 pub mod types;
 pub mod v2;
 

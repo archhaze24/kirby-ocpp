@@ -8,8 +8,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// Each version has a WebSocket subprotocol token (`ocpp1.6`) and a bare version string
 /// (`1.6`) that report, scenario and recording files carry. [`Protocol::V16`] and
-/// [`Protocol::V201`] are implemented; [`Protocol::V21`] exists so version-dependent code has
-/// one type to switch on.
+/// [`Protocol::V201`] are implemented. [`Protocol::V21`] has its schemas and action catalog
+/// (see [`SchemaRegistry`](crate::ocpp::SchemaRegistry) and
+/// [`registry`](crate::ocpp::v2::registry)) but no station or CSMS behavior yet; see
+/// [`Protocol::is_station_implemented`].
 /// Serialized as the token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]

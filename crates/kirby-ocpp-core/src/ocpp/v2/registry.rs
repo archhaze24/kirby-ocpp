@@ -1,11 +1,16 @@
-//! The catalog of all 64 OCPP 2.0.1 actions with the direction each one travels in and
-//! whether [`messages`](super::messages) has a typed payload for it.
+//! The catalogs of the OCPP 2.x actions with the direction each one travels in and whether
+//! [`messages`](super::messages) has a typed payload for it: [`ACTIONS`] holds the 64
+//! actions of 2.0.1, [`ACTIONS_V21`] the 91 of 2.1 (the 64 plus 27 new ones, one of them a
+//! SEND message). [`actions_for`] picks one by [`Protocol`]; the functions without a
+//! protocol answer for 2.0.1.
 //!
-//! The catalog is a static table: lookups borrow from it and never allocate. Having a
-//! name here means the action exists in 2.0.1, not that a station or CSMS implements it.
-//! The names are pinned to the embedded JSON schemas by the tests at the bottom of this
-//! file, and the directions to the marker types in [`messages`](super::messages).
+//! The catalogs are static tables: lookups borrow from them and never allocate. Having a
+//! name here means the action exists in that version, not that a station or CSMS implements
+//! it. The names are pinned to the embedded JSON schemas by the tests at the bottom of this
+//! file, and the directions of the typed actions to the marker types in
+//! [`messages`](super::messages).
 
+use crate::ocpp::Protocol;
 use crate::ocpp::frame::ErrorCode;
 
 /// Who may send the CALL of an action. Relative to the charge station, also when the CSMS
@@ -42,6 +47,11 @@ pub struct ActionInfo {
     /// `true` if [`messages`](super::messages) defines request and response structs and a
     /// marker for the action. Other actions are carried as raw JSON.
     pub typed: bool,
+    /// `true` for a SEND message (2.1): a one-way frame that no side answers, with a single
+    /// payload schema instead of a request/response pair. Only `NotifyPeriodicEventStream`
+    /// is one; every other action is a CALL with a CALLRESULT or CALLERROR. The direction
+    /// of a SEND message is the direction of its only frame.
+    pub send_only: bool,
 }
 
 const STATION: ActionDirection = ActionDirection::StationToCsms;
@@ -52,6 +62,17 @@ const fn info(name: &'static str, direction: ActionDirection, typed: bool) -> Ac
         name,
         direction,
         typed,
+        send_only: false,
+    }
+}
+
+/// A SEND message: untyped and answered by nobody.
+const fn send(name: &'static str, direction: ActionDirection) -> ActionInfo {
+    ActionInfo {
+        name,
+        direction,
+        typed: false,
+        send_only: true,
     }
 }
 
@@ -124,17 +145,150 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("UpdateFirmware", CSMS, false),
 ];
 
-/// The entry of action `name` (case-sensitive), or `None` if 2.0.1 has no such action.
-pub fn lookup(name: &str) -> Option<&'static ActionInfo> {
-    ACTIONS
-        .binary_search_by(|entry| entry.name.cmp(name))
-        .ok()
-        .and_then(|index| ACTIONS.get(index))
+/// All 91 OCPP 2.1 actions in byte-wise alphabetical order: the 64 of [`ACTIONS`] (same
+/// direction, same `typed` flag) plus 27 new ones, none of them typed. 36 are sent by the
+/// station (one of them the SEND message `NotifyPeriodicEventStream`), 54 by the CSMS and
+/// `DataTransfer` by either. Directions follow the message definitions of Part 2 of the 2.1
+/// specification; no 2.0.1 action changed direction.
+pub const ACTIONS_V21: [ActionInfo; 91] = [
+    info("AFRRSignal", CSMS, false),
+    info("AdjustPeriodicEventStream", CSMS, false),
+    info("Authorize", STATION, true),
+    info("BatterySwap", STATION, false),
+    info("BootNotification", STATION, true),
+    info("CancelReservation", CSMS, false),
+    info("CertificateSigned", CSMS, false),
+    info("ChangeAvailability", CSMS, true),
+    info("ChangeTransactionTariff", CSMS, false),
+    info("ClearCache", CSMS, true),
+    info("ClearChargingProfile", CSMS, false),
+    info("ClearDERControl", CSMS, false),
+    info("ClearDisplayMessage", CSMS, false),
+    info("ClearTariffs", CSMS, false),
+    info("ClearVariableMonitoring", CSMS, false),
+    info("ClearedChargingLimit", STATION, false),
+    info("ClosePeriodicEventStream", STATION, false),
+    info("CostUpdated", CSMS, false),
+    info("CustomerInformation", CSMS, false),
+    info("DataTransfer", ActionDirection::Both, true),
+    info("DeleteCertificate", CSMS, false),
+    info("FirmwareStatusNotification", STATION, false),
+    info("Get15118EVCertificate", STATION, false),
+    info("GetBaseReport", CSMS, true),
+    info("GetCertificateChainStatus", STATION, false),
+    info("GetCertificateStatus", STATION, false),
+    info("GetChargingProfiles", CSMS, false),
+    info("GetCompositeSchedule", CSMS, false),
+    info("GetDERControl", CSMS, false),
+    info("GetDisplayMessages", CSMS, false),
+    info("GetInstalledCertificateIds", CSMS, false),
+    info("GetLocalListVersion", CSMS, false),
+    info("GetLog", CSMS, false),
+    info("GetMonitoringReport", CSMS, false),
+    info("GetPeriodicEventStream", CSMS, false),
+    info("GetReport", CSMS, false),
+    info("GetTariffs", CSMS, false),
+    info("GetTransactionStatus", CSMS, true),
+    info("GetVariables", CSMS, true),
+    info("Heartbeat", STATION, true),
+    info("InstallCertificate", CSMS, false),
+    info("LogStatusNotification", STATION, false),
+    info("MeterValues", STATION, true),
+    info("NotifyAllowedEnergyTransfer", CSMS, false),
+    info("NotifyChargingLimit", STATION, false),
+    info("NotifyCustomerInformation", STATION, false),
+    info("NotifyDERAlarm", STATION, false),
+    info("NotifyDERStartStop", STATION, false),
+    info("NotifyDisplayMessages", STATION, false),
+    info("NotifyEVChargingNeeds", STATION, false),
+    info("NotifyEVChargingSchedule", STATION, false),
+    info("NotifyEvent", STATION, false),
+    info("NotifyMonitoringReport", STATION, false),
+    send("NotifyPeriodicEventStream", STATION),
+    info("NotifyPriorityCharging", STATION, false),
+    info("NotifyReport", STATION, true),
+    info("NotifySettlement", STATION, false),
+    info("NotifyWebPaymentStarted", CSMS, false),
+    info("OpenPeriodicEventStream", STATION, false),
+    info("PublishFirmware", CSMS, false),
+    info("PublishFirmwareStatusNotification", STATION, false),
+    info("PullDynamicScheduleUpdate", STATION, false),
+    info("ReportChargingProfiles", STATION, false),
+    info("ReportDERControl", STATION, false),
+    info("RequestBatterySwap", CSMS, false),
+    info("RequestStartTransaction", CSMS, true),
+    info("RequestStopTransaction", CSMS, true),
+    info("ReservationStatusUpdate", STATION, false),
+    info("ReserveNow", CSMS, false),
+    info("Reset", CSMS, true),
+    info("SecurityEventNotification", STATION, true),
+    info("SendLocalList", CSMS, false),
+    info("SetChargingProfile", CSMS, false),
+    info("SetDERControl", CSMS, false),
+    info("SetDefaultTariff", CSMS, false),
+    info("SetDisplayMessage", CSMS, false),
+    info("SetMonitoringBase", CSMS, false),
+    info("SetMonitoringLevel", CSMS, false),
+    info("SetNetworkProfile", CSMS, false),
+    info("SetVariableMonitoring", CSMS, false),
+    info("SetVariables", CSMS, true),
+    info("SignCertificate", STATION, false),
+    info("StatusNotification", STATION, true),
+    info("TransactionEvent", STATION, true),
+    info("TriggerMessage", CSMS, true),
+    info("UnlockConnector", CSMS, true),
+    info("UnpublishFirmware", CSMS, false),
+    info("UpdateDynamicSchedule", CSMS, false),
+    info("UpdateFirmware", CSMS, false),
+    info("UsePriorityCharging", CSMS, false),
+    info("VatNumberValidation", STATION, false),
+];
+
+/// The catalog of `protocol`: [`ACTIONS`] for 2.0.1, [`ACTIONS_V21`] for 2.1, sorted by name.
+/// OCPP 1.6 has its own catalog in [`crate::ocpp::messages::registry`]; here it yields an
+/// empty slice.
+pub const fn actions_for(protocol: Protocol) -> &'static [ActionInfo] {
+    match protocol {
+        Protocol::V201 => &ACTIONS,
+        Protocol::V21 => &ACTIONS_V21,
+        _ => &[],
+    }
 }
 
-/// All actions in table order.
+/// The entry of action `name` (case-sensitive) in the catalog of `protocol`, or `None` if
+/// the version has no such action.
+pub fn lookup_for(protocol: Protocol, name: &str) -> Option<&'static ActionInfo> {
+    let table = actions_for(protocol);
+    table
+        .binary_search_by(|entry| entry.name.cmp(name))
+        .ok()
+        .and_then(|index| table.get(index))
+}
+
+/// The entry of action `name` (case-sensitive), or `None` if 2.0.1 has no such action.
+pub fn lookup(name: &str) -> Option<&'static ActionInfo> {
+    lookup_for(Protocol::V201, name)
+}
+
+/// All 2.0.1 actions in table order.
 pub fn iter() -> impl Iterator<Item = &'static ActionInfo> {
     ACTIONS.iter()
+}
+
+/// Who may send the CALL (or SEND) of `name` in `protocol`, or `None` for an unknown action.
+pub fn direction_for(protocol: Protocol, name: &str) -> Option<ActionDirection> {
+    lookup_for(protocol, name).map(|entry| entry.direction)
+}
+
+/// The CALLERROR code for an incoming CALL of `name` in `protocol` that has no handler:
+/// `NotImplemented` for a name the version does not define, `NotSupported` for any defined
+/// action. See [`unhandled_error_code`].
+pub fn unhandled_error_code_for(protocol: Protocol, name: &str) -> ErrorCode {
+    if lookup_for(protocol, name).is_some() {
+        ErrorCode::NotSupported
+    } else {
+        ErrorCode::NotImplemented
+    }
 }
 
 /// `true` if `name` is an OCPP 2.0.1 action.
@@ -158,11 +312,7 @@ pub fn direction(name: &str) -> Option<ActionDirection> {
 /// payload alone does not make an action handled, so typed actions count as `NotSupported`
 /// too; the dispatcher decides which actions have a handler before it asks.
 pub fn unhandled_error_code(name: &str) -> ErrorCode {
-    if is_known(name) {
-        ErrorCode::NotSupported
-    } else {
-        ErrorCode::NotImplemented
-    }
+    unhandled_error_code_for(Protocol::V201, name)
 }
 
 #[cfg(test)]
@@ -446,6 +596,181 @@ mod tests {
         assert!(!is_known(""));
         assert_eq!(direction("NoSuchAction"), None);
         assert_eq!(lookup("Reset").map(|entry| entry.typed), Some(true));
+    }
+
+    const NEW_IN_V21_STATION: [&str; 12] = [
+        "BatterySwap",
+        "ClosePeriodicEventStream",
+        "GetCertificateChainStatus",
+        "NotifyDERAlarm",
+        "NotifyDERStartStop",
+        "NotifyPeriodicEventStream",
+        "NotifyPriorityCharging",
+        "NotifySettlement",
+        "OpenPeriodicEventStream",
+        "PullDynamicScheduleUpdate",
+        "ReportDERControl",
+        "VatNumberValidation",
+    ];
+    const NEW_IN_V21_CSMS: [&str; 15] = [
+        "AFRRSignal",
+        "AdjustPeriodicEventStream",
+        "ChangeTransactionTariff",
+        "ClearDERControl",
+        "ClearTariffs",
+        "GetDERControl",
+        "GetPeriodicEventStream",
+        "GetTariffs",
+        "NotifyAllowedEnergyTransfer",
+        "NotifyWebPaymentStarted",
+        "RequestBatterySwap",
+        "SetDefaultTariff",
+        "SetDERControl",
+        "UpdateDynamicSchedule",
+        "UsePriorityCharging",
+    ];
+
+    #[test]
+    fn v21_catalog_equals_the_schema_tables() {
+        let registry = SchemaRegistry::for_protocol(Protocol::V21).unwrap();
+        let mut schema: Vec<&str> = registry
+            .action_names()
+            .chain(registry.send_action_names())
+            .collect();
+        schema.sort_unstable();
+        let catalog: Vec<&str> = ACTIONS_V21.iter().map(|entry| entry.name).collect();
+        assert_eq!(catalog.len(), 91);
+        assert_eq!(catalog, schema);
+        assert!(
+            ACTIONS_V21
+                .windows(2)
+                .all(|pair| pair[0].name < pair[1].name)
+        );
+        for entry in &ACTIONS_V21 {
+            assert_eq!(lookup_for(Protocol::V21, entry.name), Some(entry));
+            // Every action has a schema pair, except the SEND message, which has one payload.
+            assert_eq!(
+                registry.knows_action(entry.name),
+                !entry.send_only,
+                "{}",
+                entry.name
+            );
+            assert_eq!(
+                registry.knows_send(entry.name),
+                entry.send_only,
+                "{}",
+                entry.name
+            );
+        }
+    }
+
+    #[test]
+    fn v21_is_v201_plus_27_new_actions() {
+        for old in &ACTIONS {
+            let new = lookup_for(Protocol::V21, old.name).expect(old.name);
+            assert_eq!(new, old, "{} changed", old.name);
+        }
+        let added: BTreeSet<&str> = ACTIONS_V21
+            .iter()
+            .map(|entry| entry.name)
+            .filter(|name| lookup(name).is_none())
+            .collect();
+        let expected: BTreeSet<&str> = NEW_IN_V21_STATION
+            .iter()
+            .chain(&NEW_IN_V21_CSMS)
+            .copied()
+            .collect();
+        assert_eq!(added.len(), 27);
+        assert_eq!(added, expected);
+        for name in &added {
+            let entry = lookup_for(Protocol::V21, name).unwrap();
+            assert!(!entry.typed, "{name}");
+        }
+    }
+
+    #[test]
+    fn v21_directions() {
+        let count = |wanted| {
+            ACTIONS_V21
+                .iter()
+                .filter(|entry| entry.direction == wanted)
+                .count()
+        };
+        assert_eq!(count(ActionDirection::StationToCsms), 36);
+        assert_eq!(count(ActionDirection::CsmsToStation), 54);
+        assert_eq!(count(ActionDirection::Both), 1);
+        for name in NEW_IN_V21_STATION {
+            assert_eq!(
+                direction_for(Protocol::V21, name),
+                Some(ActionDirection::StationToCsms),
+                "{name}"
+            );
+        }
+        for name in NEW_IN_V21_CSMS {
+            assert_eq!(
+                direction_for(Protocol::V21, name),
+                Some(ActionDirection::CsmsToStation),
+                "{name}"
+            );
+        }
+        assert_eq!(
+            direction_for(Protocol::V21, "BootNotification"),
+            Some(ActionDirection::StationToCsms)
+        );
+        assert_eq!(
+            direction_for(Protocol::V21, "RequestStartTransaction"),
+            Some(ActionDirection::CsmsToStation)
+        );
+        assert_eq!(
+            direction_for(Protocol::V21, "DataTransfer"),
+            Some(ActionDirection::Both)
+        );
+        assert_eq!(direction_for(Protocol::V201, "GetTariffs"), None);
+    }
+
+    #[test]
+    fn only_one_action_is_send_only() {
+        let sends: Vec<&str> = ACTIONS_V21
+            .iter()
+            .filter(|entry| entry.send_only)
+            .map(|entry| entry.name)
+            .collect();
+        assert_eq!(sends, ["NotifyPeriodicEventStream"]);
+        assert!(ACTIONS.iter().all(|entry| !entry.send_only));
+    }
+
+    #[test]
+    fn protocol_aware_lookups() {
+        assert_eq!(actions_for(Protocol::V201).len(), 64);
+        assert_eq!(actions_for(Protocol::V21).len(), 91);
+        assert_eq!(actions_for(Protocol::V16).len(), 0);
+        assert!(lookup_for(Protocol::V201, "GetTariffs").is_none());
+        assert!(lookup_for(Protocol::V21, "GetTariffs").is_some());
+        assert!(lookup_for(Protocol::V16, "Heartbeat").is_none());
+    }
+
+    #[test]
+    fn v21_unhandled_codes() {
+        assert_eq!(
+            unhandled_error_code_for(Protocol::V21, "GetTariffs"),
+            ErrorCode::NotSupported
+        );
+        assert_eq!(
+            unhandled_error_code_for(Protocol::V201, "GetTariffs"),
+            ErrorCode::NotImplemented
+        );
+        assert_eq!(
+            unhandled_error_code_for(Protocol::V21, "NotifyPeriodicEventStream"),
+            ErrorCode::NotSupported
+        );
+        assert_eq!(
+            unhandled_error_code_for(Protocol::V21, "RemoteStartTransaction"),
+            ErrorCode::NotImplemented
+        );
+        assert_eq!(
+            unhandled_error_code("GetTariffs"),
+            ErrorCode::NotImplemented
+        );
     }
 
     #[test]

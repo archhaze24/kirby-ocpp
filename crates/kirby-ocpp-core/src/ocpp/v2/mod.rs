@@ -51,8 +51,23 @@ pub(crate) mod test_support {
             .unwrap()
     }
 
-    /// Asserts that `fixture` validates against `file`, decodes into `T` and
-    /// encodes back to exactly the same JSON.
+    /// Asserts that `fixture`, valid for the 2.0.1 schema `file`, is also valid for the 2.1
+    /// schema of the same name: a 2.0.1-shaped payload must stay acceptable in 2.1.
+    fn assert_valid_in_v21(file: &str, fixture: &Value) {
+        let path = format!("{}/schemas/ocpp21/{file}", env!("CARGO_MANIFEST_DIR"));
+        let schema: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let errors: Vec<String> = jsonschema::draft6::options()
+            .should_validate_formats(true)
+            .build(&schema)
+            .unwrap()
+            .iter_errors(fixture)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{file}: invalid in 2.1: {errors:?}");
+    }
+
+    /// Asserts that `fixture` validates against `file` (2.0.1, and the 2.1 file of the same
+    /// name), decodes into `T` and encodes back to exactly the same JSON.
     pub(crate) fn check_roundtrip<T>(file: &str, fixture: &Value)
     where
         T: Serialize + DeserializeOwned,
@@ -62,6 +77,7 @@ pub(crate) mod test_support {
             .map(|e| e.to_string())
             .collect();
         assert!(errors.is_empty(), "{file}: fixture invalid: {errors:?}");
+        assert_valid_in_v21(file, fixture);
         let typed: T = serde_json::from_value(fixture.clone())
             .unwrap_or_else(|e| panic!("{file}: decode failed: {e}"));
         let back = serde_json::to_value(&typed).unwrap();

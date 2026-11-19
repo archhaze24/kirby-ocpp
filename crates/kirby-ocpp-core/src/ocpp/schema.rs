@@ -2,13 +2,16 @@
 //!
 //! The bundled schemas are the source of truth for payload validity: OCPP 1.6J (28 core
 //! actions + 11 Security Whitepaper actions, x request/response; the core ones are draft-04,
-//! the security ones draft-06 but only use keywords draft-04 shares) and OCPP 2.0.1 (64
-//! actions, all draft-06). Validation applies to **both directions**: requests we send,
-//! requests we receive, responses we receive and the replies we send ourselves.
+//! the security ones draft-06 but only use keywords draft-04 shares), OCPP 2.0.1 (64
+//! actions, all draft-06) and OCPP 2.1 (90 request/response actions plus the SEND message
+//! `NotifyPeriodicEventStream`, all draft-06). Validation applies to **both directions**:
+//! requests we send, requests we receive, responses we receive and the replies we send
+//! ourselves.
 //!
-//! The schemas live in `crates/kirby-ocpp-core/schemas/` (2.0.1 in `schemas/ocpp201/`) and
-//! are embedded with `include_str!` (no runtime file lookup). Each registry compiles its
-//! files once with the `jsonschema` crate: 1.6 forced to Draft 4, 2.0.1 to Draft 6. Before
+//! The schemas live in `crates/kirby-ocpp-core/schemas/` (2.0.1 in `schemas/ocpp201/`, 2.1
+//! in `schemas/ocpp21/`) and are embedded with `include_str!` (no runtime file lookup). Each
+//! registry compiles its files once with the `jsonschema` crate: 1.6 forced to Draft 4, 2.x
+//! to Draft 6. Before
 //! compiling, the root `$schema`, `id` and `$id` keys are removed (as the TS validator
 //! does): the official 1.6 files carry `"id": "urn:OCPP:1.6:..."`, which Draft 4 would treat
 //! as the base URI of the document. Only the **root** keys are stripped, so a property that
@@ -25,6 +28,7 @@ use thiserror::Error;
 
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::protocol::Protocol;
+use crate::ocpp::schema_v21::{EMBEDDED_V21, EMBEDDED_V21_SEND};
 use crate::ocpp::schema_v201::EMBEDDED_V201;
 
 /// Which payload of an action a schema describes.
@@ -314,8 +318,18 @@ struct Entry {
     response_source: &'static str,
 }
 
+/// The schema of a SEND message (2.1): one payload, no response.
+#[derive(Debug)]
+struct SendEntry {
+    payload: Validator,
+    source: &'static str,
+}
+
 /// The embedded schema table of one OCPP version: `(action, request json, response json)`.
 pub(crate) type SchemaTable = &'static [(&'static str, &'static str, &'static str)];
+
+/// The embedded SEND schemas of one OCPP version: `(action, payload json)`.
+pub(crate) type SendSchemaTable = &'static [(&'static str, &'static str)];
 
 /// The compiled set of the schemas of one OCPP version. Build once, share (`Arc`) freely;
 /// [`SchemaRegistry::for_protocol`] hands out the shared instance.
@@ -323,7 +337,9 @@ pub(crate) type SchemaTable = &'static [(&'static str, &'static str, &'static st
 pub struct SchemaRegistry {
     protocol: Protocol,
     table: SchemaTable,
+    send_table: SendSchemaTable,
     actions: HashMap<&'static str, Entry>,
+    sends: HashMap<&'static str, SendEntry>,
 }
 
 /// A bundled schema could not be compiled (a build-time bug, not a runtime condition).
@@ -384,11 +400,12 @@ impl SchemaRegistry {
     /// The shared registry of `protocol`, compiled on first use.
     ///
     /// # Errors
-    /// [`SchemaError::Unavailable`] for a version this build embeds no schemas for (2.1
+    /// [`SchemaError::Unavailable`] for a version this build embeds no schemas for (none
     /// today); [`SchemaError::Load`] if a bundled schema does not compile.
     pub fn for_protocol(protocol: Protocol) -> Result<Arc<Self>, SchemaError> {
         static V16: OnceLock<Result<Arc<SchemaRegistry>, SchemaLoadError>> = OnceLock::new();
         static V201: OnceLock<Result<Arc<SchemaRegistry>, SchemaLoadError>> = OnceLock::new();
+        static V21: OnceLock<Result<Arc<SchemaRegistry>, SchemaLoadError>> = OnceLock::new();
         match protocol {
             Protocol::V16 => V16
                 .get_or_init(|| Self::new().map(Arc::new))
@@ -398,7 +415,13 @@ impl SchemaRegistry {
                 .get_or_init(|| Self::build(Protocol::V201, EMBEDDED_V201).map(Arc::new))
                 .clone()
                 .map_err(SchemaError::Load),
-            other => Err(SchemaError::Unavailable(other)),
+            Protocol::V21 => V21
+                .get_or_init(|| {
+                    Self::build_with_sends(Protocol::V21, EMBEDDED_V21, EMBEDDED_V21_SEND)
+                        .map(Arc::new)
+                })
+                .clone()
+                .map_err(SchemaError::Load),
         }
     }
 
@@ -408,6 +431,24 @@ impl SchemaRegistry {
     }
 
     pub(crate) fn build(protocol: Protocol, table: SchemaTable) -> Result<Self, SchemaLoadError> {
+        Self::build_with_sends(protocol, table, &[])
+    }
+
+    pub(crate) fn build_with_sends(
+        protocol: Protocol,
+        table: SchemaTable,
+        send_table: SendSchemaTable,
+    ) -> Result<Self, SchemaLoadError> {
+        let mut sends = HashMap::with_capacity(send_table.len());
+        for &(action, source) in send_table {
+            sends.insert(
+                action,
+                SendEntry {
+                    payload: compile(protocol, action, PayloadKind::Request, source)?,
+                    source,
+                },
+            );
+        }
         let mut actions = HashMap::with_capacity(table.len());
         for &(action, request_source, response_source) in table {
             actions.insert(
@@ -423,20 +464,55 @@ impl SchemaRegistry {
         Ok(Self {
             protocol,
             table,
+            send_table,
             actions,
+            sends,
         })
     }
 
-    /// `true` if `action` has a schema in this registry (1.6: 28 core + 11 security
-    /// extensions; 2.0.1: 64).
+    /// `true` if `action` has a request/response schema pair in this registry (1.6: 28 core
+    /// and 11 security extensions; 2.0.1: 64; 2.1: 90). SEND messages are not included, see
+    /// [`SchemaRegistry::knows_send`].
     pub fn knows_action(&self, action: &str) -> bool {
         self.actions.contains_key(action)
     }
 
-    /// The action names in table order. 1.6: the 28 core ones alphabetically, then the 11
-    /// security ones; 2.0.1: all 64 alphabetically.
+    /// The request/response action names in table order. 1.6: the 28 core ones
+    /// alphabetically, then the 11 security ones; 2.0.1: all 64 alphabetically; 2.1: the 90
+    /// pairs alphabetically (without the SEND message, see
+    /// [`SchemaRegistry::send_action_names`]).
     pub fn action_names(&self) -> impl Iterator<Item = &'static str> {
         self.table.iter().map(|&(name, _, _)| name)
+    }
+
+    /// `true` if `action` is a SEND message of this version: a one-way message with a single
+    /// payload schema and no response. Only 2.1 has them (`NotifyPeriodicEventStream`).
+    pub fn knows_send(&self, action: &str) -> bool {
+        self.sends.contains_key(action)
+    }
+
+    /// The names of the SEND messages of this version, in table order.
+    pub fn send_action_names(&self) -> impl Iterator<Item = &'static str> {
+        self.send_table.iter().map(|&(name, _)| name)
+    }
+
+    /// The embedded (unmodified) payload schema source of the SEND message `action`.
+    pub fn send_schema_source(&self, action: &str) -> Option<&'static str> {
+        self.sends.get(action).map(|entry| entry.source)
+    }
+
+    /// Validates the payload of the SEND message `action`. An action that is not a SEND
+    /// message of this version yields [`ViolationCause::UnknownAction`]. A violation reports
+    /// [`PayloadKind::Request`], the direction the payload travels in.
+    pub fn validate_send(&self, action: &str, payload: &Value) -> Result<(), SchemaViolation> {
+        let Some(entry) = self.sends.get(action) else {
+            return Err(SchemaViolation::unknown_action(
+                self.protocol,
+                action,
+                PayloadKind::Request,
+            ));
+        };
+        self.check(&entry.payload, action, PayloadKind::Request, payload, false)
     }
 
     /// The embedded (unmodified) schema source for one payload of `action`.
@@ -471,9 +547,20 @@ impl SchemaRegistry {
             PayloadKind::Request => &entry.request,
             PayloadKind::Response => &entry.response,
         };
+        let secret = kind == PayloadKind::Request && carries_authorization_key(action, payload);
+        self.check(validator, action, kind, payload, secret)
+    }
+
+    fn check(
+        &self,
+        validator: &Validator,
+        action: &str,
+        kind: PayloadKind,
+        payload: &Value,
+        action_secret: bool,
+    ) -> Result<(), SchemaViolation> {
         // The validator's messages quote the offending value; that must never be a secret.
-        let secret = kind == PayloadKind::Request && carries_authorization_key(action, payload)
-            || super::frame::carries_device_model_secret(payload);
+        let secret = action_secret || super::frame::carries_device_model_secret(payload);
         let issues: Vec<SchemaIssue> = validator
             .iter_errors(payload)
             .map(|error| SchemaIssue {
@@ -910,16 +997,200 @@ mod tests {
     }
 
     #[test]
-    fn for_protocol_refuses_versions_without_schemas() {
-        let protocol = Protocol::V21;
-        let error = SchemaRegistry::for_protocol(protocol).unwrap_err();
-        assert!(
-            matches!(error, SchemaError::Unavailable(p) if p == protocol),
-            "{error:?}"
-        );
+    fn every_version_has_schemas() {
+        for protocol in Protocol::ALL {
+            let registry = SchemaRegistry::for_protocol(protocol).unwrap();
+            assert_eq!(registry.protocol(), protocol);
+        }
+        let error = SchemaError::Unavailable(Protocol::V21);
         assert_eq!(
             error.to_string(),
-            format!("this build has no OCPP schemas for {}", protocol.token())
+            "this build has no OCPP schemas for ocpp2.1"
+        );
+    }
+
+    // ---- OCPP 2.1 ----
+
+    fn v21() -> Arc<SchemaRegistry> {
+        SchemaRegistry::for_protocol(Protocol::V21).expect("2.1 schemas compile")
+    }
+
+    fn schema_dir_v21() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("schemas/ocpp21")
+    }
+
+    #[test]
+    fn v21_embeds_90_pairs_and_one_send_matching_the_files() {
+        let registry = v21();
+        assert_eq!(registry.protocol(), Protocol::V21);
+        assert!(Arc::ptr_eq(&registry, &v21()));
+        let names: Vec<_> = registry.action_names().collect();
+        assert_eq!(names.len(), 90);
+        let unique: std::collections::HashSet<_> = names.iter().copied().collect();
+        assert_eq!(unique.len(), 90);
+        let sends: Vec<_> = registry.send_action_names().collect();
+        assert_eq!(sends, ["NotifyPeriodicEventStream"]);
+        let mut files: Vec<String> = std::fs::read_dir(schema_dir_v21())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name != "README.md")
+            .collect();
+        files.sort();
+        assert_eq!(files.len(), 181);
+        let mut expected: Vec<String> = names
+            .iter()
+            .flat_map(|n| [format!("{n}Request.json"), format!("{n}Response.json")])
+            .collect();
+        expected.push("NotifyPeriodicEventStream.json".to_owned());
+        expected.sort();
+        assert_eq!(files, expected);
+        for name in names {
+            assert!(registry.knows_action(name), "{name}");
+            assert!(!registry.knows_send(name), "{name}");
+            for (kind, suffix) in [
+                (PayloadKind::Request, "Request"),
+                (PayloadKind::Response, "Response"),
+            ] {
+                let on_disk =
+                    std::fs::read_to_string(schema_dir_v21().join(format!("{name}{suffix}.json")))
+                        .unwrap();
+                assert_eq!(registry.schema_source(name, kind), Some(on_disk.as_str()));
+            }
+        }
+        let on_disk =
+            std::fs::read_to_string(schema_dir_v21().join("NotifyPeriodicEventStream.json"))
+                .unwrap();
+        assert_eq!(
+            registry.send_schema_source("NotifyPeriodicEventStream"),
+            Some(on_disk.as_str())
+        );
+        assert!(!registry.knows_action("NotifyPeriodicEventStream"));
+        assert!(
+            registry
+                .schema_source("NotifyPeriodicEventStream", PayloadKind::Request)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn v21_validates_each_direction() {
+        let registry = v21();
+        // Station -> CSMS.
+        let boot =
+            json!({"reason": "PowerUp", "chargingStation": {"model": "m", "vendorName": "v"}});
+        registry
+            .validate_request("BootNotification", &boot)
+            .unwrap();
+        let violation = registry
+            .validate_request("BootNotification", &json!({"reason": "PowerUp"}))
+            .unwrap_err();
+        assert_eq!(violation.protocol, Protocol::V21);
+        assert_ne!(violation.cause, ViolationCause::UnknownAction);
+        assert_eq!(
+            violation.error_code_for(Protocol::V21).as_str(),
+            "OccurrenceConstraintViolation"
+        );
+        // CSMS -> station.
+        registry
+            .validate_request("RequestStopTransaction", &json!({"transactionId": "t1"}))
+            .unwrap();
+        assert!(
+            registry
+                .validate_request("RequestStopTransaction", &json!({}))
+                .is_err()
+        );
+        // A response, and a new 2.1 action in each direction.
+        registry
+            .validate_response("GetTariffs", &json!({"status": "Accepted"}))
+            .unwrap();
+        assert!(
+            registry
+                .validate_response("GetTariffs", &json!({"status": "Nope"}))
+                .is_err()
+        );
+        registry
+            .validate_request("GetTariffs", &json!({"evseId": 1}))
+            .unwrap();
+        registry
+            .validate_request(
+                "NotifyPriorityCharging",
+                &json!({"transactionId": "t", "activated": true}),
+            )
+            .unwrap();
+        assert!(
+            registry
+                .validate_request("NotifyPriorityCharging", &json!({"transactionId": "t"}))
+                .is_err()
+        );
+        // 2.0.1-only shapes and names stay out.
+        let unknown = registry
+            .validate_request("RemoteStartTransaction", &json!({}))
+            .unwrap_err();
+        assert_eq!(unknown.cause, ViolationCause::UnknownAction);
+        assert_eq!(
+            unknown.errors,
+            ["`RemoteStartTransaction` is not an OCPP 2.1 action"]
+        );
+    }
+
+    #[test]
+    fn v21_validates_the_send_payload() {
+        let registry = v21();
+        let payload = json!({
+            "id": 1,
+            "pending": 0,
+            "basetime": "2026-05-06T07:08:09Z",
+            "data": [{"t": 0, "v": "1.5"}]
+        });
+        registry
+            .validate_send("NotifyPeriodicEventStream", &payload)
+            .unwrap();
+        let broken = registry
+            .validate_send("NotifyPeriodicEventStream", &json!({"id": 1}))
+            .unwrap_err();
+        assert_eq!(broken.action, "NotifyPeriodicEventStream");
+        assert_eq!(broken.protocol, Protocol::V21);
+        assert_ne!(broken.cause, ViolationCause::UnknownAction);
+        assert_eq!(
+            broken.error_code_for(Protocol::V21).as_str(),
+            "OccurrenceConstraintViolation"
+        );
+        // Request/response actions and other versions are no SEND messages.
+        let unknown = registry.validate_send("Heartbeat", &json!({})).unwrap_err();
+        assert_eq!(unknown.cause, ViolationCause::UnknownAction);
+        let v201_send = v201()
+            .validate_send("NotifyPeriodicEventStream", &payload)
+            .unwrap_err();
+        assert_eq!(v201_send.cause, ViolationCause::UnknownAction);
+        assert!(!v201().knows_send("NotifyPeriodicEventStream"));
+        assert!(!v16().knows_send("NotifyPeriodicEventStream"));
+        assert_eq!(v201().send_action_names().count(), 0);
+    }
+
+    #[test]
+    fn v21_shares_the_2_x_error_spellings() {
+        let registry = v21();
+        let missing = registry
+            .validate_request("Authorize", &json!({}))
+            .unwrap_err();
+        assert_eq!(
+            missing.error_code_for(Protocol::V21),
+            missing.error_code_for(Protocol::V201)
+        );
+        assert_eq!(
+            missing.error_code_for(Protocol::V21).as_str(),
+            "OccurrenceConstraintViolation"
+        );
+        let wrong = registry
+            .validate_request("Authorize", &json!({"idToken": 5}))
+            .unwrap_err();
+        assert_eq!(
+            wrong.error_code_for(Protocol::V21).as_str(),
+            "TypeConstraintViolation"
+        );
+        assert_eq!(
+            ErrorCode::formation_violation(Protocol::V21).as_str(),
+            "FormatViolation"
         );
     }
 
