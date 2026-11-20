@@ -58,6 +58,7 @@
 //! the `wait_for_*` methods, not with fixed sleeps.
 
 mod error;
+mod net;
 mod options;
 mod record;
 mod server;
@@ -68,6 +69,7 @@ pub use error::{TestkitError, TestkitResult};
 pub use kirby_csms_core::{Fault, Reply};
 pub use kirby_csms_core::{SubprotocolPolicy, TransactionIds};
 pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
+pub use net::{refused_addr, refused_url};
 pub use options::CsmsOptions;
 pub use record::{ConnectionInfo, Received};
 pub use server::MockCsms;

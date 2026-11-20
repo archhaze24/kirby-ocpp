@@ -247,14 +247,9 @@ pub async fn wait_state(
     }
 }
 
-/// An address nothing listens on. The port stays bound without `listen` until the test process
-/// ends, so connections are refused and a parallel test cannot take the port over.
+/// A URL that refuses connections.
 pub async fn dead_url() -> String {
-    let socket = tokio::net::TcpSocket::new_v4().unwrap();
-    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
-    let addr = socket.local_addr().unwrap();
-    std::mem::forget(socket);
-    format!("ws://{addr}/ocpp")
+    kirby_ocpp_testkit::refused_url()
 }
 
 // ---- helpers shared by the transaction/feature tests -----------------------------

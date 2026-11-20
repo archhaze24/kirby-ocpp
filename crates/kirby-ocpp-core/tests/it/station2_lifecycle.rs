@@ -64,15 +64,9 @@ async fn stop(station: &Station2Handle, task: JoinHandle<()>) {
         .expect("the station task does not panic");
 }
 
-/// A URL nothing listens on. The port stays bound (without `listen`) while the guard lives, so
-/// connections are refused and a parallel test cannot take the port over.
-fn dead_url() -> (String, tokio::net::TcpSocket) {
-    let socket = tokio::net::TcpSocket::new_v4().expect("a socket");
-    socket
-        .bind("127.0.0.1:0".parse().expect("an address"))
-        .expect("a free port");
-    let addr = socket.local_addr().expect("a local address");
-    (format!("ws://{addr}/ocpp"), socket)
+/// A URL that refuses connections.
+fn dead_url() -> String {
+    kirby_ocpp_testkit::refused_url()
 }
 
 /// Waits for a log line containing `needle`.
@@ -500,7 +494,7 @@ async fn disconnect_clears_the_registration_and_the_next_connect_boots() {
 
 #[tokio::test]
 async fn backoff_doubles_and_stops_after_max_attempts() {
-    let (url, _port) = dead_url();
+    let url = dead_url();
     let (station, task) = spawn_with(
         &url,
         |config| {
@@ -534,7 +528,7 @@ async fn backoff_doubles_and_stops_after_max_attempts() {
 
 #[tokio::test]
 async fn disconnect_and_connect_reset_the_stopped_reason() {
-    let (url, _port) = dead_url();
+    let url = dead_url();
     let (station, task) = spawn_with(
         &url,
         |config| {
