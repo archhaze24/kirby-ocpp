@@ -1,6 +1,6 @@
 # kirby-ocpp-core
 
-UI-free OCPP 1.6J and 2.0.1 charge point emulator core. It is the engine behind the [`kirby-ocpp`](https://crates.io/crates/kirby-ocpp) terminal tool and the base of the whole workspace: `kirby-csms-core` reuses its frames, schemas and WebSocket layer.
+UI-free OCPP 1.6J, 2.0.1 and 2.1 charge point emulator core. It is the engine behind the [`kirby-ocpp`](https://crates.io/crates/kirby-ocpp) terminal tool and the base of the whole workspace: `kirby-csms-core` reuses its frames, schemas and WebSocket layer.
 
 **Most users want the binaries**, not this library:
 
@@ -10,9 +10,9 @@ cargo install kirby-ocpp kirby-csms    # or: npm install -g kirby-ocpp kirby-csm
 
 ## What it is
 
-- Typed OCPP 1.6J frames and 39 messages (core profiles plus the Security Whitepaper set) and typed OCPP 2.0.1 messages, checked against the embedded official JSON schemas of each version.
+- Typed OCPP 1.6J frames and 39 messages (core profiles plus the Security Whitepaper set) and typed OCPP 2.0.1 messages (with the OCPP 2.1 enum values), checked against the embedded official JSON schemas of each version; the OCPP 2.1 message types CALLRESULTERROR and SEND.
 - A single `StationActor` that owns all station state: transactions, metering, smart charging, local list, reservations, configuration, certificates, security events.
-- `Station2`, the OCPP 2.0.1 station: EVSEs, `TransactionEvent` with its offline queue, authorization cache, device model.
+- `Station2`, the OCPP 2.0.1 and 2.1 station: EVSEs, `TransactionEvent` with its offline queue, authorization cache, device model.
 - A WebSocket connection layer: rustls TLS including mTLS, a serialized CALL queue, a ping watchdog.
 - TOML scenarios with a runner and JUnit renderer, a fleet runner (`fleet::Fleet`) and an atomic versioned state store.
 

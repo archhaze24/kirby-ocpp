@@ -38,7 +38,7 @@ use crate::ocpp::v2::messages::{
     GetVariables, RequestStartTransaction, RequestStopTransaction, Reset, SetVariables,
     TriggerMessage, UnlockConnector,
 };
-use crate::ocpp::v2::registry::unhandled_error_code;
+use crate::ocpp::v2::registry::unhandled_error_code_for;
 use crate::station::LogLevel;
 use crate::ws::IncomingCall;
 
@@ -112,7 +112,7 @@ impl Station2Actor {
                 self.invoke::<DataTransfer>(payload, reply, control::data_transfer);
             }
             other => {
-                let code = unhandled_error_code(other);
+                let code = unhandled_error_code_for(self.protocol(), other);
                 let text = if code == ErrorCode::NotSupported {
                     format!("{other} is not supported")
                 } else {

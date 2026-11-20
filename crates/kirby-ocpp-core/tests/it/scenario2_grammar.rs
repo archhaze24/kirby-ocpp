@@ -795,12 +795,12 @@ fn reply_errors_for_2_0_1() {
 #[test]
 fn file_level_versions() {
     let step = "[[steps]]\naction = \"heartbeat\"\n";
-    let e = Scenario::from_toml(&format!("name = \"t\"\nocpp_version = \"2.1\"\n{step}"))
+    let e = Scenario::from_toml(&format!("name = \"t\"\nocpp_version = \"2.2\"\n{step}"))
         .unwrap_err()
         .to_string();
     assert_eq!(
         e,
-        "invalid scenario: `ocpp_version = \"2.1\"`: this build supports OCPP 1.6 and 2.0.1 only"
+        "invalid scenario: `ocpp_version = \"2.2\"`: this build supports OCPP 1.6, 2.0.1 and 2.1 only"
     );
     // The 1.6 grammar still reserves the 2.x keys and points at the version key.
     let e = Scenario::from_toml("name = \"t\"\n[[steps]]\naction = \"plug\"\nevse = 1\n")

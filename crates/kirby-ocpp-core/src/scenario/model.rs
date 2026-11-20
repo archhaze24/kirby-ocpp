@@ -370,21 +370,17 @@ impl Action {
     }
 
     /// The inverse of [`Action::to_json`] for one step: reads a JSON object with an `action`
-    /// tag in the grammar of `mode` (`Protocol::V16` or `Protocol::V201`). `repeat` is built by
-    /// the loaders only.
+    /// tag in the grammar of `mode` (`Protocol::V16`, or the 2.x grammar for `Protocol::V201`
+    /// and `Protocol::V21`). `repeat` is built by the loaders only.
     ///
     /// # Errors
-    /// A deserialization failure, or `mode` is not a protocol with scenarios.
+    /// A deserialization failure.
     pub(crate) fn from_json(value: Value, mode: Protocol) -> Result<Self, serde_json::Error> {
         match mode {
             Protocol::V16 => serde_json::from_value(value),
-            Protocol::V201 => {
+            Protocol::V201 | Protocol::V21 => {
                 serde_json::from_value::<Action2>(value).map(|a| Self::V201(Box::new(a)))
             }
-            _ => Err(serde::de::Error::custom(format!(
-                "no scenario steps for {}",
-                mode.token()
-            ))),
         }
     }
 
@@ -651,12 +647,12 @@ impl Scenario {
     }
 
     fn parse(text: &str, max_steps: u64) -> Result<Self, Located> {
-        super::precheck_contract(text).map_err(Located::plain)?;
+        super::precheck_scenario(text).map_err(Located::plain)?;
         let raw: RawScenario = toml::from_str(text).map_err(|e| Located {
             message: super::with_suggestion(e.message().to_owned()),
             offset: e.span().map(|span| span.start),
         })?;
-        let declared = super::check_contract_keys(raw.ocpp_version.as_deref(), raw.schema)
+        let declared = super::check_scenario_keys(raw.ocpp_version.as_deref(), raw.schema)
             .map_err(Located::plain)?;
         // The grammar a file is read in follows its declared version; there is no fallback
         // between the two, so every 1.6 message stays as it was.
@@ -674,8 +670,15 @@ impl Scenario {
             .enumerate()
             .map(|(i, table)| {
                 let offset = table.span().start;
-                parse_step(table.into_inner(), 0, mode)
-                    .map_err(|e| Located::at(format!("step {}: {e}", i + 1), offset))
+                parse_step(table.into_inner(), 0, mode).map_err(|e| {
+                    // The 2.x grammar names its version in messages; a 2.1 file reads 2.1.
+                    let e = if declared == Some(Protocol::V21) {
+                        e.replace("OCPP 2.0.1", "OCPP 2.1")
+                    } else {
+                        e
+                    };
+                    Located::at(format!("step {}: {e}", i + 1), offset)
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let scenario = Self {
@@ -924,7 +927,7 @@ fn validate_steps(
                 }
             }
             Action::V201(action) => {
-                if let Err(message) = action.validate() {
+                if let Err(message) = action.validate_for(protocol) {
                     return bad(&message);
                 }
             }
@@ -942,9 +945,9 @@ fn validate_reply(
     result: Option<&Value>,
     error: Option<&ReplyError>,
 ) -> Result<(), String> {
-    let v201 = protocol == Protocol::V201;
+    let v201 = protocol != Protocol::V16;
     let action = match static_text(call) {
-        Some(text) if v201 => Some(canonical_action_v201(&text)?),
+        Some(text) if v201 => Some(canonical_action_v2(protocol, &text)?),
         Some(text) => Some(
             canonical_action(&text)
                 .map_err(|e| e.to_string())?
@@ -1011,14 +1014,18 @@ pub(super) const ERROR_CODES_V201: [&str; 12] = [
     "TypeConstraintViolation",
 ];
 
-/// The CSMS command a 2.0.1 `reply` answers, in its canonical spelling (case-insensitive
-/// match).
-fn canonical_action_v201(text: &str) -> Result<String, String> {
+/// The CSMS command a 2.x `reply` of `protocol` answers, in its canonical spelling
+/// (case-insensitive match).
+fn canonical_action_v2(protocol: Protocol, text: &str) -> Result<String, String> {
     use crate::ocpp::v2::registry;
     let name = text.trim();
-    let Some(info) = registry::iter().find(|info| info.name.eq_ignore_ascii_case(name)) else {
+    let Some(info) = registry::actions_for(protocol)
+        .iter()
+        .find(|info| info.name.eq_ignore_ascii_case(name))
+    else {
         return Err(format!(
-            "unknown OCPP 2.0.1 action `{name}` (expected a command the CSMS sends, e.g. Reset)"
+            "unknown OCPP {} action `{name}` (expected a command the CSMS sends, e.g. Reset)",
+            protocol.ocpp_version()
         ));
     };
     if !info.direction.csms_may_send() {
@@ -1270,10 +1277,11 @@ fn parse_repeat(
     })
 }
 
-/// `open_loops` is the number of `repeat` steps around this one; `mode` is the grammar of the
-/// file (`Protocol::V16` or `Protocol::V201`).
+/// `open_loops` is the number of `repeat` steps around this one; `mode` is the version the
+/// file declares (`Protocol::V16` without a declaration). 2.0.1 and 2.1 share the 2.x grammar.
 fn parse_step(mut table: toml::Table, open_loops: usize, mode: Protocol) -> Result<Step, String> {
-    if mode != Protocol::V201 {
+    let v2 = mode != Protocol::V16;
+    if !v2 {
         // The hint names the way out for a file that was written for 2.0.1 but does not say so.
         super::check_reserved_keys(&table).map_err(|message| {
             format!("{message} (use `ocpp_version = \"2.0.1\"` for OCPP 2.0.1 scenarios)")
@@ -1315,8 +1323,8 @@ fn parse_step(mut table: toml::Table, open_loops: usize, mode: Protocol) -> Resu
         Some(toml::Value::String(s)) => s.clone(),
         Some(_) => return Err("`action` must be a string".to_owned()),
     };
-    let mut action = if mode == Protocol::V201 {
-        super::model2::parse_action(table, &tag)?
+    let mut action = if v2 {
+        super::model2::parse_action(table, &tag, mode)?
     } else {
         toml::Value::Table(table)
             .try_into::<Action>()
@@ -1328,7 +1336,7 @@ fn parse_step(mut table: toml::Table, open_loops: usize, mode: Protocol) -> Resu
             })?
     };
     if !capture.is_empty() && !action.accepts_capture() {
-        return Err(if mode == Protocol::V201 {
+        return Err(if v2 {
             format!(
                 "action `{tag}`: `capture` is only valid on send_raw, data_transfer, expect_call, authorize, start_tx and present_token steps"
             )
@@ -1797,9 +1805,9 @@ call = "Heartbeat"
         let e = err(&format!("name = \"t\"\nschema = 2\nfuture_key = 1\n{step}"));
         assert!(e.contains("unsupported schema 2"), "{e}");
         let e = err(&format!(
-            "name = \"t\"\nocpp_version = \"2.1\"\nfuture_key = 1\n{step}"
+            "name = \"t\"\nocpp_version = \"2.2\"\nfuture_key = 1\n{step}"
         ));
-        assert!(e.contains("OCPP 1.6 and 2.0.1 only"), "{e}");
+        assert!(e.contains("OCPP 1.6, 2.0.1 and 2.1 only"), "{e}");
         let e = err(&format!("name = \"t\"\nschema = \"1\"\n{step}"));
         assert!(e.contains("`schema` must be an integer"), "{e}");
         let e = err(&format!("name = \"t\"\nocpp_version = 1.6\n{step}"));
@@ -1873,10 +1881,19 @@ call = "Heartbeat"
         ))
         .unwrap();
         assert_eq!(ok.tags, ["a", "b"]);
-        let e = err(&format!("name = \"t\"\nocpp_version = \"2.1\"\n{step}"));
+        let e = err(&format!("name = \"t\"\nocpp_version = \"2.2\"\n{step}"));
         assert!(
-            e.contains("OCPP 1.6 and 2.0.1 only") && e.contains("2.1"),
+            e.contains("OCPP 1.6, 2.0.1 and 2.1 only") && e.contains("2.2"),
             "{e}"
+        );
+        // 2.1 is a valid version for a scenario.
+        let ok = Scenario::from_toml(&format!(
+            "name = \"t\"\nocpp_version = \"2.1\"\nschema = 1\n{step}"
+        ))
+        .unwrap();
+        assert_eq!(
+            (ok.ocpp_version, ok.protocol()),
+            (Some(Protocol::V21), Protocol::V21)
         );
         // 2.0.1 is a valid version and `heartbeat` is a neutral step.
         let ok = Scenario::from_toml(&format!(

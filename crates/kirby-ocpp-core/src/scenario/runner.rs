@@ -1495,6 +1495,11 @@ mod tests {
         assert_eq!(Action::from_json(json, Protocol::V201).unwrap(), action);
         // The same JSON is not a 1.6 step.
         assert!(Action::from_json(json!({"action": "plug", "evse": 2}), Protocol::V16).is_err());
+        // 2.1 reads the 2.x grammar.
+        assert_eq!(
+            Action::from_json(json!({"action": "plug", "evse": 2}), Protocol::V21).unwrap(),
+            action
+        );
         assert!(Action::from_json(json!({"action": "plug"}), Protocol::V21).is_err());
 
         let looped = Scenario {

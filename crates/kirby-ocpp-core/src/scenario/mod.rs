@@ -87,13 +87,46 @@ pub fn parse_contract_version(
     ocpp_version: Option<&str>,
 ) -> Result<Option<crate::ocpp::Protocol>, String> {
     use crate::ocpp::Protocol;
+    parse_version_in(
+        ocpp_version,
+        &[Protocol::V16, Protocol::V201],
+        SCENARIO_VERSIONS,
+    )
+}
+
+/// The OCPP versions an emulator scenario file may declare, for messages.
+const EMULATOR_SCENARIO_VERSIONS: &str = "1.6, 2.0.1 and 2.1";
+
+/// Like [`parse_contract_version`] for emulator scenario files, which may also declare
+/// `"2.1"`.
+///
+/// # Errors
+/// A message for any other value.
+pub(crate) fn parse_scenario_version(
+    ocpp_version: Option<&str>,
+) -> Result<Option<crate::ocpp::Protocol>, String> {
+    use crate::ocpp::Protocol;
+    parse_version_in(
+        ocpp_version,
+        &[Protocol::V16, Protocol::V201, Protocol::V21],
+        EMULATOR_SCENARIO_VERSIONS,
+    )
+}
+
+fn parse_version_in(
+    ocpp_version: Option<&str>,
+    accepted: &[crate::ocpp::Protocol],
+    names: &str,
+) -> Result<Option<crate::ocpp::Protocol>, String> {
     match ocpp_version {
         None => Ok(None),
-        Some(text) if text == Protocol::V16.ocpp_version() => Ok(Some(Protocol::V16)),
-        Some(text) if text == Protocol::V201.ocpp_version() => Ok(Some(Protocol::V201)),
-        Some(version) => Err(format!(
-            "`ocpp_version = {version:?}`: this build supports OCPP {SCENARIO_VERSIONS} only"
-        )),
+        Some(text) => accepted
+            .iter()
+            .find(|protocol| protocol.ocpp_version() == text)
+            .map(|protocol| Some(*protocol))
+            .ok_or_else(|| {
+                format!("`ocpp_version = {text:?}`: this build supports OCPP {names} only")
+            }),
     }
 }
 
@@ -131,6 +164,23 @@ pub fn check_contract_keys(
 pub fn precheck_contract(text: &str) -> Result<(), String> {
     precheck_with(text, |version, schema| {
         check_contract_keys(version, schema).map(drop)
+    })
+}
+
+/// [`check_contract_keys`] for emulator scenario files (see [`parse_scenario_version`]).
+pub(crate) fn check_scenario_keys(
+    ocpp_version: Option<&str>,
+    schema: Option<i64>,
+) -> Result<Option<crate::ocpp::Protocol>, String> {
+    let protocol = parse_scenario_version(ocpp_version)?;
+    check_schema_key(schema)?;
+    Ok(protocol)
+}
+
+/// [`precheck_contract`] for emulator scenario files.
+pub(crate) fn precheck_scenario(text: &str) -> Result<(), String> {
+    precheck_with(text, |version, schema| {
+        check_scenario_keys(version, schema).map(drop)
     })
 }
 

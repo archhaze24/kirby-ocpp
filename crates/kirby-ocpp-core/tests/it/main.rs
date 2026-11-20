@@ -2,11 +2,13 @@
 //! Add a test file as `tests/it/<name>.rs` and declare it here.
 
 mod fleet;
+mod scenario21;
 mod scenario2_builtin;
 mod scenario2_grammar;
 mod scenario2_runner;
 mod scenario_reply;
 mod scenario_runner;
+mod station21;
 mod station2_auth;
 mod station2_availability_restart;
 mod station2_device_model;
@@ -45,3 +47,4 @@ mod ws_calls;
 mod ws_connect;
 mod ws_support;
 mod ws_tls;
+mod ws_v21_frames;

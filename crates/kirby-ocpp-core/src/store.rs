@@ -144,7 +144,9 @@ pub const STORE2_VERSION: u32 = 2;
 pub struct PersistedStation2 {
     pub version: u32,
     pub charge_point_id: String,
-    /// The subprotocol token of the station that wrote the file: `ocpp2.0.1`.
+    /// The subprotocol token of the station that wrote the file: `ocpp2.0.1` or `ocpp2.1`. A
+    /// 2.1 station reads and writes the same files as a 2.0.1 one; nothing checks this field
+    /// on load.
     pub protocol: String,
     /// Availability of the whole station.
     pub station_operative: bool,

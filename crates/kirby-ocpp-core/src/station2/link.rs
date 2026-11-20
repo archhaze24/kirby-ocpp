@@ -88,7 +88,7 @@ pub(crate) struct Link2 {
     boot_in_flight: bool,
     /// A station-originated `Heartbeat` CALL is in flight; the timer skips its period.
     heartbeat_in_flight: bool,
-    /// The 2.0.1 schemas the connection validates against; built once.
+    /// The schemas (2.0.1 or 2.1) the connection validates against; built once.
     schemas: SchemaSet,
     /// When the link was lost; cleared once the statuses were re-sent.
     offline_since: Option<DateTime<Utc>>,
@@ -99,8 +99,8 @@ pub(crate) struct Link2 {
 }
 
 impl Link2 {
-    /// A link that is not wanted yet, with the 2.0.1 schema set.
-    pub(super) fn new() -> Self {
+    /// A link that is not wanted yet, with the schema set of `protocol` (2.0.1 or 2.1).
+    pub(super) fn new(protocol: Protocol) -> Self {
         Self {
             conn: None,
             events: None,
@@ -110,8 +110,7 @@ impl Link2 {
             attempts: 0,
             boot_in_flight: false,
             heartbeat_in_flight: false,
-            schemas: SchemaSet::for_protocol(Protocol::V201)
-                .expect("bundled OCPP 2.0.1 schemas compile"),
+            schemas: SchemaSet::for_protocol(protocol).expect("bundled OCPP 2.x schemas compile"),
             offline_since: None,
             retry_reason: None,
             security_outbox: Vec::new(),
@@ -419,6 +418,24 @@ impl Station2Actor {
             ConnectionEvent::Call(call) => self.dispatch_incoming(call),
             ConnectionEvent::ProtocolWarning(text) => {
                 self.log(LogLevel::Warn, format!("protocol: {}", sanitize(&text)));
+            }
+            ConnectionEvent::Send { action, .. } => {
+                self.log(
+                    LogLevel::Warn,
+                    format!("unexpected SEND {} from the CSMS", sanitize(&action)),
+                );
+            }
+            ConnectionEvent::CallResultError {
+                code, description, ..
+            } => {
+                self.log(
+                    LogLevel::Warn,
+                    format!(
+                        "CALLRESULTERROR {} from the CSMS: {}",
+                        sanitize(code.as_str()),
+                        sanitize(&description)
+                    ),
+                );
             }
             ConnectionEvent::Closed {
                 code,

@@ -55,6 +55,11 @@ impl Station2Actor {
         if evse.is_some() {
             return ResetStatus::Rejected;
         }
+        // OCPP 2.1 `ImmediateAndResume` (resume the transactions after the reboot) is not
+        // implemented.
+        if kind == ResetKind::ImmediateAndResume {
+            return ResetStatus::Rejected;
+        }
         if let Some(plan) = &self.reset {
             let mid_reboot = plan.phase == ResetPhase::Rebooting
                 && self.state.registration.is_none()
@@ -71,6 +76,7 @@ impl Station2Actor {
         let phase = match kind {
             ResetKind::Immediate => ResetPhase::EndingTransactions,
             ResetKind::OnIdle => ResetPhase::WaitingForIdle,
+            ResetKind::ImmediateAndResume => return ResetStatus::Rejected,
         };
         // A reset answered `Scheduled` runs later on its own: its boot is a `ScheduledReset`.
         let scheduled = kind == ResetKind::OnIdle && busy;

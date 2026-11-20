@@ -40,6 +40,15 @@ wire_enum! {
         AbnormalCondition = "AbnormalCondition",
         SignedDataReceived = "SignedDataReceived",
         ResetCommand = "ResetCommand",
+        // OCPP 2.1 additions.
+        CostLimitReached = "CostLimitReached",
+        LimitSet = "LimitSet",
+        OperationModeChanged = "OperationModeChanged",
+        RunningCost = "RunningCost",
+        SocLimitReached = "SoCLimitReached",
+        TariffChanged = "TariffChanged",
+        TariffNotAccepted = "TariffNotAccepted",
+        TxResumed = "TxResumed",
     }
 }
 

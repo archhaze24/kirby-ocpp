@@ -89,7 +89,7 @@ fn token_key(token: &IdTokenRef) -> String {
 }
 
 /// Tokens of these types need no `Authorize` and are never cached (C02.FR.02, C05.FR.01).
-fn needs_no_check(kind: IdTokenType) -> bool {
+fn needs_no_check(kind: &IdTokenType) -> bool {
     matches!(kind, IdTokenType::NoAuthorization | IdTokenType::Central)
 }
 
@@ -102,7 +102,7 @@ fn wire_token(token: &IdTokenRef) -> IdToken {
     IdToken {
         additional_info: None,
         id_token: token.id_token.clone(),
-        kind: token.kind,
+        kind: token.kind.clone(),
         custom_data: None,
     }
 }
@@ -182,7 +182,7 @@ impl Station2Actor {
     /// tokens are never stored (C05.FR.02). An `idTokenInfo` that already expired removes the
     /// entry instead (C10).
     fn cache_store(&mut self, token: &IdTokenRef, info: &IdTokenInfo) {
-        if needs_no_check(token.kind) || !self.cache_enabled() {
+        if needs_no_check(&token.kind) || !self.cache_enabled() {
             return;
         }
         let key = token_key(token);
@@ -274,7 +274,7 @@ impl Station2Actor {
         ask: Ask,
         cont: impl FnOnce(&mut Self, AuthDecision) + Send + 'static,
     ) {
-        if !self.auth_enabled() || needs_no_check(token.kind) {
+        if !self.auth_enabled() || needs_no_check(&token.kind) {
             cont(self, AuthDecision::Accepted(None));
             return;
         }

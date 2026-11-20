@@ -7,11 +7,10 @@ use serde::{Deserialize, Serialize};
 /// An OCPP version that travels over OCPP-J (JSON over WebSocket).
 ///
 /// Each version has a WebSocket subprotocol token (`ocpp1.6`) and a bare version string
-/// (`1.6`) that report, scenario and recording files carry. [`Protocol::V16`] and
-/// [`Protocol::V201`] are implemented. [`Protocol::V21`] has its schemas and action catalog
-/// (see [`SchemaRegistry`](crate::ocpp::SchemaRegistry) and
-/// [`registry`](crate::ocpp::v2::registry)) but no station or CSMS behavior yet; see
-/// [`Protocol::is_station_implemented`].
+/// (`1.6`) that report, scenario and recording files carry. All three versions are
+/// implemented; [`Protocol::V21`] runs the 2.0.1 behavior with the 2.1 schemas, action
+/// catalog and message types (see [`SchemaRegistry`](crate::ocpp::SchemaRegistry) and
+/// [`registry`](crate::ocpp::v2::registry)).
 /// Serialized as the token.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
@@ -62,13 +61,13 @@ impl Protocol {
     /// Whether this build can act as a charge station for the version.
     #[must_use]
     pub const fn is_station_implemented(self) -> bool {
-        matches!(self, Self::V16 | Self::V201)
+        matches!(self, Self::V16 | Self::V201 | Self::V21)
     }
 
     /// Whether this build can act as a central system for the version.
     #[must_use]
     pub const fn is_csms_implemented(self) -> bool {
-        matches!(self, Self::V16 | Self::V201)
+        matches!(self, Self::V16 | Self::V201 | Self::V21)
     }
 }
 
@@ -143,12 +142,10 @@ mod tests {
     }
 
     #[test]
-    fn station_and_csms_implement_1_6_and_2_0_1_only() {
-        for protocol in [Protocol::V16, Protocol::V201] {
+    fn station_and_csms_implement_every_version() {
+        for protocol in [Protocol::V16, Protocol::V201, Protocol::V21] {
             assert!(protocol.is_station_implemented());
             assert!(protocol.is_csms_implemented());
         }
-        assert!(!Protocol::V21.is_station_implemented());
-        assert!(!Protocol::V21.is_csms_implemented());
     }
 }

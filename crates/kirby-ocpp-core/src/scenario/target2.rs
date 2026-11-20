@@ -1,4 +1,4 @@
-//! The OCPP 2.0.1 scenario target: runs scenario steps against a
+//! The OCPP 2.0.1 and 2.1 scenario target: runs scenario steps against a
 //! [`Station2Handle`](crate::station2::Station2Handle).
 //!
 //! The runner handles `sleep`, `expect_call`, variables and reports itself. This module maps
@@ -18,7 +18,7 @@ use super::vars;
 use crate::error::StationError;
 use crate::ocpp::Protocol;
 use crate::ocpp::schema::SchemaRegistry;
-use crate::ocpp::v2::registry::ACTIONS;
+use crate::ocpp::v2::registry::actions_for;
 use crate::ocpp::v2::types::{Component, Evse};
 use crate::station::Event;
 use crate::station2::{Command2, Outcome2, Snapshot2, Station2Handle};
@@ -54,7 +54,7 @@ impl sealed::Sealed for Station2Handle {}
 
 impl ScenarioTarget for Station2Handle {
     fn protocol(&self) -> Protocol {
-        Protocol::V201
+        station_protocol(self)
     }
 
     fn station_id(&self) -> String {
@@ -68,7 +68,7 @@ impl ScenarioTarget for Station2Handle {
     async fn wait_for(&self, step: &Step) -> Result<(), WaitFailure> {
         let Action::V201(action) = &step.action else {
             return Err(WaitFailure {
-                reason: not_for_2_0_1(step),
+                reason: not_for_2_x(step, station_protocol(self)),
                 expected: None,
             });
         };
@@ -119,8 +119,9 @@ impl ScenarioTarget for Station2Handle {
             ..
         } = &step.action
         {
-            let action = canonical_action(call)?;
-            let registry = SchemaRegistry::for_protocol(Protocol::V201).ok();
+            let protocol = station_protocol(self);
+            let action = canonical_action(protocol, call)?;
+            let registry = SchemaRegistry::for_protocol(protocol).ok();
             let reply = scripted_reply(
                 tag,
                 action,
@@ -135,7 +136,7 @@ impl ScenarioTarget for Station2Handle {
                 .map_err(|error| format!("reply: {error}"))?;
             return Ok(None);
         }
-        let commands = to_commands(step)?;
+        let commands = to_commands(step, station_protocol(self))?;
         // Commands run in order; the first failure decides the step. The outcome of the last
         // one is the step's.
         let mut result = Ok(Outcome2::Done);
@@ -173,17 +174,27 @@ impl ScenarioTarget for Station2Handle {
     }
 }
 
+/// The OCPP version of `station`: 2.1 or 2.0.1.
+fn station_protocol(station: &Station2Handle) -> Protocol {
+    if station.config().protocol == Protocol::V21 {
+        Protocol::V21
+    } else {
+        Protocol::V201
+    }
+}
+
 /// Failure reason of a step that is written for another protocol.
-fn not_for_2_0_1(step: &Step) -> String {
+fn not_for_2_x(step: &Step, protocol: Protocol) -> String {
     format!(
-        "`{}` is an OCPP 1.6 step; this station speaks OCPP 2.0.1",
-        step.action.name()
+        "`{}` is an OCPP 1.6 step; this station speaks OCPP {}",
+        step.action.name(),
+        protocol.ocpp_version()
     )
 }
 
-/// Canonical spelling of a CSMS command (case-insensitive), for a `reply` step.
-fn canonical_action(name: &str) -> Result<&'static str, String> {
-    ACTIONS
+/// Canonical spelling of a CSMS command of `protocol` (case-insensitive), for a `reply` step.
+fn canonical_action(protocol: Protocol, name: &str) -> Result<&'static str, String> {
+    actions_for(protocol)
         .iter()
         .find(|info| info.direction.csms_may_send() && info.name.eq_ignore_ascii_case(name.trim()))
         .map(|info| info.name)
@@ -204,7 +215,7 @@ fn evse_ref(id: u32) -> Result<Evse, String> {
 }
 
 /// The commands a step sends, in order (variables already substituted).
-fn to_commands(step: &Step) -> Result<Vec<Command2>, String> {
+fn to_commands(step: &Step, protocol: Protocol) -> Result<Vec<Command2>, String> {
     let action = match &step.action {
         Action::Connect {} => Command2::Connect,
         Action::Disconnect {} => Command2::Disconnect,
@@ -222,8 +233,9 @@ fn to_commands(step: &Step) -> Result<Vec<Command2>, String> {
         },
         Action::SetRule { .. } | Action::ClearRules { .. } | Action::RequestCertificate {} => {
             return Err(format!(
-                "`{}` is not available for OCPP 2.0.1",
-                step.action.name()
+                "`{}` is not available for OCPP {}",
+                step.action.name(),
+                protocol.ocpp_version()
             ));
         }
         Action::V201(action) => return v201_commands(action),
@@ -232,7 +244,7 @@ fn to_commands(step: &Step) -> Result<Vec<Command2>, String> {
         | Action::ExpectCall { .. }
         | Action::Reply { .. }
         | Action::Repeat { .. } => return Err("not a command".to_owned()),
-        _ => return Err(not_for_2_0_1(step)),
+        _ => return Err(not_for_2_x(step, protocol)),
     };
     Ok(vec![action])
 }

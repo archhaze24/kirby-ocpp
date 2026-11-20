@@ -7,7 +7,7 @@ use crate::ocpp::responder::Responder;
 use crate::ocpp::v2::messages::MessageTrigger;
 use crate::ocpp::v2::messages::{
     BootReason, ClearCache, ClearCacheRequest, ClearCacheResponse, ClearCacheStatus, DataTransfer,
-    DataTransferRequest, DataTransferResponse, DataTransferStatus, Reset, ResetRequest,
+    DataTransferRequest, DataTransferResponse, DataTransferStatus, Reset, ResetKind, ResetRequest,
     ResetResponse, ResetStatus, TransactionEventKind, TriggerMessage, TriggerMessageRequest,
     TriggerMessageResponse, TriggerMessageStatus, TriggerReason, UnlockConnector,
     UnlockConnectorRequest, UnlockConnectorResponse, UnlockStatus,
@@ -42,8 +42,9 @@ pub(in crate::station2) fn reset(
         LogLevel::Info,
         format!("Reset {:?} -> {status:?}", request.kind),
     );
-    let status_info = (evse.is_some() && status == ResetStatus::Rejected)
-        .then(|| status_info("UnsupportedParam"));
+    let unsupported = evse.is_some() || request.kind == ResetKind::ImmediateAndResume;
+    let status_info =
+        (unsupported && status == ResetStatus::Rejected).then(|| status_info("UnsupportedParam"));
     actor.respond(
         responder,
         ResetResponse {
@@ -134,7 +135,10 @@ impl Station2Actor {
             MessageTrigger::SignChargingStationCertificate
             | MessageTrigger::SignV2gCertificate
             | MessageTrigger::SignCombinedCertificate
-            | MessageTrigger::PublishFirmwareStatusNotification => {
+            | MessageTrigger::PublishFirmwareStatusNotification
+            // OCPP 2.1 additions the station has no message for.
+            | MessageTrigger::SignV2g20Certificate
+            | MessageTrigger::CustomTrigger => {
                 Err(TriggerMessageStatus::NotImplemented)
             }
         }

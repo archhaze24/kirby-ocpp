@@ -139,6 +139,7 @@ impl Station2Actor {
     fn build_persisted(&self) -> PersistedStation2 {
         PersistedStation2 {
             charge_point_id: self.config.charge_point_id.clone(),
+            protocol: self.protocol().token().to_owned(),
             station_operative: self.station_operative(),
             evse_availability: self.availability_snapshot(),
             device_model: self.persist_device_model(),

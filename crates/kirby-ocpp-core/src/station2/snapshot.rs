@@ -9,6 +9,16 @@ use crate::ocpp::v2::messages::{BootReason, ConnectorStatus, Mutability, Registr
 use crate::ocpp::v2::types::ChargingState;
 use crate::ws::ConnectionState;
 
+/// The OCPP 2.x version a station built from `config` speaks: 2.1 when `config` asks for it,
+/// else 2.0.1. Schemas, the action catalog and the reported protocol follow it.
+pub(super) fn wire_protocol(config: &StationConfig) -> Protocol {
+    if config.protocol == Protocol::V21 {
+        Protocol::V21
+    } else {
+        Protocol::V201
+    }
+}
+
 /// Snapshot of the whole station.
 ///
 /// `variables` lists station-level device-model variables only (at most 256); per-EVSE and
@@ -16,7 +26,7 @@ use crate::ws::ConnectionState;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Snapshot2 {
     pub charge_point_id: String,
-    /// The WebSocket subprotocol token of the station: `ocpp2.0.1`.
+    /// The WebSocket subprotocol token of the station: `ocpp2.0.1` or `ocpp2.1`.
     pub protocol: String,
     pub connection: ConnectionState,
     /// Result of the last `BootNotification`; `None` before any boot.
@@ -91,7 +101,7 @@ impl Snapshot2 {
     pub fn initial(config: &StationConfig) -> Self {
         Self {
             charge_point_id: config.charge_point_id.clone(),
-            protocol: Protocol::V201.token().to_owned(),
+            protocol: wire_protocol(config).token().to_owned(),
             connection: ConnectionState::Disconnected,
             registration: None,
             boot_reason: None,

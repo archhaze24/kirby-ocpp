@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::model::{Action, MAX_WAIT_MS, Step, default_timeout_ms, default_wh_delta, static_text};
+use crate::ocpp::Protocol;
 use crate::ocpp::v2::messages::{ConnectorStatus, RegistrationStatus};
-use crate::ocpp::v2::types::{ChargingState, IdTokenType, StopReason};
+use crate::ocpp::v2::types::{ChargingState, IdTokenType, StopReason, WireEnum};
 
 fn default_token_type() -> IdTokenType {
     IdTokenType::Iso14443
@@ -217,12 +218,17 @@ fn refused(tag: &str, hint: &str) -> String {
     format!("action `{tag}`: not available for OCPP 2.0.1 ({hint})")
 }
 
-/// Reads the `action` of one 2.0.1 step from its table (`action` still in it, `name`,
-/// `expect` and `capture` already taken out). `tag` is the step's `action` text.
+/// Reads the `action` of one 2.x step from its table (`action` still in it, `name`,
+/// `expect` and `capture` already taken out). `tag` is the step's `action` text and `protocol`
+/// the version the file declares (2.0.1 or 2.1).
 ///
 /// # Errors
 /// A message for an unknown or 1.6-only step, an unknown or missing key and a bad value.
-pub(super) fn parse_action(mut table: toml::Table, tag: &str) -> Result<Action, String> {
+pub(super) fn parse_action(
+    mut table: toml::Table,
+    tag: &str,
+    protocol: Protocol,
+) -> Result<Action, String> {
     match tag {
         "set_rule" | "clear_rules" => {
             return Err(refused(
@@ -268,10 +274,53 @@ pub(super) fn parse_action(mut table: toml::Table, tag: &str) -> Result<Action, 
     if tag == "set_variable" {
         expand_set_variable(&mut table)?;
     }
-    toml::Value::Table(table)
+    let action = toml::Value::Table(table)
         .try_into::<Action2>()
-        .map(|action| Action::V201(Box::new(action)))
-        .map_err(|e| value_error(e.message().to_owned()))
+        .map_err(|e| value_error(e.message().to_owned()))?;
+    check_values_of(&action, protocol).map_err(|e| format!("action `{tag}`: {e}"))?;
+    Ok(Action::V201(Box::new(action)))
+}
+
+/// Rejects values that exist only in OCPP 2.1 when the file declares an earlier version, with
+/// the message the 2.0.1 enumerations always gave. The types accept the 2.1 values.
+fn check_values_of(action: &Action2, protocol: Protocol) -> Result<(), String> {
+    fn unknown(text: &str, known: &[&str]) -> String {
+        let list = known
+            .iter()
+            .map(|name| format!("`{name}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("unknown variant `{text}`, expected one of {list}")
+    }
+    if protocol == Protocol::V21 {
+        return Ok(());
+    }
+    match action {
+        Action2::Authorize { token_type, .. }
+        | Action2::StartTx { token_type, .. }
+        | Action2::PresentToken { token_type, .. } => {
+            if let IdTokenType::Other(text) = token_type {
+                let known: Vec<&str> = IdTokenType::KNOWN.iter().map(IdTokenType::as_str).collect();
+                return Err(unknown(text, &known));
+            }
+        }
+        Action2::StopTx {
+            reason: StopReason::ReqEnergyTransferRejected,
+            ..
+        } => {
+            let known: Vec<&str> = StopReason::ALL
+                .iter()
+                .filter(|reason| **reason != StopReason::ReqEnergyTransferRejected)
+                .map(WireEnum::as_str)
+                .collect();
+            return Err(unknown(
+                StopReason::ReqEnergyTransferRejected.as_str(),
+                &known,
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 /// `set_variable` accepts a bare string for `component` and `variable` (the name) and plain
@@ -416,15 +465,25 @@ impl Action2 {
     /// # Errors
     /// A message naming the offending key.
     pub fn validate(&self) -> Result<(), String> {
-        self.validate_numbers()?;
-        self.validate_texts()
+        self.validate_for(Protocol::V201)
     }
 
-    fn validate_texts(&self) -> Result<(), String> {
-        let token = |id_token: &str, token_type: IdTokenType| {
+    /// [`Self::validate`] with the lengths of `protocol`: an `id_token` may have 255
+    /// characters in OCPP 2.1 and 36 in 2.0.1.
+    ///
+    /// # Errors
+    /// A message naming the offending key.
+    pub fn validate_for(&self, protocol: Protocol) -> Result<(), String> {
+        self.validate_numbers()?;
+        self.validate_texts(protocol)
+    }
+
+    fn validate_texts(&self, protocol: Protocol) -> Result<(), String> {
+        let max_token = if protocol == Protocol::V21 { 255 } else { 36 };
+        let token = |id_token: &str, token_type: &IdTokenType| {
             // `NoAuthorization` tokens carry no value.
-            let min = usize::from(token_type != IdTokenType::NoAuthorization);
-            check_len("id_token", id_token, min, 36)
+            let min = usize::from(*token_type != IdTokenType::NoAuthorization);
+            check_len("id_token", id_token, min, max_token)
         };
         match self {
             Self::Authorize {
@@ -440,7 +499,7 @@ impl Action2 {
                 id_token,
                 token_type,
                 ..
-            } => token(id_token, *token_type),
+            } => token(id_token, token_type),
             Self::SecurityEvent {
                 event_type,
                 tech_info,

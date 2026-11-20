@@ -8,6 +8,8 @@ wire_enum! {
     ResetKind {
         Immediate = "Immediate",
         OnIdle = "OnIdle",
+        /// OCPP 2.1.
+        ImmediateAndResume = "ImmediateAndResume",
     }
 }
 
@@ -70,6 +72,10 @@ wire_enum! {
         TransactionEvent = "TransactionEvent",
         SignCombinedCertificate = "SignCombinedCertificate",
         PublishFirmwareStatusNotification = "PublishFirmwareStatusNotification",
+        /// OCPP 2.1.
+        SignV2g20Certificate = "SignV2G20Certificate",
+        /// OCPP 2.1.
+        CustomTrigger = "CustomTrigger",
     }
 }
 

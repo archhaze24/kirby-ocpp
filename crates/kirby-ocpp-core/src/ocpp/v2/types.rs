@@ -12,7 +12,10 @@
 //!   require at least one element when the property is present.
 //! * Unknown fields outside `customData` are rejected by schema validation
 //!   before decoding, so the structs do not use `deny_unknown_fields`.
-//! * Enums have no catch-all variant: schema validation precedes decoding.
+//! * Enums have no catch-all variant: schema validation precedes decoding. The one exception
+//!   is [`IdTokenType`], a free string in OCPP 2.1.
+//! * Enums list the OCPP 2.1 values too. A 2.0.1 connection validates against the 2.0.1
+//!   schemas, which reject the 2.1-only values before a payload reaches these types.
 //! * Timestamps deserialize from any RFC 3339 value and serialize with
 //!   millisecond precision and a `Z` suffix.
 
@@ -153,17 +156,77 @@ macro_rules! payload {
 }
 pub(crate) use payload;
 
-wire_enum! {
-    /// Kind of an [`IdToken`] (`IdTokenEnumType`).
-    IdTokenType {
-        Central = "Central",
-        Emaid = "eMAID",
-        Iso14443 = "ISO14443",
-        Iso15693 = "ISO15693",
-        KeyCode = "KeyCode",
-        Local = "Local",
-        MacAddress = "MacAddress",
-        NoAuthorization = "NoAuthorization",
+/// Kind of an [`IdToken`].
+///
+/// OCPP 2.0.1 fixes the kind to eight values (`IdTokenEnumType`); OCPP 2.1 makes it a free
+/// string of at most 20 characters. The 2.0.1 schemas reject any other text before a payload
+/// is decoded, so [`Other`](Self::Other) only occurs on a 2.1 connection. It keeps the text
+/// as received and serializes back unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IdTokenType {
+    Central,
+    Emaid,
+    Iso14443,
+    Iso15693,
+    KeyCode,
+    Local,
+    MacAddress,
+    NoAuthorization,
+    /// A kind OCPP 2.1 allows and 2.0.1 does not define.
+    Other(String),
+}
+
+impl IdTokenType {
+    /// The kinds 2.0.1 defines, in schema order (without [`Other`](Self::Other)).
+    pub const KNOWN: &'static [Self] = &[
+        Self::Central,
+        Self::Emaid,
+        Self::Iso14443,
+        Self::Iso15693,
+        Self::KeyCode,
+        Self::Local,
+        Self::MacAddress,
+        Self::NoAuthorization,
+    ];
+
+    /// The wire string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Central => "Central",
+            Self::Emaid => "eMAID",
+            Self::Iso14443 => "ISO14443",
+            Self::Iso15693 => "ISO15693",
+            Self::KeyCode => "KeyCode",
+            Self::Local => "Local",
+            Self::MacAddress => "MacAddress",
+            Self::NoAuthorization => "NoAuthorization",
+            Self::Other(text) => text,
+        }
+    }
+
+    /// The kind with wire string `text`: a known variant when `text` names one, else
+    /// [`Other`](Self::Other).
+    #[must_use]
+    pub fn from_wire(text: &str) -> Self {
+        Self::KNOWN
+            .iter()
+            .find(|kind| kind.as_str() == text)
+            .cloned()
+            .unwrap_or_else(|| Self::Other(text.to_owned()))
+    }
+}
+
+impl Serialize for IdTokenType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for IdTokenType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Ok(Self::from_wire(&text))
     }
 }
 
@@ -190,6 +253,8 @@ wire_enum! {
         Html = "HTML",
         Uri = "URI",
         Utf8 = "UTF8",
+        /// OCPP 2.1.
+        QrCode = "QRCODE",
     }
 }
 
@@ -231,10 +296,20 @@ wire_enum! {
         PowerQuality = "PowerQuality",
         Reboot = "Reboot",
         Remote = "Remote",
+        /// OCPP 2.1.
+        ReqEnergyTransferRejected = "ReqEnergyTransferRejected",
         SocLimitReached = "SOCLimitReached",
         StoppedByEv = "StoppedByEV",
         TimeLimitReached = "TimeLimitReached",
         Timeout = "Timeout",
+    }
+}
+
+impl StopReason {
+    /// Whether OCPP 2.0.1 lacks the reason: a 2.0.1 connection refuses it by schema.
+    #[must_use]
+    pub const fn is_v21_only(&self) -> bool {
+        matches!(self, Self::ReqEnergyTransferRejected)
     }
 }
 
@@ -246,6 +321,8 @@ wire_enum! {
         Ev = "EV",
         Inlet = "Inlet",
         Outlet = "Outlet",
+        /// OCPP 2.1.
+        Upstream = "Upstream",
     }
 }
 
@@ -277,6 +354,38 @@ wire_enum! {
         PowerReactiveImport = "Power.Reactive.Import",
         Soc = "SoC",
         Voltage = "Voltage",
+        // OCPP 2.1 additions. A 2.0.1 connection rejects them by schema before decoding.
+        CurrentExportOffered = "Current.Export.Offered",
+        CurrentExportMinimum = "Current.Export.Minimum",
+        CurrentImportOffered = "Current.Import.Offered",
+        CurrentImportMinimum = "Current.Import.Minimum",
+        DisplayPresentSoc = "Display.PresentSOC",
+        DisplayMinimumSoc = "Display.MinimumSOC",
+        DisplayTargetSoc = "Display.TargetSOC",
+        DisplayMaximumSoc = "Display.MaximumSOC",
+        DisplayRemainingTimeToMinimumSoc = "Display.RemainingTimeToMinimumSOC",
+        DisplayRemainingTimeToTargetSoc = "Display.RemainingTimeToTargetSOC",
+        DisplayRemainingTimeToMaximumSoc = "Display.RemainingTimeToMaximumSOC",
+        DisplayChargingComplete = "Display.ChargingComplete",
+        DisplayBatteryEnergyCapacity = "Display.BatteryEnergyCapacity",
+        DisplayInletHot = "Display.InletHot",
+        EnergyActiveImportCableLoss = "Energy.Active.Import.CableLoss",
+        EnergyActiveImportLocalGenerationRegister = "Energy.Active.Import.LocalGeneration.Register",
+        EnergyActiveSetpointInterval = "Energy.Active.Setpoint.Interval",
+        EnergyRequestTarget = "EnergyRequest.Target",
+        EnergyRequestMinimum = "EnergyRequest.Minimum",
+        EnergyRequestMaximum = "EnergyRequest.Maximum",
+        EnergyRequestMinimumV2x = "EnergyRequest.Minimum.V2X",
+        EnergyRequestMaximumV2x = "EnergyRequest.Maximum.V2X",
+        EnergyRequestBulk = "EnergyRequest.Bulk",
+        PowerActiveSetpoint = "Power.Active.Setpoint",
+        PowerActiveResidual = "Power.Active.Residual",
+        PowerExportMinimum = "Power.Export.Minimum",
+        PowerExportOffered = "Power.Export.Offered",
+        PowerImportOffered = "Power.Import.Offered",
+        PowerImportMinimum = "Power.Import.Minimum",
+        VoltageMinimum = "Voltage.Minimum",
+        VoltageMaximum = "Voltage.Maximum",
     }
 }
 
@@ -377,7 +486,7 @@ payload! {
         /// Absent or non-empty.
         #[serde(default, skip_serializing_if = "helpers::omit_empty")]
         pub additional_info: Option<Vec<AdditionalInfo>>,
-        /// Max 36 characters.
+        /// Max 36 characters in 2.0.1, 255 in 2.1.
         pub id_token: String,
         #[serde(rename = "type")]
         pub kind: IdTokenType,
@@ -469,12 +578,14 @@ payload! {
     SignedMeterValue {
         /// Max 2500 characters.
         pub signed_meter_data: String,
-        /// Max 50 characters.
-        pub signing_method: String,
+        /// Max 50 characters. Required by 2.0.1, optional in 2.1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub signing_method: Option<String>,
         /// Max 50 characters.
         pub encoding_method: String,
-        /// Max 2500 characters.
-        pub public_key: String,
+        /// Max 2500 characters. Required by 2.0.1, optional in 2.1.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub public_key: Option<String>,
     }
 }
 
@@ -554,7 +665,20 @@ mod tests {
 
     #[test]
     fn enum_values_match_schema() {
-        check_enum::<IdTokenType>("AuthorizeRequest.json", "IdTokenEnumType");
+        let known: Vec<&str> = IdTokenType::KNOWN.iter().map(IdTokenType::as_str).collect();
+        let schema = std::fs::read_to_string(format!(
+            "{}/schemas/ocpp201/AuthorizeRequest.json",
+            env!("CARGO_MANIFEST_DIR")
+        ))
+        .unwrap();
+        let schema: Value = serde_json::from_str(&schema).unwrap();
+        let expected: Vec<&str> = schema["definitions"]["IdTokenEnumType"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(known, expected, "IdTokenType::KNOWN is the 2.0.1 enum");
         check_enum::<AuthorizationStatus>("AuthorizeResponse.json", "AuthorizationStatusEnumType");
         check_enum::<MessageFormat>("AuthorizeResponse.json", "MessageFormatEnumType");
         check_enum::<HashAlgorithm>("AuthorizeRequest.json", "HashAlgorithmEnumType");
@@ -673,6 +797,47 @@ mod tests {
         let parsed: Transaction = serde_json::from_value(json!({"transactionId": "tx-1"})).unwrap();
         assert_eq!(parsed.transaction_id, "tx-1");
         assert!(serde_json::from_value::<Transaction>(json!({"transactionId": 1})).is_err());
+    }
+
+    #[test]
+    fn an_id_token_kind_outside_the_2_0_1_enum_round_trips() {
+        for text in ["MacAddress", "eMAID", "Plate", "", "ISO14443 "] {
+            let kind: IdTokenType = serde_json::from_value(json!(text)).unwrap();
+            assert_eq!(kind.as_str(), text);
+            assert_eq!(serde_json::to_value(&kind).unwrap(), json!(text));
+        }
+        assert_eq!(
+            serde_json::from_value::<IdTokenType>(json!("MacAddress")).unwrap(),
+            IdTokenType::MacAddress
+        );
+        assert_eq!(
+            serde_json::from_value::<IdTokenType>(json!("Plate")).unwrap(),
+            IdTokenType::Other("Plate".to_owned())
+        );
+        assert!(serde_json::from_value::<IdTokenType>(json!(3)).is_err());
+        let token: IdToken =
+            serde_json::from_value(json!({"idToken": "T", "type": "Plate"})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&token).unwrap(),
+            json!({"idToken": "T", "type": "Plate"})
+        );
+    }
+
+    #[test]
+    fn signed_meter_value_omits_the_fields_2_1_made_optional() {
+        let wire = json!({"signedMeterData": "AAAA", "encodingMethod": "Other"});
+        let parsed: SignedMeterValue = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(parsed.signing_method, None);
+        assert_eq!(parsed.public_key, None);
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), wire);
+        let full = json!({
+            "signedMeterData": "AAAA",
+            "signingMethod": "ECDSA",
+            "encodingMethod": "Other",
+            "publicKey": "KEY"
+        });
+        let parsed: SignedMeterValue = serde_json::from_value(full.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), full);
     }
 
     #[test]

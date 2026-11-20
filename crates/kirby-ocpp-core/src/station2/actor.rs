@@ -25,12 +25,13 @@ use super::handle::Envelope2;
 use super::link::{Link2, sanitize, security_profile_of};
 use super::persistence::Persistence2;
 use super::reset::ResetPlan;
-use super::snapshot::Snapshot2;
+use super::snapshot::{Snapshot2, wire_protocol};
 use super::transactions::TxEngine;
 use super::tx_queue::TxQueue;
 use crate::clock::Clock;
 use crate::config::StationConfig;
 use crate::error::CallError;
+use crate::ocpp::Protocol;
 use crate::recording::RecordSink;
 use crate::station::scripted_reply::ReplyList;
 use crate::station::{Event, FrameRecord, LogLevel, LogRecord};
@@ -127,6 +128,11 @@ pub(crate) struct Station2Actor {
 }
 
 impl Station2Actor {
+    /// The OCPP 2.x version of this station (2.0.1 or 2.1).
+    pub(super) fn protocol(&self) -> Protocol {
+        wire_protocol(&self.config)
+    }
+
     /// Builds the actor with its initial state.
     pub(crate) fn new(
         config: StationConfig,
@@ -140,6 +146,7 @@ impl Station2Actor {
         let persistence = Persistence2::open(&config, &mut startup_logs);
         let state = Snapshot2::initial(&config);
         let (snapshot_tx, snapshot_rx) = watch::channel(state.clone());
+        let link = Link2::new(wire_protocol(&config));
         let mut actor = Self {
             dm: DeviceModel::new(&config),
             config,
@@ -151,7 +158,7 @@ impl Station2Actor {
             timers: TimerWheel::new(),
             internal_tx,
             internal_rx,
-            link: Link2::new(),
+            link,
             calls: Calls2::default(),
             evses: Vec::new(),
             tx: TxEngine::default(),

@@ -98,15 +98,28 @@ pub(crate) mod test_support {
         check_roundtrip::<A::Res>(&format!("{}Response.json", A::NAME), response);
     }
 
-    /// Asserts that `E` lists exactly the values of definition `def` in `file`.
-    pub(crate) fn check_enum<E: WireEnum + Serialize>(file: &str, def: &str) {
-        let schema = load(file);
-        let expected: BTreeSet<String> = schema["definitions"][def]["enum"]
+    /// The values of enum definition `def` in the `version` (`ocpp201` or `ocpp21`) schema
+    /// `file`.
+    fn schema_enum(version: &str, file: &str, def: &str) -> BTreeSet<String> {
+        let path = format!("{}/schemas/{version}/{file}", env!("CARGO_MANIFEST_DIR"));
+        let schema: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        schema["definitions"][def]["enum"]
             .as_array()
-            .unwrap_or_else(|| panic!("{file}: no enum {def}"))
+            .unwrap_or_else(|| panic!("{version}/{file}: no enum {def}"))
             .iter()
             .map(|v| v.as_str().unwrap().to_owned())
-            .collect();
+            .collect()
+    }
+
+    /// Asserts that `E` lists exactly the values of definition `def` in the 2.1 schema `file`,
+    /// which holds every value of the 2.0.1 one.
+    pub(crate) fn check_enum<E: WireEnum + Serialize>(file: &str, def: &str) {
+        let v201 = schema_enum("ocpp201", file, def);
+        let expected = schema_enum("ocpp21", file, def);
+        assert!(
+            v201.is_subset(&expected),
+            "{file}#{def}: 2.1 dropped a value"
+        );
         let actual: BTreeSet<String> = E::ALL.iter().map(|v| v.as_str().to_owned()).collect();
         assert_eq!(actual, expected, "{file}#{def}");
         assert_eq!(

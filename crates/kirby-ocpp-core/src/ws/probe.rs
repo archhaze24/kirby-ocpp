@@ -607,7 +607,7 @@ async fn send_boot(
     o: &ProbeOptions,
     wait: Duration,
 ) -> Result<(RegistrationStatus, i32, DateTime<Utc>), CallError> {
-    if o.protocol == Protocol::V201 {
+    if o.protocol != Protocol::V16 {
         let request = v2::messages::BootNotificationRequest {
             charging_station: v2::types::ChargingStation {
                 serial_number: o.serial_number.clone(),
@@ -731,7 +731,7 @@ fn upgrade_failure(
                 clean(expected, 100)
             ),
             Some(
-                "set --ws-subprotocol to a value the server accepts; OCPP 1.6J uses ocpp1.6 and OCPP 2.0.1 uses ocpp2.0.1"
+                "set --ws-subprotocol to a value the server accepts; OCPP 1.6J uses ocpp1.6, OCPP 2.0.1 uses ocpp2.0.1 and OCPP 2.1 uses ocpp2.1"
                     .to_owned(),
             ),
         ),

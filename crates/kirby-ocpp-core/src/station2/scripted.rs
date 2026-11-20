@@ -15,24 +15,27 @@ use super::command::Outcome2;
 use super::link::sanitize;
 use super::types::Reply2;
 use crate::error::StationError;
-use crate::ocpp::ReplyError;
 use crate::ocpp::responder::ReplyHandle;
 use crate::ocpp::v2::registry;
+use crate::ocpp::{Protocol, ReplyError};
 use crate::station::LogLevel;
 use crate::station::scripted_reply::{ScriptedAnswer, ScriptedReply};
 
-/// The registry spelling of a CSMS-originated action, matched case-insensitively.
+/// The registry spelling of a CSMS-originated action of `protocol`, matched
+/// case-insensitively.
 ///
 /// # Errors
-/// The action is not an OCPP 2.0.1 action, or the CSMS cannot send it.
-fn canonical_action(name: &str) -> Result<&'static str, StationError> {
+/// The action is not an action of `protocol`, or the CSMS cannot send it.
+fn canonical_action(protocol: Protocol, name: &str) -> Result<&'static str, StationError> {
     let name = name.trim();
-    let entry = registry::iter()
+    let entry = registry::actions_for(protocol)
+        .iter()
         .find(|entry| entry.name.eq_ignore_ascii_case(name))
         .ok_or_else(|| {
             StationError::InvalidArgument(format!(
-                "`{}` is not an OCPP 2.0.1 action",
-                sanitize(name)
+                "`{}` is not an OCPP {} action",
+                sanitize(name),
+                protocol.ocpp_version()
             ))
         })?;
     if entry.direction.csms_may_send() {
@@ -49,7 +52,7 @@ impl Station2Actor {
     /// `Command2::ArmScriptedReply`: arms `scripted` after the ones already armed. The action
     /// name is canonicalized against the 2.0.1 registry.
     pub(super) fn cmd_arm_scripted_reply(&mut self, mut scripted: ScriptedReply, reply: Reply2) {
-        let result = canonical_action(&scripted.action).and_then(|canonical| {
+        let result = canonical_action(self.protocol(), &scripted.action).and_then(|canonical| {
             canonical.clone_into(&mut scripted.action);
             let note = format!(
                 "scripted reply armed: {} x{}",
@@ -139,22 +142,36 @@ mod tests {
 
     #[test]
     fn actions_are_canonicalized_and_checked_against_the_registry() {
-        assert_eq!(canonical_action("reset").unwrap(), "Reset");
+        let v201 = |name: &str| canonical_action(Protocol::V201, name);
+        assert_eq!(v201("reset").unwrap(), "Reset");
         assert_eq!(
-            canonical_action(" requestStartTransaction ").unwrap(),
+            v201(" requestStartTransaction ").unwrap(),
             "RequestStartTransaction"
         );
         // Both directions may send a DataTransfer.
-        assert_eq!(canonical_action("DATATRANSFER").unwrap(), "DataTransfer");
+        assert_eq!(v201("DATATRANSFER").unwrap(), "DataTransfer");
         assert!(matches!(
-            canonical_action("BootNotification"),
+            v201("BootNotification"),
             Err(StationError::InvalidArgument(text)) if text.contains("station")
         ));
         assert!(matches!(
-            canonical_action("Frobnicate"),
+            v201("Frobnicate"),
             Err(StationError::InvalidArgument(_))
         ));
         // A 1.6-only name is not a 2.0.1 action.
-        assert!(canonical_action("RemoteStartTransaction").is_err());
+        assert!(v201("RemoteStartTransaction").is_err());
+    }
+
+    #[test]
+    fn a_2_1_station_knows_the_2_1_actions() {
+        assert_eq!(
+            canonical_action(Protocol::V21, "afrrsignal").unwrap(),
+            "AFRRSignal"
+        );
+        assert!(matches!(
+            canonical_action(Protocol::V201, "AFRRSignal"),
+            Err(StationError::InvalidArgument(text)) if text.contains("2.0.1")
+        ));
+        assert_eq!(canonical_action(Protocol::V21, "reset").unwrap(), "Reset");
     }
 }
