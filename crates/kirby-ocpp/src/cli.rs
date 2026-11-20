@@ -18,7 +18,7 @@ use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::station::ResponseRule;
 use kirby_ocpp_core::{AuthorizationKeyEncoding, StationConfig};
 
-/// Terminal OCPP 1.6J and 2.0.1 charge point emulator for CSMS testing.
+/// Terminal OCPP 1.6J, 2.0.1 and 2.1 charge point emulator for CSMS testing.
 ///
 /// Without a subcommand it opens an interactive terminal UI (or, when stdout is not a
 /// terminal or with --no-tui, connects and logs events to stdout until interrupted).
@@ -175,7 +175,7 @@ pub struct Cli {
     #[arg(help_heading = "Station", global = true, long, env = "KIRBY_OCPP_STATE_DIR", value_name = "PATH", value_parser = non_empty_path)]
     pub state_dir: Option<PathBuf>,
 
-    /// OCPP version the station speaks: ocpp1.6, ocpp2.0.1 or ocpp2.1 (not supported by this build)
+    /// OCPP version the station speaks: ocpp1.6, ocpp2.0.1 or ocpp2.1
     #[arg(
         help_heading = "Connection",
         global = true,
@@ -450,7 +450,7 @@ pub enum ProtocolChoice {
     /// OCPP 2.0.1.
     #[value(name = "ocpp2.0.1")]
     V201,
-    /// OCPP 2.1 (not supported by this build).
+    /// OCPP 2.1.
     #[value(name = "ocpp2.1")]
     V21,
 }

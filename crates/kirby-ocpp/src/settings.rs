@@ -21,7 +21,7 @@ use crate::cli;
 
 /// Settings of the configuration file of `kirby-ocpp`: one table per `--help` heading.
 pub const SCHEMA: Schema = Schema {
-    protocols: &["ocpp1.6", "ocpp2.0.1"],
+    protocols: &["ocpp1.6", "ocpp2.0.1", "ocpp2.1"],
     sections: &[
         Section {
             path: &["connection"],
@@ -62,6 +62,10 @@ pub const SCHEMA: Schema = Schema {
         },
         Section {
             path: &["station", "v201"],
+            keys: &[],
+        },
+        Section {
+            path: &["station", "v21"],
             keys: &[],
         },
         Section {

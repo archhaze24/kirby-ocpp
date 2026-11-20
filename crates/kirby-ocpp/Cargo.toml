@@ -1,6 +1,6 @@
 [package]
 name = "kirby-ocpp"
-description = "Terminal OCPP 1.6J and 2.0.1 charge point emulator for CSMS testing"
+description = "Terminal OCPP 1.6J, 2.0.1 and 2.1 charge point emulator for CSMS testing"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

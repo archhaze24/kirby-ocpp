@@ -4,7 +4,7 @@
 
 use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::SchemaRegistry;
-use kirby_ocpp_core::ocpp::v2::registry::ACTIONS;
+use kirby_ocpp_core::ocpp::v2::registry::actions_for;
 use kirby_ocpp_core::ocpp::v2::types::{
     ChargingState, Component, IdTokenType, StopReason, Variable, WireEnum,
 };
@@ -13,7 +13,9 @@ use serde_json::Value;
 
 use super::app::{App2, Effect2, Mode2};
 use crate::app::{NoticeLevel, event_line};
-use crate::forms::{Choice, ChoiceKind, Field, FieldKind, FieldValue, Form, Submitted};
+use crate::forms::{
+    Choice, ChoiceKind, Field, FieldKind, FieldValue, Form, ID_TOKEN_MAX_V21, Submitted,
+};
 use crate::text::sanitize;
 
 /// Names of the generic forms (the `kind` of [`Submitted::Generic`]).
@@ -72,8 +74,12 @@ fn names<T: WireEnum>() -> Vec<String> {
 
 /// The `IdTokenEnumType` select, on `Local` (the usual type of a typed-in token).
 fn token_type_field() -> Field {
-    let mut field = Field::new("type", FieldKind::Select, "").with_options(names::<IdTokenType>());
-    if let Some(i) = IdTokenType::ALL
+    let options = IdTokenType::KNOWN
+        .iter()
+        .map(|t| t.as_str().to_owned())
+        .collect();
+    let mut field = Field::new("type", FieldKind::Select, "").with_options(options);
+    if let Some(i) = IdTokenType::KNOWN
         .iter()
         .position(|t| *t == IdTokenType::Local)
     {
@@ -83,28 +89,35 @@ fn token_type_field() -> Field {
 }
 
 fn token_type(value: &str) -> Option<IdTokenType> {
-    IdTokenType::ALL
+    IdTokenType::KNOWN
         .iter()
-        .copied()
         .find(|t| t.as_str() == value)
+        .cloned()
+}
+
+/// The `idToken` input: 36 characters at most in OCPP 2.0.1, 255 in 2.1.
+fn id_token_field(protocol: Protocol) -> Field {
+    if protocol == Protocol::V21 {
+        Field::new("idToken (at most 255 characters)", FieldKind::IdToken, "")
+            .with_max_chars(ID_TOKEN_MAX_V21)
+    } else {
+        Field::new("idToken (at most 36 characters)", FieldKind::IdToken, "")
+    }
 }
 
 /// `Authorize`: an `idToken` and its type.
-pub(super) fn authorize_form() -> Form {
+pub(super) fn authorize_form(protocol: Protocol) -> Form {
     Form::generic(
         AUTHORIZE,
         "Authorize",
-        vec![
-            Field::new("idToken (at most 36 characters)", FieldKind::IdToken, ""),
-            token_type_field(),
-        ],
+        vec![id_token_field(protocol), token_type_field()],
         1,
     )
 }
 
 /// Present a token: at the selected EVSE, or at the one the station picks (the first with an
 /// EV plugged in and no transaction).
-pub(super) fn present_token_form(evse: u32) -> Form {
+pub(super) fn present_token_form(evse: u32, protocol: Protocol) -> Form {
     let mut target = Field::new("EVSE", FieldKind::Select, "").with_options(vec![
         format!("EVSE {evse} (selected)"),
         "any (the station picks one)".to_owned(),
@@ -115,11 +128,7 @@ pub(super) fn present_token_form(evse: u32) -> Form {
     Form::generic(
         PRESENT_TOKEN,
         "Present token",
-        vec![
-            target,
-            Field::new("idToken (at most 36 characters)", FieldKind::IdToken, ""),
-            token_type_field(),
-        ],
+        vec![target, id_token_field(protocol), token_type_field()],
         1,
     )
 }
@@ -158,9 +167,10 @@ pub(super) fn data_transfer_form(vendor: &str) -> Form {
     )
 }
 
-/// Any CALL the station may send, checked against the OCPP 2.0.1 schema on submit.
-pub(super) fn raw_call_form() -> Form {
-    let options: Vec<String> = ACTIONS
+/// Any CALL the station of `protocol` may send, checked against the schema of that version on
+/// submit.
+pub(super) fn raw_call_form(protocol: Protocol) -> Form {
+    let options: Vec<String> = actions_for(protocol)
         .iter()
         .filter(|a| a.direction.station_may_send())
         .map(|a| a.name.to_owned())
@@ -255,13 +265,15 @@ pub(super) fn set_variable_form(view: &VariableView) -> Form {
     )
 }
 
-/// The stop reasons (`ReasonEnumType`), `Local` first: the reason of a stop the driver causes.
-pub(super) fn stop_reason_choice(evse: u32) -> Choice {
+/// The stop reasons (`ReasonEnumType`) of `protocol`, `Local` first: the reason of a stop the
+/// driver causes.
+pub(super) fn stop_reason_choice(evse: u32, protocol: Protocol) -> Choice {
     let mut items = vec![StopReason::Local.as_str().to_owned()];
     items.extend(
         StopReason::ALL
             .iter()
             .filter(|r| **r != StopReason::Local)
+            .filter(|r| protocol == Protocol::V21 || !r.is_v21_only())
             .map(|r| r.as_str().to_owned()),
     );
     Choice::generic(STOP_REASON, "Stop reason", items, evse, "EVSE")
@@ -363,7 +375,12 @@ fn token_command(
 
 /// Turns the values of the generic form `kind` into the commands to send. `evse` is the
 /// selected EVSE.
-fn plan(kind: &str, values: &[FieldValue], evse: u32) -> Result<Planned, FieldProblem> {
+fn plan(
+    kind: &str,
+    values: &[FieldValue],
+    evse: u32,
+    protocol: Protocol,
+) -> Result<Planned, FieldProblem> {
     match kind {
         AUTHORIZE => {
             let (id_token, token_type) = token_command(values, 0)?;
@@ -427,7 +444,7 @@ fn plan(kind: &str, values: &[FieldValue], evse: u32) -> Result<Planned, FieldPr
             if !payload.is_object() {
                 return Err((1, "payload must be a JSON object".to_owned()));
             }
-            SchemaRegistry::for_protocol(Protocol::V201)
+            SchemaRegistry::for_protocol(protocol)
                 .map_err(|e| (1, format!("schemas are not available: {e}")))?
                 .validate_request(&action, &payload)
                 .map_err(|e| (1, e.to_string()))?;
@@ -488,7 +505,7 @@ fn plan(kind: &str, values: &[FieldValue], evse: u32) -> Result<Planned, FieldPr
 /// open with the reason on the field.
 pub(super) fn apply_form(app: &mut App2, mut form: Form, done: Submitted, fx: &mut Vec<Effect2>) {
     match done {
-        Submitted::Generic { kind, values } => match plan(kind, &values, app.evse) {
+        Submitted::Generic { kind, values } => match plan(kind, &values, app.evse, app.protocol) {
             Ok(p) => fx.push(Effect2::Send {
                 label: p.label,
                 commands: p.commands,

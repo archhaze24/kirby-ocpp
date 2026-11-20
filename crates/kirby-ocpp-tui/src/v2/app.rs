@@ -122,6 +122,8 @@ pub enum Msg2 {
     reason = "independent view flags (dirty, quit, mono) of one model"
 )]
 pub struct App2 {
+    /// The OCPP version of the station (2.0.1 or 2.1).
+    pub protocol: Protocol,
     pub size: (u16, u16),
     pub snapshot: Snapshot2,
     pub url: String,
@@ -164,8 +166,16 @@ impl App2 {
     pub fn new(snapshot: Snapshot2, url: impl Into<String>, vendor: impl Into<String>) -> Self {
         let protocol = Protocol::from_token(&snapshot.protocol).unwrap_or(Protocol::V201);
         let scenarios = builtin::all_for(protocol);
+        let mut catalog = catalog2(&scenarios);
+        if protocol == Protocol::V21 {
+            // The catalogue names the version in a few descriptions.
+            for def in &mut catalog {
+                def.desc = def.desc.replace("OCPP 2.0.1", "OCPP 2.1");
+            }
+        }
         let evse = snapshot.evses.first().map_or(0, |e| e.id);
         Self {
+            protocol,
             size: (120, 40),
             snapshot,
             url: url.into(),
@@ -178,7 +188,7 @@ impl App2 {
             suspended: None,
             log: LogStore::default(),
             notice: None,
-            catalog: catalog2(&scenarios),
+            catalog,
             scenarios,
             scenario: ScenarioView::default(),
             dirty: true,

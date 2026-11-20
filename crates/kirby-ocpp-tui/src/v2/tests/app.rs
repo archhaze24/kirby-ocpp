@@ -8,6 +8,7 @@
 use chrono::Utc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kirby_ocpp_core::StationConfig;
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::v2::messages::{Mutability, RegistrationStatus};
 use kirby_ocpp_core::ocpp::v2::types::{
     ChargingState, Component, IdTokenType, StopReason, Variable, WireEnum,
@@ -476,7 +477,7 @@ fn token_type_options_are_the_wire_names() {
     let mut app = app();
     press(&mut app, "3a");
     let options = &form_of(&app).fields[1].options;
-    let wire: Vec<&str> = IdTokenType::ALL.iter().map(WireEnum::as_str).collect();
+    let wire: Vec<&str> = IdTokenType::KNOWN.iter().map(IdTokenType::as_str).collect();
     assert_eq!(options.iter().map(String::as_str).collect::<Vec<_>>(), wire);
     assert!(wire.contains(&"eMAID") && wire.contains(&"ISO14443"));
     // `Right` moves from Local to MacAddress.
@@ -535,15 +536,28 @@ fn present_token_with_and_without_an_evse() {
 
 #[test]
 fn stop_reasons_are_the_nineteen_wire_names_with_local_first() {
-    let c = stop_reason_choice(1);
+    let c = stop_reason_choice(1, Protocol::V201);
     assert_eq!(c.items.len(), 19);
     assert_eq!(c.items[0], "Local");
     let mut got: Vec<&str> = c.items.iter().map(String::as_str).collect();
-    let mut want: Vec<&str> = StopReason::ALL.iter().map(WireEnum::as_str).collect();
+    let mut want: Vec<&str> = StopReason::ALL
+        .iter()
+        .filter(|r| !r.is_v21_only())
+        .map(WireEnum::as_str)
+        .collect();
     got.sort_unstable();
     want.sort_unstable();
     assert_eq!(got, want);
     assert!(got.contains(&"EVDisconnected") && got.contains(&"SOCLimitReached"));
+    assert!(!got.contains(&"ReqEnergyTransferRejected"));
+}
+
+#[test]
+fn a_2_1_station_also_offers_the_reasons_new_in_2_1() {
+    let c = stop_reason_choice(1, Protocol::V21);
+    assert_eq!(c.items.len(), 20);
+    assert_eq!(c.items[0], "Local");
+    assert!(c.items.iter().any(|i| i == "ReqEnergyTransferRejected"));
 }
 
 #[test]

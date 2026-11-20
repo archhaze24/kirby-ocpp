@@ -106,17 +106,10 @@ fn protocol_2_0_1_derives_the_subprotocol() {
 }
 
 #[test]
-fn protocol_2_1_is_refused() {
-    for (args, env) in [
-        (vec!["--url", URL, "--protocol", "ocpp2.1"], vec![]),
-        (vec!["--url", URL], vec![("OCPP_PROTOCOL", "ocpp2.1")]),
-    ] {
-        let text = rejected(&args, &env);
-        assert!(
-            text.contains("OCPP 2.1 is not supported by this build"),
-            "{text}"
-        );
-    }
+fn protocol_2_1_derives_the_subprotocol() {
+    let c = config(&["--protocol", "ocpp2.1"], &[]);
+    assert_eq!(c["protocol"], "ocpp2.1");
+    assert_eq!(c["ws_subprotocol"], "ocpp2.1");
 }
 
 #[test]
@@ -213,11 +206,11 @@ fn the_environment_selects_the_protocol() {
 }
 
 #[test]
-fn the_file_accepts_both_protocols_and_nothing_else() {
+fn the_file_accepts_the_protocol_tokens_and_nothing_else() {
     let dir = tempfile::tempdir().unwrap();
     let ok = write(dir.path(), "ok.toml", "protocol = \"ocpp1.6\"\n");
     assert_eq!(config(&["--config", &ok], &[])["protocol"], "ocpp1.6");
-    for bad in ["ocpp2.1", "2.0.1"] {
+    for bad in ["ocpp3", "2.0.1"] {
         let file = write(dir.path(), "bad.toml", &format!("protocol = \"{bad}\"\n"));
         let text = rejected(&["--url", URL, "--config", &file], &[]);
         assert!(text.contains("key `protocol`"), "{text}");
@@ -477,7 +470,7 @@ fn an_odd_station_id_prints_a_note_for_2_0_1_only() {
 }
 
 #[test]
-fn version_lists_both_protocols() {
+fn version_lists_the_protocols() {
     let output = run(&["version"], &[]);
     assert!(
         stdout(&output).contains("protocols: OCPP 1.6J, OCPP 2.0.1"),
@@ -486,9 +479,12 @@ fn version_lists_both_protocols() {
     );
     let output = run(&["version", "--json"], &[]);
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["protocols"], json!(["OCPP 1.6J", "OCPP 2.0.1"]));
-    assert_eq!(value["protocol_tokens"], json!(["ocpp1.6", "ocpp2.0.1"]));
-    // The offline commands do not mind a protocol this build lacks.
+    // The list grows with the versions; earlier entries keep their place.
+    assert_eq!(value["protocols"][0], "OCPP 1.6J");
+    assert_eq!(value["protocols"][1], "OCPP 2.0.1");
+    assert_eq!(value["protocol_tokens"][0], "ocpp1.6");
+    assert_eq!(value["protocol_tokens"][1], "ocpp2.0.1");
+    // The offline commands do not mind the protocol of the environment.
     let output = run(&["version"], &[("OCPP_PROTOCOL", "ocpp2.1")]);
     assert!(output.status.success());
 }

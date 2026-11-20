@@ -8,6 +8,7 @@ mod fleet;
 mod hardening;
 mod headless;
 mod protocol2;
+mod protocol21;
 mod record;
 mod state;
 mod suite;

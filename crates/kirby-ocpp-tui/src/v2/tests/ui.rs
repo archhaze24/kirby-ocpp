@@ -4,6 +4,7 @@
 use chrono::{TimeZone, Utc};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kirby_ocpp_core::StationConfig;
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::v2::messages::{
     BootReason, ConnectorStatus, Mutability, RegistrationStatus,
 };
@@ -294,7 +295,7 @@ fn every_tab_is_free_of_1_6_words_at_every_size() {
     let mut a = app();
     a.mode = Mode2::Help;
     assert_no_16_words(&render(&a, 110, 60), "help");
-    assert_no_16_words(&help_lines2().join("\n"), "help text");
+    assert_no_16_words(&help_lines2(Protocol::V201).join("\n"), "help text");
     a.mode = Mode2::Palette(Palette::from_rows(&super::super::actions::palette_rows(
         &a.catalog,
     )));
@@ -452,6 +453,36 @@ fn scenarios_tab_lists_the_built_in_scenarios() {
     assert!(
         text.contains(&a.catalog[a.tab_actions()[0]].label),
         "{text}"
+    );
+}
+
+#[test]
+fn a_2_1_station_shows_the_2_1_version_where_2_0_1_shows_its_own() {
+    let mut snapshot = app().snapshot;
+    snapshot.protocol = "ocpp2.1".to_owned();
+    let mut a = App2::new(snapshot, "ws://csms.example/ocpp", "Kirby");
+    assert_eq!(a.protocol, Protocol::V21);
+    let text = render(&a, 110, 30);
+    assert!(text.contains("ocpp2.1"), "{text}");
+    a.mode = Mode2::Help;
+    let text = render(&a, 110, 60);
+    assert!(text.contains("Not available for OCPP 2.1"), "{text}");
+    assert!(!text.contains("2.0.1"), "{text}");
+    for def in &a.catalog {
+        assert!(!def.desc.contains("2.0.1"), "{}: {}", def.label, def.desc);
+    }
+    assert!(
+        a.catalog
+            .iter()
+            .any(|def| def.desc.contains("validated against the OCPP 2.1 schema"))
+    );
+    // The 2.0.1 station keeps its own text.
+    let old = app();
+    assert_eq!(old.protocol, Protocol::V201);
+    assert!(
+        old.catalog
+            .iter()
+            .any(|def| def.desc.contains("validated against the OCPP 2.0.1 schema"))
     );
 }
 

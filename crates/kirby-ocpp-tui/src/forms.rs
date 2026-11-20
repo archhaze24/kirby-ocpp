@@ -102,15 +102,19 @@ pub enum FieldKind {
     ProfileJson,
     /// An OCPP 2.x EVSE number: 1 to the form's `max_connector` (used as the EVSE count).
     Evse,
-    /// An OCPP 2.x `idToken`: required, at most [`ID_TOKEN_MAX`] characters.
+    /// An OCPP 2.x `idToken`: required, at most the field's `max_chars` characters
+    /// ([`ID_TOKEN_MAX`] without one).
     IdToken,
     /// Any JSON value (string, number, array, object, ...); empty means "none". Unlike
     /// [`FieldKind::Json`] it is not checked against a schema.
     JsonValue,
 }
 
-/// Most characters of an OCPP 2.x `idToken` (the schema's `IdTokenType.idToken`).
+/// Most characters of an OCPP 2.0.1 `idToken` (the schema's `IdTokenType.idToken`).
 pub const ID_TOKEN_MAX: usize = 36;
+
+/// Most characters of an OCPP 2.1 `idToken`.
+pub const ID_TOKEN_MAX_V21: usize = 255;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Field {
@@ -706,8 +710,8 @@ impl Form {
                     Some("idToken is required".to_owned())
                 } else {
                     let n = text.chars().count();
-                    (n > ID_TOKEN_MAX)
-                        .then(|| format!("idToken is {n} characters, at most {ID_TOKEN_MAX}"))
+                    let limit = f.max_chars.unwrap_or(ID_TOKEN_MAX);
+                    (n > limit).then(|| format!("idToken is {n} characters, at most {limit}"))
                 }
             }
             FieldKind::JsonValue => (!text.is_empty())

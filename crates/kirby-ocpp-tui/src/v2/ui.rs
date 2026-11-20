@@ -1,6 +1,7 @@
 //! Drawing of the OCPP 2.x UI. `draw2` is a pure function of the [`App2`]; it never mutates
 //! it.
 
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::v2::types::WireEnum;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -325,7 +326,11 @@ fn draw_overlay(f: &mut Frame<'_>, app: &App2, area: Rect) {
         }),
         Mode2::Form(form) => overlays::form(f, form, area),
         Mode2::Choice(c) => overlays::choice(f, c, area),
-        Mode2::Help => overlays::help(f, &help_lines2(), area),
+        Mode2::Help => {
+            let lines = help_lines2(app.protocol);
+            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
+            overlays::help(f, &lines, area);
+        }
         Mode2::Detail(d) => overlays::detail(f, d, area),
         Mode2::Confirm(c) => {
             overlays::confirm(f, &c.message, c.action == ConfirmAction2::Quit, area);
@@ -389,6 +394,15 @@ const HELP2: &[&str] = &[
 ];
 
 /// The lines of the help popup.
-pub fn help_lines2() -> Vec<&'static str> {
-    HELP2.to_vec()
+pub fn help_lines2(protocol: Protocol) -> Vec<String> {
+    HELP2
+        .iter()
+        .map(|line| {
+            if protocol == Protocol::V21 {
+                line.replace("OCPP 2.0.1", "OCPP 2.1")
+            } else {
+                (*line).to_owned()
+            }
+        })
+        .collect()
 }

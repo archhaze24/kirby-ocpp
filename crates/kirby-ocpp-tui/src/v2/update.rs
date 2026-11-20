@@ -319,9 +319,13 @@ impl App2 {
                     .map_or(1, |c| c.id);
                 plain(fx, Command2::StatusNotification { evse, connector });
             }
-            ActionId2::Authorize => self.mode = Mode2::Form(authorize_form()),
-            ActionId2::PresentToken => self.mode = Mode2::Form(present_token_form(evse)),
-            ActionId2::StopTransaction => self.mode = Mode2::Choice(stop_reason_choice(evse)),
+            ActionId2::Authorize => self.mode = Mode2::Form(authorize_form(self.protocol)),
+            ActionId2::PresentToken => {
+                self.mode = Mode2::Form(present_token_form(evse, self.protocol));
+            }
+            ActionId2::StopTransaction => {
+                self.mode = Mode2::Choice(stop_reason_choice(evse, self.protocol));
+            }
             ActionId2::Meter120 => fx.push(Effect2::Send {
                 label: "meter +120 Wh".to_owned(),
                 commands: vec![
@@ -348,7 +352,7 @@ impl App2 {
                 },
                 true,
             ),
-            ActionId2::RawCall => self.mode = Mode2::Form(raw_call_form()),
+            ActionId2::RawCall => self.mode = Mode2::Form(raw_call_form(self.protocol)),
             ActionId2::LogCopySelected => {
                 if let Some(e) = self.log.selected() {
                     fx.push(Effect2::Copy {

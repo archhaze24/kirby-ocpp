@@ -322,11 +322,11 @@ fn mode_gate(command: Option<&Cmd>, is_fleet: bool, protocol: Protocol) -> Optio
     }
 }
 
-/// A note about a station id that OCPP 2.0.1 does not allow in the URL path: at most 48
+/// A note about a station id that OCPP 2.x does not allow in the URL path: at most 48
 /// characters of `identifierString` and no colon (Part 4 section 3.1.1). The id is used as
 /// given.
 fn station_id_note(config: &StationConfig) -> Option<String> {
-    if config.protocol != Protocol::V201 {
+    if config.protocol == Protocol::V16 {
         return None;
     }
     let id = &config.charge_point_id;
@@ -349,9 +349,10 @@ fn station_id_note(config: &StationConfig) -> Option<String> {
     let shown: String = id.chars().take(64).collect();
     let ellipsis = if id.chars().count() > 64 { "..." } else { "" };
     Some(format!(
-        "station id `{}{ellipsis}` {} (OCPP 2.0.1 allows at most 48 identifierString characters and no colon); it is used as given",
+        "station id `{}{ellipsis}` {} (OCPP {} allows at most 48 identifierString characters and no colon); it is used as given",
         kirby_ocpp_tui::text::sanitize(&shown),
-        problems.join(" and ")
+        problems.join(" and "),
+        config.protocol.ocpp_version()
     ))
 }
 
@@ -365,9 +366,9 @@ fn scenarios(action: &ScenariosCmd, protocol: Protocol) -> ExitCode {
             }
             ExitCode::SUCCESS
         }
-        ScenariosCmd::Show { name } => match builtin::source_for(name, protocol) {
+        ScenariosCmd::Show { name } => match builtin::source_text(name, protocol) {
             Some(text) => {
-                print_lossy(text);
+                print_lossy(&text);
                 ExitCode::SUCCESS
             }
             None => usage_error(&format!(
@@ -480,8 +481,8 @@ fn print_version(json: bool) -> ExitCode {
     let commit = env!("KIRBY_OCPP_GIT_COMMIT");
     let date = env!("KIRBY_OCPP_BUILD_DATE");
     let target = env!("KIRBY_OCPP_TARGET");
-    let protocols = ["OCPP 1.6J", "OCPP 2.0.1"];
-    let protocol_tokens = ["ocpp1.6", "ocpp2.0.1"];
+    let protocols = ["OCPP 1.6J", "OCPP 2.0.1", "OCPP 2.1"];
+    let protocol_tokens = ["ocpp1.6", "ocpp2.0.1", "ocpp2.1"];
     if json {
         let value = serde_json::json!({
             "name": "kirby-ocpp",
@@ -636,9 +637,15 @@ pub(crate) fn retarget_for(
     } else {
         if let Some(token) = id_tag {
             let len = token.chars().count();
-            if !(1..=36).contains(&len) {
+            // OCPP 2.1 raised the maximum of `idToken` from 36 to 255 characters.
+            let max = if scenario.protocol() == Protocol::V21 {
+                255
+            } else {
+                36
+            };
+            if !(1..=max).contains(&len) {
                 return Err(format!(
-                    "idToken is {len} characters long, it must be 1 to 36"
+                    "idToken is {len} characters long, it must be 1 to {max}"
                 ));
             }
         }

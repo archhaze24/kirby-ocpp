@@ -410,7 +410,7 @@ fn file_errors_name_the_file_and_the_key_and_exit_2() {
             "key `faults.rule`: expected an array of strings",
         ),
         ("schema = 2\n", "version 2 is not supported"),
-        ("protocol = \"ocpp2.1\"\n", "`ocpp2.1` is not supported"),
+        ("protocol = \"ocpp3\"\n", "`ocpp3` is not supported"),
         ("[connection\n", "line 1"),
         (
             "[profile.x.identity]\nbogus = 1\n",
