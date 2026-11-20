@@ -36,6 +36,7 @@ use serde::{Deserialize, Serialize};
 
 use super::actor::{Station2Actor, TimerKey2};
 use super::evse::Evse;
+use super::snapshot::ReservationView2;
 use super::types::{IdTokenRef, Origin2};
 use crate::ocpp::responder::Responder;
 use crate::ocpp::v2::messages::{
@@ -147,6 +148,24 @@ impl Station2Actor {
             }
         }
         situation
+    }
+
+    /// The reservation in force that holds `evse`; the earliest-expiring one when several do.
+    pub(super) fn reservation_view(&self, evse: u32) -> Option<ReservationView2> {
+        if !self.reservations_enabled() {
+            return None;
+        }
+        let now = self.clock.now_utc();
+        self.reservations
+            .list
+            .iter()
+            .filter(|r| r.evse == Some(evse) && r.expires_at > now)
+            .min_by_key(|r| r.expires_at)
+            .map(|r| ReservationView2 {
+                id: r.id,
+                id_token: r.id_token.id_token.clone(),
+                expires_at: r.expires_at,
+            })
     }
 
     fn evse_state(&self, evse: &Evse, held: &BTreeSet<u32>) -> EvseState {

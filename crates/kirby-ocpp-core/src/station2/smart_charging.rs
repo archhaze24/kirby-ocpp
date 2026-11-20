@@ -1011,6 +1011,23 @@ impl Station2Actor {
         ))
     }
 
+    /// What the snapshot shows of the profiles of an EVSE: the power they allow when that is
+    /// below the nominal power, and whether an external constraint covers it.
+    pub(super) fn sc_view(&self, evse: u32) -> (Option<f64>, bool) {
+        let eval = self.sc_eval();
+        let offered = self.sc_offered_w(evse);
+        let limited = offered < eval.model.nominal_w;
+        let external = eval.entries.iter().any(|entry| {
+            entry.is_external() && (entry.stored.evse == evse || entry.stored.evse == 0)
+        });
+        (limited.then_some(offered), external)
+    }
+
+    /// Profiles installed.
+    pub(super) fn sc_profile_count(&self) -> usize {
+        self.charging.entries.len()
+    }
+
     /// The energy in Wh an EVSE draws in `elapsed` from `from`, under the limit in force.
     pub(super) fn sc_energy_wh(&self, evse: u32, from: DateTime<Utc>, elapsed: Duration) -> f64 {
         let eval = self.sc_eval();

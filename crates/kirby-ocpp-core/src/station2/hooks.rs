@@ -38,9 +38,33 @@ impl Station2Actor {
         self.settle_tx_meters();
     }
 
+    /// Refreshes the reservation, limit and list rows of the snapshot from the live state.
+    fn refresh_evse_views(&mut self) {
+        let views: Vec<_> = self
+            .state
+            .evses
+            .iter()
+            .map(|e| {
+                let (offered, external) = self.sc_view(e.id);
+                (e.id, self.reservation_view(e.id), offered, external)
+            })
+            .collect();
+        for (id, reservation, offered, external) in views {
+            if let Some(entry) = self.state.evses.iter_mut().find(|e| e.id == id) {
+                entry.reservation = reservation;
+                entry.offered_w = offered;
+                entry.external_limit = external;
+            }
+        }
+        self.state.local_list_version = self.local_list.version;
+        self.state.local_list_entries = self.local_list_len();
+        self.state.charging_profiles = self.sc_profile_count();
+    }
+
     /// Refreshes the device-model rows of the snapshot. `publish` calls it before it compares
     /// the live model with the published one.
     pub(super) fn refresh_variables(&mut self) {
         self.refresh_variable_views();
+        self.refresh_evse_views();
     }
 }

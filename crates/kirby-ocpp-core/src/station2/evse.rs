@@ -392,6 +392,9 @@ impl Station2Actor {
                     connectors,
                     transaction: None,
                     meter_wh: 0,
+                    reservation: None,
+                    offered_w: None,
+                    external_limit: false,
                 });
             }
         }

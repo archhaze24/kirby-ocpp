@@ -57,7 +57,8 @@ pub use self::local_list::{ListEntry, LocalListPersist};
 pub use self::reservation::{Reservation, ReservationPersist};
 pub use self::smart_charging::{SmartChargingPersist, StoredProfile2};
 pub use self::snapshot::{
-    ConnectorSnapshot2, EvseSnapshot, Snapshot2, TransactionSnapshot, VariableView,
+    ConnectorSnapshot2, EvseSnapshot, ReservationView2, Snapshot2, TransactionSnapshot,
+    VariableView,
 };
 pub use self::transactions::{ActiveTx, TxPersist};
 pub use self::tx_queue::{QueuePersist, QueuedEvent};

@@ -827,6 +827,47 @@ async fn an_external_limit_is_notified_installed_and_released() {
 }
 
 #[tokio::test]
+async fn the_snapshot_shows_the_limit_in_force_and_the_profile_count() {
+    let rig = Rig::new().await;
+    let free = wait_snapshot(&rig.station, "a booted station", |s| {
+        s.booted() && s.evse(1).is_some()
+    })
+    .await;
+    assert_eq!(free.charging_profiles, 0);
+    assert_eq!(free.evse(1).and_then(|e| e.offered_w), None);
+    rig.station
+        .set_external_limit(1, external_schedule("W", 3000.0))
+        .await
+        .expect("external limit");
+    let limited = wait_snapshot(&rig.station, "the external limit", |s| {
+        s.evse(1).is_some_and(|e| e.external_limit)
+    })
+    .await;
+    assert_eq!(limited.charging_profiles, 1);
+    assert_eq!(limited.evse(1).and_then(|e| e.offered_w), Some(3000.0));
+    // Another EVSE is not covered.
+    assert_eq!(limited.evse(2).map(|e| e.external_limit), Some(false));
+    assert_eq!(limited.evse(2).and_then(|e| e.offered_w), None);
+    // A limit on the whole station covers every EVSE.
+    rig.station.clear_external_limit(1).await.expect("released");
+    rig.station
+        .set_external_limit(0, external_schedule("W", 2000.0))
+        .await
+        .expect("station limit");
+    let whole = wait_snapshot(&rig.station, "the station limit", |s| {
+        s.evse(2).is_some_and(|e| e.external_limit)
+    })
+    .await;
+    assert_eq!(whole.evse(1).map(|e| e.external_limit), Some(true));
+    assert_eq!(whole.evse(2).and_then(|e| e.offered_w), Some(2000.0));
+    rig.station.clear_external_limit(0).await.expect("released");
+    let after = wait_snapshot(&rig.station, "the release", |s| s.charging_profiles == 0).await;
+    assert_eq!(after.evse(1).map(|e| e.external_limit), Some(false));
+    assert_eq!(after.evse(1).and_then(|e| e.offered_w), None);
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn an_external_limit_notice_leaves_the_schedule_out_when_the_variable_says_so() {
     let rig = Rig::new().await;
     rig.set_variable(

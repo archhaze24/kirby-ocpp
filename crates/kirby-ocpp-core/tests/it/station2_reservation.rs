@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::station2_remote::Rig;
-use super::station2_support::{STEP, v201_csms, wait_booted};
+use super::station2_support::{STEP, v201_csms, wait_booted, wait_snapshot};
 
 fn central(id: &str) -> Value {
     json!({"idToken": id, "type": "Central"})
@@ -154,6 +154,28 @@ async fn a_reserved_evse_reports_reserved_and_the_other_stays_available() {
     rig.wait_status(1, "Reserved", 1).await;
     rig.settle().await;
     assert_eq!(rig.status_count(2, "Reserved"), 0);
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn the_snapshot_shows_a_reservation_until_it_is_cancelled() {
+    let rig = Rig::new().await;
+    assert_eq!(rig.reserve(7, Some(1), "ABC").await, "Accepted");
+    let held = wait_snapshot(&rig.station, "the reservation", |s| {
+        s.evse(1).is_some_and(|e| e.reservation.is_some())
+    })
+    .await;
+    let view = held
+        .evse(1)
+        .and_then(|e| e.reservation.clone())
+        .expect("held");
+    assert_eq!((view.id, view.id_token.as_str()), (7, "ABC"));
+    assert_eq!(held.evse(2).map(|e| e.reservation.is_none()), Some(true));
+    assert_eq!(rig.cancel(7).await, "Accepted");
+    wait_snapshot(&rig.station, "the cancellation", |s| {
+        s.evse(1).is_some_and(|e| e.reservation.is_none())
+    })
+    .await;
     rig.stop().await;
 }
 

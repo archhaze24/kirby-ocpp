@@ -21,7 +21,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::station2_remote::Rig;
-use super::station2_support::{STEP, v201_csms, wait_booted};
+use super::station2_support::{STEP, v201_csms, wait_booted, wait_snapshot};
 
 fn token(id: &str) -> Value {
     json!({"idToken": id, "type": "ISO14443"})
@@ -145,6 +145,25 @@ async fn a_full_update_replaces_the_list_and_sets_the_version() {
     assert_eq!(rig.status_of("SendLocalList", empty).await, "Accepted");
     assert_eq!(rig.variable("LocalAuthListCtrlr", "Entries").await, "0");
     assert_eq!(rig.list_version().await, 6);
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn the_snapshot_follows_the_list() {
+    let rig = Rig::new().await;
+    assert_eq!(
+        rig.send_list(3, "Full", &[entry("A", "Accepted"), entry("B", "Accepted")])
+            .await,
+        "Accepted"
+    );
+    let snapshot = wait_snapshot(&rig.station, "the list", |s| s.local_list_version == 3).await;
+    assert_eq!(snapshot.local_list_entries, 2);
+    assert_eq!(
+        rig.send_list(4, "Differential", &[removal("A")]).await,
+        "Accepted"
+    );
+    let snapshot = wait_snapshot(&rig.station, "the update", |s| s.local_list_version == 4).await;
+    assert_eq!(snapshot.local_list_entries, 1);
     rig.stop().await;
 }
 

@@ -23,7 +23,7 @@ pub(super) fn wire_protocol(config: &StationConfig) -> Protocol {
 ///
 /// `variables` lists station-level device-model variables only (at most 256); per-EVSE and
 /// per-connector variables are reachable through `GetVariables`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot2 {
     pub charge_point_id: String,
     /// The WebSocket subprotocol token of the station: `ocpp2.0.1` or `ocpp2.1`.
@@ -49,10 +49,19 @@ pub struct Snapshot2 {
     pub reconnect_stopped: Option<String>,
     /// `SecurityProfile` (0..=3).
     pub security_profile: u8,
+    /// Version of the Local Authorization List; `0` while no list was ever sent.
+    #[serde(default)]
+    pub local_list_version: i32,
+    /// Tokens in the Local Authorization List.
+    #[serde(default)]
+    pub local_list_entries: usize,
+    /// Charging profiles installed, external constraints included.
+    #[serde(default)]
+    pub charging_profiles: usize,
 }
 
 /// State of one EVSE.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvseSnapshot {
     pub id: u32,
     pub operative: bool,
@@ -60,6 +69,26 @@ pub struct EvseSnapshot {
     pub transaction: Option<TransactionSnapshot>,
     /// Simulated meter, Wh.
     pub meter_wh: u64,
+    /// The reservation that holds this EVSE; `None` when none is in force.
+    #[serde(default)]
+    pub reservation: Option<ReservationView2>,
+    /// Power in watts the charging profiles in force allow on this EVSE; `None` when no
+    /// profile limits it below the nominal power.
+    #[serde(default)]
+    pub offered_w: Option<f64>,
+    /// An external constraint (`ChargingStationExternalConstraints`) covers this EVSE or the
+    /// whole station.
+    #[serde(default)]
+    pub external_limit: bool,
+}
+
+/// A reservation as the snapshot shows it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReservationView2 {
+    pub id: i32,
+    /// The text of the reserved token.
+    pub id_token: String,
+    pub expires_at: DateTime<Utc>,
 }
 
 /// State of one connector of an EVSE.
@@ -113,6 +142,9 @@ impl Snapshot2 {
             variables: Vec::new(),
             reconnect_stopped: None,
             security_profile: 0,
+            local_list_version: 0,
+            local_list_entries: 0,
+            charging_profiles: 0,
         }
     }
 
