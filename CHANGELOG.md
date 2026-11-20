@@ -17,6 +17,7 @@ tag as the GitHub release notes.
 - OCPP 2.0.1 and 2.1 emulator: Local Authorization List (`SendLocalList`, `GetLocalListVersion`, `LocalAuthListCtrlr`). Listed tokens authorize offline (`LocalAuthorizeOffline`) and online without `Authorize` (`LocalPreAuthorize`), take precedence over the authorization cache, and the list survives a restart. `kirby-csms` has forms for both commands on 2.x stations.
 - OCPP 2.0.1 and 2.1 emulator: reservations. `ReserveNow` holds an EVSE, or any EVSE, for an `idToken` or its group, the connectors report `Reserved`, `CancelReservation` frees it, `ReservationStatusUpdate` reports `Expired` and `Removed`, and reservations survive a restart.
 - OCPP 2.0.1 and 2.1 emulator: `GetReport` limits a report by component criteria and by component and variable, and sends it in `NotifyReport` chunks. `kirby-csms` has forms for `GetReport`, `ReserveNow` and `CancelReservation` on 2.x stations.
+- OCPP 2.0.1 conformance family: `local-list` covers `TC_D_01_CS` to `TC_D_06_CS`, `TC_D_08_CS`, `TC_D_10_CS` and `TC_C_31_CS`.
 - OCPP 2.0.1 and 2.1 emulator: master pass (C16). A token in the group set by `AuthCtrlr.MasterPassGroupId` starts no transaction and ends all running ones with stop reason `MasterPass`.
 - Release archives carry a build provenance attestation; check one with `gh attestation verify <archive> --repo archhaze24/kirby-ocpp`.
 

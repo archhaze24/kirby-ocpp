@@ -168,7 +168,7 @@ The specification wins over 1.6 parity. Each entry is either backed by a require
 
 ## Conformance scenarios
 
-The twelve scenarios in `conformance/v201/` exercise the station through a scripted `kirby-csms`; how to run them is in [Scenarios](scenarios.md#ocpp-201-conformance-family). The table maps them to the test cases of OCPP 2.0.1 Part 6 (edition 4, the `_CS` cases for a charging station). The runs are not a certification: a scenario follows a test case where the station supports it and says in the last column where it does not.
+The thirteen scenarios in `conformance/v201/` exercise the station through a scripted `kirby-csms`; how to run them is in [Scenarios](scenarios.md#ocpp-201-conformance-family). The table maps them to the test cases of OCPP 2.0.1 Part 6 (edition 4, the `_CS` cases for a charging station). The runs are not a certification: a scenario follows a test case where the station supports it and says in the last column where it does not.
 
 | Scenario | Test cases | Covers | Differences from the test case |
 | --- | --- | --- | --- |
@@ -184,13 +184,14 @@ The twelve scenarios in `conformance/v201/` exercise the station through a scrip
 | `transaction-retry` | `TC_E_50_CS`, `TC_E_51_CS` | the number of attempts | The wait between attempts is not asserted (a scenario sees no timestamps); the station sends the event `MessageAttempts` times and no more, which the script proves by the unused refusal |
 | `meter-values` | `TC_J_07_CS`, `TC_J_09_CS`, `TC_J_10_CS` | one sample per configured measurand with the contexts `Transaction.Begin`, `Sample.Periodic` and `Transaction.End` | The interval of the updates is not asserted; `TxEndedInterval` stays 0, so the periodic samples of the `Ended` event are not checked (a match compares arrays at their full length); no sample is checked for `location` |
 | `scripted-replies` | none | the [`reply`](scenarios.md#reply) step | Scenario feature, not a test case |
+| `local-list` | `TC_D_01_CS` to `TC_D_06_CS`, `TC_D_08_CS`, `TC_D_10_CS`, `TC_C_31_CS` | all steps | The lists use the `SendLocalList` schema: an empty list is sent without `localAuthorizationList`, as the schema requires at least one item. The versions start at 5 on a fresh station (the cases use a configured number). `TC_C_31_CS` lists the token as `Invalid` with `LocalPreAuthorize` on, starts the transaction on the `Accepted` answer of the CSMS and stops it; the energy transfer is not checked |
 
 Test cases listed by title (`TC_G_06_CS`, `TC_G_08_CS`, `TC_G_10_CS`) follow the title only; the other cases were compared with their steps and validations.
 
 Not in the family:
 
 - `TC_E_41_CS`, `TC_E_42_CS`: the CSMS does not answer, so each attempt waits for the call timeout (30 s by default); `TC_E_50_CS` and `TC_E_51_CS` cover the same retry rule with CALLERROR answers.
-- Authorization cache and Local Authorization List cases (parts C and D), `GetReport` and reservation (part H): implemented, no scenario yet.
+- Authorization cache cases and the other Local Authorization List cases (`TC_D_07_CS`, a list that survives a reboot, and the authorization cases `TC_C_29_CS`, `TC_C_30_CS`, `TC_C_40_CS`, `TC_C_43_CS`), `GetReport` and reservation (part H): implemented, no scenario yet.
 - Certificates, firmware, monitoring, smart charging and display messages: the station answers `NotSupported` or does not send the message.
 
 ## CSMS side (`kirby-csms`)
