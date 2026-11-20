@@ -158,10 +158,12 @@ async fn a_charging_session_runs_through_its_steps() {
         report.steps[5].detail.label,
         "expect_call TransactionEvent out"
     );
-    let ended = rig.events_of("Ended");
-    assert_eq!(ended[0]["transactionInfo"]["stoppedReason"], "DeAuthorized");
+    // `expect_call ... out` sees the frame as the station sent it; the mock may record it a
+    // moment later.
+    let ended = rig.wait_event("Ended").await;
+    assert_eq!(ended["transactionInfo"]["stoppedReason"], "DeAuthorized");
     assert_eq!(
-        ended[0]["transactionInfo"]["transactionId"],
+        ended["transactionInfo"]["transactionId"],
         started[0]["transactionInfo"]["transactionId"]
     );
     assert_eq!(
