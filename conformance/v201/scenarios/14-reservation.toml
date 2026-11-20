@@ -39,6 +39,12 @@ match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
 timeout_ms = 5000
 
 [[steps]]
+name = "tell the CSMS the reservation is visible"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-reserved"
+
+[[steps]]
 name = "ReserveNow for the reserved EVSE arrives"
 action = "expect_call"
 call = "ReserveNow"
@@ -179,6 +185,12 @@ match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
 timeout_ms = 5000
 
 [[steps]]
+name = "tell the CSMS reservation 6 is visible"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-reserved-6"
+
+[[steps]]
 name = "CancelReservation for reservation 6 arrives"
 action = "expect_call"
 call = "CancelReservation"
@@ -196,6 +208,12 @@ timeout_ms = 5000
 # Any EVSE: the single EVSE is held, and a connector type finds it taken
 
 [[steps]]
+name = "tell the CSMS reservation 6 is cancelled"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-cancelled-6"
+
+[[steps]]
 name = "ReserveNow without an EVSE arrives"
 action = "expect_call"
 call = "ReserveNow"
@@ -209,6 +227,12 @@ call = "StatusNotification"
 direction = "out"
 match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
 timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS reservation 7 is visible"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-reserved-7"
 
 [[steps]]
 name = "ReserveNow with a connector type arrives while every EVSE is reserved"
@@ -235,6 +259,12 @@ timeout_ms = 5000
 # A connector type
 
 [[steps]]
+name = "tell the CSMS reservation 7 is cancelled"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-cancelled-7"
+
+[[steps]]
 name = "ReserveNow with a connector type arrives"
 action = "expect_call"
 call = "ReserveNow"
@@ -248,6 +278,12 @@ call = "StatusNotification"
 direction = "out"
 match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
 timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS reservation 9 is visible"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-reserved-9"
 
 [[steps]]
 name = "CancelReservation for reservation 9 arrives"
@@ -267,6 +303,12 @@ timeout_ms = 5000
 # A reservation for a group: another token of the group uses it
 
 [[steps]]
+name = "tell the CSMS reservation 9 is cancelled"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-cancelled-9"
+
+[[steps]]
 name = "ReserveNow for EVSE 1 with a group arrives"
 action = "expect_call"
 call = "ReserveNow"
@@ -280,6 +322,12 @@ call = "StatusNotification"
 direction = "out"
 match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
 timeout_ms = 5000
+
+[[steps]]
+name = "tell the CSMS the group reservation is visible"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-reserved-group"
 
 [[steps]]
 name = "the CSMS has seen the answer"
@@ -354,6 +402,12 @@ match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
 timeout_ms = 5000
 
 [[steps]]
+name = "tell the CSMS the any-EVSE group reservation is visible"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-reserved-any-group"
+
+[[steps]]
 name = "the CSMS has seen the answer"
 action = "expect_call"
 call = "DataTransfer"
@@ -426,6 +480,12 @@ match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
 timeout_ms = 5000
 
 [[steps]]
+name = "tell the CSMS reservation 12 is visible"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-reserved-12"
+
+[[steps]]
 name = "ChangeAvailability (EVSE 1, Inoperative) arrives"
 action = "expect_call"
 call = "ChangeAvailability"
@@ -444,6 +504,12 @@ timeout_ms = 5000
 name = "the connector is Unavailable"
 action = "wait_for"
 condition = { kind = "connector_status", evse = 1, connector = 1, status = "Unavailable" }
+
+[[steps]]
+name = "tell the CSMS the EVSE is Unavailable"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-unavailable-evse"
 
 [[steps]]
 name = "ReserveNow for the unavailable EVSE arrives"
@@ -475,6 +541,12 @@ match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
 timeout_ms = 5000
 
 # Reservations switched off
+
+[[steps]]
+name = "tell the CSMS the EVSE is Operative again"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-operative"
 
 [[steps]]
 name = "SetVariables switches ReservationCtrlr off"

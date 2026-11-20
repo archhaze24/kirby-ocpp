@@ -1379,6 +1379,14 @@ payload = { id = 1, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken
 expect_status = "Accepted"
 
 [[steps]]
+name = "reservation: the reservation is visible"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-reserved" }
+timeout_ms = 30000
+
+[[steps]]
 name = "reservation: a reserved EVSE is Occupied for another token"
 action = "call"
 station = "${station}"
@@ -1473,6 +1481,14 @@ payload = { id = 6, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken
 expect_status = "Accepted"
 
 [[steps]]
+name = "reservation: reservation 6 is visible"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-reserved-6" }
+timeout_ms = 30000
+
+[[steps]]
 name = "reservation: the reservation is cancelled"
 action = "call"
 station = "${station}"
@@ -1481,12 +1497,28 @@ payload = { reservationId = 6 }
 expect_status = "Accepted"
 
 [[steps]]
+name = "reservation: reservation 6 is cancelled"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-cancelled-6" }
+timeout_ms = 30000
+
+[[steps]]
 name = "reservation: any EVSE is reserved"
 action = "call"
 station = "${station}"
 call = "ReserveNow"
 payload = { id = 7, expiryDateTime = "2099-01-01T00:00:00Z", idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
 expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: reservation 7 is visible"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-reserved-7" }
+timeout_ms = 30000
 
 [[steps]]
 name = "reservation: a connector type finds every EVSE reserved"
@@ -1505,12 +1537,28 @@ payload = { reservationId = 7 }
 expect_status = "Accepted"
 
 [[steps]]
+name = "reservation: reservation 7 is cancelled"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-cancelled-7" }
+timeout_ms = 30000
+
+[[steps]]
 name = "reservation: a connector type is reserved"
 action = "call"
 station = "${station}"
 call = "ReserveNow"
 payload = { id = 9, expiryDateTime = "2099-01-01T00:00:00Z", connectorType = "cType2", idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
 expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: reservation 9 is visible"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-reserved-9" }
+timeout_ms = 30000
 
 [[steps]]
 name = "reservation: the reservation of the connector type is cancelled"
@@ -1521,12 +1569,28 @@ payload = { reservationId = 9 }
 expect_status = "Accepted"
 
 [[steps]]
+name = "reservation: reservation 9 is cancelled"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-cancelled-9" }
+timeout_ms = 30000
+
+[[steps]]
 name = "reservation: EVSE 1 is reserved for a group"
 action = "call"
 station = "${station}"
 call = "ReserveNow"
 payload = { id = 10, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" }, groupIdToken = { idToken = "PARENTTAG", type = "Central" } }
 expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: the group reservation is visible"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-reserved-group" }
+timeout_ms = 30000
 
 [[steps]]
 name = "reservation: go"
@@ -1552,6 +1616,14 @@ payload = { id = 11, expiryDateTime = "2099-01-01T00:00:00Z", idToken = { idToke
 expect_status = "Accepted"
 
 [[steps]]
+name = "reservation: the any-EVSE group reservation is visible"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-reserved-any-group" }
+timeout_ms = 30000
+
+[[steps]]
 name = "reservation: go"
 action = "call"
 station = "${station}"
@@ -1575,12 +1647,28 @@ payload = { id = 12, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToke
 expect_status = "Accepted"
 
 [[steps]]
+name = "reservation: reservation 12 is visible"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-reserved-12" }
+timeout_ms = 30000
+
+[[steps]]
 name = "reservation: EVSE 1 is made Inoperative"
 action = "call"
 station = "${station}"
 call = "ChangeAvailability"
 payload = { operationalStatus = "Inoperative", evse = { id = 1 } }
 expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: the EVSE is Unavailable"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-unavailable-evse" }
+timeout_ms = 30000
 
 [[steps]]
 name = "reservation: an unavailable EVSE cannot be reserved"
@@ -1605,6 +1693,14 @@ station = "${station}"
 call = "ChangeAvailability"
 payload = { operationalStatus = "Operative", evse = { id = 1 } }
 expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: the EVSE is Operative again"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-operative" }
+timeout_ms = 30000
 
 [[steps]]
 name = "reservation: reservations are switched off"
