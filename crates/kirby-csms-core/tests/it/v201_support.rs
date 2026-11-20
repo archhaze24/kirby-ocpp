@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
 use kirby_csms_core::{
-    CsmsConfig, CsmsEvent, CsmsHandle, CsmsServer, Frame, StationState, SubprotocolPolicy,
+    CsmsConfig, CsmsEvent, CsmsHandle, CsmsServer, Frame, Protocol, StationState, SubprotocolPolicy,
 };
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -93,12 +93,19 @@ impl Client {
 
     /// The next frame from the engine.
     pub async fn recv(&mut self) -> Frame {
+        self.recv_for(Protocol::V16).await
+    }
+
+    /// The next frame from the engine, parsed for `protocol` (types 5 and 6 need 2.1).
+    pub async fn recv_for(&mut self, protocol: Protocol) -> Frame {
         loop {
             match timeout(STEP, self.socket.next())
                 .await
                 .expect("frame in time")
             {
-                Some(Ok(Message::Text(text))) => return Frame::parse(text.as_str()).unwrap(),
+                Some(Ok(Message::Text(text))) => {
+                    return Frame::parse_for(protocol, text.as_str()).unwrap();
+                }
                 Some(Ok(_)) => {}
                 other => panic!("socket ended: {other:?}"),
             }

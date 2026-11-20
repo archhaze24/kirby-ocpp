@@ -4,7 +4,7 @@
 //! frame with a Heartbeat: its answer is the next frame the station gets, so nothing was
 //! sent in between.
 
-use kirby_csms_core::{CsmsEvent, CsmsHandle, Direction, Frame};
+use kirby_csms_core::{CsmsError, CsmsEvent, CsmsHandle, Direction, ErrorCode, Frame, Protocol};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
@@ -237,5 +237,106 @@ async fn types_5_and_6_stay_malformed_on_older_sessions() {
         let seen = drain(&mut events);
         assert_eq!(malformed(&seen).len(), 2, "{id}: {seen:?}");
     }
+    csms.shutdown().await;
+}
+
+fn spawn_reset(
+    csms: &CsmsHandle,
+    station: &str,
+) -> tokio::task::JoinHandle<Result<Frame, CsmsError>> {
+    let csms = csms.clone();
+    let station = station.to_owned();
+    tokio::spawn(async move {
+        csms.call(&station, "Reset", json!({"type": "Immediate"}))
+            .await
+    })
+}
+
+async fn next_call_id(station: &mut Client) -> String {
+    let Frame::Call { id, .. } = station.recv().await else {
+        panic!("expected the CSMS CALL");
+    };
+    id
+}
+
+#[tokio::test]
+async fn an_invalid_callresult_on_21_is_answered_with_a_callresulterror_and_fails_the_call() {
+    let csms = start(|_| {}).await;
+    let mut station = Client::connect(&csms, "CP-1", V21).await;
+    let call = spawn_reset(&csms, "CP-1");
+    let id = next_call_id(&mut station).await;
+
+    station
+        .send_text(Frame::call_result(id.as_str(), json!({"status": "Bogus"})).to_json_string())
+        .await;
+    let Frame::CallResultError {
+        id: error_id,
+        code,
+        description,
+        ..
+    } = station.recv_for(Protocol::V21).await
+    else {
+        panic!("expected a CALLRESULTERROR");
+    };
+    assert_eq!(error_id, id);
+    assert_eq!(code, ErrorCode::PropertyConstraintViolation);
+    assert!(!description.is_empty() && description.chars().count() <= 255);
+    let error = call.await.unwrap().expect_err("the call fails");
+    assert!(
+        matches!(&error, CsmsError::InvalidResponse { action, .. } if action == "Reset"),
+        "{error:?}"
+    );
+    // The frame is recorded like any outbound frame.
+    let recorded = csms.history("CP-1").unwrap().into_iter().any(|entry| {
+        entry.direction == Direction::Out
+            && matches!(&entry.frame, Frame::CallResultError { id: i, .. } if *i == id)
+    });
+    assert!(recorded);
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_valid_callresult_on_21_gets_no_callresulterror() {
+    let csms = start(|_| {}).await;
+    let mut station = Client::connect(&csms, "CP-1", V21).await;
+    let call = spawn_reset(&csms, "CP-1");
+    let id = next_call_id(&mut station).await;
+    station
+        .send_text(Frame::call_result(id, json!({"status": "Accepted"})).to_json_string())
+        .await;
+    let answer = call.await.unwrap().expect("the call completes");
+    assert_eq!(result_of(answer)["status"], "Accepted");
+    // The Heartbeat answer is the next frame: nothing was sent in between.
+    result_of(station.call("Heartbeat", json!({})).await);
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_invalid_callresult_on_201_gets_no_callresulterror() {
+    let csms = start(|_| {}).await;
+    let mut station = Client::connect(&csms, "CP-201", V201).await;
+    let call = spawn_reset(&csms, "CP-201");
+    let id = next_call_id(&mut station).await;
+    station
+        .send_text(Frame::call_result(id, json!({"status": "Bogus"})).to_json_string())
+        .await;
+    let answer = call.await.unwrap().expect("the call still completes");
+    assert_eq!(result_of(answer)["status"], "Bogus");
+    result_of(station.call("Heartbeat", json!({})).await);
+    csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_invalid_callresult_on_21_is_not_checked_when_validation_is_off() {
+    let csms = start(|config| config.validate_inbound = false).await;
+    let mut station = Client::connect(&csms, "CP-1", V21).await;
+    let call = spawn_reset(&csms, "CP-1");
+    let id = next_call_id(&mut station).await;
+    station
+        .send_text(Frame::call_result(id, json!({"status": "Bogus"})).to_json_string())
+        .await;
+    let answer = call.await.unwrap().expect("the call completes");
+    assert_eq!(result_of(answer)["status"], "Bogus");
+    result_of(station.call("Heartbeat", json!({})).await);
     csms.shutdown().await;
 }

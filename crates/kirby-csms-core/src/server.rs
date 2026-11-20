@@ -2052,7 +2052,7 @@ where
                     .is_some_and(|flight| flight.id == frame.id())
                     && let Some(flight) = self.in_flight.take()
                 {
-                    let _ = flight.reply.send(Ok(frame));
+                    return self.complete_call(flight, frame).await;
                 }
                 // Anything else answers a CALL that already timed out, or was never sent.
                 None
@@ -2074,6 +2074,45 @@ where
             // added later is not a reply either.
             _ => None,
         }
+    }
+
+    /// Hands the station's reply to the caller. OCPP 2.1: a CALLRESULT that violates the
+    /// response schema is answered with a CALLRESULTERROR and fails the call.
+    async fn complete_call(&mut self, flight: InFlight, frame: Frame) -> Option<DisconnectReason> {
+        let rejection = match &frame {
+            Frame::CallResult { payload, .. } => self.result_violation(&flight.action, payload),
+            _ => None,
+        };
+        let Some((code, errors)) = rejection else {
+            let _ = flight.reply.send(Ok(frame));
+            return None;
+        };
+        let reply = Frame::call_result_error(
+            frame.id(),
+            code,
+            truncate_chars(&errors, MAX_ERROR_DESCRIPTION),
+        );
+        let _ = flight.reply.send(Err(CsmsError::InvalidResponse {
+            station: self.station.clone(),
+            action: flight.action,
+            reason: errors,
+        }));
+        self.send(&reply).await
+    }
+
+    /// The 2.x error code and the joined schema errors of a CALLRESULT that violates the
+    /// response schema of `action`. `None` when valid, when inbound validation is off, or
+    /// when the session is not OCPP 2.1.
+    fn result_violation(&self, action: &str, payload: &Value) -> Option<(ErrorCode, String)> {
+        if self.protocol != Protocol::V21 || !self.inner.config.validate_inbound {
+            return None;
+        }
+        let schemas = self.inner.schemas.schemas_for(self.protocol)?;
+        let violation = schemas.validate_response(action, payload).err()?;
+        Some((
+            violation.error_code_for(Protocol::V21),
+            violation.errors.join("; "),
+        ))
     }
 
     /// Why a station SEND is invalid (schema violation, or not a SEND message of this
