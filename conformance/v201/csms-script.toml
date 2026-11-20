@@ -1205,6 +1205,161 @@ payload_contains = { vendorId = "${vendor}", messageId = "done:scripted-replies"
 timeout_ms = 30000
 
 # ---------------------------------------------------------------------------------------
+# 13 conformance-v201-local-list
+
+[[steps]]
+name = "local-list: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:local-list" }
+timeout_ms = 30000
+
+[[steps]]
+name = "local-list: full list with one token is Accepted"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 5, updateType = "Full", localAuthorizationList = [{ idToken = { idToken = "CONF-LIST-1", type = "ISO14443" }, idTokenInfo = { status = "Accepted" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list: the version is 5"
+action = "call"
+station = "${station}"
+call = "GetLocalListVersion"
+expect_payload = { versionNumber = 5 }
+
+[[steps]]
+name = "local-list: a differential update adds a token"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 6, updateType = "Differential", localAuthorizationList = [{ idToken = { idToken = "CONF-LIST-2", type = "ISO14443" }, idTokenInfo = { status = "Accepted" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list: the version is 6"
+action = "call"
+station = "${station}"
+call = "GetLocalListVersion"
+expect_payload = { versionNumber = 6 }
+
+[[steps]]
+name = "local-list: a differential update without idTokenInfo removes a token"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 7, updateType = "Differential", localAuthorizationList = [{ idToken = { idToken = "CONF-LIST-2", type = "ISO14443" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list: the version is 7"
+action = "call"
+station = "${station}"
+call = "GetLocalListVersion"
+expect_payload = { versionNumber = 7 }
+
+[[steps]]
+name = "local-list: a differential update with an empty list is Accepted"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 8, updateType = "Differential" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list: the version is 8"
+action = "call"
+station = "${station}"
+call = "GetLocalListVersion"
+expect_payload = { versionNumber = 8 }
+
+[[steps]]
+name = "local-list: a differential update with an old version is a VersionMismatch"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 7, updateType = "Differential", localAuthorizationList = [{ idToken = { idToken = "CONF-LIST-2", type = "ISO14443" }, idTokenInfo = { status = "Accepted" } }] }
+expect_status = "VersionMismatch"
+
+[[steps]]
+name = "local-list: the version is still 8"
+action = "call"
+station = "${station}"
+call = "GetLocalListVersion"
+expect_payload = { versionNumber = 8 }
+
+[[steps]]
+name = "local-list: a full update with an empty list is Accepted"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 9, updateType = "Full" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list: the version is 9"
+action = "call"
+station = "${station}"
+call = "GetLocalListVersion"
+expect_payload = { versionNumber = 9 }
+
+[[steps]]
+name = "local-list: a full list holds a token the list marks Invalid"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 10, updateType = "Full", localAuthorizationList = [{ idToken = { idToken = "CONF-LIST-3", type = "ISO14443" }, idTokenInfo = { status = "Invalid" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list: LocalPreAuthorize is turned on"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "true", component = { name = "AuthCtrlr" }, variable = { name = "LocalPreAuthorize" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted" }] }
+
+[[steps]]
+name = "local-list: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:local-list" }
+
+[[steps]]
+name = "local-list: the transaction ended"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:local-list-disabled" }
+timeout_ms = 30000
+
+[[steps]]
+name = "local-list: the list is disabled"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "false", component = { name = "LocalAuthListCtrlr" }, variable = { name = "Enabled" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted" }] }
+
+[[steps]]
+name = "local-list: a disabled list reports version 0"
+action = "call"
+station = "${station}"
+call = "GetLocalListVersion"
+expect_payload = { versionNumber = 0 }
+
+[[steps]]
+name = "local-list: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:local-list" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
 # End: the station takes the answer to its last message before the connection closes.
 
 [[steps]]

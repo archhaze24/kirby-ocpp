@@ -1,0 +1,181 @@
+name = "conformance-v201-local-list"
+ocpp_version = "2.0.1"
+description = "SendLocalList (full, differential, remove, empty lists, version mismatch), GetLocalListVersion with the list enabled and disabled, and a listed token that is authorized by the CSMS"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends the lists and checks the answers and the version after each of them.
+# It then lists the token CONF-LIST-3 as Invalid and turns LocalPreAuthorize on; the station
+# starts a transaction with that token and, as the entry is not Accepted, asks the CSMS
+# (which answers Accepted). At the end the script disables the list and reads the version.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:local-list"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:local-list" }
+
+[[steps]]
+name = "SendLocalList Full arrives"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Full", versionNumber = 5 }
+
+[[steps]]
+name = "GetLocalListVersion arrives after the full list"
+action = "expect_call"
+call = "GetLocalListVersion"
+direction = "in"
+
+[[steps]]
+name = "SendLocalList Differential update arrives"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Differential", versionNumber = 6 }
+
+[[steps]]
+name = "GetLocalListVersion arrives after the update"
+action = "expect_call"
+call = "GetLocalListVersion"
+direction = "in"
+
+[[steps]]
+name = "SendLocalList Differential remove arrives"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Differential", versionNumber = 7 }
+
+[[steps]]
+name = "GetLocalListVersion arrives after the remove"
+action = "expect_call"
+call = "GetLocalListVersion"
+direction = "in"
+
+[[steps]]
+name = "SendLocalList Differential with an empty list arrives"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Differential", versionNumber = 8 }
+
+[[steps]]
+name = "GetLocalListVersion arrives after the empty differential list"
+action = "expect_call"
+call = "GetLocalListVersion"
+direction = "in"
+
+[[steps]]
+name = "SendLocalList Differential with an old version arrives"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Differential", versionNumber = 7 }
+
+[[steps]]
+name = "GetLocalListVersion arrives after the version mismatch"
+action = "expect_call"
+call = "GetLocalListVersion"
+direction = "in"
+
+[[steps]]
+name = "SendLocalList Full with an empty list arrives"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Full", versionNumber = 9 }
+
+[[steps]]
+name = "GetLocalListVersion arrives after the empty full list"
+action = "expect_call"
+call = "GetLocalListVersion"
+direction = "in"
+
+[[steps]]
+name = "SendLocalList Full with the Invalid token arrives"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Full", versionNumber = 10 }
+
+[[steps]]
+name = "the CSMS has listed the token and enabled LocalPreAuthorize"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:local-list" }
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "the transaction starts with the listed token"
+action = "start_tx"
+evse = 1
+id_token = "CONF-LIST-3"
+
+[[steps]]
+name = "the station asks the CSMS because the entry is Invalid"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "CONF-LIST-3", type = "ISO14443" } }
+timeout_ms = 5000
+
+[[steps]]
+name = "the transaction starts on the answer of the CSMS"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", idToken = { idToken = "CONF-LIST-3", type = "ISO14443" } }
+timeout_ms = 5000
+
+[[steps]]
+name = "the transaction ends"
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "the Ended event is sent"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+
+[[steps]]
+name = "tell the CSMS the transaction ended"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:local-list-disabled"
+
+[[steps]]
+name = "SetVariables disables the list"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+
+[[steps]]
+name = "GetLocalListVersion with the list disabled arrives"
+action = "expect_call"
+call = "GetLocalListVersion"
+direction = "in"
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:local-list"
