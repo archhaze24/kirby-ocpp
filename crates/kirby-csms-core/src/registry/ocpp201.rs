@@ -163,10 +163,11 @@ pub const ACTIONS: ProtocolActions = ProtocolActions {
 };
 
 pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
-    raw(
+    action(
         "CancelReservation",
         "Cancel reservation",
-        "CancelReservation (raw payload)",
+        "CancelReservation by reservation id",
+        &[number("reservationId", "reservationId", true)],
     ),
     raw(
         "CertificateSigned",
@@ -284,7 +285,22 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
         "Get monitoring report",
         "GetMonitoringReport (raw payload)",
     ),
-    raw("GetReport", "Get report", "GetReport (raw payload)"),
+    action(
+        "GetReport",
+        "Get report",
+        "GetReport: a report limited by component criteria and component variables",
+        &[
+            with_default(number("requestId", "requestId", true), "1"),
+            with_hint(
+                json("componentCriteria", "componentCriteria (optional)", false),
+                "JSON array of Active, Available, Enabled, Problem",
+            ),
+            with_hint(
+                json("componentVariable", "componentVariable (optional)", false),
+                "JSON array of {component:{name}, variable:{name}}",
+            ),
+        ],
+    ),
     action(
         "GetTransactionStatus",
         "Get transaction status",
@@ -339,7 +355,27 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
             "the active transactions of the station",
         )],
     ),
-    raw("ReserveNow", "Reserve now", "ReserveNow (raw payload)"),
+    action(
+        "ReserveNow",
+        "Reserve now",
+        "ReserveNow: hold an EVSE, or any EVSE, for an id token until a time",
+        &[
+            with_default(number("id", "reservation id", true), "1"),
+            with_hint(
+                text("expiryDateTime", "expiryDateTime", true),
+                "RFC 3339 UTC, e.g. 2030-01-01T00:00:00Z",
+            ),
+            with_hint(
+                text("idToken.idToken", "idToken", true),
+                "at most 36 characters",
+            ),
+            with_default(
+                choice("idToken.type", "idToken type", ID_TOKEN_TYPES, true),
+                "ISO14443",
+            ),
+            with_hint(number("evseId", "evse (optional)", false), "1 or higher"),
+        ],
+    ),
     action(
         "Reset",
         "Reset",
@@ -516,7 +552,7 @@ pub(in crate::registry) mod tests {
             .iter()
             .filter(|spec| core::is_typed(spec.name))
             .count();
-        assert_eq!(typed, 14);
+        assert_eq!(typed, 17);
     }
 
     fn request_schema(protocol: Protocol, action: &str) -> Value {

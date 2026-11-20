@@ -398,6 +398,11 @@ fn typed_input(action: &str) -> Vec<(&'static str, &'static str)> {
         "DataTransfer" => vec![("vendorId", "vendor")],
         "UnlockConnector" => vec![("evseId", "1"), ("connectorId", "1")],
         "SendLocalList" => vec![("versionNumber", "1")],
+        "CancelReservation" => vec![("reservationId", "1")],
+        "ReserveNow" => vec![
+            ("expiryDateTime", "2030-01-01T00:00:00Z"),
+            ("idToken.idToken", "TAG1"),
+        ],
         "GetVariables" => vec![(
             "getVariableData",
             r#"[{"component":{"name":"ChargingStation"},"variable":{"name":"Model"}}]"#,
@@ -705,7 +710,7 @@ fn every_2_0_1_form_builds_a_schema_valid_request() {
     }
     assert_eq!(
         (typed, raw),
-        (12, 26),
+        (15, 23),
         "ClearCache and GetLocalListVersion are the other two typed actions"
     );
 }
