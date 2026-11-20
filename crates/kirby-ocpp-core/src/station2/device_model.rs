@@ -359,6 +359,7 @@ pub(crate) static TABLE: &[VarSpec] = &[
     flag(AUTH, "LocalAuthorizeOffline", "true").rw(),
     flag(AUTH, "LocalPreAuthorize", "false").rw(),
     flag(AUTH, "OfflineTxForUnknownIdEnabled", "false").rw(),
+    text(AUTH, "MasterPassGroupId", "").rw().empty(),
     // LocalAuthListCtrlr
     flag(LOCAL_LIST, "Enabled", "true").rw(),
     flag(LOCAL_LIST, "Available", "true"),
@@ -1367,6 +1368,12 @@ impl Station2Actor {
     /// `AuthCtrlr.LocalPreAuthorize`.
     pub(super) fn local_pre_authorize(&self) -> bool {
         self.dm.flag(AUTH, "LocalPreAuthorize")
+    }
+
+    /// `AuthCtrlr.MasterPassGroupId`; `None` when empty (the feature is off).
+    pub(super) fn master_pass_group_id(&self) -> Option<String> {
+        let id = self.dm.station_text(AUTH, "MasterPassGroupId", None);
+        (!id.is_empty()).then_some(id)
     }
 
     /// `AuthCtrlr.OfflineTxForUnknownIdEnabled`.

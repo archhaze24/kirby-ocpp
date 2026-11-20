@@ -1541,6 +1541,28 @@ impl Station2Actor {
         let _ = reply.send(result.map(|()| Outcome2::Done));
     }
 
+    /// The EVSEs with a running transaction, in id order.
+    pub(super) fn active_tx_evses(&self) -> Vec<u32> {
+        let mut evses: Vec<u32> = self.tx.active.keys().copied().collect();
+        evses.sort_unstable();
+        evses
+    }
+
+    /// Ends the transaction on `evse` for a master pass token (C16): `Ended` with
+    /// `StopAuthorized` and `MasterPass`, whatever the stop points say.
+    pub(super) fn end_by_master_pass(
+        &mut self,
+        evse: u32,
+        token: IdTokenRef,
+    ) -> Result<(), StationError> {
+        self.end_with(
+            evse,
+            StopReason::MasterPass,
+            TriggerReason::StopAuthorized,
+            Some(token),
+        )
+    }
+
     fn stop_locally(&mut self, evse: u32, reason: StopReason) -> Result<(), StationError> {
         let Some(tx) = self.tx.active.get(&evse) else {
             return Err(no_transaction(evse));

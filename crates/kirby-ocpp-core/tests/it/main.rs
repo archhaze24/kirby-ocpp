@@ -15,6 +15,7 @@ mod station2_device_model;
 mod station2_get_report;
 mod station2_lifecycle;
 mod station2_local_list;
+mod station2_master_pass;
 mod station2_persistence;
 mod station2_remote;
 mod station2_reservation;

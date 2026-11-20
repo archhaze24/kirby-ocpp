@@ -116,6 +116,14 @@ impl Station2Actor {
                 );
                 return;
             }
+            // C16.FR.03: a master pass token starts no transaction.
+            if actor.is_master_pass(&presented, &decision) {
+                actor.log(
+                    LogLevel::Warn,
+                    format!("remote start on EVSE {evse}: a master pass token starts nothing"),
+                );
+                return;
+            }
             let info = match decision {
                 AuthDecision::Accepted(info) => info,
                 _ => None,

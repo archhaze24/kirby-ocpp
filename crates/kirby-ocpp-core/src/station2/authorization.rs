@@ -509,6 +509,10 @@ impl Station2Actor {
             id_token,
             kind: token_type,
         };
+        if self.master_pass_group_id().is_some() {
+            self.present_with_master_pass(evse, token, reply);
+            return;
+        }
         let evse = match self.pick_evse(evse, &token) {
             Ok(evse) => evse,
             Err(error) => {
@@ -527,6 +531,66 @@ impl Station2Actor {
         self.authorize(token, Some(evse), move |actor, decision| {
             actor.finish_presentation(evse, presented, decision, reply);
         });
+    }
+
+    /// `PresentToken` while `MasterPassGroupId` is set (C16). The token is decided first, since
+    /// a master pass is accepted on a station whose EVSEs are all busy. A master pass starts no
+    /// transaction (C16.FR.03) and ends all running ones (C16.FR.02: the station has no UI).
+    fn present_with_master_pass(&mut self, evse: Option<u32>, token: IdTokenRef, reply: Reply2) {
+        let picked = self.pick_evse(evse, &token);
+        if let Ok(evse) = picked
+            && self.token_ends_authorization(evse, &token, None)
+        {
+            self.on_stopped_by_token(evse, token);
+            let _ = reply.send(Ok(Outcome2::Done));
+            return;
+        }
+        let presented = token.clone();
+        self.authorize(
+            token,
+            picked.as_ref().ok().copied(),
+            move |actor, decision| {
+                if actor.is_master_pass(&presented, &decision) {
+                    actor.stop_all_by_master_pass(&presented);
+                    // The requester may have gone away; nothing to do about that.
+                    let _ = reply.send(Ok(Outcome2::Done));
+                    return;
+                }
+                match picked {
+                    Ok(evse) => actor.finish_presentation(evse, presented, decision, reply),
+                    Err(error) => {
+                        let _ = reply.send(Err(error));
+                    }
+                }
+            },
+        );
+    }
+
+    /// Whether an accepted `decision` for `token` names the group `MasterPassGroupId`: from
+    /// the answer, else from the cache (C16.FR.04).
+    pub(super) fn is_master_pass(&self, token: &IdTokenRef, decision: &AuthDecision) -> bool {
+        let Some(master) = self.master_pass_group_id() else {
+            return false;
+        };
+        let (accepted, info) = match decision {
+            AuthDecision::Accepted(info) => (true, info.as_ref()),
+            AuthDecision::Offline { accepted } => (*accepted, None),
+            AuthDecision::Rejected { .. } => (false, None),
+        };
+        accepted && self.group_of_token(token, group_in(info)).as_deref() == Some(master.as_str())
+    }
+
+    /// Ends every running transaction with `MasterPass` (C16.FR.02, C16.FR.08), whatever the
+    /// stop points say: each `Ended` event carries the master pass token.
+    fn stop_all_by_master_pass(&mut self, token: &IdTokenRef) {
+        for evse in self.active_tx_evses() {
+            if let Err(error) = self.end_by_master_pass(evse, token.clone()) {
+                self.log(
+                    LogLevel::Warn,
+                    format!("master pass: transaction on EVSE {evse} not ended: {error}"),
+                );
+            }
+        }
     }
 
     /// The EVSE a token is presented to: the given one; else the one this token authorized,
