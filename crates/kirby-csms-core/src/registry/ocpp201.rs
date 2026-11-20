@@ -3,8 +3,8 @@
 //! (`kirby_ocpp_core::ocpp::v2::registry`). The OCPP 2.1 table ([`super::ocpp21`]) builds on
 //! this one.
 //!
-//! Twelve central-system actions have a typed payload and a form specification. The other
-//! 28 have no fields: their payload is sent raw. 2.0.1 integrates the security extensions
+//! Twenty-one central-system actions have a typed payload and a form specification. The other
+//! 19 have no fields: their payload is sent raw. 2.0.1 integrates the security extensions
 //! into the base specification, so every action is in the core group.
 
 use super::{ActionGroup, ActionSpec, FieldSpec, FieldType, ProtocolActions};
@@ -106,6 +106,13 @@ const ID_TOKEN_TYPES: &[&str] = &[
     "MacAddress",
     "NoAuthorization",
 ];
+const PROFILE_PURPOSES: &[&str] = &[
+    "ChargingStationExternalConstraints",
+    "ChargingStationMaxProfile",
+    "TxDefaultProfile",
+    "TxProfile",
+];
+const RATE_UNITS: &[&str] = &["W", "A"];
 const REPORT_BASES: &[&str] = &[
     "ConfigurationInventory",
     "FullInventory",
@@ -198,10 +205,35 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
         "ClearCache of the authorization cache (no input)",
         &[],
     ),
-    raw(
+    action(
         "ClearChargingProfile",
         "Clear charging profile",
-        "ClearChargingProfile (raw payload)",
+        "ClearChargingProfile by id or by criteria (all together without input)",
+        &[
+            number("chargingProfileId", "chargingProfileId (optional)", false),
+            with_hint(
+                number(
+                    "chargingProfileCriteria.evseId",
+                    "criteria: evse (optional)",
+                    false,
+                ),
+                "0 for the profiles of the station itself",
+            ),
+            with_hint(
+                choice(
+                    "chargingProfileCriteria.chargingProfilePurpose",
+                    "criteria: purpose (optional)",
+                    PROFILE_PURPOSES,
+                    false,
+                ),
+                "profiles of an external system are never cleared",
+            ),
+            number(
+                "chargingProfileCriteria.stackLevel",
+                "criteria: stack level (optional)",
+                false,
+            ),
+        ],
     ),
     raw(
         "ClearDisplayMessage",
@@ -253,15 +285,68 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
             ),
         ],
     ),
-    raw(
+    action(
         "GetChargingProfiles",
         "Get charging profiles",
-        "GetChargingProfiles (raw payload)",
+        "GetChargingProfiles: the station reports the installed profiles that match",
+        &[
+            with_default(number("requestId", "requestId", true), "1"),
+            with_hint(
+                number("evseId", "evse (optional)", false),
+                "0 for the profiles of the station itself; omit for all",
+            ),
+            with_hint(
+                choice(
+                    "chargingProfile.chargingProfilePurpose",
+                    "purpose (optional)",
+                    PROFILE_PURPOSES,
+                    false,
+                ),
+                "set at least one filter",
+            ),
+            number(
+                "chargingProfile.stackLevel",
+                "stack level (optional)",
+                false,
+            ),
+            with_hint(
+                json(
+                    "chargingProfile.chargingProfileId",
+                    "profile ids (optional)",
+                    false,
+                ),
+                "JSON array of ids, e.g. [1,2]",
+            ),
+            with_hint(
+                json(
+                    "chargingProfile.chargingLimitSource",
+                    "limit sources (optional)",
+                    false,
+                ),
+                "JSON array of EMS, Other, SO, CSO",
+            ),
+        ],
     ),
-    raw(
+    action(
         "GetCompositeSchedule",
         "Get composite schedule",
-        "GetCompositeSchedule (raw payload)",
+        "GetCompositeSchedule: the limit that results from all profiles of an EVSE",
+        &[
+            with_default(number("duration", "duration (s)", true), "3600"),
+            with_default(
+                with_hint(
+                    number("evseId", "evse (0 = station)", true),
+                    "0 for the station as a whole",
+                ),
+                "0",
+            ),
+            choice(
+                "chargingRateUnit",
+                "chargingRateUnit (optional)",
+                RATE_UNITS,
+                false,
+            ),
+        ],
     ),
     raw(
         "GetDisplayMessages",
@@ -408,10 +493,17 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
             ),
         ],
     ),
-    raw(
+    action(
         "SetChargingProfile",
         "Set charging profile",
-        "SetChargingProfile (raw payload)",
+        "SetChargingProfile from JSON, checked against the schema",
+        &[
+            with_default(number("evseId", "evse (0 = station)", true), "0"),
+            with_hint(
+                json("chargingProfile", "chargingProfile (JSON)", true),
+                "{id, stackLevel, chargingProfilePurpose, chargingProfileKind, chargingSchedule:[...]}",
+            ),
+        ],
     ),
     raw(
         "SetDisplayMessage",
@@ -552,7 +644,7 @@ pub(in crate::registry) mod tests {
             .iter()
             .filter(|spec| core::is_typed(spec.name))
             .count();
-        assert_eq!(typed, 17);
+        assert_eq!(typed, 21);
     }
 
     fn request_schema(protocol: Protocol, action: &str) -> Value {
