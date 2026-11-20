@@ -21,6 +21,7 @@ tag as the GitHub release notes.
 - OCPP 2.0.1 and 2.1 emulator: master pass (C16). A token in the group set by `AuthCtrlr.MasterPassGroupId` starts no transaction and ends all running ones with stop reason `MasterPass`.
 - OCPP 2.0.1 and 2.1 emulator: smart charging (K01, K05, K08 to K13). `SetChargingProfile`, `ClearChargingProfile`, `GetChargingProfiles` with `ReportChargingProfiles`, `GetCompositeSchedule` and the profile of `RequestStartTransaction`; `SmartChargingCtrlr` in the device model; the meter follows the limit in force; profiles except `TxProfile`s survive a restart. The library API can set and clear an external limit, which sends `NotifyChargingLimit` and `ClearedChargingLimit`. `kirby-csms` has forms for the four commands on 2.x stations.
 - OCPP 2.0.1 conformance family: `reservation` covers `TC_H_01_CS` to `TC_H_04_CS`, `TC_H_06_CS`, `TC_H_08_CS` to `TC_H_10_CS`, `TC_H_12_CS`, `TC_H_14_CS` to `TC_H_19_CS` and `TC_H_21_CS` to `TC_H_24_CS`; `get-report` covers `TC_B_16_CS`, `TC_B_17_CS`, `TC_B_18_CS` and `TC_B_55_CS`; `master-pass` covers `TC_C_14_CS`, `TC_C_45_CS` and `TC_C_49_CS`; `local-list-auth` covers `TC_D_07_CS`, `TC_C_29_CS`, `TC_C_30_CS` and `TC_C_43_CS`.
+- OCPP 2.x terminal UI: the EVSE details show the reservation and the limit in force, the Station tab shows the local list and the installed charging profiles, and the actions `set external limit` (`l`) and `clear external limit` (`L`) on the EVSE tab drive the external limits. The 2.x snapshot gains `reservation`, `offered_w` and `external_limit` per EVSE and `local_list_version`, `local_list_entries` and `charging_profiles`.
 - Release archives carry a build provenance attestation; check one with `gh attestation verify <archive> --repo archhaze24/kirby-ocpp`.
 
 ### Changed
@@ -30,6 +31,7 @@ tag as the GitHub release notes.
 - The lag note of a `GET /v1/events?station=ID` stream says that its count covers events of all stations lost from the shared stream.
 - The state file of OCPP 2.0.1 stations is format version 2; files of version 1 still load.
 - The default `kirby-csms --subprotocol` policy is `require:ocpp1.6,ocpp2.0.1,ocpp2.1`.
+- `kirby-ocpp-core`: `Snapshot2` and `EvseSnapshot` no longer implement `Eq` (the snapshot carries an `f64` limit).
 - `kirby-ocpp-core`: the 2.x typed enums carry the OCPP 2.1 values; `IdTokenType` decodes any string (`Other` keeps the text), is no longer `Copy` and lists the 2.0.1 kinds in `KNOWN` instead of `ALL`; `SignedMeterValue.public_key` and `signing_method` are optional.
 
 ### Fixed
