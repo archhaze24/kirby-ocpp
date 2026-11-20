@@ -9,8 +9,8 @@ use clap::builder::BoolishValueParser;
 use clap::{ArgAction, Parser};
 use kirby_csms_core::{CsmsConfig, SecurityProfile, SubprotocolPolicy, TransactionIds};
 
-/// Terminal OCPP 1.6J and 2.0.1 central system (CSMS) for charge point firmware development and
-/// load tests.
+/// Terminal OCPP 1.6J, 2.0.1 and 2.1 central system (CSMS) for charge point firmware
+/// development and load tests.
 ///
 /// Accepts any number of charge points on `ws(s)://HOST:PORT/<any prefix>/<station id>`, prints
 /// what happens and takes commands as JSON lines on stdin. With --script it runs a TOML script
@@ -144,11 +144,11 @@ pub struct Cli {
 
     /// WebSocket subprotocol policy: require:NAME (refuse clients that do not offer it), require:A,B
     /// (select the first offered name that is listed, refuse if none), select:NAME (always select
-    /// it), omit (select nothing), reject (refuse every upgrade). The default serves OCPP 1.6 and
-    /// 2.0.1; a client that offers both gets the one it lists first
+    /// it), omit (select nothing), reject (refuse every upgrade). The default serves OCPP 1.6,
+    /// 2.0.1 and 2.1; a client that offers several gets the one it lists first
     #[arg(
         long, env = "KIRBY_CSMS_SUBPROTOCOL", value_name = "POLICY",
-        default_value = "require:ocpp1.6,ocpp2.0.1", value_parser = parse_policy
+        default_value = "require:ocpp1.6,ocpp2.0.1,ocpp2.1", value_parser = parse_policy
     )]
     pub subprotocol: SubprotocolPolicy,
 
@@ -1023,14 +1023,18 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_serves_both_protocols() {
+    fn default_policy_serves_every_protocol() {
         let cli = Cli::parse_from(["kirby-csms"]);
         assert_eq!(
             cli.subprotocol,
-            SubprotocolPolicy::RequireAny(vec!["ocpp1.6".to_owned(), "ocpp2.0.1".to_owned()])
+            SubprotocolPolicy::RequireAny(vec![
+                "ocpp1.6".to_owned(),
+                "ocpp2.0.1".to_owned(),
+                "ocpp2.1".to_owned()
+            ])
         );
         assert_eq!(
-            parse_policy("require:ocpp1.6,ocpp2.0.1"),
+            parse_policy("require:ocpp1.6,ocpp2.0.1,ocpp2.1"),
             Ok(cli.subprotocol)
         );
     }

@@ -238,8 +238,9 @@ pub const CATALOG: &[ActionDef] = &[
     ),
 ];
 
-/// The hotkeys of the actions of the OCPP 2.0.1 table. The ones that exist for 1.6 too keep
-/// their key; `g`, `c`, `b` and `s` are new.
+/// The hotkeys of the actions of the OCPP 2.0.1 table, which the 2.1 table shares (its other
+/// actions have none). The ones that exist for 1.6 too keep their key; `g`, `c`, `b` and `s`
+/// are new.
 const KEYS_V201: &[(&str, char)] = &[
     ("Reset", 'R'),
     ("TriggerMessage", 'T'),

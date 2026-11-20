@@ -275,8 +275,10 @@ const CONTENT_BY_NAME: &[&str] = &[
 /// Whether the registry entry `spec` of `protocol` takes its payload as raw JSON: it has no
 /// form fields and is not an action that simply takes no input.
 pub fn takes_raw_payload(protocol: &str, spec: &registry::ActionSpec) -> bool {
-    spec.fields.is_empty()
-        && !(protocol == Protocol::V201.token() && v2_registry::is_typed(spec.name))
+    let typed_v2 = Protocol::from_token(protocol).is_some_and(|protocol| {
+        v2_registry::lookup_for(protocol, spec.name).is_some_and(|a| a.typed)
+    });
+    spec.fields.is_empty() && !typed_v2
 }
 
 fn content_by_name(protocol: &str, action: &str, response: &Value) -> bool {

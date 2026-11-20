@@ -75,7 +75,7 @@ fn id_token_info(token: Option<&Value>, now: DateTime<Utc>) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use chrono::TimeZone;
     use kirby_ocpp_core::ocpp::Protocol;
     use kirby_ocpp_core::ocpp::schema::SchemaRegistry;
@@ -94,7 +94,7 @@ mod tests {
     }
 
     #[allow(clippy::too_many_lines)] // one flat table of minimal requests
-    fn sample_request(action: &str) -> Value {
+    pub(crate) fn sample_request(action: &str) -> Value {
         let token = json!({ "idToken": "TAG1", "type": "ISO14443" });
         let schedule = json!({
             "id": 1,

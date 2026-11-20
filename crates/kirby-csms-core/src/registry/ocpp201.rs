@@ -1,6 +1,7 @@
 //! The OCPP 2.0.1 table of the action registry: the 40 actions a central system sends and
 //! the 25 actions a charge station sends. The names follow the payload layer
-//! (`kirby_ocpp_core::ocpp::v2::registry`).
+//! (`kirby_ocpp_core::ocpp::v2::registry`). The OCPP 2.1 table ([`super::ocpp21`]) builds on
+//! this one.
 //!
 //! Twelve central-system actions have a typed payload and a form specification. The other
 //! 28 have no fields: their payload is sent raw. 2.0.1 integrates the security extensions
@@ -76,7 +77,11 @@ const fn action(
 }
 
 /// An action without form fields: the payload is sent raw.
-const fn raw(name: &'static str, title: &'static str, summary: &'static str) -> ActionSpec {
+pub(super) const fn raw(
+    name: &'static str,
+    title: &'static str,
+    summary: &'static str,
+) -> ActionSpec {
     action(name, title, summary, &[])
 }
 
@@ -156,7 +161,7 @@ pub const ACTIONS: ProtocolActions = ProtocolActions {
     station_actions: STATION_ACTIONS,
 };
 
-const CSMS_ACTIONS: &[ActionSpec] = &[
+pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
     raw(
         "CancelReservation",
         "Cancel reservation",
@@ -424,7 +429,7 @@ const CSMS_ACTIONS: &[ActionSpec] = &[
 ];
 
 #[cfg(test)]
-mod tests {
+pub(in crate::registry) mod tests {
     use std::collections::BTreeSet;
 
     use kirby_ocpp_core::ocpp::v2::registry as core;
@@ -497,8 +502,8 @@ mod tests {
         assert_eq!(typed, 12);
     }
 
-    fn request_schema(action: &str) -> Value {
-        let registry = SchemaRegistry::for_protocol(Protocol::V201).expect("2.0.1 schemas");
+    fn request_schema(protocol: Protocol, action: &str) -> Value {
+        let registry = SchemaRegistry::for_protocol(protocol).expect("schemas");
         let source = registry
             .schema_source(action, PayloadKind::Request)
             .expect("request schema");
@@ -530,8 +535,22 @@ mod tests {
 
     #[test]
     fn typed_actions_match_the_request_schema() {
-        for spec in CSMS_ACTIONS.iter().filter(|spec| core::is_typed(spec.name)) {
-            let root = request_schema(spec.name);
+        let typed: Vec<ActionSpec> = CSMS_ACTIONS
+            .iter()
+            .copied()
+            .filter(|spec| core::is_typed(spec.name))
+            .collect();
+        assert_forms_match_schemas(Protocol::V201, &typed);
+    }
+
+    /// Every form field of `specs` exists in the request schema of `protocol` with the same
+    /// type, choices and required flag, and the form covers the required keys.
+    pub(in crate::registry) fn assert_forms_match_schemas(
+        protocol: Protocol,
+        specs: &[ActionSpec],
+    ) {
+        for spec in specs {
+            let root = request_schema(protocol, spec.name);
             let mut covered = BTreeSet::new();
             for field in spec.fields {
                 let (top, nested) = match field.name.split_once('.') {
@@ -557,6 +576,20 @@ mod tests {
                     .and_then(Value::as_array)
                     .map(|list| list.iter().filter_map(Value::as_str).collect());
                 match field.ty {
+                    // The 2.1 table reuses these forms. 2.1 added values to some enums (the
+                    // reset type) and made others open strings (the id token type): every
+                    // choice stays valid, but the list is no longer complete.
+                    FieldType::Choice
+                        if !field.choices.is_empty() && protocol != Protocol::V201 =>
+                    {
+                        if let Some(allowed) = &schema_choices {
+                            assert!(
+                                field.choices.iter().all(|choice| allowed.contains(choice)),
+                                "{context}: choices {:?} not in {allowed:?}",
+                                field.choices
+                            );
+                        }
+                    }
                     FieldType::Choice if !field.choices.is_empty() => {
                         assert_eq!(
                             schema_choices.as_deref(),
@@ -597,10 +630,10 @@ mod tests {
     }
 
     #[test]
-    fn protocols_list_both_tables_in_order() {
+    fn protocols_list_every_table_in_order() {
         assert_eq!(
             registry::protocols().collect::<Vec<_>>(),
-            ["ocpp1.6", "ocpp2.0.1"]
+            ["ocpp1.6", "ocpp2.0.1", "ocpp2.1"]
         );
         assert_eq!(
             registry::protocol_actions("ocpp2.0.1").map(|table| table.csms_actions.len()),

@@ -1,4 +1,4 @@
-//! A raw OCPP 2.0.1 station client for the engine tests.
+//! A raw OCPP 2.x station client for the engine tests.
 //!
 //! It speaks plain frames over a WebSocket, so the tests see exactly what a station sees.
 //! Every wait has a deadline; nothing sleeps for a fixed time.
@@ -20,11 +20,14 @@ pub const STEP: Duration = Duration::from_secs(10);
 pub type Raw =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-/// An engine that serves OCPP 1.6 and 2.0.1 on one listener.
+/// An engine that serves OCPP 1.6, 2.0.1 and 2.1 on one listener.
 pub async fn start(tweak: impl FnOnce(&mut CsmsConfig)) -> CsmsHandle {
     let mut config = CsmsConfig::new("127.0.0.1:0".parse().unwrap());
-    config.subprotocol =
-        SubprotocolPolicy::RequireAny(vec!["ocpp1.6".to_owned(), "ocpp2.0.1".to_owned()]);
+    config.subprotocol = SubprotocolPolicy::RequireAny(vec![
+        "ocpp1.6".to_owned(),
+        "ocpp2.0.1".to_owned(),
+        "ocpp2.1".to_owned(),
+    ]);
     tweak(&mut config);
     CsmsServer::start(config).await.expect("engine starts")
 }

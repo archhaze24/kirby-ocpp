@@ -3,9 +3,9 @@
 //! script commands and the HTTP API share.
 //!
 //! The types here are version-neutral. Each protocol contributes one static table, found by
-//! its WebSocket subprotocol name through [`protocol_actions`]. `ocpp1.6` (see [`ocpp16`])
-//! and `ocpp2.0.1` (see [`ocpp201`]) have one; a protocol without a table has no registered
-//! actions.
+//! its WebSocket subprotocol name through [`protocol_actions`]. `ocpp1.6` (see [`ocpp16`]),
+//! `ocpp2.0.1` (see [`ocpp201`]) and `ocpp2.1` (see [`ocpp21`]) have one; a protocol without a
+//! table has no registered actions.
 //!
 //! ```
 //! use kirby_csms_core::registry;
@@ -14,11 +14,13 @@
 //! assert_eq!(reset.title, "Reset");
 //! assert!(registry::is_station_action("ocpp1.6", "Heartbeat"));
 //! assert!(registry::is_station_action("ocpp2.0.1", "TransactionEvent"));
+//! assert!(registry::is_station_action("ocpp2.1", "NotifySettlement"));
 //! assert!(registry::protocol_actions("ocpp9.9").is_none());
 //! ```
 
 pub mod ocpp16;
 pub mod ocpp201;
+pub mod ocpp21;
 
 /// Where an action comes from, for grouping in menus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +116,7 @@ pub struct ProtocolActions {
 }
 
 /// Every protocol that has a table.
-const PROTOCOLS: &[&ProtocolActions] = &[&ocpp16::ACTIONS, &ocpp201::ACTIONS];
+const PROTOCOLS: &[&ProtocolActions] = &[&ocpp16::ACTIONS, &ocpp201::ACTIONS, &ocpp21::ACTIONS];
 
 /// The subprotocol names that have a table.
 pub fn protocols() -> impl Iterator<Item = &'static str> {

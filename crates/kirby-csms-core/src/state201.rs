@@ -61,7 +61,7 @@ const MAX_TECH_INFO_LEN: usize = 255;
 /// The OCPP 2.0.1 part of a station's state. See the module docs.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StationState2 {
-    /// The protocol token the data was folded under (`ocpp2.0.1`).
+    /// The protocol token the data was folded under (`ocpp2.0.1` or `ocpp2.1`).
     pub protocol: String,
     /// The `reason` of the last `BootNotification`.
     pub boot_reason: Option<BootReason>,
@@ -729,21 +729,35 @@ impl StationState {
         now: DateTime<Utc>,
         history_cap: usize,
     ) -> bool {
-        if protocol != Protocol::V201 {
+        if !matches!(protocol, Protocol::V201 | Protocol::V21) {
             return false;
         }
         DecodedCall201::decode(action, request, response)
-            .is_some_and(|call| self.apply_decoded_v2(call, now, history_cap))
+            .is_some_and(|call| self.apply_decoded_v2(protocol, call, now, history_cap))
     }
 
-    /// Folds an answered 2.0.1 CALL into the state. Heartbeats and updates that only bump
-    /// counters do not count as changes.
+    /// Folds an answered 2.0.1 or 2.1 CALL into the state. The messages the fold reads have
+    /// the same shape in both. Heartbeats and updates that only bump counters do not count
+    /// as changes.
     pub(crate) fn apply_decoded_v2(
         &mut self,
+        protocol: Protocol,
         call: DecodedCall201,
         now: DateTime<Utc>,
         history_cap: usize,
     ) -> bool {
+        let changed = self.fold_v2(call, now, history_cap);
+        // The section is created lazily under 2.0.1's name; a session never changes protocol
+        // under a kept state (the state is reset first), so naming it here is enough.
+        if let Some(v2) = self.v2.as_deref_mut()
+            && v2.protocol != protocol.token()
+        {
+            protocol.token().clone_into(&mut v2.protocol);
+        }
+        changed
+    }
+
+    fn fold_v2(&mut self, call: DecodedCall201, now: DateTime<Utc>, history_cap: usize) -> bool {
         match call {
             DecodedCall201::Boot(req, res) => self.v2_boot(*req, res, now),
             DecodedCall201::Heartbeat => {
@@ -1103,14 +1117,37 @@ mod tests {
     }
 
     #[test]
-    fn other_protocols_fold_nothing() {
+    fn ocpp_1_6_folds_nothing_as_2_x() {
         let mut state = StationState::default();
         let req = json!({"timestamp": at(0), "connectorStatus": "Available",
             "evseId": 1, "connectorId": 1});
-        for protocol in [Protocol::V16, Protocol::V21] {
-            assert!(!state.apply_v2(protocol, "StatusNotification", &req, &json!({}), now(), 5));
-        }
+        assert!(!state.apply_v2(
+            Protocol::V16,
+            "StatusNotification",
+            &req,
+            &json!({}),
+            now(),
+            5
+        ));
         assert_eq!(state, StationState::default());
+    }
+
+    #[test]
+    fn a_2_1_station_is_folded_under_its_own_protocol_name() {
+        let mut state = StationState::default();
+        let req = json!({"timestamp": at(0), "connectorStatus": "Available",
+            "evseId": 1, "connectorId": 1});
+        assert!(state.apply_v2(
+            Protocol::V21,
+            "StatusNotification",
+            &req,
+            &json!({}),
+            now(),
+            5
+        ));
+        let v2 = state.v2.as_deref().expect("v2 section");
+        assert_eq!(v2.protocol, "ocpp2.1");
+        assert_eq!(v2.evses[&1].connectors.len(), 1);
     }
 
     #[test]

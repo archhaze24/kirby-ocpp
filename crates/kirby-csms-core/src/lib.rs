@@ -1,10 +1,11 @@
-//! OCPP 1.6J and 2.0.1 central system (CSMS) engine: a multi-station WebSocket server with a station
+//! OCPP 1.6J, 2.0.1 and 2.1 central system (CSMS) engine: a multi-station WebSocket server with a station
 //! registry, bounded per-station frame history, an event stream, CSMS-originated CALLs and
 //! scripted replies. No UI; a terminal tool or a load test drives it through [`CsmsHandle`].
 //!
 //! * Stations connect to `ws(s)://host:port/<any prefix>/<station id>`; see [`CsmsServer`]
 //!   for identity, replacement and outbound-call rules.
-//! * Inbound CALLs are checked against the OCPP 1.6J schemas ([`CsmsConfig::validate_inbound`]):
+//! * Inbound CALLs are checked against the schemas of the session's protocol
+//!   ([`CsmsConfig::validate_inbound`]):
 //!   an invalid payload gets a CALLERROR (a [`Fault`] on the same action still wins).
 //! * Inbound CALLs get the canned answers of the test mock ([`default_reply`]), unless a
 //!   [`Fault`] or a responder ([`CsmsHandle::respond`]) applies. Actions a charge point may
@@ -42,6 +43,7 @@ mod auth;
 mod config;
 mod defaults;
 mod defaults201;
+mod defaults21;
 mod error;
 mod event;
 mod fault;

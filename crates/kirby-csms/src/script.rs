@@ -48,7 +48,7 @@ use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::scenario::vars::{self, Vars};
 use kirby_ocpp_core::scenario::{
     ScenarioReport, StepReport, StepStatus, check_contract_keys, check_reserved_keys, line_col,
-    now_rfc3339, precheck_contract, read_scenario_file, redact_params, redacted, with_suggestion,
+    now_rfc3339, read_scenario_file, redact_params, redacted, with_suggestion,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -279,12 +279,13 @@ impl Script {
     }
 
     fn parse(text: &str) -> Result<Self, Located> {
-        precheck_contract(text).map_err(Located::plain)?;
+        precheck_script(text).map_err(Located::plain)?;
         let raw: RawScript = toml::from_str(text).map_err(|e| Located {
             message: with_suggestion(e.message().to_owned()),
             offset: e.span().map(|span| span.start),
         })?;
-        let protocol = check_contract_keys(raw.ocpp_version.as_deref(), raw.schema)
+        check_contract_keys(None, raw.schema).map_err(Located::plain)?;
+        let protocol = script_protocol(raw.ocpp_version.as_deref())
             .map_err(Located::plain)?
             .unwrap_or(Protocol::V16);
         if raw.name.trim().is_empty() {
@@ -356,6 +357,50 @@ impl Script {
             }),
         }
     }
+}
+
+/// The protocol a script declares with `ocpp_version`: `None` when absent. Scripts may declare
+/// any version this build serves as a central system.
+fn script_protocol(declared: Option<&str>) -> Result<Option<Protocol>, String> {
+    let Some(text) = declared else {
+        return Ok(None);
+    };
+    Protocol::ALL
+        .into_iter()
+        .find(|protocol| protocol.is_csms_implemented() && protocol.ocpp_version() == text)
+        .map(Some)
+        .ok_or_else(|| {
+            format!("`ocpp_version = {text:?}`: this build supports OCPP 1.6, 2.0.1 and 2.1 only")
+        })
+}
+
+/// Checks the version keys of a script before the file is parsed in full, so a file written
+/// for a later version reports the version problem and not "unknown field". It is the check of
+/// emulator scenarios (`kirby_ocpp_core::scenario::precheck_contract`) with the versions a
+/// script may declare. Text that is not valid TOML is left to the real parser.
+fn precheck_script(text: &str) -> Result<(), String> {
+    let Ok(table) = text.parse::<toml::Table>() else {
+        return Ok(());
+    };
+    let ocpp_version = match table.get("ocpp_version") {
+        None => None,
+        Some(toml::Value::String(s)) => Some(s.as_str()),
+        Some(_) => return Err("`ocpp_version` must be a string".to_owned()),
+    };
+    let schema = match table.get("schema") {
+        None => None,
+        Some(toml::Value::Integer(n)) => Some(*n),
+        Some(_) => return Err("`schema` must be an integer".to_owned()),
+    };
+    if let Some(tags) = table.get("tags")
+        && !tags
+            .as_array()
+            .is_some_and(|a| a.iter().all(toml::Value::is_str))
+    {
+        return Err("`tags` must be an array of strings".to_owned());
+    }
+    script_protocol(ocpp_version)?;
+    check_contract_keys(None, schema).map(drop)
 }
 
 fn parse_step(mut table: toml::Table) -> Result<Step, String> {
@@ -1695,11 +1740,19 @@ call = "Heartbeat"
         assert_eq!(script.protocol, Protocol::V201);
         let script = Script::from_toml(&format!("name = \"t\"\n{step}")).unwrap();
         assert_eq!(script.protocol, Protocol::V16);
-        let e = err(&format!("name = \"t\"\nocpp_version = \"2.1\"\n{step}"));
+        let script =
+            Script::from_toml(&format!("name = \"t\"\nocpp_version = \"2.1\"\n{step}")).unwrap();
+        assert_eq!(script.protocol, Protocol::V21);
+        let e = err(&format!("name = \"t\"\nocpp_version = \"2.2\"\n{step}"));
         assert!(
-            e.contains("OCPP 1.6 and 2.0.1 only") && e.contains("2.1"),
+            e.contains("OCPP 1.6, 2.0.1 and 2.1 only") && e.contains("2.2"),
             "{e}"
         );
+        // The version problem is reported before a schema problem.
+        let e = err(&format!(
+            "name = \"t\"\nocpp_version = \"2.2\"\nschema = 7\n{step}"
+        ));
+        assert!(e.contains("OCPP 1.6, 2.0.1 and 2.1 only"), "{e}");
         let e = err(&format!("name = \"t\"\nschema = 7\n{step}"));
         assert!(e.contains("unsupported schema 7"), "{e}");
         let e = err(&format!("name = \"t\"\ntimeout = 5\n{step}"));
@@ -1714,13 +1767,17 @@ call = "Heartbeat"
         let e = err(&format!("name = \"t\"\nschema = 2\nfuture = 1\n{step}"));
         assert!(e.contains("unsupported schema 2"), "{e}");
         let e = err(&format!(
-            "name = \"t\"\nocpp_version = \"2.1\"\nfuture = 1\n{step}"
+            "name = \"t\"\nocpp_version = \"2.2\"\nfuture = 1\n{step}"
         ));
-        assert!(e.contains("OCPP 1.6 and 2.0.1 only"), "{e}");
-        let e = err(&format!(
-            "name = \"t\"\nocpp_version = \"2.0.1\"\nfuture = 1\n{step}"
-        ));
-        assert!(e.contains("unknown field `future`"), "{e}");
+        assert!(e.contains("OCPP 1.6, 2.0.1 and 2.1 only"), "{e}");
+        for version in ["2.0.1", "2.1"] {
+            let e = err(&format!(
+                "name = \"t\"\nocpp_version = \"{version}\"\nfuture = 1\n{step}"
+            ));
+            assert!(e.contains("unknown field `future`"), "{e}");
+        }
+        let e = err(&format!("name = \"t\"\nocpp_version = 2.1\n{step}"));
+        assert!(e.contains("`ocpp_version` must be a string"), "{e}");
         let e = err(&format!("name = \"t\"\nschema = \"1\"\n{step}"));
         assert!(e.contains("`schema` must be an integer"), "{e}");
         let e = err("name = \"t\"\n[[steps]]\naction = \"sleep\"\nms = 1\nevse = 1\n");

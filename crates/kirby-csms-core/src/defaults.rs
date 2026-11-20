@@ -24,10 +24,12 @@ pub fn is_charge_point_action(action: &str) -> bool {
 }
 
 /// Whether `action` is one a charge point of `protocol` may initiate. `false` for every
-/// action of a protocol without an action table (2.1 today).
+/// action of a protocol without an action table. `NotifyPeriodicEventStream`, the SEND-only
+/// message of OCPP 2.1, is not one: it is not a CALL.
 pub fn is_charge_point_action_for(protocol: Protocol, action: &str) -> bool {
     match protocol {
         Protocol::V201 => crate::defaults201::is_station_action(action),
+        Protocol::V21 => crate::defaults21::is_station_action(action),
         _ => crate::registry::is_station_action(protocol.token(), action),
     }
 }
@@ -52,9 +54,9 @@ pub fn default_reply(
     )
 }
 
-/// Like [`default_reply`] for `protocol`. OCPP 2.0.1 has its own answers and ignores
-/// `transaction_id` (the station names its transactions); a protocol without default answers
-/// (2.1 today) gets `{}` for every action.
+/// Like [`default_reply`] for `protocol`. OCPP 2.0.1 and 2.1 have their own answers and
+/// ignore `transaction_id` (the station names its transactions); a protocol without default
+/// answers gets `{}` for every action.
 pub fn default_reply_for(
     protocol: Protocol,
     action: &str,
@@ -66,6 +68,14 @@ pub fn default_reply_for(
         Protocol::V16 => {}
         Protocol::V201 => {
             return crate::defaults201::default_reply(
+                action,
+                payload,
+                heartbeat_interval,
+                Utc::now(),
+            );
+        }
+        Protocol::V21 => {
+            return crate::defaults21::default_reply(
                 action,
                 payload,
                 heartbeat_interval,
@@ -184,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_variants_delegate_for_1_6_and_know_nothing_else() {
+    fn each_protocol_has_its_own_actions_and_answers() {
         assert_eq!(ACTIONS_PROTOCOL, "ocpp1.6");
         assert!(is_charge_point_action_for(Protocol::V16, "Heartbeat"));
         assert!(is_charge_point_action_for(Protocol::V201, "Heartbeat"));
@@ -197,7 +207,20 @@ mod tests {
             "StartTransaction"
         ));
         assert!(!is_charge_point_action_for(Protocol::V201, "Reset"));
-        assert!(!is_charge_point_action_for(Protocol::V21, "Heartbeat"));
+        assert!(is_charge_point_action_for(Protocol::V21, "Heartbeat"));
+        assert!(is_charge_point_action_for(
+            Protocol::V21,
+            "NotifySettlement"
+        ));
+        assert!(!is_charge_point_action_for(
+            Protocol::V201,
+            "NotifySettlement"
+        ));
+        assert!(!is_charge_point_action_for(Protocol::V21, "Reset"));
+        assert!(!is_charge_point_action_for(
+            Protocol::V21,
+            "NotifyPeriodicEventStream"
+        ));
         let Reply::Result(body) =
             default_reply_for(Protocol::V16, "Heartbeat", &json!({}), 5, None)
         else {
@@ -215,6 +238,16 @@ mod tests {
         else {
             panic!("expected a result");
         };
-        assert_eq!(body, json!({}));
+        assert!(body["currentTime"].is_string());
+        let Reply::Result(body) = default_reply_for(
+            Protocol::V21,
+            "OpenPeriodicEventStream",
+            &json!({}),
+            5,
+            None,
+        ) else {
+            panic!("expected a result");
+        };
+        assert_eq!(body, json!({ "status": "Accepted" }));
     }
 }

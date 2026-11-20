@@ -389,29 +389,33 @@ fn a_subprotocol_list_round_trips_through_print_config() {
 }
 
 #[test]
-fn the_default_subprotocol_policy_serves_both_protocols() {
+fn the_default_subprotocol_policy_serves_every_protocol() {
     let printed = print(&[], &[]);
     assert!(
-        printed.contains("subprotocol = \"require:ocpp1.6,ocpp2.0.1\""),
+        printed.contains("subprotocol = \"require:ocpp1.6,ocpp2.0.1,ocpp2.1\""),
         "{printed}"
     );
 }
 
 #[test]
-fn both_protocols_are_accepted_at_top_level_and_in_blocks() {
+fn every_protocol_is_accepted_at_top_level_and_in_blocks() {
     let dir = tempfile::tempdir().unwrap();
-    let text = "schema = 1\nprotocol = \"ocpp2.0.1\"\n\
-[[station]]\nid = \"A\"\nprotocol = \"ocpp2.0.1\"\n\
-[[rule]]\naction = \"Heartbeat\"\nbehavior = \"respond\"\npayload = \"{}\"\n\
-station = \"CP-1\"\nprotocol = \"ocpp2.0.1\"\n";
-    let file = write(dir.path(), "v201.toml", text);
-    let output = check(&["--config", &file], &[]);
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
-    let printed = print(&["--config", &file], &[]);
-    assert!(
-        printed.contains("station = \"CP-1\"\nprotocol = \"ocpp2.0.1\""),
-        "{printed}"
-    );
+    for protocol in ["ocpp2.0.1", "ocpp2.1"] {
+        let text = format!(
+            "schema = 1\nprotocol = \"{protocol}\"\n\
+[[station]]\nid = \"A\"\nprotocol = \"{protocol}\"\n\
+[[rule]]\naction = \"Heartbeat\"\nbehavior = \"respond\"\npayload = \"{{}}\"\n\
+station = \"CP-1\"\nprotocol = \"{protocol}\"\n"
+        );
+        let file = write(dir.path(), &format!("{protocol}.toml"), &text);
+        let output = check(&["--config", &file], &[]);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        let printed = print(&["--config", &file], &[]);
+        assert!(
+            printed.contains(&format!("station = \"CP-1\"\nprotocol = \"{protocol}\"")),
+            "{printed}"
+        );
+    }
 }
 
 #[test]

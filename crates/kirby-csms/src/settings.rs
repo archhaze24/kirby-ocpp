@@ -28,7 +28,7 @@ use crate::commands::{self, FaultKind, MAX_FAULT_ACTION_LEN, MAX_FAULT_TIMES};
 /// Settings of the configuration file of `kirby-csms`: one table per `--help` heading, plus
 /// the `[[station]]` and `[[rule]]` blocks.
 pub const SCHEMA: Schema = Schema {
-    protocols: &["ocpp1.6", "ocpp2.0.1"],
+    protocols: &["ocpp1.6", "ocpp2.0.1", "ocpp2.1"],
     sections: &[
         Section {
             path: &["listener"],

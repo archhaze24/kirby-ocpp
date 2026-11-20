@@ -1,5 +1,5 @@
-//! `kirby-csms`: terminal OCPP 1.6J and 2.0.1 central system for charge point firmware development and
-//! load tests. A terminal UI on an interactive terminal, headless otherwise.
+//! `kirby-csms`: terminal OCPP 1.6J, 2.0.1 and 2.1 central system for charge point firmware
+//! development and load tests. A terminal UI on an interactive terminal, headless otherwise.
 
 mod api;
 mod automation;

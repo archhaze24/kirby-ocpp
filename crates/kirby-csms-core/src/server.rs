@@ -60,7 +60,7 @@ const MALFORMED_TEXT_CHARS: usize = 512;
 /// Close code for injected closes (internal error), as in the test mock.
 const CLOSE_CODE_ERROR: u16 = 1011;
 
-/// Entry point: starts a multi-station OCPP 1.6J and 2.0.1 central system.
+/// Entry point: starts a multi-station OCPP 1.6J, 2.0.1 and 2.1 central system.
 ///
 /// # Station identity
 ///
@@ -2224,7 +2224,9 @@ fn unhandled_code(protocol: Protocol, action: &str) -> ErrorCode {
         Protocol::V16 if kirby_ocpp_core::ocpp::messages::registry::find(action).is_some() => {
             ErrorCode::NotSupported
         }
-        Protocol::V201 => kirby_ocpp_core::ocpp::v2::registry::unhandled_error_code(action),
+        Protocol::V201 | Protocol::V21 => {
+            kirby_ocpp_core::ocpp::v2::registry::unhandled_error_code_for(protocol, action)
+        }
         _ => ErrorCode::NotImplemented,
     }
 }
@@ -2239,15 +2241,19 @@ fn check_station_id(
     protocol: Option<Protocol>,
     id: &str,
 ) -> Result<(), ErrorResponse> {
-    if protocol.is_none_or(|protocol| ids::check_station_id_for(protocol, id).is_ok()) {
+    let Some(protocol) =
+        protocol.filter(|protocol| ids::check_station_id_for(*protocol, id).is_err())
+    else {
         return Ok(());
-    }
+    };
     inner.emit(CsmsEvent::AuthFailed {
         station: None,
         remote_addr: peer,
-        reason: "refused: station id is not valid for ocpp2.0.1 (1 to 48 characters from a-z A-Z 0-9 * - _ = + | @ .)".to_owned(),
+        reason: format!(
+            "refused: station id is not valid for {protocol} (1 to 48 characters from a-z A-Z 0-9 * - _ = + | @ .)"
+        ),
     });
-    Err(refusal("station id is not valid for ocpp2.0.1"))
+    Err(refusal(&format!("station id is not valid for {protocol}")))
 }
 
 /// An HTTP 503 refusal.

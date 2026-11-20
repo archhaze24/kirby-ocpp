@@ -38,7 +38,7 @@ async fn bulk_calls_validate_select_and_keep_per_station_outcomes() {
     for body in [
         json!({"station":"*","action":"Reset","unexpected":"private"}),
         json!({"station":"*","action":"Reset","timeout_ms":0}),
-        json!({"station":"*","action":"Reset","protocol":"ocpp2.1"}),
+        json!({"station":"*","action":"Reset","protocol":"ocpp2.2"}),
         json!({"station":"*","action":"bad\nname"}),
     ] {
         assert_eq!(post(body).await.0, 400);
@@ -2428,7 +2428,7 @@ async fn scoped_fault_requests_are_validated_and_bounded() {
     let addr = &csms.api_addr;
     let long = "S".repeat(129);
     for body in [
-        r#"{"action":"Heartbeat","kind":"silence","protocol":"ocpp2.1"}"#.to_owned(),
+        r#"{"action":"Heartbeat","kind":"silence","protocol":"ocpp2.2"}"#.to_owned(),
         r#"{"action":"Heartbeat","kind":"silence","station":""}"#.to_owned(),
         r#"{"action":"Heartbeat","kind":"silence","station":"CP\u001b"}"#.to_owned(),
         format!(r#"{{"action":"Heartbeat","kind":"silence","station":"{long}"}}"#),

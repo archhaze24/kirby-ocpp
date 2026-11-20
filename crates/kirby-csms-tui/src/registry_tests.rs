@@ -1058,8 +1058,12 @@ fn rule_and_fault_forms_pick_a_protocol_first() {
         Some("Heartbeat"),
         "the action is kept"
     );
-    // (all) keeps the engine-wide behavior
+    // 2.1 lists its own actions
     rule.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    rule.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+    assert_eq!(rule.fields[0].chosen(), Some(V21));
+    assert_eq!(rule.fields[1].options, table21().station_actions);
+    // (all) keeps the engine-wide behavior
     rule.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
     assert_eq!(rule.fields[0].chosen(), Some("(all)"));
     assert!(matches!(
@@ -1083,6 +1087,108 @@ fn rule_and_fault_forms_pick_a_protocol_first() {
     assert_eq!(fault.fields[2].chosen(), Some("invalid_payload"));
     fault.fields[4].input = TextInput::new("nope");
     assert!(!fault.validate_all());
+}
+
+// ---- OCPP 2.1 stations ----------------------------------------------------------------
+
+const V21: &str = "ocpp2.1";
+
+fn table21() -> &'static registry::ProtocolActions {
+    registry::protocol_actions(V21).expect("the 2.1 table")
+}
+
+fn station21() -> App {
+    station_with(V21, vec![running_tx(TX_ID, "TAG1")])
+}
+
+#[test]
+fn a_2_1_station_offers_the_2_1_table_with_the_2_0_1_hotkeys() {
+    let mut app = station21();
+    let table = table21();
+    assert_eq!(table.csms_actions.len(), 55);
+    app.open_palette();
+    let Mode::Palette(p) = &app.mode else {
+        panic!("palette");
+    };
+    let rows: Vec<_> = p.rows().copied().collect();
+    for (i, spec) in table.csms_actions.iter().enumerate() {
+        let def = rows
+            .iter()
+            .find(|d| d.id == ActionId::Call(i))
+            .unwrap_or_else(|| panic!("{} has no palette entry", spec.name));
+        assert_eq!(def.spec().map(|s| s.name), Some(spec.name));
+        assert_eq!((def.label(), def.desc()), (spec.title, spec.summary));
+    }
+    assert!(rows.iter().all(|d| d.protocol == V21 || d.ocpp.is_none()));
+    for (name, key) in [("Reset", 'R'), ("RequestStartTransaction", 't')] {
+        let Some(ActionId::Call(i)) = app.action_for_key(key) else {
+            panic!("{key} is not a table entry");
+        };
+        assert_eq!(table.csms_actions[i].name, name, "key {key}");
+    }
+    // an action new in 2.1 is in the palette without a hotkey
+    let tariffs = rows
+        .iter()
+        .find(|d| d.ocpp == Some("GetTariffs"))
+        .expect("GetTariffs is offered");
+    assert_eq!(tariffs.key, None);
+    // the 1.6 entries are not offered, and one says why
+    assert!(app.reason_for(ActionId::Reset).is_some());
+}
+
+#[test]
+fn every_2_1_registry_entry_runs_from_the_palette() {
+    let mut app = station21();
+    for (i, spec) in table21().csms_actions.iter().enumerate() {
+        let mut fx = Vec::new();
+        app.mode = Mode::Normal;
+        app.run_action(ActionId::Call(i), &mut fx);
+        let opened = matches!(app.mode, Mode::Form(_)) || !fx.is_empty();
+        assert!(opened, "{} did nothing: {}", spec.name, notice_text(&app));
+    }
+}
+
+#[test]
+fn the_raw_form_of_a_2_1_station_lists_its_actions_and_checks_its_schemas() {
+    let mut app = station21();
+    press(&mut app, KeyCode::Char('w'));
+    let Mode::Form(form) = &mut app.mode else {
+        panic!("raw form");
+    };
+    let mut names: Vec<&str> = table21().csms_actions.iter().map(|s| s.name).collect();
+    names.sort_unstable();
+    let options: Vec<&str> = form.fields[0].options.iter().map(String::as_str).collect();
+    assert_eq!(options, names);
+    let tariffs = options.iter().position(|o| *o == "GetTariffs").unwrap();
+    let reset = options.iter().position(|o| *o == "Reset").unwrap();
+    form.fields[0].option = tariffs;
+    form.fields[1].input = TextInput::new("{}");
+    assert!(!form.validate_all(), "GetTariffs needs an evseId");
+    form.fields[1].input = TextInput::new(r#"{"evseId":1}"#);
+    assert!(form.validate_all());
+    // the 2.1 schema of Reset knows a type that 2.0.1 does not
+    form.fields[0].option = reset;
+    form.fields[1].input = TextInput::new(r#"{"type":"ImmediateAndResume"}"#);
+    assert!(form.validate_all());
+}
+
+#[test]
+fn rule_and_fault_forms_of_a_2_1_station_list_its_station_actions() {
+    let mut app = station21();
+    press(&mut app, KeyCode::Char('m'));
+    let Mode::Form(form) = &app.mode else {
+        panic!("rule form");
+    };
+    assert_eq!(form.fields[0].chosen(), Some(V21));
+    assert_eq!(form.fields[1].options, table21().station_actions);
+    assert!(
+        form.fields[1]
+            .options
+            .iter()
+            .any(|name| name == "NotifySettlement")
+    );
+    let fx = press(&mut app, KeyCode::Enter);
+    assert!(matches!(fx.first(), Some(Effect::RespondScoped { .. })));
 }
 
 #[test]

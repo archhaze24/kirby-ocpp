@@ -85,11 +85,17 @@ fn tx2(id: &str, connector: Option<u32>, token: &str) -> kirby_csms_core::Tx2Rec
 /// A 2.0.1 station with one running and one ended transaction, a duplicate event and a
 /// report in progress; ids and tokens are hostile.
 fn app_v2() -> App {
+    app_v2_on("ocpp2.0.1")
+}
+
+/// The station of [`app_v2`] on the 2.x subprotocol `protocol`.
+fn app_v2_on(protocol: &str) -> App {
     use kirby_ocpp_core::ocpp::v2::messages::{BootReason, ConnectorStatus as Status2};
     use kirby_ocpp_core::ocpp::v2::types::{ChargingState, StopReason};
     let (mut app, _) = app_with(&["CP-1"]);
     let mut station_info = info("CP-1", true);
-    station_info.subprotocol = Some("ocpp2.0.1".into());
+    station_info.subprotocol = Some(protocol.into());
+    app.stations[0].protocol = Some(protocol.into());
     app.info = Some(station_info);
     let mut running = tx2(
         "0123456789abcdef-running-transaction",
@@ -114,7 +120,7 @@ fn app_v2() -> App {
     s.connectors.clear();
     s.transactions.clear();
     s.v2 = Some(Box::new(kirby_csms_core::StationState2 {
-        protocol: "ocpp2.0.1".into(),
+        protocol: protocol.into(),
         boot_reason: Some(BootReason::PowerUp),
         evses: [(1, evse)].into_iter().collect(),
         transactions: vec![ended, running],
@@ -157,6 +163,33 @@ fn v2_station_shows_wire_names_short_ids_and_report_progress() {
     for (w, h) in [(24, 8), (80, 24), (110, 30)] {
         let screen = render(&app, w, h);
         assert!(!screen.contains('\u{1b}'));
+    }
+}
+
+#[test]
+fn a_2_1_station_uses_the_v2_views_and_shows_its_protocol() {
+    let app = app_v2_on("ocpp2.1");
+    let screen = render(&app, 160, 40);
+    for want in [
+        "v2.1",
+        "Occupied",
+        "SuspendedEVSE",
+        "ImmediateReset",
+        "0123456…",
+        "PowerUp",
+        "1/-",
+        "report #7 seqNo 2 tbc true",
+    ] {
+        assert!(screen.contains(want), "missing {want}:\n{screen}");
+    }
+    for unwanted in ["idTag", "Preparing", "\u{1b}", "\u{202e}"] {
+        assert!(!screen.contains(unwanted), "found {unwanted:?}:\n{screen}");
+    }
+    // The 2.0.1 station of the same fixture is marked `v2` only.
+    let older = render(&app_v2(), 160, 40);
+    assert!(!older.contains("v2.1"), "{older}");
+    for (w, h) in [(24, 8), (80, 24), (110, 30)] {
+        assert!(!render(&app, w, h).contains('\u{1b}'));
     }
 }
 

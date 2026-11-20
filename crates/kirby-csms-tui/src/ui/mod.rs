@@ -311,7 +311,9 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
         Mode::Help => {
             let rect_w = kirby_ocpp_tui::ui::popup_width(area.width, 96);
             let catalog = app.catalog();
-            let dynamic = catalog.iter().any(|a| a.protocol == "ocpp2.0.1");
+            let dynamic = catalog
+                .iter()
+                .any(|a| a.protocol == "ocpp2.0.1" || a.protocol == "ocpp2.1");
             let action_lines: Vec<String> = catalog
                 .iter()
                 .filter_map(|a| a.key.map(|key| format!("{key}  {}", a.label())))

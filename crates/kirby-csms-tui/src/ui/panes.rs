@@ -74,10 +74,10 @@ fn station_row(s: &Summary, inner_w: usize, selected: bool, mono: bool) -> Line<
         (_, Some(m)) if inner_w >= 34 => format!(" {}", truncate(&sanitize(m), 14)),
         _ => String::new(),
     };
-    let protocol = if s.protocol.as_deref() == Some("ocpp2.0.1") {
-        " v2"
-    } else {
-        ""
+    let protocol = match s.protocol.as_deref() {
+        Some("ocpp2.0.1") => " v2",
+        Some("ocpp2.1") => " v2.1",
+        _ => "",
     };
     let id_w = inner_w
         .saturating_sub(2 + width(&model) + width(&tx) + width(protocol))
@@ -188,11 +188,12 @@ pub fn details(f: &mut Frame<'_>, app: &App, area: Rect) {
     let inner = outer.inner(area);
     f.render_widget(outer, area);
     let lines = info_lines(app, app.info.as_ref(), app.state.as_ref(), inner_w);
-    let is_v2 = app.info.as_ref().and_then(|i| i.subprotocol.as_deref()) == Some("ocpp2.0.1")
+    let is_v2_protocol = |protocol: Option<&str>| matches!(protocol, Some("ocpp2.0.1" | "ocpp2.1"));
+    let is_v2 = is_v2_protocol(app.info.as_ref().and_then(|i| i.subprotocol.as_deref()))
         || app
             .stations
             .iter()
-            .any(|s| s.id == id && s.protocol.as_deref() == Some("ocpp2.0.1"));
+            .any(|s| s.id == id && is_v2_protocol(s.protocol.as_deref()));
     let info_h = u16::try_from(lines.len())
         .unwrap_or(u16::MAX)
         .min(inner.height);

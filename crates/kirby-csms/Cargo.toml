@@ -1,6 +1,6 @@
 [package]
 name = "kirby-csms"
-description = "Terminal OCPP 1.6J and 2.0.1 central system (CSMS) for charge point firmware development and load tests"
+description = "Terminal OCPP 1.6J, 2.0.1 and 2.1 central system (CSMS) for charge point firmware development and load tests"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

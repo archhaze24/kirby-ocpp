@@ -83,10 +83,10 @@ pub struct StationState {
     /// The last answered `GetInstalledCertificateIds` per `certificateType` (the request's
     /// filter, as on the wire, e.g. `CentralSystemRootCertificate`).
     pub installed_certificates: BTreeMap<String, InstalledCertificates>,
-    /// The OCPP 2.0.1 read model (EVSEs, transactions, meter readings). `None` (`null` in the
-    /// JSON) for stations on any other protocol and for a 2.0.1 station that has not sent a
-    /// message the fold reads yet. Interpret `state` by the station's protocol: the shared
-    /// fields above are filled for both.
+    /// The OCPP 2.x read model (EVSEs, transactions, meter readings) of a 2.0.1 or 2.1
+    /// station; its `protocol` names which. `None` (`null` in the JSON) for a 1.6 station and
+    /// for a 2.x station that has not sent a message the fold reads yet. Interpret `state` by
+    /// the station's protocol: the shared fields above are filled for both.
     #[serde(default)]
     pub v2: Option<Box<StationState2>>,
 }
@@ -387,7 +387,8 @@ pub(crate) enum DecodedCall {
     Log(LogStatusNotificationRequest),
     SignedFirmware(SignedFirmwareStatusNotificationRequest),
     SignCertificate(SignCertificateRequest),
-    V201(DecodedCall201),
+    /// An OCPP 2.0.1 or 2.1 call, with the protocol it came in on.
+    V2(Protocol, DecodedCall201),
 }
 
 impl DecodedCall {
@@ -399,8 +400,9 @@ impl DecodedCall {
     ) -> Option<Self> {
         match protocol {
             Protocol::V16 => {}
-            Protocol::V201 => {
-                return DecodedCall201::decode(action, request, response).map(Self::V201);
+            Protocol::V201 | Protocol::V21 => {
+                return DecodedCall201::decode(action, request, response)
+                    .map(|call| Self::V2(protocol, call));
             }
             _ => return None,
         }
@@ -496,7 +498,9 @@ impl StationState {
                     received_at: now,
                 });
             }
-            DecodedCall::V201(call) => return self.apply_decoded_v2(call, now, history_cap),
+            DecodedCall::V2(protocol, call) => {
+                return self.apply_decoded_v2(protocol, call, now, history_cap);
+            }
         }
         true
     }
