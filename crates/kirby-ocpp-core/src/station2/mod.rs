@@ -14,7 +14,7 @@
 //! of user commands), `hooks` (timer and loop hooks), `handlers/` (CSMS-originated CALLs),
 //! `device_model`, `evse` and `status` (EVSEs, connectors, `StatusNotification`),
 //! `transactions` and `tx_queue` (transactions and the outbound event queue),
-//! `authorization`, `remote`, `reset`, `security_events` (startup and reboot events), `scripted`
+//! `authorization`, `local_list` (the Local Authorization List), `remote`, `reset`, `security_events` (startup and reboot events), `scripted`
 //! (scenario replies) and `persistence`.
 
 mod actor;
@@ -28,6 +28,7 @@ mod handle;
 mod handlers;
 mod hooks;
 mod link;
+mod local_list;
 mod persistence;
 mod remote;
 mod reset;
@@ -49,6 +50,7 @@ pub use self::command::{Command2, Outcome2};
 pub use self::device_model::DeviceModelPersist;
 pub use self::evse::EvseAvail;
 pub use self::handle::Station2Handle;
+pub use self::local_list::{ListEntry, LocalListPersist};
 pub use self::snapshot::{
     ConnectorSnapshot2, EvseSnapshot, Snapshot2, TransactionSnapshot, VariableView,
 };

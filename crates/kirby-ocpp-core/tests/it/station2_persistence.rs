@@ -115,6 +115,7 @@ fn sample() -> PersistedStation2 {
                 group_id: Some("G".to_owned()),
             },
         )],
+        ..AuthCachePersist::default()
     };
     state.tx = TxPersist {
         active: vec![active_tx(1, "11111111-1111-4111-8111-111111111111", 3)],

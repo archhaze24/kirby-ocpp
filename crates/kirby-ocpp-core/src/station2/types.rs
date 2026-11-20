@@ -65,4 +65,5 @@ pub enum LiveVar {
     DateTime,
     EvsePower(u32),
     CertificateEntries,
+    LocalListEntries,
 }

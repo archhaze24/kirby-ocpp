@@ -423,7 +423,7 @@ async fn outbound_data_transfer_returns_the_answer() {
 async fn an_action_without_a_handler_is_not_supported() {
     let rig = Rig::new().await;
     rig.csms
-        .expect_call_error("GetLocalListVersion", json!({}), &ErrorCode::NotSupported)
+        .expect_call_error("ClearChargingProfile", json!({}), &ErrorCode::NotSupported)
         .await
         .expect("NotSupported");
     rig.stop().await;

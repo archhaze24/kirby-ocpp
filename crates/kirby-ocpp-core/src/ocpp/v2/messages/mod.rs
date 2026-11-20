@@ -11,6 +11,7 @@
 //! | `transactions` | `TransactionEvent`, `MeterValues`, `GetTransactionStatus` |
 //! | `remote_control` | `Reset`, `ChangeAvailability`, `RequestStartTransaction`, `RequestStopTransaction`, `UnlockConnector`, `TriggerMessage` |
 //! | `device_model` | `GetVariables`, `SetVariables`, `GetBaseReport`, `NotifyReport` |
+//! | `local_list` | `SendLocalList`, `GetLocalListVersion` |
 //! | `data_security` | `DataTransfer`, `SecurityEventNotification` |
 //!
 //! Each test block holds a table of fixtures that exercise every optional
@@ -42,6 +43,7 @@ mod authorization;
 mod boot_status;
 mod data_security;
 mod device_model;
+mod local_list;
 mod remote_control;
 mod transactions;
 
@@ -64,6 +66,11 @@ pub use device_model::{
     GetVariablesResponse, Mutability, NotifyReport, NotifyReportRequest, NotifyReportResponse,
     ReportBase, ReportData, SetVariableData, SetVariableResult, SetVariableStatus, SetVariables,
     SetVariablesRequest, SetVariablesResponse, VariableAttribute, VariableCharacteristics,
+};
+pub use local_list::{
+    AuthorizationData, GetLocalListVersion, GetLocalListVersionRequest,
+    GetLocalListVersionResponse, SendLocalList, SendLocalListRequest, SendLocalListResponse,
+    SendLocalListStatus, UpdateKind,
 };
 pub use remote_control::{
     ChangeAvailability, ChangeAvailabilityRequest, ChangeAvailabilityResponse,

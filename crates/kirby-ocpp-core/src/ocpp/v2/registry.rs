@@ -77,7 +77,7 @@ const fn send(name: &'static str, direction: ActionDirection) -> ActionInfo {
 }
 
 /// All 64 actions in byte-wise alphabetical order: 24 sent by the station, 39 by the CSMS
-/// and `DataTransfer` by either. 20 of them are typed.
+/// and `DataTransfer` by either. 22 of them are typed.
 pub const ACTIONS: [ActionInfo; 64] = [
     info("Authorize", STATION, true),
     info("BootNotification", STATION, true),
@@ -101,7 +101,7 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("GetCompositeSchedule", CSMS, false),
     info("GetDisplayMessages", CSMS, false),
     info("GetInstalledCertificateIds", CSMS, false),
-    info("GetLocalListVersion", CSMS, false),
+    info("GetLocalListVersion", CSMS, true),
     info("GetLog", CSMS, false),
     info("GetMonitoringReport", CSMS, false),
     info("GetReport", CSMS, false),
@@ -128,7 +128,7 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("ReserveNow", CSMS, false),
     info("Reset", CSMS, true),
     info("SecurityEventNotification", STATION, true),
-    info("SendLocalList", CSMS, false),
+    info("SendLocalList", CSMS, true),
     info("SetChargingProfile", CSMS, false),
     info("SetDisplayMessage", CSMS, false),
     info("SetMonitoringBase", CSMS, false),
@@ -182,7 +182,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("GetDERControl", CSMS, false),
     info("GetDisplayMessages", CSMS, false),
     info("GetInstalledCertificateIds", CSMS, false),
-    info("GetLocalListVersion", CSMS, false),
+    info("GetLocalListVersion", CSMS, true),
     info("GetLog", CSMS, false),
     info("GetMonitoringReport", CSMS, false),
     info("GetPeriodicEventStream", CSMS, false),
@@ -222,7 +222,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("ReserveNow", CSMS, false),
     info("Reset", CSMS, true),
     info("SecurityEventNotification", STATION, true),
-    info("SendLocalList", CSMS, false),
+    info("SendLocalList", CSMS, true),
     info("SetChargingProfile", CSMS, false),
     info("SetDERControl", CSMS, false),
     info("SetDefaultTariff", CSMS, false),
@@ -358,6 +358,8 @@ mod tests {
             csms_sent::<m::ClearCache>(),
             csms_sent::<m::GetTransactionStatus>(),
             csms_sent::<m::DataTransfer>(),
+            csms_sent::<m::SendLocalList>(),
+            csms_sent::<m::GetLocalListVersion>(),
         ];
         (outbound, inbound)
     }
@@ -388,7 +390,7 @@ mod tests {
             .filter(|entry| entry.typed)
             .map(|entry| entry.name)
             .collect();
-        assert_eq!(typed.len(), 20);
+        assert_eq!(typed.len(), 22);
         let markers: BTreeSet<&str> = outbound.iter().chain(&inbound).copied().collect();
         assert_eq!(markers, typed);
         for name in &typed {

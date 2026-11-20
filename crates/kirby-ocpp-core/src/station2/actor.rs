@@ -117,6 +117,8 @@ pub(crate) struct Station2Actor {
     pub(super) tx: TxEngine,
     pub(super) queue: TxQueue,
     pub(super) auth: AuthState,
+    /// The Local Authorization List.
+    pub(super) local_list: super::local_list::LocalListPersist,
     pub(super) reset: Option<ResetPlan>,
     pub(super) persistence: Persistence2,
     /// Answers armed by scenario `reply` steps (runtime only, see `scripted`).
@@ -164,6 +166,7 @@ impl Station2Actor {
             tx: TxEngine::default(),
             queue: TxQueue::default(),
             auth: AuthState::default(),
+            local_list: super::local_list::LocalListPersist::default(),
             reset: None,
             persistence,
             scripted_replies: ReplyList::default(),

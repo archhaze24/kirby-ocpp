@@ -13,6 +13,7 @@ mod station2_auth;
 mod station2_availability_restart;
 mod station2_device_model;
 mod station2_lifecycle;
+mod station2_local_list;
 mod station2_persistence;
 mod station2_remote;
 mod station2_scripted_reply;

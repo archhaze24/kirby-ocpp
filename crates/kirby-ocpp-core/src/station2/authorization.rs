@@ -3,7 +3,9 @@
 //! This module decides whether a token is accepted (C01, C02, C05, C12, C15); it never
 //! evaluates start or stop points. An accepted token goes to the transaction engine
 //! (`on_authorized`), a token that stops being valid in a `TransactionEventResponse` to
-//! `on_deauthorized` or `set_charging_state_internal`. There is no Local Authorization List.
+//! `on_deauthorized` or `set_charging_state_internal`. The Local Authorization List
+//! (`local_list.rs`) takes precedence over the cache for a token it holds (C13.FR.01,
+//! C14.FR.01).
 //!
 //! Cache entries expire at the earlier of the `cacheExpiryDateTime` of the CSMS and the
 //! `AuthCacheCtrlr.LifeTime` after the entry was last updated (C10.FR.10); a `LifeTime` of 0
@@ -20,6 +22,7 @@ use super::calls::call_failure;
 use super::command::Outcome2;
 use super::device_model::Lookup;
 use super::link::sanitize;
+use super::local_list::{ListEntry, LocalListPersist};
 use super::types::{IdTokenRef, Origin2, Reply2};
 use crate::error::{CallError, StationError};
 use crate::ocpp::v2::messages::{Authorize, AuthorizeRequest, AuthorizeResponse, TriggerReason};
@@ -59,6 +62,8 @@ pub struct CacheEntry {
 #[serde(default)]
 pub struct AuthCachePersist {
     pub entries: Vec<(String, CacheEntry)>,
+    /// The Local Authorization List and its version. Older files have none.
+    pub local_list: LocalListPersist,
 }
 
 /// The authorization cache and the bookkeeping of a reset in progress.
@@ -111,7 +116,7 @@ impl Station2Actor {
     // ---- device-model switches ---------------------------------------------------
 
     /// The `Actual` value of a station-level variable, when the table has it.
-    fn dm_text(&self, component: &str, variable: &str) -> Option<String> {
+    pub(super) fn dm_text(&self, component: &str, variable: &str) -> Option<String> {
         let component = Component {
             evse: None,
             name: component.to_owned(),
@@ -129,7 +134,7 @@ impl Station2Actor {
         }
     }
 
-    fn dm_enabled(&self, component: &str) -> bool {
+    pub(super) fn dm_enabled(&self, component: &str) -> bool {
         self.dm_text(component, "Enabled").as_deref() != Some("false")
     }
 
@@ -227,12 +232,14 @@ impl Station2Actor {
     pub(super) fn auth_cache_persist(&self) -> AuthCachePersist {
         AuthCachePersist {
             entries: self.auth.cache.clone(),
+            local_list: self.local_list_persist(),
         }
     }
 
     /// Takes back the persisted authorization cache at start: expired entries are dropped, at
     /// most [`CACHE_LIMIT`] of the newest are kept.
     pub(super) fn auth_cache_restore(&mut self, cache: AuthCachePersist) {
+        self.local_list_restore(cache.local_list);
         let now = self.clock.now_utc();
         let mut entries: Vec<_> = cache
             .entries
@@ -286,11 +293,36 @@ impl Station2Actor {
         };
         let online =
             self.link.conn.is_some() && self.may_send("Authorize", Origin2::Station).is_ok();
+        let listed = self.local_list_entry(&token);
         if !online {
-            let decision = self.offline_decision(cached.as_ref());
+            let decision = self.offline_decision(listed.as_ref(), cached.as_ref());
             cont(self, decision);
             return;
         }
+        if ask == Ask::CacheFirst
+            && let Some(entry) = &listed
+            && self.local_pre_authorize()
+        {
+            // C14.FR.02: an `Accepted` entry starts without `Authorize`. With
+            // `DisablePostAuthorize` any other entry is refused locally, without asking
+            // (C14.FR.03 otherwise sends `Authorize`).
+            if entry.is_accepted() {
+                cont(self, AuthDecision::Accepted(None));
+                return;
+            }
+            if self.local_list_disable_post_authorize() {
+                cont(
+                    self,
+                    AuthDecision::Rejected {
+                        status: entry.status.clone(),
+                        info: None,
+                    },
+                );
+                return;
+            }
+        }
+        // A listed token never takes the cache shortcut: the list has priority (C14.FR.01).
+        let cached = if listed.is_some() { None } else { cached };
         if ask == Ask::CacheFirst && cached.as_ref().is_some_and(|e| e.status == ACCEPTED) {
             if self.local_pre_authorize() {
                 self.refresh_cached(token, evse);
@@ -338,17 +370,26 @@ impl Station2Actor {
                     ),
                 );
                 let cached = self.cache_lookup(&token_key(token));
-                self.offline_decision(cached.as_ref())
+                let listed = self.local_list_entry(token);
+                self.offline_decision(listed.as_ref(), cached.as_ref())
             }
         }
     }
 
     /// C12/C15: a cached `Accepted` token is accepted with `LocalAuthorizeOffline`, an unknown
     /// one with `OfflineTxForUnknownIdEnabled`; neither is added to the cache (C15.FR.01).
-    fn offline_decision(&self, cached: Option<&CacheEntry>) -> AuthDecision {
-        let accepted = match cached {
-            Some(entry) => entry.status == ACCEPTED && self.local_authorize_offline(),
-            None => self.offline_tx_for_unknown_id(),
+    ///
+    /// A token of the Local Authorization List is decided by its entry alone (C13.FR.01):
+    /// only `Accepted` is let in, and a listed token is not an unknown one.
+    fn offline_decision(
+        &self,
+        listed: Option<&ListEntry>,
+        cached: Option<&CacheEntry>,
+    ) -> AuthDecision {
+        let accepted = match (listed, cached) {
+            (Some(entry), _) => entry.is_accepted() && self.local_authorize_offline(),
+            (None, Some(entry)) => entry.status == ACCEPTED && self.local_authorize_offline(),
+            (None, None) => self.offline_tx_for_unknown_id(),
         };
         AuthDecision::Offline { accepted }
     }
@@ -807,6 +848,7 @@ mod tests {
                 ("keep".to_owned(), entry(Some(now + Duration::seconds(5)))),
                 ("forever".to_owned(), entry(None)),
             ],
+            ..AuthCachePersist::default()
         });
         let keys: Vec<String> = actor
             .auth_cache_persist()

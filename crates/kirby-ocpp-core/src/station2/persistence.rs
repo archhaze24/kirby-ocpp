@@ -289,7 +289,7 @@ impl Station2Actor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::station2::CacheEntry;
+    use crate::station2::{CacheEntry, LocalListPersist};
 
     #[test]
     fn expired_cache_entries_are_dropped() {
@@ -300,6 +300,7 @@ mod tests {
             group_id: None,
         };
         let mut cache = AuthCachePersist {
+            local_list: LocalListPersist::default(),
             entries: vec![
                 (
                     "old".to_owned(),

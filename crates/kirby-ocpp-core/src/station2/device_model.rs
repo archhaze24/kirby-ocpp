@@ -192,6 +192,7 @@ const CS: &str = "ChargingStation";
 const OCPP: &str = "OCPPCommCtrlr";
 const AUTH: &str = "AuthCtrlr";
 const CACHE: &str = "AuthCacheCtrlr";
+const LOCAL_LIST: &str = "LocalAuthListCtrlr";
 const TX: &str = "TxCtrlr";
 const SAMPLED: &str = "SampledDataCtrlr";
 const ALIGNED: &str = "AlignedDataCtrlr";
@@ -357,6 +358,16 @@ pub(crate) static TABLE: &[VarSpec] = &[
     flag(AUTH, "LocalAuthorizeOffline", "true").rw(),
     flag(AUTH, "LocalPreAuthorize", "false").rw(),
     flag(AUTH, "OfflineTxForUnknownIdEnabled", "false").rw(),
+    // LocalAuthListCtrlr
+    flag(LOCAL_LIST, "Enabled", "true").rw(),
+    flag(LOCAL_LIST, "Available", "true"),
+    int(LOCAL_LIST, "Entries", Fixed("0"))
+        .hi(1_000)
+        .live(LiveVar::LocalListEntries),
+    int(LOCAL_LIST, "ItemsPerMessage", Fixed("1000")),
+    int(LOCAL_LIST, "BytesPerMessage", Fixed("262144")),
+    flag(LOCAL_LIST, "SupportsExpiryDateTime", "true"),
+    flag(LOCAL_LIST, "DisablePostAuthorize", "false").rw(),
     // AuthCacheCtrlr
     flag(CACHE, "Enabled", "true").rw(),
     int(CACHE, "LifeTime", Fixed("86400")).rw().u("s"),
@@ -1021,6 +1032,7 @@ impl Station2Actor {
                 .to_rfc3339_opts(SecondsFormat::Millis, true),
             LiveVar::EvsePower(evse) => format!("{:.1}", self.evse_power_w(evse)),
             LiveVar::CertificateEntries => "0".into(),
+            LiveVar::LocalListEntries => self.local_list_len().to_string(),
         }
     }
 

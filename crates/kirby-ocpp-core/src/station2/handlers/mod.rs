@@ -29,14 +29,15 @@ pub(super) mod tx;
 
 use super::actor::Station2Actor;
 use super::link::sanitize;
+use super::local_list;
 use super::remote;
 use crate::ocpp::action::{Action, InboundAction};
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::responder::{ReplyHandle, Responder};
 use crate::ocpp::v2::messages::{
-    ChangeAvailability, ClearCache, DataTransfer, GetBaseReport, GetTransactionStatus,
-    GetVariables, RequestStartTransaction, RequestStopTransaction, Reset, SetVariables,
-    TriggerMessage, UnlockConnector,
+    ChangeAvailability, ClearCache, DataTransfer, GetBaseReport, GetLocalListVersion,
+    GetTransactionStatus, GetVariables, RequestStartTransaction, RequestStopTransaction, Reset,
+    SendLocalList, SetVariables, TriggerMessage, UnlockConnector,
 };
 use crate::ocpp::v2::registry::unhandled_error_code_for;
 use crate::station::LogLevel;
@@ -106,6 +107,16 @@ impl Station2Actor {
             }
             UnlockConnector::NAME => {
                 self.invoke::<UnlockConnector>(payload, reply, control::unlock_connector);
+            }
+            SendLocalList::NAME => {
+                self.invoke::<SendLocalList>(payload, reply, local_list::send_local_list);
+            }
+            GetLocalListVersion::NAME => {
+                self.invoke::<GetLocalListVersion>(
+                    payload,
+                    reply,
+                    local_list::get_local_list_version,
+                );
             }
             ClearCache::NAME => self.invoke::<ClearCache>(payload, reply, control::clear_cache),
             DataTransfer::NAME => {
