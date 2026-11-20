@@ -1973,7 +1973,7 @@ where
     }
 
     async fn on_text(&mut self, text: &str) -> Option<DisconnectReason> {
-        let frame = match Frame::parse(text) {
+        let frame = match Frame::parse_for(self.protocol, text) {
             Ok(frame) => frame,
             Err(error) => {
                 if let Some(sink) = &self.inner.recording {
@@ -2057,9 +2057,45 @@ where
                 // Anything else answers a CALL that already timed out, or was never sent.
                 None
             }
-            // A frame kind added later is not a reply either.
+            Frame::Send {
+                action, payload, ..
+            } => {
+                // Never answered, not even with an error; it touches no CALL bookkeeping.
+                if let Some(reason) = self.send_violation(&action, &payload) {
+                    self.inner.emit(CsmsEvent::Malformed {
+                        station: self.station.clone(),
+                        text: truncate_chars(&reason, MALFORMED_TEXT_CHARS),
+                    });
+                }
+                None
+            }
+            // A CALLRESULTERROR refers to a CALLRESULT the CSMS sent, so it completes no CALL,
+            // and it is never answered (an error about an error would loop). A frame kind
+            // added later is not a reply either.
             _ => None,
         }
+    }
+
+    /// Why a station SEND is invalid (schema violation, or not a SEND message of this
+    /// protocol); `None` when valid or when inbound validation is off.
+    fn send_violation(&self, action: &str, payload: &Value) -> Option<String> {
+        if !self.inner.config.validate_inbound {
+            return None;
+        }
+        let schemas = self.inner.schemas.schemas_for(self.protocol)?;
+        let violation = schemas.validate_send(action, payload).err()?;
+        let name = sanitize_action(action);
+        let reason = if schemas.knows_send(action) {
+            format!("invalid SEND {name}: {}", violation.errors.join("; "))
+        } else {
+            format!("SEND {name} is not an OCPP 2.1 SEND message")
+        };
+        Some(
+            reason
+                .chars()
+                .map(|c| if c.is_control() { '?' } else { c })
+                .collect(),
+        )
     }
 
     /// Records and writes a frame. `Some` means the socket is gone.
@@ -2145,8 +2181,10 @@ fn frame_json_len(frame: &Frame) -> usize {
 /// Whether the frame already carries the truncation marker.
 fn is_truncated_marker(frame: &Frame) -> bool {
     let payload = match frame {
-        Frame::Call { payload, .. } | Frame::CallResult { payload, .. } => payload,
-        Frame::CallError { details, .. } => details,
+        Frame::Call { payload, .. }
+        | Frame::CallResult { payload, .. }
+        | Frame::Send { payload, .. } => payload,
+        Frame::CallError { details, .. } | Frame::CallResultError { details, .. } => details,
         _ => return false,
     };
     payload["truncated"] == true
@@ -2165,6 +2203,22 @@ fn truncated_frame(frame: &Frame, original_bytes: usize) -> Frame {
             description,
             ..
         } => Frame::CallError {
+            id: id.clone(),
+            code: code.clone(),
+            description: truncate_chars(description, 128),
+            details: marker,
+        },
+        Frame::Send { id, action, .. } => Frame::Send {
+            id: id.clone(),
+            action: action.clone(),
+            payload: marker,
+        },
+        Frame::CallResultError {
+            id,
+            code,
+            description,
+            ..
+        } => Frame::CallResultError {
             id: id.clone(),
             code: code.clone(),
             description: truncate_chars(description, 128),
