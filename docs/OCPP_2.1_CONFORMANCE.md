@@ -66,9 +66,10 @@ A 2.1 session is handled by the same listener as 1.6 and 2.0.1 and like a 2.0.1 
 | Subprotocol | The default policy is `require:ocpp1.6,ocpp2.0.1,ocpp2.1`; the client's order of preference decides |
 | Station id | The 2.0.1 rule: 1 to 48 `identifierString` characters, no colon |
 | Inbound validation | Station CALLs are validated against the 2.1 schemas with 2.x error codes; the 91-action catalog decides between `NotSupported` (defined, but not a station CALL) and `NotImplemented` (unknown name). `NotifyPeriodicEventStream` is a SEND message, so a CALL of that name gets `NotSupported` |
+| Commands | `SendLocalList` and `GetLocalListVersion` have forms, as for 2.0.1 |
 | Replies | The 36 station CALLs get answers valid against the 2.1 response schemas: the 2.0.1 answers for the shared actions; `OpenPeriodicEventStream` and `PullDynamicScheduleUpdate` `Accepted`; `VatNumberValidation` `Accepted`, echoing the request; `GetCertificateChainStatus` `Failed` for each certificate; an empty result for the other new actions. Rules and faults can replace them |
 | State | The 2.0.1 fold (EVSEs, transactions, meter values); `state.v2.protocol` is `ocpp2.1` |
 | Commands | Typed commands and forms are the 2.0.1 ones; the 15 CSMS actions new in 2.1 are sent as raw payloads, checked against the 2.1 schemas |
 | Scripts | `ocpp_version = "2.1"`; JUnit class names read `ocpp2.1.<script>` |
-| Message types 5 and 6 | Not handled yet: a SEND or CALLRESULTERROR from a station is reported as a malformed frame (`malformed` event) and never answered |
+| Message types 5 and 6 | A station SEND (such as `NotifyPeriodicEventStream`) is recorded in the frame history and events and never answered; with inbound validation on, one that violates its 2.1 schema, or whose action is not a 2.1 SEND message, also emits a `malformed` event. A station CALLRESULTERROR is recorded, never answered, and completes or fails no CSMS CALL. The CSMS sends neither type itself: a station reply that violates its schema fails the call without a CALLRESULTERROR |
 | Replay | `--replay` stays 1.6-only |

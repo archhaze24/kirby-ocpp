@@ -4,7 +4,7 @@ Coverage of `kirby-ocpp --protocol ocpp2.0.1` (the station) and of `kirby-csms` 
 - The station is an emulator for testing a CSMS, not a certified charge station; it is not OCA-certified and deliberately simulates hardware (no real metering, firmware or file transfer).
 - Where the specification and the 1.6 emulator differ, the 2.0.1 station follows the specification; deviations are listed in [Known deviations](#known-deviations).
 
-Summary: the catalog holds 64 actions (24 only the station sends, 39 only the CSMS sends, `DataTransfer` in both directions). Of these 15 are fully implemented, 6 partly, 1 is simulated and 42 are not implemented. The two tables below list 65 rows because `DataTransfer` appears in both directions; it is counted once, as full.
+Summary: the catalog holds 64 actions (24 only the station sends, 39 only the CSMS sends, `DataTransfer` in both directions). Of these 17 are fully implemented, 6 partly, 1 is simulated and 40 are not implemented. The two tables below list 65 rows because `DataTransfer` appears in both directions; it is counted once, as full.
 
 Legend: **full** = implemented as specified for emulator purposes; **partial** = implemented for common cases, see notes; **simulated** = the messages are real, the underlying action (power flow, connector lock) is not; **not implemented** = the station never sends the message, or answers the CSMS CALL with `NotSupported`.
 
@@ -20,8 +20,8 @@ Functional blocks of OCPP 2.0.1 Part 2 (the numbers are the use-case letters):
 | --- | --- |
 | A Security | partial: `SecurityEventNotification`, Basic Auth (profile 1) and TLS (profiles 2 and 3) at the transport; no certificate management |
 | B Provisioning | full for boot, `GetVariables`, `SetVariables`, `GetBaseReport`, `Reset` (station level); `GetReport` is not supported |
-| C Authorization | full for `Authorize` and the cache; no Local Authorization List |
-| D Local Authorization List Management | not implemented |
+| C Authorization | full for `Authorize`, the cache and the Local Authorization List (C13, C14) |
+| D Local Authorization List Management | full: `SendLocalList` (full and differential), `GetLocalListVersion`, `LocalAuthListCtrlr`; the list survives a restart |
 | E Transactions | full for `TransactionEvent`, offline queue and `GetTransactionStatus` (see deviations) |
 | F Remote Control | `RequestStartTransaction`, `RequestStopTransaction`, `TriggerMessage` (partial), `UnlockConnector` (simulated) |
 | G Availability | full for `ChangeAvailability`; connector status through `StatusNotification` |
@@ -56,16 +56,18 @@ Every CALL is answered exactly once. An action without a handler gets CALLERROR 
 | ClearCache | full | `Rejected` while `AuthCacheCtrlr.Enabled` is `false`. |
 | DataTransfer | full | Data for the station's own vendor id is accepted and echoed (`messageId` is not interpreted); other vendor ids get `UnknownVendorId`. |
 | GetBaseReport | full | `FullInventory`, `ConfigurationInventory` and `SummaryInventory` (the `AvailabilityState` variables only). A second request while a report is being sent is `Rejected`. |
+| GetLocalListVersion | full | `0` while no list was sent or while `LocalAuthListCtrlr.Enabled` is `false` (D02.FR.03). |
 | GetTransactionStatus | full | With an id: `ongoingIndicator` and `messagesInQueue` for that transaction (an unknown id is not ongoing); without an id only `messagesInQueue`, for the whole queue (E14). |
 | GetReport | not implemented | Answered with status `NotSupported` and reason code `UnsupportedRequest`. |
 | GetVariables | full | `Actual` attribute only (`NotSupportedAttributeType` otherwise); `UnknownComponent`, `UnknownVariable`; a write-only variable is `Rejected` with reason `WriteOnly`. More entries than `DeviceDataCtrlr.ItemsPerMessage` (GetVariables) get CALLERROR `OccurrenceConstraintViolation`. |
 | RequestStartTransaction | partial | Authorizes the token first when `AuthCtrlr.AuthorizeRemoteStart` is `true` (F01.FR.01). A `chargingProfile` is ignored with a warning. An unknown, unavailable or faulted EVSE is `Rejected`. |
 | RequestStopTransaction | full | An unknown transaction id is `Rejected` with reason `UnknownTransaction`. |
 | Reset | partial | `Immediate` and `OnIdle` at station level, see [Reset](#reset). A request with an `evseId` is `Rejected` with reason `UnsupportedParam`. |
+| SendLocalList | full | `Full` and `Differential`. A version of 0 or less, a request over 1000 entries or 262144 bytes, a full update with an entry without `idTokenInfo` or a list over 1000 tokens is `Failed`; a differential update whose version is not above the current one is `VersionMismatch`. A refused update leaves the list unchanged. The list is kept in the state file. |
 | SetVariables | full | Type, range and value-list validation; read-only variables are `Rejected` with reason `ReadOnly`. Limit as for `GetVariables`. |
 | TriggerMessage | partial | `BootNotification` (`Rejected` once the boot is accepted), `Heartbeat`, `StatusNotification` (needs an EVSE and a connector), `MeterValues`, `TransactionEvent` (`Rejected` without a running transaction), `FirmwareStatusNotification` and `LogStatusNotification` (status `Idle`). The certificate signing triggers and `PublishFirmwareStatusNotification` are `NotImplemented`; an unknown EVSE is `Rejected`. |
 | UnlockConnector | simulated | `Unlocked`, `UnknownConnector`, or `OngoingAuthorizedTransaction` while an authorized transaction runs; no hardware, no transaction is stopped. |
-| the other 28 | not implemented | `NotSupported`: `CancelReservation`, `CertificateSigned`, `ClearChargingProfile`, `ClearDisplayMessage`, `ClearVariableMonitoring`, `CostUpdated`, `CustomerInformation`, `DeleteCertificate`, `GetChargingProfiles`, `GetCompositeSchedule`, `GetDisplayMessages`, `GetInstalledCertificateIds`, `GetLocalListVersion`, `GetLog`, `GetMonitoringReport`, `InstallCertificate`, `PublishFirmware`, `ReserveNow`, `SendLocalList`, `SetChargingProfile`, `SetDisplayMessage`, `SetMonitoringBase`, `SetMonitoringLevel`, `SetNetworkProfile`, `SetVariableMonitoring`, `UnpublishFirmware`, `UpdateFirmware` (27) and `GetReport` (answered as above) |
+| the other 26 | not implemented | `NotSupported`: `CancelReservation`, `CertificateSigned`, `ClearChargingProfile`, `ClearDisplayMessage`, `ClearVariableMonitoring`, `CostUpdated`, `CustomerInformation`, `DeleteCertificate`, `GetChargingProfiles`, `GetCompositeSchedule`, `GetDisplayMessages`, `GetInstalledCertificateIds`, `GetLog`, `GetMonitoringReport`, `InstallCertificate`, `PublishFirmware`, `ReserveNow`, `SetChargingProfile`, `SetDisplayMessage`, `SetMonitoringBase`, `SetMonitoringLevel`, `SetNetworkProfile`, `SetVariableMonitoring`, `UnpublishFirmware`, `UpdateFirmware` (25) and `GetReport` (answered as above) |
 
 ### Reset
 
@@ -138,7 +140,8 @@ The specification wins over 1.6 parity. Each entry is either backed by a require
 | Heartbeat | Sent on a fixed period; it does not restart when other messages are sent | B04 |
 | Connector status | Reported by `StatusNotification` only; no `NotifyEvent` for `Connector.AvailabilityState` | G01 allows either |
 | Boot | At power-up and after a reset only; a reconnect with an accepted registration re-sends the statuses and the queue instead (unlike the 1.6 emulator) | B01.FR.03, B04 |
-| Local Authorization List, reservation | Not implemented; `RebootRequired` is not used | C, H |
+| Reservation | Not implemented; `RebootRequired` is not used | H |
+| Local Authorization List | At most 1000 tokens, 1000 entries and 262144 bytes per `SendLocalList`; a larger update is `Failed`. Entry expiry is honored (`SupportsExpiryDateTime` is `true`). With `LocalPreAuthorize` an entry that is not `Accepted` is sent to the CSMS, or refused locally when `DisablePostAuthorize` is `true` | C14.FR.03, D01 |
 | EVSE reset | `Reset` with an `evseId` is `Rejected` (`EVSE.AllowReset` is `false`) | B11.FR.09 |
 | `BasicAuthPassword` | Below 16 characters accepted with a warning | A00.FR.205, A00.FR.304 |
 | Unreadable frames | A CALL with the wrong number of elements or a non-string action, whose message id is readable, gets `RpcFrameworkError` (station and CSMS); other broken CALLs keep `FormatViolation`; a frame without a readable message id is dropped and logged instead of answered with message id `"-1"`, which the specification allows | OCPP-J 2.0.1 section 4.2.3 |
@@ -184,7 +187,7 @@ Test cases listed by title (`TC_G_06_CS`, `TC_G_08_CS`, `TC_G_10_CS`) follow the
 Not in the family:
 
 - `TC_E_41_CS`, `TC_E_42_CS`: the CSMS does not answer, so each attempt waits for the call timeout (30 s by default); `TC_E_50_CS` and `TC_E_51_CS` cover the same retry rule with CALLERROR answers.
-- Authorization cache and Local Authorization List cases (parts C and D), custom reports (`GetReport`), certificates, firmware, monitoring, reservation, smart charging and display messages: the station answers `NotSupported` or does not send the message.
+- Authorization cache and Local Authorization List cases (parts C and D; implemented, no scenario yet), custom reports (`GetReport`), certificates, firmware, monitoring, reservation, smart charging and display messages: the station answers `NotSupported` or does not send the message.
 
 ## CSMS side (`kirby-csms`)
 
