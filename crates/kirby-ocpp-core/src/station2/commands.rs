@@ -67,6 +67,10 @@ impl Station2Actor {
                 value,
             } => self.cmd_set_variable(component, variable, value, reply),
             Command2::SampleMeter { evse } => self.cmd_sample_meter(evse, reply),
+            Command2::SetExternalLimit { evse, limit } => {
+                self.cmd_set_external_limit(evse, &limit, reply);
+            }
+            Command2::ClearExternalLimit { evse } => self.cmd_clear_external_limit(evse, reply),
             Command2::ArmScriptedReply { reply: scripted } => {
                 self.cmd_arm_scripted_reply(scripted, reply);
             }

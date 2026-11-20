@@ -15,7 +15,8 @@
 //! `device_model`, `evse` and `status` (EVSEs, connectors, `StatusNotification`),
 //! `transactions` and `tx_queue` (transactions and the outbound event queue),
 //! `authorization`, `local_list` (the Local Authorization List), `remote`, `reservation` (reservations), `reset`, `security_events` (startup and reboot events), `scripted`
-//! (scenario replies) and `persistence`.
+//! (scenario replies), `smart_charging` (charging profiles and external limits) and
+//! `persistence`.
 
 mod actor;
 mod authorization;
@@ -35,6 +36,7 @@ mod reservation;
 mod reset;
 mod scripted;
 mod security_events;
+mod smart_charging;
 mod snapshot;
 mod status;
 mod transactions;
@@ -53,6 +55,7 @@ pub use self::evse::EvseAvail;
 pub use self::handle::Station2Handle;
 pub use self::local_list::{ListEntry, LocalListPersist};
 pub use self::reservation::{Reservation, ReservationPersist};
+pub use self::smart_charging::{SmartChargingPersist, StoredProfile2};
 pub use self::snapshot::{
     ConnectorSnapshot2, EvseSnapshot, Snapshot2, TransactionSnapshot, VariableView,
 };

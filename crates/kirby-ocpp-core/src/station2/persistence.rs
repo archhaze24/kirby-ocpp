@@ -18,7 +18,7 @@
 //!   file follows the same rule: one that cannot be read, or is newer, is never replaced.
 //!
 //! Restored: availability, device-model values, the authorization cache (expired entries are
-//! dropped), reservations, transactions in progress (their owner ends them after the boot is accepted), the
+//! dropped), reservations, charging profiles (except `TxProfile`s), transactions in progress (their owner ends them after the boot is accepted), the
 //! event queue (every entry flagged `offline`: the process was down), the stopped ids and the
 //! energy register of every EVSE.
 
@@ -128,6 +128,7 @@ impl Station2Actor {
         }
         self.restore_availability(persisted.station_operative, &persisted.evse_availability);
         self.restore_device_model(persisted.device_model);
+        self.sc_restore(persisted.charging_profiles);
         self.restore_auth_cache(persisted.auth_cache);
         self.restore_transactions(persisted.tx);
         self.restore_queue(persisted.queue);
@@ -148,6 +149,7 @@ impl Station2Actor {
             tx: self.persist_transactions(),
             queue: self.persist_queue(),
             reservations: self.reservations_persist(),
+            charging_profiles: self.sc_persist(),
             boot_count: self.persistence.boot_count,
             ..PersistedStation2::default()
         }

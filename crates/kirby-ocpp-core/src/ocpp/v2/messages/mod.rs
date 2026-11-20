@@ -13,6 +13,7 @@
 //! | `device_model` | `GetVariables`, `SetVariables`, `GetBaseReport`, `GetReport`, `NotifyReport` |
 //! | `local_list` | `SendLocalList`, `GetLocalListVersion` |
 //! | `reservation` | `ReserveNow`, `CancelReservation`, `ReservationStatusUpdate` |
+//! | `smart_charging` | `SetChargingProfile`, `ClearChargingProfile`, `GetChargingProfiles`, `ReportChargingProfiles`, `GetCompositeSchedule`, `NotifyChargingLimit`, `ClearedChargingLimit` |
 //! | `data_security` | `DataTransfer`, `SecurityEventNotification` |
 //!
 //! Each test block holds a table of fixtures that exercise every optional
@@ -47,6 +48,7 @@ mod device_model;
 mod local_list;
 mod remote_control;
 mod reservation;
+mod smart_charging;
 mod transactions;
 
 pub use authorization::{
@@ -89,6 +91,19 @@ pub use reservation::{
     CancelReservationStatus, ReservationStatusUpdate, ReservationStatusUpdateRequest,
     ReservationStatusUpdateResponse, ReservationUpdateStatus, ReserveNow, ReserveNowRequest,
     ReserveNowResponse, ReserveNowStatus,
+};
+pub use smart_charging::{
+    ChargingLimit, ChargingProfile, ChargingProfileCriterion, ChargingProfileKind,
+    ChargingProfilePurpose, ChargingProfileStatus, ChargingRateUnit, ChargingSchedule,
+    ChargingSchedulePeriod, ClearChargingProfile, ClearChargingProfileCriteria,
+    ClearChargingProfileRequest, ClearChargingProfileResponse, ClearChargingProfileStatus,
+    ClearedChargingLimit, ClearedChargingLimitRequest, ClearedChargingLimitResponse,
+    CompositeSchedule, CompositeScheduleStatus, GetChargingProfileStatus, GetChargingProfiles,
+    GetChargingProfilesRequest, GetChargingProfilesResponse, GetCompositeSchedule,
+    GetCompositeScheduleRequest, GetCompositeScheduleResponse, NotifyChargingLimit,
+    NotifyChargingLimitRequest, NotifyChargingLimitResponse, RecurrencyKind,
+    ReportChargingProfiles, ReportChargingProfilesRequest, ReportChargingProfilesResponse,
+    SetChargingProfile, SetChargingProfileRequest, SetChargingProfileResponse,
 };
 pub use transactions::{
     GetTransactionStatus, GetTransactionStatusRequest, GetTransactionStatusResponse, MeterValues,

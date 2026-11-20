@@ -422,8 +422,13 @@ async fn outbound_data_transfer_returns_the_answer() {
 #[tokio::test]
 async fn an_action_without_a_handler_is_not_supported() {
     let rig = Rig::new().await;
+    let get_log = json!({
+        "log": {"remoteLocation": "https://logs.example.com/upload"},
+        "logType": "DiagnosticsLog",
+        "requestId": 1,
+    });
     rig.csms
-        .expect_call_error("ClearChargingProfile", json!({}), &ErrorCode::NotSupported)
+        .expect_call_error("GetLog", get_log, &ErrorCode::NotSupported)
         .await
         .expect("NotSupported");
     rig.stop().await;

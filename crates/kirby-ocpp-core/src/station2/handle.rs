@@ -95,6 +95,21 @@ impl Station2Handle {
         self.send(Command2::Disconnect).await.map(drop)
     }
 
+    /// An external system limits `evse` (0 is the whole station); see
+    /// [`Command2::SetExternalLimit`]. Returns the answer of the CSMS to `NotifyChargingLimit`.
+    pub async fn set_external_limit(
+        &self,
+        evse: u32,
+        limit: serde_json::Value,
+    ) -> Result<Outcome2, StationError> {
+        self.send(Command2::SetExternalLimit { evse, limit }).await
+    }
+
+    /// The external system releases its limits on `evse`; see [`Command2::ClearExternalLimit`].
+    pub async fn clear_external_limit(&self, evse: u32) -> Result<Outcome2, StationError> {
+        self.send(Command2::ClearExternalLimit { evse }).await
+    }
+
     /// Asks the station to stop. `Err(Stopped)` if it already has.
     pub async fn shutdown(&self) -> Result<(), StationError> {
         self.send(Command2::Shutdown).await.map(drop)

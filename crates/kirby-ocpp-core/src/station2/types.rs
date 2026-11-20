@@ -66,4 +66,5 @@ pub enum LiveVar {
     EvsePower(u32),
     CertificateEntries,
     LocalListEntries,
+    SmartChargingEntries,
 }

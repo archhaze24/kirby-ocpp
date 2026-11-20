@@ -15,6 +15,7 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::actor::{Station2Actor, TimerKey2};
+use super::smart_charging::MAX_PROFILES;
 use super::snapshot::VariableView;
 use super::types::{ItemsPer, LiveVar, Reply2, StartStopPoint};
 use crate::config::StationConfig;
@@ -194,6 +195,7 @@ const AUTH: &str = "AuthCtrlr";
 const CACHE: &str = "AuthCacheCtrlr";
 const LOCAL_LIST: &str = "LocalAuthListCtrlr";
 const RESERVATION: &str = "ReservationCtrlr";
+const SMART: &str = "SmartChargingCtrlr";
 const TX: &str = "TxCtrlr";
 const SAMPLED: &str = "SampledDataCtrlr";
 const ALIGNED: &str = "AlignedDataCtrlr";
@@ -374,6 +376,30 @@ pub(crate) static TABLE: &[VarSpec] = &[
     flag(RESERVATION, "Enabled", "true").rw(),
     flag(RESERVATION, "Available", "true"),
     flag(RESERVATION, "NonEvseSpecific", "true"),
+    // SmartChargingCtrlr
+    flag(SMART, "Enabled", "true").rw(),
+    flag(SMART, "Available", "true"),
+    int(SMART, "Entries", Fixed("0"))
+        .at("ChargingProfiles")
+        .hi(MAX_PROFILES)
+        .live(LiveVar::SmartChargingEntries),
+    row(
+        SMART,
+        Scope::Station,
+        "LimitChangeSignificance",
+        DataType::Decimal,
+        Fixed("0"),
+    )
+    .rw()
+    .u("Percent")
+    .lo(0)
+    .hi(100),
+    int(SMART, "PeriodsPerSchedule", Fixed("24")).rw().lo(1),
+    int(SMART, "ProfileStackLevel", Fixed("10")).rw(),
+    members(SMART, "RateUnit", "A,W", "A,W").rw(),
+    flag(SMART, "ExternalControlSignalsEnabled", "true").rw(),
+    flag(SMART, "NotifyChargingLimitWithSchedules", "true").rw(),
+    flag(SMART, "ACPhaseSwitchingSupported", "false"),
     // AuthCacheCtrlr
     flag(CACHE, "Enabled", "true").rw(),
     int(CACHE, "LifeTime", Fixed("86400")).rw().u("s"),
@@ -1140,6 +1166,7 @@ impl Station2Actor {
             LiveVar::EvsePower(evse) => format!("{:.1}", self.evse_power_w(evse)),
             LiveVar::CertificateEntries => "0".into(),
             LiveVar::LocalListEntries => self.local_list_len().to_string(),
+            LiveVar::SmartChargingEntries => self.charging_profile_count().to_string(),
         }
     }
 
@@ -1411,6 +1438,36 @@ impl Station2Actor {
         usize::try_from(self.dm.uint(DEVICE, "ItemsPerMessage", Some(instance)))
             .unwrap_or(usize::MAX)
             .max(1)
+    }
+
+    /// `SmartChargingCtrlr.Enabled`.
+    pub(super) fn smart_charging_enabled(&self) -> bool {
+        self.dm.flag(SMART, "Enabled")
+    }
+
+    /// `SmartChargingCtrlr.ProfileStackLevel`: the highest accepted `stackLevel`.
+    pub(super) fn smart_stack_limit(&self) -> i32 {
+        i32::try_from(self.dm.uint(SMART, "ProfileStackLevel", None)).unwrap_or(i32::MAX)
+    }
+
+    /// `SmartChargingCtrlr.PeriodsPerSchedule`.
+    pub(super) fn smart_period_limit(&self) -> usize {
+        usize::try_from(self.dm.uint(SMART, "PeriodsPerSchedule", None)).unwrap_or(usize::MAX)
+    }
+
+    /// `SmartChargingCtrlr.RateUnit`: the rate units a schedule may use (`A`, `W`).
+    pub(super) fn smart_rate_units(&self) -> Vec<String> {
+        self.dm.list(SMART, "RateUnit")
+    }
+
+    /// `SmartChargingCtrlr.NotifyChargingLimitWithSchedules`.
+    pub(super) fn smart_notify_with_schedules(&self) -> bool {
+        self.dm.flag(SMART, "NotifyChargingLimitWithSchedules")
+    }
+
+    /// `SmartChargingCtrlr.ExternalControlSignalsEnabled`.
+    pub(super) fn smart_external_signals(&self) -> bool {
+        self.dm.flag(SMART, "ExternalControlSignalsEnabled")
     }
 
     /// `OCPPCommCtrlr.WebSocketPingInterval`; `None` is off.

@@ -15,7 +15,8 @@
 //!
 //! One file per topic: `device_model` (variables and reports), `availability`, `tx`
 //! (transaction status) and `control` (reset, trigger, unlock, cache, data transfer). The
-//! remote start and stop handlers live in `remote`.
+//! remote start and stop handlers live in `remote`, the charging profile handlers in
+//! `smart_charging`.
 
 #![allow(
     clippy::needless_pass_by_value,
@@ -32,13 +33,15 @@ use super::link::sanitize;
 use super::local_list;
 use super::remote;
 use super::reservation;
+use super::smart_charging;
 use crate::ocpp::action::{Action, InboundAction};
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::responder::{ReplyHandle, Responder};
 use crate::ocpp::v2::messages::{
-    CancelReservation, ChangeAvailability, ClearCache, DataTransfer, GetBaseReport,
-    GetLocalListVersion, GetReport, GetTransactionStatus, GetVariables, RequestStartTransaction,
-    RequestStopTransaction, ReserveNow, Reset, SendLocalList, SetVariables, TriggerMessage,
+    CancelReservation, ChangeAvailability, ClearCache, ClearChargingProfile, DataTransfer,
+    GetBaseReport, GetChargingProfiles, GetCompositeSchedule, GetLocalListVersion, GetReport,
+    GetTransactionStatus, GetVariables, RequestStartTransaction, RequestStopTransaction,
+    ReserveNow, Reset, SendLocalList, SetChargingProfile, SetVariables, TriggerMessage,
     UnlockConnector,
 };
 use crate::ocpp::v2::registry::unhandled_error_code_for;
@@ -50,6 +53,10 @@ type Handler<A> = fn(&mut Station2Actor, Responder<A>, <A as Action>::Req);
 
 impl Station2Actor {
     /// Routes an incoming CALL to its handler.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per handled action, each a one-line route"
+    )]
     pub(super) fn dispatch_incoming(&mut self, call: IncomingCall) {
         let IncomingCall {
             action,
@@ -122,6 +129,34 @@ impl Station2Actor {
             ReserveNow::NAME => self.invoke::<ReserveNow>(payload, reply, reservation::reserve_now),
             CancelReservation::NAME => {
                 self.invoke::<CancelReservation>(payload, reply, reservation::cancel_reservation);
+            }
+            SetChargingProfile::NAME => {
+                self.invoke::<SetChargingProfile>(
+                    payload,
+                    reply,
+                    smart_charging::set_charging_profile,
+                );
+            }
+            ClearChargingProfile::NAME => {
+                self.invoke::<ClearChargingProfile>(
+                    payload,
+                    reply,
+                    smart_charging::clear_charging_profile,
+                );
+            }
+            GetChargingProfiles::NAME => {
+                self.invoke::<GetChargingProfiles>(
+                    payload,
+                    reply,
+                    smart_charging::get_charging_profiles,
+                );
+            }
+            GetCompositeSchedule::NAME => {
+                self.invoke::<GetCompositeSchedule>(
+                    payload,
+                    reply,
+                    smart_charging::get_composite_schedule,
+                );
             }
             ClearCache::NAME => self.invoke::<ClearCache>(payload, reply, control::clear_cache),
             DataTransfer::NAME => {

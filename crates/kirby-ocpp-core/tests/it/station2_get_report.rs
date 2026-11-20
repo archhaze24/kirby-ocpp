@@ -22,7 +22,7 @@ use crate::station2_support::{STEP, calls_of, v201_csms, wait_booted};
 const VERSIONS: [Protocol; 2] = [Protocol::V201, Protocol::V21];
 
 /// Every component of the device model, in report order.
-const ALL_COMPONENTS: [&str; 14] = [
+const ALL_COMPONENTS: [&str; 15] = [
     "AlignedDataCtrlr",
     "AuthCacheCtrlr",
     "AuthCtrlr",
@@ -36,6 +36,7 @@ const ALL_COMPONENTS: [&str; 14] = [
     "ReservationCtrlr",
     "SampledDataCtrlr",
     "SecurityCtrlr",
+    "SmartChargingCtrlr",
     "TxCtrlr",
 ];
 

@@ -41,7 +41,8 @@ use crate::station::reservation::Reservation;
 use crate::station::security::PendingSecurityEvent;
 use crate::station::transaction::TransactionState;
 use crate::station2::{
-    AuthCachePersist, DeviceModelPersist, EvseAvail, QueuePersist, ReservationPersist, TxPersist,
+    AuthCachePersist, DeviceModelPersist, EvseAvail, QueuePersist, ReservationPersist,
+    SmartChargingPersist, TxPersist,
 };
 
 /// Current on-disk format version.
@@ -162,6 +163,8 @@ pub struct PersistedStation2 {
     pub queue: QueuePersist,
     /// Reservations (added without a version bump: a file without them loads as none).
     pub reservations: ReservationPersist,
+    /// Charging profiles (added without a version bump: a file without them loads as none).
+    pub charging_profiles: SmartChargingPersist,
     /// How many times the station booted.
     pub boot_count: u64,
 }
@@ -189,6 +192,7 @@ impl Default for PersistedStation2 {
             tx: TxPersist::default(),
             queue: QueuePersist::default(),
             reservations: ReservationPersist::default(),
+            charging_profiles: SmartChargingPersist::default(),
             boot_count: 0,
         }
     }

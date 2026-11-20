@@ -20,6 +20,7 @@ mod station2_persistence;
 mod station2_remote;
 mod station2_reservation;
 mod station2_scripted_reply;
+mod station2_smart_charging;
 mod station2_status;
 mod station2_support;
 mod station2_transactions;

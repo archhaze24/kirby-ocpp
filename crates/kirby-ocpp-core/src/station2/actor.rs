@@ -71,6 +71,8 @@ pub(crate) enum TimerKey2 {
     ReportChunk,
     /// The earliest reservation expires.
     ReservationExpiry,
+    /// The next `ReportChargingProfiles` is due.
+    ProfileReport,
 }
 
 /// Completions and log messages delivered to the actor loop.
@@ -123,6 +125,8 @@ pub(crate) struct Station2Actor {
     pub(super) local_list: super::local_list::LocalListPersist,
     /// The reservations.
     pub(super) reservations: super::reservation::ReservationState,
+    /// The charging profiles.
+    pub(super) charging: super::smart_charging::SmartCharging,
     pub(super) reset: Option<ResetPlan>,
     pub(super) persistence: Persistence2,
     /// Answers armed by scenario `reply` steps (runtime only, see `scripted`).
@@ -172,6 +176,7 @@ impl Station2Actor {
             auth: AuthState::default(),
             local_list: super::local_list::LocalListPersist::default(),
             reservations: super::reservation::ReservationState::default(),
+            charging: super::smart_charging::SmartCharging::default(),
             reset: None,
             persistence,
             scripted_replies: ReplyList::default(),

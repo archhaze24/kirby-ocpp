@@ -89,6 +89,16 @@ pub enum Command2 {
     /// Take one meter sample on an EVSE as the periodic timer would: inside a transaction an
     /// `Updated` event with trigger reason `MeterValuePeriodic`, outside one a `MeterValues`.
     SampleMeter { evse: u32 },
+    /// An external system (an energy management system) limits `evse`; 0 is the whole
+    /// station. `limit` is a `ChargingScheduleType`, or a whole `ChargingProfileType` (its
+    /// purpose becomes `ChargingStationExternalConstraints`). The limit is in force at once;
+    /// the CSMS is told with `NotifyChargingLimit` (carrying the schedule when
+    /// `SmartChargingCtrlr.NotifyChargingLimitWithSchedules` is true) and the command
+    /// completes with its answer.
+    SetExternalLimit { evse: u32, limit: Value },
+    /// The external system releases its limits on `evse`; the CSMS is told with
+    /// `ClearedChargingLimit`.
+    ClearExternalLimit { evse: u32 },
     /// Arm an answer for the next inbound CALLs of one action (a scenario `reply` step). See
     /// [`crate::station::scripted_reply`]; the action name is checked against the 2.0.1
     /// registry.
@@ -125,6 +135,8 @@ impl Command2 {
             Self::SendRaw { .. } => "send_raw",
             Self::SetVariable { .. } => "set_variable",
             Self::SampleMeter { .. } => "sample_meter",
+            Self::SetExternalLimit { .. } => "set_external_limit",
+            Self::ClearExternalLimit { .. } => "clear_external_limit",
             Self::ArmScriptedReply { .. } => "arm_scripted_reply",
             Self::ClearScriptedReplies => "clear_scripted_replies",
             Self::Shutdown => "shutdown",

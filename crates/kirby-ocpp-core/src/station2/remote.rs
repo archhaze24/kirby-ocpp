@@ -205,12 +205,28 @@ pub(super) fn request_start_transaction(
             return;
         }
     };
-    if request.charging_profile.is_some() {
+    // K05: a charging profile must be a valid TxProfile; it takes effect with the transaction.
+    actor.sc_forget_pending(evse);
+    if let Some(profile) = &request.charging_profile
+        && let Err(info) = actor.sc_remote_start_profile(evse, profile, request.remote_start_id)
+    {
         actor.log(
-            LogLevel::Warn,
-            "RequestStartTransaction: the charging profile is ignored (no smart charging)"
-                .to_owned(),
+            LogLevel::Info,
+            format!(
+                "RequestStartTransaction rejected: {}",
+                sanitize(&info.reason_code)
+            ),
         );
+        actor.respond(
+            responder,
+            RequestStartTransactionResponse {
+                status: RequestStartStopStatus::Rejected,
+                status_info: Some(info),
+                transaction_id: None,
+                custom_data: None,
+            },
+        );
+        return;
     }
     // F01.FR.13: the id of a transaction that exists already.
     let transaction_id = actor.active_tx(evse).map(|tx| tx.id.0.clone());

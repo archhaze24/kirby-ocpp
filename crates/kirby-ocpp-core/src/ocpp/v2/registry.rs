@@ -77,7 +77,7 @@ const fn send(name: &'static str, direction: ActionDirection) -> ActionInfo {
 }
 
 /// All 64 actions in byte-wise alphabetical order: 24 sent by the station, 39 by the CSMS
-/// and `DataTransfer` by either. 26 of them are typed.
+/// and `DataTransfer` by either. 33 of them are typed.
 pub const ACTIONS: [ActionInfo; 64] = [
     info("Authorize", STATION, true),
     info("BootNotification", STATION, true),
@@ -85,10 +85,10 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("CertificateSigned", CSMS, false),
     info("ChangeAvailability", CSMS, true),
     info("ClearCache", CSMS, true),
-    info("ClearChargingProfile", CSMS, false),
+    info("ClearChargingProfile", CSMS, true),
     info("ClearDisplayMessage", CSMS, false),
     info("ClearVariableMonitoring", CSMS, false),
-    info("ClearedChargingLimit", STATION, false),
+    info("ClearedChargingLimit", STATION, true),
     info("CostUpdated", CSMS, false),
     info("CustomerInformation", CSMS, false),
     info("DataTransfer", ActionDirection::Both, true),
@@ -97,8 +97,8 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("Get15118EVCertificate", STATION, false),
     info("GetBaseReport", CSMS, true),
     info("GetCertificateStatus", STATION, false),
-    info("GetChargingProfiles", CSMS, false),
-    info("GetCompositeSchedule", CSMS, false),
+    info("GetChargingProfiles", CSMS, true),
+    info("GetCompositeSchedule", CSMS, true),
     info("GetDisplayMessages", CSMS, false),
     info("GetInstalledCertificateIds", CSMS, false),
     info("GetLocalListVersion", CSMS, true),
@@ -111,7 +111,7 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("InstallCertificate", CSMS, false),
     info("LogStatusNotification", STATION, false),
     info("MeterValues", STATION, true),
-    info("NotifyChargingLimit", STATION, false),
+    info("NotifyChargingLimit", STATION, true),
     info("NotifyCustomerInformation", STATION, false),
     info("NotifyDisplayMessages", STATION, false),
     info("NotifyEVChargingNeeds", STATION, false),
@@ -121,7 +121,7 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("NotifyReport", STATION, true),
     info("PublishFirmware", CSMS, false),
     info("PublishFirmwareStatusNotification", STATION, false),
-    info("ReportChargingProfiles", STATION, false),
+    info("ReportChargingProfiles", STATION, true),
     info("RequestStartTransaction", CSMS, true),
     info("RequestStopTransaction", CSMS, true),
     info("ReservationStatusUpdate", STATION, true),
@@ -129,7 +129,7 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("Reset", CSMS, true),
     info("SecurityEventNotification", STATION, true),
     info("SendLocalList", CSMS, true),
-    info("SetChargingProfile", CSMS, false),
+    info("SetChargingProfile", CSMS, true),
     info("SetDisplayMessage", CSMS, false),
     info("SetMonitoringBase", CSMS, false),
     info("SetMonitoringLevel", CSMS, false),
@@ -161,12 +161,12 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("ChangeAvailability", CSMS, true),
     info("ChangeTransactionTariff", CSMS, false),
     info("ClearCache", CSMS, true),
-    info("ClearChargingProfile", CSMS, false),
+    info("ClearChargingProfile", CSMS, true),
     info("ClearDERControl", CSMS, false),
     info("ClearDisplayMessage", CSMS, false),
     info("ClearTariffs", CSMS, false),
     info("ClearVariableMonitoring", CSMS, false),
-    info("ClearedChargingLimit", STATION, false),
+    info("ClearedChargingLimit", STATION, true),
     info("ClosePeriodicEventStream", STATION, false),
     info("CostUpdated", CSMS, false),
     info("CustomerInformation", CSMS, false),
@@ -177,8 +177,8 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("GetBaseReport", CSMS, true),
     info("GetCertificateChainStatus", STATION, false),
     info("GetCertificateStatus", STATION, false),
-    info("GetChargingProfiles", CSMS, false),
-    info("GetCompositeSchedule", CSMS, false),
+    info("GetChargingProfiles", CSMS, true),
+    info("GetCompositeSchedule", CSMS, true),
     info("GetDERControl", CSMS, false),
     info("GetDisplayMessages", CSMS, false),
     info("GetInstalledCertificateIds", CSMS, false),
@@ -195,7 +195,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("LogStatusNotification", STATION, false),
     info("MeterValues", STATION, true),
     info("NotifyAllowedEnergyTransfer", CSMS, false),
-    info("NotifyChargingLimit", STATION, false),
+    info("NotifyChargingLimit", STATION, true),
     info("NotifyCustomerInformation", STATION, false),
     info("NotifyDERAlarm", STATION, false),
     info("NotifyDERStartStop", STATION, false),
@@ -213,7 +213,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("PublishFirmware", CSMS, false),
     info("PublishFirmwareStatusNotification", STATION, false),
     info("PullDynamicScheduleUpdate", STATION, false),
-    info("ReportChargingProfiles", STATION, false),
+    info("ReportChargingProfiles", STATION, true),
     info("ReportDERControl", STATION, false),
     info("RequestBatterySwap", CSMS, false),
     info("RequestStartTransaction", CSMS, true),
@@ -223,7 +223,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("Reset", CSMS, true),
     info("SecurityEventNotification", STATION, true),
     info("SendLocalList", CSMS, true),
-    info("SetChargingProfile", CSMS, false),
+    info("SetChargingProfile", CSMS, true),
     info("SetDERControl", CSMS, false),
     info("SetDefaultTariff", CSMS, false),
     info("SetDisplayMessage", CSMS, false),
@@ -345,6 +345,9 @@ mod tests {
             station_sent::<m::SecurityEventNotification>(),
             station_sent::<m::DataTransfer>(),
             station_sent::<m::ReservationStatusUpdate>(),
+            station_sent::<m::ReportChargingProfiles>(),
+            station_sent::<m::NotifyChargingLimit>(),
+            station_sent::<m::ClearedChargingLimit>(),
         ];
         let inbound = vec![
             csms_sent::<m::Reset>(),
@@ -364,6 +367,10 @@ mod tests {
             csms_sent::<m::GetLocalListVersion>(),
             csms_sent::<m::ReserveNow>(),
             csms_sent::<m::CancelReservation>(),
+            csms_sent::<m::SetChargingProfile>(),
+            csms_sent::<m::ClearChargingProfile>(),
+            csms_sent::<m::GetChargingProfiles>(),
+            csms_sent::<m::GetCompositeSchedule>(),
         ];
         (outbound, inbound)
     }
@@ -394,7 +401,7 @@ mod tests {
             .filter(|entry| entry.typed)
             .map(|entry| entry.name)
             .collect();
-        assert_eq!(typed.len(), 26);
+        assert_eq!(typed.len(), 33);
         let markers: BTreeSet<&str> = outbound.iter().chain(&inbound).copied().collect();
         assert_eq!(markers, typed);
         for name in &typed {

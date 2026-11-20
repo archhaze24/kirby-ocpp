@@ -63,7 +63,7 @@ use crate::ocpp::v2::types::{
     StopReason, Transaction, UnitOfMeasure,
 };
 use crate::station::LogLevel;
-use crate::station::metering::{PowerModel, clock_aligned_delay, energy_wh_for};
+use crate::station::metering::{PowerModel, clock_aligned_delay};
 
 /// Stopped transaction ids kept for `GetTransactionStatus`.
 const STOPPED_HISTORY: usize = 64;
@@ -199,6 +199,8 @@ impl IntervalSamples {
 struct MeterRt {
     register_wh: f64,
     last: Option<Instant>,
+    /// The station clock at `last`: where the profiles of the next span are looked up.
+    last_utc: Option<DateTime<Utc>>,
     /// The EVSE was charging at `last`.
     charging: bool,
 }
@@ -346,10 +348,21 @@ impl Station2Actor {
             .get(&evse)
             .is_some_and(|tx| tx.charging_state == ChargingState::Charging);
         if charging {
-            PowerModel::from_config(&self.config).nominal_w
+            self.sc_offered_w(evse)
         } else {
             0.0
         }
+    }
+
+    /// How many EVSEs draw power now: they share the limit of a max profile.
+    pub(super) fn charging_evse_count(&self) -> u32 {
+        let count = self
+            .tx
+            .active
+            .values()
+            .filter(|tx| tx.charging_state == ChargingState::Charging)
+            .count();
+        u32::try_from(count).unwrap_or(u32::MAX)
     }
 
     /// The token that authorizes `evse` now: of the running transaction, or of an
@@ -410,7 +423,7 @@ impl Station2Actor {
     /// Adds the energy of the time that passed to every running meter.
     pub(super) fn settle_tx_meters(&mut self) {
         let now = Instant::now();
-        let power = PowerModel::from_config(&self.config).nominal_w;
+        let now_utc = self.clock.now_utc();
         let ids: Vec<u32> = self.evses.iter().map(|e| e.id).collect();
         for id in ids {
             let charging_now = self
@@ -418,16 +431,27 @@ impl Station2Actor {
                 .active
                 .get(&id)
                 .is_some_and(|tx| tx.charging_state == ChargingState::Charging);
-            let meter = self.tx.meters.entry(id).or_default();
-            if let (Some(last), true) = (meter.last, meter.charging) {
-                let wh = energy_wh_for(power, now.saturating_duration_since(last));
-                meter.register_wh += wh;
-                if let Some(tx) = self.tx.active.get_mut(&id) {
-                    tx.energy_wh += wh;
+            let (last, was_charging, last_utc) = {
+                let meter = self.tx.meters.entry(id).or_default();
+                (meter.last, meter.charging, meter.last_utc)
+            };
+            // The energy follows the charging profiles in force during the span.
+            let wh = match (last, was_charging) {
+                (Some(last), true) => {
+                    let elapsed = now.saturating_duration_since(last);
+                    let from = last_utc.unwrap_or(now_utc);
+                    self.sc_energy_wh(id, from, elapsed)
                 }
-            }
+                _ => 0.0,
+            };
+            let meter = self.tx.meters.entry(id).or_default();
+            meter.register_wh += wh;
             meter.last = Some(now);
+            meter.last_utc = Some(now_utc);
             meter.charging = charging_now;
+            if let Some(tx) = self.tx.active.get_mut(&id) {
+                tx.energy_wh += wh;
+            }
         }
         if !self.tx.active.is_empty() && self.tx.seen_intervals != Some(self.meter_intervals()) {
             self.rearm_meter_timers();
@@ -479,7 +503,7 @@ impl Station2Actor {
                         (Number::from(whole_wh(register)), "Wh")
                     }
                     Measurand::PowerActiveImport => (decimal(power)?, "W"),
-                    Measurand::PowerOffered => (decimal(model.nominal_w)?, "W"),
+                    Measurand::PowerOffered => (decimal(self.sc_offered_w(evse))?, "W"),
                     Measurand::CurrentImport => (decimal(model.watts_to_amps(power))?, "A"),
                     Measurand::Voltage => (decimal(model.voltage_v)?, "V"),
                     _ => return None,
@@ -914,6 +938,7 @@ impl Station2Actor {
         });
         self.tx.pending.remove(&evse);
         self.tx.groups.remove(&evse);
+        self.sc_tx_started(evse, &id.0, spec.remote_start_id);
         self.tx.active.insert(
             evse,
             ActiveTx {
@@ -1503,6 +1528,8 @@ impl Station2Actor {
         // The transaction is gone before the queue is written, so a saved state never holds
         // both the transaction and its `Ended` event.
         if let Some(tx) = self.tx.active.remove(&evse) {
+            // K01.FR.04: the profiles of the transaction end with it.
+            self.sc_tx_ended(&tx.id.0);
             self.tx.stopped.push_back(tx.id.0);
             while self.tx.stopped.len() > STOPPED_HISTORY {
                 self.tx.stopped.pop_front();
