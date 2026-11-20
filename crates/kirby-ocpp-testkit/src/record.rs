@@ -18,6 +18,20 @@ pub struct Received {
     pub payload: Value,
 }
 
+/// A text frame that a charge point sent to the mock CSMS, exactly as received. Unlike
+/// [`Received`] this covers every frame type (CALLRESULT, CALLERROR, and the OCPP 2.1
+/// CALLRESULTERROR and SEND) and malformed text. Parse it with
+/// `Frame::parse_for(protocol, &frame.text)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReceivedFrame {
+    /// When the frame was received.
+    pub ts: DateTime<Utc>,
+    /// Id of the connection it arrived on (see [`ConnectionInfo::id`]).
+    pub connection: u64,
+    /// The raw WebSocket text.
+    pub text: String,
+}
+
 /// A WebSocket connection accepted by the mock CSMS.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectionInfo {

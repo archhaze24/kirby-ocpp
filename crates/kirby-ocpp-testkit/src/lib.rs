@@ -10,7 +10,9 @@
 //! * script failures for the next N occurrences of an action with [`Fault`]
 //!   (CALLERROR, silence, socket close, invalid payload),
 //! * send CSMS-originated CALLs to the charge point with [`MockCsms::send_call`],
-//! * drop or count connections, and check subprotocol negotiation and mTLS.
+//! * drop or count connections, and check subprotocol negotiation and mTLS,
+//! * send any raw frame with [`MockCsms::send_raw`] and inspect every frame the charge point
+//!   sent with [`MockCsms::received_frames`] (OCPP 2.1 SEND and CALLRESULTERROR included).
 //!
 //! The canned answers follow the subprotocol negotiated on each connection: `ocpp1.6` (also
 //! the fallback when none was selected) or `ocpp2.0.1`. Serve 2.0.1 by setting
@@ -71,6 +73,6 @@ pub use kirby_csms_core::{SubprotocolPolicy, TransactionIds};
 pub use kirby_ocpp_core::ocpp::{ErrorCode, Frame};
 pub use net::{refused_addr, refused_url};
 pub use options::CsmsOptions;
-pub use record::{ConnectionInfo, Received};
+pub use record::{ConnectionInfo, Received, ReceivedFrame};
 pub use server::MockCsms;
 pub use tls::{TlsMaterial, TlsOpts};

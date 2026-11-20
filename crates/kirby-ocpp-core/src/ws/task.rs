@@ -47,13 +47,30 @@ const fn protocol_label(protocol: Protocol) -> &'static str {
 const ABNORMAL_CLOSE: u16 = 1006;
 /// Close code of a normal, client-initiated close.
 const NORMAL_CLOSE: u16 = 1000;
+/// Longest `errorDescription` of a CALLRESULTERROR, in characters (OCPP 2.1 Part 4, table 7).
+const MAX_ERROR_DESCRIPTION: usize = 255;
 /// How long a close handshake may take before the socket is dropped.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Requests from [`super::Connection`] handles to the task.
 pub(super) enum Command {
     Call(OutboundCall),
+    /// An OCPP 2.1 SEND, written at once (it never waits for the CALL queue).
+    Send(OutboundSend),
     Close,
+}
+
+/// A SEND to write.
+pub(super) struct OutboundSend {
+    pub id: String,
+    pub action: String,
+    pub payload: Value,
+}
+
+/// A fresh message id for a CALL or SEND. CALL and SEND ids come from the same generator,
+/// so they never repeat (OCPP 2.1 Part 4, 4.1.4).
+pub(super) fn new_message_id() -> String {
+    Uuid::new_v4().to_string()
 }
 
 /// A CALL waiting for its turn on the wire.
@@ -202,6 +219,15 @@ impl Task {
                 self.queue.push_back(call);
                 self.pump(sink).await
             }
+            Step::Command(Some(Command::Send(send))) => {
+                let OutboundSend {
+                    id,
+                    action,
+                    payload,
+                } = send;
+                let frame = Frame::send(id, action.clone(), payload);
+                self.write(frame, Some(action), sink).await
+            }
             Step::Command(Some(Command::Close) | None) => Err(Stop::Requested),
             Step::Reply(Some(frame)) => self.reply(frame, sink).await,
             Step::Reply(None) => Ok(()),
@@ -244,7 +270,7 @@ impl Task {
                 timeout,
                 reply,
             } = call;
-            let id = Uuid::new_v4().to_string();
+            let id = new_message_id();
             let frame = Frame::call(id.clone(), action.clone(), payload);
             if let Err(stop) = self.write(frame, Some(action.clone()), sink).await {
                 let _ = reply.send(Err(CallError::Closed {
@@ -352,7 +378,8 @@ impl Task {
     where
         W: Sink<Message, Error = WsError> + Unpin,
     {
-        let frame = match Frame::parse(text) {
+        let protocol = self.schemas.registry().protocol();
+        let frame = match Frame::parse_for(protocol, text) {
             Ok(frame) => frame,
             Err(error) => {
                 let record = FrameRecord {
@@ -364,7 +391,7 @@ impl Task {
                 };
                 self.emit(ConnectionEvent::Frame(record)).await?;
                 self.warn(error.to_string()).await?;
-                return match error.reply_for(self.schemas.registry().protocol()) {
+                return match error.reply_for(protocol) {
                     Some(reply) => self.write(reply, None, sink).await,
                     None => Ok(()),
                 };
@@ -372,7 +399,7 @@ impl Task {
         };
 
         let action = match &frame {
-            Frame::Call { action, .. } => Some(action.clone()),
+            Frame::Call { action, .. } | Frame::Send { action, .. } => Some(action.clone()),
             other => self
                 .pending
                 .get(other.id())
@@ -400,7 +427,50 @@ impl Task {
                 description,
                 details,
             } => self.call_error(&id, code, description, details, sink).await,
+            Frame::Send {
+                id,
+                action,
+                payload,
+            } => self.incoming_send(id, action, payload).await,
+            Frame::CallResultError {
+                id,
+                code,
+                description,
+                details,
+            } => {
+                // Never answered (an error about an error would loop).
+                self.emit(ConnectionEvent::CallResultError {
+                    id,
+                    code,
+                    description,
+                    details,
+                })
+                .await
+            }
         }
+    }
+
+    /// Validates a CSMS SEND. A valid one is delivered; an invalid one or an unknown action
+    /// is dropped with a warning. A SEND is never answered, not even with an error.
+    async fn incoming_send(&self, id: String, action: String, payload: Value) -> Flow {
+        let schemas = self.schemas.registry();
+        if let Err(violation) = schemas.validate_send(&action, &payload) {
+            let label = protocol_label(schemas.protocol());
+            let reason = if schemas.knows_send(&action) {
+                violation.errors.join("; ")
+            } else {
+                format!("{action} is not an {label} SEND message")
+            };
+            return self
+                .warn(format!("dropped SEND {id} ({action}): {reason}"))
+                .await;
+        }
+        self.emit(ConnectionEvent::Send {
+            id,
+            action,
+            payload,
+        })
+        .await
     }
 
     /// Validates a CSMS CALL. Invalid ones are answered here; valid ones are delivered.
@@ -471,6 +541,8 @@ impl Task {
             debug!(message_id = %id, "CALLRESULT for an unknown or expired CALL ignored");
             return Ok(());
         };
+        let protocol = self.schemas.registry().protocol();
+        let mut rejection = None;
         let result = match self
             .schemas
             .registry()
@@ -478,16 +550,32 @@ impl Task {
         {
             Ok(()) => Ok(payload),
             Err(violation) => {
-                let label = protocol_label(self.schemas.registry().protocol());
+                let label = protocol_label(protocol);
                 self.warn(format!(
                     "CALLRESULT for {} violates the {label} schema: {violation}",
                     pending.action
                 ))
                 .await?;
+                // OCPP 2.1 tells the sender its response could not be processed.
+                if protocol == Protocol::V21 {
+                    rejection = Some(Frame::call_result_error(
+                        id,
+                        violation.error_code_for(protocol),
+                        violation
+                            .errors
+                            .join("; ")
+                            .chars()
+                            .take(MAX_ERROR_DESCRIPTION)
+                            .collect::<String>(),
+                    ));
+                }
                 Err(CallError::Schema(violation))
             }
         };
         let _ = pending.reply.send(result);
+        if let Some(frame) = rejection {
+            self.write(frame, Some(pending.action), sink).await?;
+        }
         self.pump(sink).await
     }
 

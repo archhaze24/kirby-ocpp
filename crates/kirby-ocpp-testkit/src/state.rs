@@ -18,7 +18,7 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::error::{TestkitError, TestkitResult};
 use crate::options::CsmsOptions;
-use crate::record::{ConnectionInfo, Received, charge_point_id_from_path};
+use crate::record::{ConnectionInfo, Received, ReceivedFrame, charge_point_id_from_path};
 
 /// Close code used for injected and dropped connections.
 pub(crate) const CLOSE_CODE_ERROR: u16 = 1011;
@@ -40,6 +40,8 @@ pub(crate) struct Pending {
 
 pub(crate) struct State {
     pub(crate) received: Vec<Received>,
+    /// Every inbound text frame, raw, in arrival order.
+    pub(crate) frames: Vec<ReceivedFrame>,
     pub(crate) connections: Vec<ConnectionInfo>,
     pub(crate) next_connection_id: u64,
     /// Open connections. The highest id is the "current" connection that
@@ -115,6 +117,7 @@ impl Shared {
         Self {
             state: Mutex::new(State {
                 received: Vec::new(),
+                frames: Vec::new(),
                 connections: Vec::new(),
                 next_connection_id: 0,
                 open: BTreeMap::new(),
@@ -245,7 +248,13 @@ impl Shared {
     /// Handles one inbound text frame from `connection`. Returns the frame to send back, if any.
     pub(crate) fn handle_inbound(&self, connection: u64, text: &str) -> Option<Outbound> {
         let protocol = self.protocol_of(connection);
-        match Frame::parse(text) {
+        self.lock().frames.push(ReceivedFrame {
+            ts: Utc::now(),
+            connection,
+            text: text.to_owned(),
+        });
+        self.notify();
+        match Frame::parse_for(protocol, text) {
             Ok(Frame::Call {
                 id,
                 action,

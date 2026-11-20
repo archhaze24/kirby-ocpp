@@ -17,6 +17,11 @@
 //! * Incoming CALLs are validated, then delivered as [`ConnectionEvent::Call`]
 //!   with a [`ReplyHandle`] (one-shot, see [`crate::ocpp::responder`]). Invalid
 //!   ones are answered by the task itself and never reach the station.
+//! * On an OCPP 2.1 connection ([`ConnectOptions::schemas`]) the task also handles the
+//!   message types 5 and 6. Incoming SEND and CALLRESULTERROR frames are delivered as
+//!   [`ConnectionEvent::Send`] and [`ConnectionEvent::CallResultError`] and never answered.
+//!   A CALLRESULT that fails its schema is answered with a CALLRESULTERROR.
+//!   [`Connection::send_unconfirmed`] writes a SEND without waiting behind the CALL queue.
 //! * On close, every pending and queued CALL fails with [`CallError::Closed`],
 //!   and outstanding reply handles are invalidated.
 //! * The WebSocket URL is `<base>/<percent-encoded id>` built by
@@ -61,7 +66,7 @@ use crate::error::CallError;
 use crate::ocpp::action::OutboundAction;
 use crate::ocpp::frame::FrameRecord;
 use crate::ocpp::responder::ReplyHandle;
-use crate::ocpp::{Protocol, SchemaError, SchemaRegistry};
+use crate::ocpp::{ErrorCode, Protocol, SchemaError, SchemaRegistry, SchemaViolation};
 
 /// Bounded capacity of the event channel.
 const EVENT_CAPACITY: usize = 64;
@@ -194,6 +199,21 @@ pub enum ConnectionEvent {
     Frame(FrameRecord),
     /// A schema-valid CALL from the CSMS awaiting a reply.
     Call(IncomingCall),
+    /// A schema-valid SEND from the CSMS (OCPP 2.1 only). SEND is never answered. Invalid
+    /// ones and unknown actions are dropped with a [`ConnectionEvent::ProtocolWarning`].
+    Send {
+        id: String,
+        action: String,
+        payload: Value,
+    },
+    /// The CSMS could not process a CALLRESULT of ours and said so (OCPP 2.1 only). Never
+    /// answered; the CALL it concerns has been answered already.
+    CallResultError {
+        id: String,
+        code: ErrorCode,
+        description: String,
+        details: Value,
+    },
     /// A protocol problem that did not close the socket (malformed frame, CALLRESULT
     /// for an unknown id, ...). Informational.
     ProtocolWarning(String),
@@ -253,6 +273,21 @@ pub enum ConnectError {
     Timeout,
 }
 
+/// Why [`Connection::send_unconfirmed`] refused a SEND.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum SendError {
+    /// The socket is closed.
+    #[error("not connected to the central system")]
+    NotConnected,
+    /// SEND exists in OCPP 2.1 only.
+    #[error("SEND messages need OCPP 2.1, this connection uses {}", .protocol.token())]
+    Unsupported { protocol: Protocol },
+    /// The action is not a SEND message of this version, or the payload violates its schema.
+    #[error(transparent)]
+    Schema(#[from] SchemaViolation),
+}
+
 /// Cloneable handle to an open connection.
 ///
 /// Dropping the last handle closes the connection gracefully.
@@ -304,7 +339,7 @@ impl Connection {
         };
         (connection, move || match receiver.try_recv().unwrap() {
             task::Command::Call(call) => call.reply,
-            task::Command::Close => panic!("expected a queued CALL"),
+            task::Command::Close | task::Command::Send(_) => panic!("expected a queued CALL"),
         })
     }
 
@@ -432,6 +467,38 @@ impl Connection {
             .send(task::Command::Call(call))
             .map_err(|_| CallError::NotConnected)?;
         Ok(PendingReply(response))
+    }
+
+    /// Sends a SEND (OCPP 2.1 message type 6): an unconfirmed message that is never
+    /// answered. The payload is validated first. The frame is written as soon as the
+    /// connection task reaches this command: it does not wait behind queued CALLs or for the
+    /// answer to the CALL in flight. Returns the message id, drawn from the same generator as
+    /// CALL ids so the two never repeat.
+    ///
+    /// # Errors
+    /// [`SendError::Unsupported`] on an OCPP 1.6J or 2.0.1 connection, [`SendError::Schema`]
+    /// for an action that is no SEND message or a payload that violates its schema,
+    /// [`SendError::NotConnected`] when the socket is closed.
+    pub fn send_unconfirmed(&self, action: &str, payload: Value) -> Result<String, SendError> {
+        let registry = self.schemas.registry();
+        if registry.protocol() != Protocol::V21 {
+            return Err(SendError::Unsupported {
+                protocol: registry.protocol(),
+            });
+        }
+        if !self.is_open() {
+            return Err(SendError::NotConnected);
+        }
+        registry.validate_send(action, &payload)?;
+        let id = task::new_message_id();
+        self.commands
+            .send(task::Command::Send(task::OutboundSend {
+                id: id.clone(),
+                action: action.to_owned(),
+                payload,
+            }))
+            .map_err(|_| SendError::NotConnected)?;
+        Ok(id)
     }
 
     /// Typed variant of [`Connection::call`] for charge-point-initiated actions.

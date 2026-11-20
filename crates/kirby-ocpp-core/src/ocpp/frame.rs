@@ -1,15 +1,20 @@
-//! OCPP-J wire frames: `CALL`, `CALLRESULT`, `CALLERROR`.
+//! OCPP-J wire frames: `CALL`, `CALLRESULT`, `CALLERROR` and, for OCPP 2.1 only,
+//! `CALLRESULTERROR` and `SEND`.
 //!
 //! ```text
 //! [2, "<id>", "<Action>", {payload}]                              CALL
 //! [3, "<id>", {payload}]                                          CALLRESULT
 //! [4, "<id>", "<ErrorCode>", "<description>", {details}]          CALLERROR
+//! [5, "<id>", "<ErrorCode>", "<description>", {details}]          CALLRESULTERROR (2.1)
+//! [6, "<id>", "<Action>", {payload}]                              SEND (2.1)
 //! ```
 //!
 //! Parsing is deliberately strict (it mirrors `isValidCall` & co. in the TS
 //! client): the message type must be the *integer* 2, 3 or 4 (`2.0` and `"2"` are
 //! rejected), the array length must match exactly, and payloads and error details
-//! must be JSON objects. Failures are reported as [`FrameError`], which keeps
+//! must be JSON objects. Types 5 and 6 are accepted only by [`Frame::parse_for`] with
+//! [`Protocol::V21`]; [`Frame::parse`] and every other protocol treat them as unknown
+//! message types. Failures are reported as [`FrameError`], which keeps
 //! whatever message id could still be read so that the caller can answer a broken
 //! CALL with a `FormationViolation` CALLERROR ([`FrameError::reply`]).
 
@@ -31,6 +36,10 @@ pub const MESSAGE_TYPE_CALL: u8 = 2;
 pub const MESSAGE_TYPE_CALL_RESULT: u8 = 3;
 /// `MessageTypeId` of a CALLERROR.
 pub const MESSAGE_TYPE_CALL_ERROR: u8 = 4;
+/// `MessageTypeId` of a CALLRESULTERROR (OCPP 2.1).
+pub const MESSAGE_TYPE_CALL_RESULT_ERROR: u8 = 5;
+/// `MessageTypeId` of a SEND (OCPP 2.1).
+pub const MESSAGE_TYPE_SEND: u8 = 6;
 
 /// OCPP 1.6 `CALLERROR` error codes.
 ///
@@ -185,6 +194,20 @@ pub enum Frame {
         description: String,
         details: Value,
     },
+    /// OCPP 2.1: the error answer to a CALLRESULT the receiver could not process. Same
+    /// shape as a CALLERROR; the id is the one of the CALLRESULT.
+    CallResultError {
+        id: MessageId,
+        code: ErrorCode,
+        description: String,
+        details: Value,
+    },
+    /// OCPP 2.1: an unconfirmed message, never answered. Same shape as a CALL.
+    Send {
+        id: MessageId,
+        action: String,
+        payload: Value,
+    },
 }
 
 impl Frame {
@@ -219,37 +242,73 @@ impl Frame {
         }
     }
 
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Call { id, .. } | Self::CallResult { id, .. } | Self::CallError { id, .. } => id,
+    /// Builds a CALLRESULTERROR (OCPP 2.1) with empty (`{}`) details.
+    pub fn call_result_error(
+        id: impl Into<MessageId>,
+        code: ErrorCode,
+        description: impl Into<String>,
+    ) -> Self {
+        Self::CallResultError {
+            id: id.into(),
+            code,
+            description: description.into(),
+            details: Value::Object(Map::new()),
         }
     }
 
-    /// `2`, `3` or `4`.
+    /// Builds a SEND (OCPP 2.1).
+    pub fn send(id: impl Into<MessageId>, action: impl Into<String>, payload: Value) -> Self {
+        Self::Send {
+            id: id.into(),
+            action: action.into(),
+            payload,
+        }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Call { id, .. }
+            | Self::CallResult { id, .. }
+            | Self::CallError { id, .. }
+            | Self::CallResultError { id, .. }
+            | Self::Send { id, .. } => id,
+        }
+    }
+
+    /// `2` to `6` (`5` and `6` exist in OCPP 2.1 only).
     pub fn message_type(&self) -> u8 {
         match self {
             Self::Call { .. } => MESSAGE_TYPE_CALL,
             Self::CallResult { .. } => MESSAGE_TYPE_CALL_RESULT,
             Self::CallError { .. } => MESSAGE_TYPE_CALL_ERROR,
+            Self::CallResultError { .. } => MESSAGE_TYPE_CALL_RESULT_ERROR,
+            Self::Send { .. } => MESSAGE_TYPE_SEND,
         }
     }
 
-    /// The action name, for CALLs only.
+    /// The action name, for CALLs and SENDs only.
     pub fn action(&self) -> Option<&str> {
         match self {
-            Self::Call { action, .. } => Some(action),
+            Self::Call { action, .. } | Self::Send { action, .. } => Some(action),
             _ => None,
         }
     }
 
-    /// Parses a text frame.
+    /// Parses a text frame of OCPP 1.6J or 2.0.1: message types 2, 3 and 4.
     pub fn parse(text: &str) -> Result<Self, FrameError> {
+        Self::parse_for(Protocol::V16, text)
+    }
+
+    /// Parses a text frame of `protocol`. Only [`Protocol::V21`] accepts the message types
+    /// 5 (CALLRESULTERROR) and 6 (SEND); for the other versions they are unknown message
+    /// types, exactly as in [`Frame::parse`].
+    pub fn parse_for(protocol: Protocol, text: &str) -> Result<Self, FrameError> {
         let value: Value = serde_json::from_str(text).map_err(|e| FrameError {
             kind: FrameErrorKind::InvalidJson(e),
             message_type: None,
             message_id: None,
         })?;
-        Self::try_from(value)
+        Self::decode(value, protocol == Protocol::V21)
     }
 
     /// The JSON array form of this frame.
@@ -275,12 +334,28 @@ impl Frame {
                 code,
                 description,
                 details,
+            } => error_array(MESSAGE_TYPE_CALL_ERROR, id, code, description, details),
+            Self::CallResultError {
+                id,
+                code,
+                description,
+                details,
+            } => error_array(
+                MESSAGE_TYPE_CALL_RESULT_ERROR,
+                id,
+                code,
+                description,
+                details,
+            ),
+            Self::Send {
+                id,
+                action,
+                payload,
             } => Value::Array(vec![
-                Value::from(MESSAGE_TYPE_CALL_ERROR),
+                Value::from(MESSAGE_TYPE_SEND),
                 Value::from(id.as_str()),
-                Value::from(code.as_str()),
-                Value::from(description.as_str()),
-                details.clone(),
+                Value::from(action.as_str()),
+                payload.clone(),
             ]),
         }
     }
@@ -292,10 +367,47 @@ impl Frame {
     }
 }
 
+/// The five-element array of a CALLERROR or CALLRESULTERROR.
+fn error_array(
+    message_type: u8,
+    id: &str,
+    code: &ErrorCode,
+    description: &str,
+    details: &Value,
+) -> Value {
+    Value::Array(vec![
+        Value::from(message_type),
+        Value::from(id),
+        Value::from(code.as_str()),
+        Value::from(description),
+        details.clone(),
+    ])
+}
+
 impl TryFrom<Value> for Frame {
     type Error = FrameError;
 
+    /// Decodes a frame of OCPP 1.6J or 2.0.1 (types 2 to 4), like [`Frame::parse`].
     fn try_from(value: Value) -> Result<Self, Self::Error> {
+        Self::decode(value, false)
+    }
+}
+
+impl Frame {
+    /// The message type number in the type slot; the integers 5 and 6 only if `extended`.
+    fn type_of(slot: &Value, extended: bool) -> Option<u8> {
+        match slot.as_u64()? {
+            2 => Some(MESSAGE_TYPE_CALL),
+            3 => Some(MESSAGE_TYPE_CALL_RESULT),
+            4 => Some(MESSAGE_TYPE_CALL_ERROR),
+            5 if extended => Some(MESSAGE_TYPE_CALL_RESULT_ERROR),
+            6 if extended => Some(MESSAGE_TYPE_SEND),
+            _ => None,
+        }
+    }
+
+    /// Decodes a JSON value; `extended` also accepts the OCPP 2.1 types 5 and 6.
+    fn decode(value: Value, extended: bool) -> Result<Self, FrameError> {
         let Value::Array(mut items) = value else {
             return Err(FrameError::new(FrameErrorKind::NotAnArray));
         };
@@ -303,26 +415,20 @@ impl TryFrom<Value> for Frame {
             return Err(FrameError::new(FrameErrorKind::EmptyArray));
         };
 
-        let message_type = match first.as_u64() {
-            Some(2) => MESSAGE_TYPE_CALL,
-            Some(3) => MESSAGE_TYPE_CALL_RESULT,
-            Some(4) => MESSAGE_TYPE_CALL_ERROR,
-            _ => {
-                // The id is still readable for logging. Structured values in the
-                // type slot may contain credentials.
-                let kind = match first {
-                    Value::Object(_) => FrameErrorKind::StructuredMessageType("an object"),
-                    Value::Array(_) => FrameErrorKind::StructuredMessageType("an array"),
-                    _ => FrameErrorKind::UnknownMessageType(first.clone()),
-                };
-                let id = items.get(1).and_then(Value::as_str).map(str::to_owned);
-                return Err(FrameError {
-                    kind,
-                    message_type: None,
-                    message_id: id,
-                });
+        let message_type = Self::type_of(first, extended).ok_or_else(|| {
+            // The id is still readable for logging. Structured values in the
+            // type slot may contain credentials.
+            let kind = match first {
+                Value::Object(_) => FrameErrorKind::StructuredMessageType("an object"),
+                Value::Array(_) => FrameErrorKind::StructuredMessageType("an array"),
+                _ => FrameErrorKind::UnknownMessageType(first.clone()),
+            };
+            FrameError {
+                kind,
+                message_type: None,
+                message_id: items.get(1).and_then(Value::as_str).map(str::to_owned),
             }
-        };
+        })?;
 
         let message_id = items.get(1).and_then(Value::as_str).map(str::to_owned);
         let fail = |kind| FrameError {
@@ -332,7 +438,7 @@ impl TryFrom<Value> for Frame {
         };
 
         let expected = match message_type {
-            MESSAGE_TYPE_CALL => 4,
+            MESSAGE_TYPE_CALL | MESSAGE_TYPE_SEND => 4,
             MESSAGE_TYPE_CALL_RESULT => 3,
             _ => 5,
         };
@@ -367,13 +473,21 @@ impl TryFrom<Value> for Frame {
 
         let id = take_string(&mut items, 1, "messageId")?;
         Ok(match message_type {
-            MESSAGE_TYPE_CALL => {
+            MESSAGE_TYPE_CALL | MESSAGE_TYPE_SEND => {
                 let action = take_string(&mut items, 2, "action")?;
                 let payload = take_object(&mut items, 3, "payload")?;
-                Self::Call {
-                    id,
-                    action,
-                    payload,
+                if message_type == MESSAGE_TYPE_SEND {
+                    Self::Send {
+                        id,
+                        action,
+                        payload,
+                    }
+                } else {
+                    Self::Call {
+                        id,
+                        action,
+                        payload,
+                    }
                 }
             }
             MESSAGE_TYPE_CALL_RESULT => {
@@ -384,11 +498,20 @@ impl TryFrom<Value> for Frame {
                 let code = ErrorCode::from_wire(&take_string(&mut items, 2, "errorCode")?);
                 let description = take_string(&mut items, 3, "errorDescription")?;
                 let details = take_object(&mut items, 4, "errorDetails")?;
-                Self::CallError {
-                    id,
-                    code,
-                    description,
-                    details,
+                if message_type == MESSAGE_TYPE_CALL_RESULT_ERROR {
+                    Self::CallResultError {
+                        id,
+                        code,
+                        description,
+                        details,
+                    }
+                } else {
+                    Self::CallError {
+                        id,
+                        code,
+                        description,
+                        details,
+                    }
                 }
             }
         })
@@ -436,7 +559,7 @@ pub enum FrameErrorKind {
 #[error("invalid OCPP-J frame: {kind}")]
 pub struct FrameError {
     pub kind: FrameErrorKind,
-    /// `Some(2|3|4)` if the first element was a valid message type.
+    /// `Some(2..=4)` (`2..=6` for OCPP 2.1) if the first element was a valid message type.
     pub message_type: Option<u8>,
     /// The message id, if element 1 was a string.
     pub message_id: Option<MessageId>,
@@ -506,8 +629,10 @@ pub fn redact_secrets(frame: &Frame) -> Frame {
         {
             redact_payload(payload);
         }
-        Frame::CallResult { payload, .. } => redact_payload(payload),
-        Frame::CallError { details, .. } => redact_payload(details),
+        Frame::CallResult { payload, .. } | Frame::Send { payload, .. } => redact_payload(payload),
+        Frame::CallError { details, .. } | Frame::CallResultError { details, .. } => {
+            redact_payload(details);
+        }
         Frame::Call { .. } => {}
     }
     copy
@@ -662,8 +787,8 @@ pub struct FrameRecord {
     pub direction: Direction,
     /// `None` only for text that did not parse as a frame at all.
     pub msg_id: Option<MessageId>,
-    /// Action name. For CALLRESULT/CALLERROR the connection layer fills in the
-    /// action of the CALL they answer when it is known (correlation).
+    /// Action name. For CALLRESULT/CALLERROR/CALLRESULTERROR the connection layer fills in
+    /// the action of the CALL they answer when it is known (correlation).
     pub action: Option<String>,
     /// The frame as JSON (`[2, ...]`), or a JSON string with the raw text if it
     /// was not a valid frame.
@@ -813,6 +938,159 @@ mod tests {
             r#"[4,"x","OccurenceConstraintViolation","missing",{"k":1}]"#
         );
         roundtrip(&frame);
+    }
+
+    fn roundtrip_v21(frame: &Frame) {
+        let text = frame.to_json_string();
+        assert_eq!(
+            &Frame::parse_for(Protocol::V21, &text).unwrap(),
+            frame,
+            "text form: {text}"
+        );
+    }
+
+    #[test]
+    fn send_roundtrip_and_exact_wire_form() {
+        let frame = Frame::send("s1", "NotifyPeriodicEventStream", json!({"id": 1}));
+        assert_eq!(
+            frame.to_json_string(),
+            r#"[6,"s1","NotifyPeriodicEventStream",{"id":1}]"#
+        );
+        roundtrip_v21(&frame);
+        assert_eq!(frame.id(), "s1");
+        assert_eq!(frame.action(), Some("NotifyPeriodicEventStream"));
+        assert_eq!(frame.message_type(), 6);
+    }
+
+    #[test]
+    fn call_result_error_roundtrip_and_exact_wire_form() {
+        let frame = Frame::CallResultError {
+            id: "x".into(),
+            code: ErrorCode::from_wire("FormatViolation"),
+            description: "bad".into(),
+            details: json!({"k": 1}),
+        };
+        assert_eq!(
+            frame.to_json_string(),
+            r#"[5,"x","FormatViolation","bad",{"k":1}]"#
+        );
+        roundtrip_v21(&frame);
+        assert_eq!(frame.message_type(), 5);
+        assert_eq!(frame.action(), None);
+        assert_eq!(
+            Frame::call_result_error("y", ErrorCode::GenericError, "d").to_json_string(),
+            r#"[5,"y","GenericError","d",{}]"#
+        );
+    }
+
+    #[test]
+    fn parse_for_v21_validates_the_new_message_types() {
+        let v21 = |text: &str| Frame::parse_for(Protocol::V21, text);
+        // Types 2 to 4 parse as before.
+        assert_eq!(
+            v21(r#"[2,"1","Heartbeat",{}]"#).unwrap(),
+            Frame::call("1", "Heartbeat", json!({}))
+        );
+        for text in [r#"[6,"id","A"]"#, r#"[6,"id","A",{},1]"#] {
+            let error = v21(text).unwrap_err();
+            assert!(
+                matches!(error.kind, FrameErrorKind::WrongLength { expected: 4, .. }),
+                "{text}"
+            );
+            assert_eq!(error.message_type, Some(6));
+            assert_eq!(error.message_id.as_deref(), Some("id"));
+            assert!(
+                error.reply_for(Protocol::V21).is_none(),
+                "no reply for a SEND"
+            );
+        }
+        for text in [r#"[5,"id","C","d"]"#, r#"[5,"id","C","d",{},1]"#] {
+            let error = v21(text).unwrap_err();
+            assert!(
+                matches!(error.kind, FrameErrorKind::WrongLength { expected: 5, .. }),
+                "{text}"
+            );
+            assert_eq!(error.message_type, Some(5));
+            assert!(error.reply_for(Protocol::V21).is_none());
+        }
+        for text in [
+            r#"[6,1,"A",{}]"#,
+            r#"[6,"id",5,{}]"#,
+            r#"[6,"id","A",[]]"#,
+            r#"[6,"id","A",null]"#,
+            r#"[5,1,"C","d",{}]"#,
+            r#"[5,"id",1,"d",{}]"#,
+            r#"[5,"id","C",1,{}]"#,
+            r#"[5,"id","C","d",null]"#,
+            r#"[5,"id","C","d",[]]"#,
+        ] {
+            assert!(
+                matches!(
+                    v21(text).unwrap_err().kind,
+                    FrameErrorKind::InvalidField { .. }
+                ),
+                "{text}"
+            );
+        }
+        // Same strictness for the type number as for 2 to 4, and 7 stays unknown.
+        for text in [
+            r#"["6","id","A",{}]"#,
+            r#"[6.0,"id","A",{}]"#,
+            r#"[7,"id"]"#,
+        ] {
+            assert!(
+                matches!(
+                    v21(text).unwrap_err().kind,
+                    FrameErrorKind::UnknownMessageType(_)
+                ),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn types_5_and_6_are_unknown_below_2_1() {
+        for text in [r#"[5,"id","C","d",{}]"#, r#"[6,"id","A",{}]"#] {
+            for protocol in [Protocol::V16, Protocol::V201] {
+                let error = Frame::parse_for(protocol, text).unwrap_err();
+                assert!(
+                    matches!(error.kind, FrameErrorKind::UnknownMessageType(_)),
+                    "{protocol:?} {text}"
+                );
+                assert_eq!(error.message_type, None);
+                assert_eq!(error.message_id.as_deref(), Some("id"));
+                assert!(error.reply_for(protocol).is_none());
+            }
+            let plain = Frame::parse(text).unwrap_err();
+            assert!(matches!(plain.kind, FrameErrorKind::UnknownMessageType(_)));
+            assert!(serde_json::from_str::<Frame>(text).is_err());
+        }
+    }
+
+    #[test]
+    fn redaction_covers_the_new_frames() {
+        let entry = set_variable(
+            json!({"name": "SecurityCtrlr"}),
+            json!({"name": "BasicAuthPassword"}),
+            SENTINEL,
+        );
+        for frame in [
+            Frame::send(
+                "1",
+                "NotifyPeriodicEventStream",
+                json!({"data": [entry.clone()]}),
+            ),
+            Frame::CallResultError {
+                id: "2".into(),
+                code: ErrorCode::GenericError,
+                description: "bad".into(),
+                details: json!({"request": entry}),
+            },
+        ] {
+            let text = redact_secrets(&frame).to_json_string();
+            assert!(!text.contains(SENTINEL), "{text}");
+            assert!(text.contains(REDACTED), "{text}");
+        }
     }
 
     #[test]

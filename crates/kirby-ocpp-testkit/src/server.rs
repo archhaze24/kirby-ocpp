@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 
 use crate::error::{TestkitError, TestkitResult};
 use crate::options::CsmsOptions;
-use crate::record::{ConnectionInfo, Received};
+use crate::record::{ConnectionInfo, Received, ReceivedFrame};
 use crate::state::{Outbound, Shared, StartedCall, wait_until};
 use crate::tls::{self, TlsMaterial, TlsOpts};
 
@@ -279,6 +279,62 @@ impl MockCsms {
             (found.len() == count).then_some(found)
         })
         .await
+    }
+
+    /// A position in the raw frame log. Pass it to [`MockCsms::wait_for_frame_after`] and
+    /// [`MockCsms::frames_since`] so that only frames received after this point count.
+    pub fn frame_mark(&self) -> usize {
+        self.shared.lock().frames.len()
+    }
+
+    /// Every text frame a charge point sent, raw and in arrival order, whatever its type.
+    pub fn received_frames(&self) -> Vec<ReceivedFrame> {
+        self.shared.lock().frames.clone()
+    }
+
+    /// Frames received since `mark` (see [`MockCsms::frame_mark`]).
+    pub fn frames_since(&self, mark: usize) -> Vec<ReceivedFrame> {
+        let state = self.shared.lock();
+        state.frames.get(mark..).unwrap_or_default().to_vec()
+    }
+
+    /// Waits for a frame received after `mark` whose raw text satisfies `predicate`, and
+    /// returns the first match. Use it to observe frames the mock does not act on, such as
+    /// the OCPP 2.1 message types 5 (CALLRESULTERROR) and 6 (SEND).
+    pub async fn wait_for_frame_after<F>(
+        &self,
+        mark: usize,
+        predicate: F,
+        timeout: Duration,
+    ) -> TestkitResult<ReceivedFrame>
+    where
+        F: Fn(&str) -> bool + Send,
+    {
+        wait_until(&self.shared, "a matching frame", timeout, |state| {
+            state
+                .frames
+                .get(mark..)
+                .unwrap_or_default()
+                .iter()
+                .find(|frame| predicate(&frame.text))
+                .cloned()
+        })
+        .await
+    }
+
+    /// Sends `text` to the current connection as one WebSocket text frame, unchanged. The
+    /// mock neither parses nor tracks it, so a test can send any frame: an OCPP 2.1 SEND or
+    /// CALLRESULTERROR, an unknown message type, or malformed JSON. Fails with
+    /// [`TestkitError::NotConnected`] if no connection is open.
+    pub fn send_raw(&self, text: impl Into<String>) -> TestkitResult<()> {
+        let (_, outbound) = self
+            .shared
+            .lock()
+            .current()
+            .ok_or(TestkitError::NotConnected)?;
+        outbound
+            .send(Outbound::Text(text.into()))
+            .map_err(|_| TestkitError::NotConnected)
     }
 
     /// Scripts a fault for the next occurrences of an action. Faults are used in the order injected.

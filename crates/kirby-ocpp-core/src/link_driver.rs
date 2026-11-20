@@ -89,7 +89,11 @@ pub(crate) fn drain_buffered(
         match events.try_recv() {
             Ok(ConnectionEvent::Frame(record)) => publish(Drained::Frame(record)),
             Ok(ConnectionEvent::ProtocolWarning(text)) => publish(Drained::Warning(text)),
-            Ok(ConnectionEvent::Call(_)) => {}
+            Ok(
+                ConnectionEvent::Call(_)
+                | ConnectionEvent::Send { .. }
+                | ConnectionEvent::CallResultError { .. },
+            ) => {}
             Ok(ConnectionEvent::Closed { .. }) | Err(_) => break,
         }
     }

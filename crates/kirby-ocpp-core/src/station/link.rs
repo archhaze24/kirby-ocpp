@@ -196,6 +196,28 @@ impl StationActor {
             ConnectionEvent::ProtocolWarning(text) => {
                 self.log(LogLevel::Warn, format!("protocol: {text}"));
             }
+            // OCPP 2.1 only: a 1.6 connection never produces these.
+            ConnectionEvent::Send { action, .. } => {
+                self.log(
+                    LogLevel::Warn,
+                    format!(
+                        "unexpected SEND {} from the CSMS",
+                        crate::text::escape_unsafe(&action)
+                    ),
+                );
+            }
+            ConnectionEvent::CallResultError {
+                code, description, ..
+            } => {
+                self.log(
+                    LogLevel::Warn,
+                    format!(
+                        "CALLRESULTERROR {} from the CSMS: {}",
+                        crate::text::escape_unsafe(code.as_str()),
+                        crate::text::escape_unsafe(&description)
+                    ),
+                );
+            }
             ConnectionEvent::Closed {
                 code,
                 reason,
