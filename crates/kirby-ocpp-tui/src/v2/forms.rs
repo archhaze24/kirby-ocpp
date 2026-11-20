@@ -9,7 +9,7 @@ use kirby_ocpp_core::ocpp::v2::types::{
     ChargingState, Component, IdTokenType, StopReason, Variable, WireEnum,
 };
 use kirby_ocpp_core::station2::{Command2, VariableView};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::app::{App2, Effect2, Mode2};
 use crate::app::{NoticeLevel, event_line};
@@ -26,6 +26,8 @@ const DATA_TRANSFER: &str = "data_transfer";
 const RAW_CALL: &str = "raw_call";
 const SECURITY_EVENT: &str = "security_event";
 const SET_VARIABLE: &str = "set_variable";
+const EXTERNAL_LIMIT: &str = "external_limit";
+const CLEAR_EXTERNAL_LIMIT: &str = "clear_external_limit";
 
 /// Names of the generic pick-lists (the name of a [`ChoiceKind::Generic`]).
 const STOP_REASON: &str = "stop_reason";
@@ -144,6 +146,35 @@ pub(super) fn meter_custom_form(evse: u32, max_evse: u32) -> Form {
             Field::new("send a sample", FieldKind::Select, "")
                 .with_options(vec!["yes".to_owned(), "no".to_owned()]),
         ],
+        max_evse,
+    )
+}
+
+/// A limit of the external system: the EVSE (0 is the whole station), the value and its unit.
+pub(super) fn external_limit_form(max_evse: u32) -> Form {
+    Form::generic(
+        EXTERNAL_LIMIT,
+        "External limit",
+        vec![
+            Field::new("EVSE (0 = whole station)", FieldKind::StationEvse, "0"),
+            Field::new("limit", FieldKind::Limit, "16"),
+            Field::new("unit", FieldKind::Select, "")
+                .with_options(vec!["A".to_owned(), "W".to_owned()]),
+        ],
+        max_evse,
+    )
+}
+
+/// Release the external limit of an EVSE (0 is the whole station).
+pub(super) fn clear_external_limit_form(max_evse: u32) -> Form {
+    Form::generic(
+        CLEAR_EXTERNAL_LIMIT,
+        "Clear external limit",
+        vec![Field::new(
+            "EVSE (0 = whole station)",
+            FieldKind::StationEvse,
+            "0",
+        )],
         max_evse,
     )
 }
@@ -419,6 +450,34 @@ fn plan(
                 show_response: false,
             })
         }
+        EXTERNAL_LIMIT => {
+            let evse: u32 = number(values, 0, "EVSE")?;
+            let limit: f64 = number(values, 1, "limit")?;
+            if !limit.is_finite() || limit <= 0.0 {
+                return Err((1, "limit must be a number above 0".to_owned()));
+            }
+            let unit = selected(values, 2).1;
+            let schedule = json!({
+                "id": 1000 + evse,
+                "chargingRateUnit": unit,
+                "chargingSchedulePeriod": [{"startPeriod": 0, "limit": limit}],
+            });
+            Ok(Planned::one(
+                "set external limit",
+                Command2::SetExternalLimit {
+                    evse,
+                    limit: schedule,
+                },
+                false,
+            ))
+        }
+        CLEAR_EXTERNAL_LIMIT => Ok(Planned::one(
+            "clear external limit",
+            Command2::ClearExternalLimit {
+                evse: number(values, 0, "EVSE")?,
+            },
+            false,
+        )),
         DATA_TRANSFER => {
             let data = match text(values, 2) {
                 "" => None,

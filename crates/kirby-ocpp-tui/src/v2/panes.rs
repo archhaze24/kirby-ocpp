@@ -210,6 +210,17 @@ fn station_lines(app: &App2) -> Vec<Line<'static>> {
         kv("security profile", s.security_profile.to_string()),
         kv("queued events", s.queued_events.to_string()),
         kv(
+            "local list",
+            format!(
+                "v{}, {} entries",
+                s.local_list_version, s.local_list_entries
+            ),
+        ),
+        kv(
+            "profiles",
+            format!("{} charging profiles", s.charging_profiles),
+        ),
+        kv(
             "security events",
             format!("{} sent (since UI start)", app.security_events_sent),
         ),
@@ -262,6 +273,24 @@ fn evse_lines(app: &App2, transaction_first: bool) -> Vec<Line<'static>> {
         base.push(kv("  fault", if c.fault { "yes" } else { "no" }));
     }
     base.push(kv("meter", format!("{} Wh", evse.meter_wh)));
+    match &evse.reservation {
+        // On its own line: it needs the width of the pane.
+        Some(r) => base.push(Line::from(Span::raw(format!(
+            "reserved #{} for {} until {} UTC",
+            r.id,
+            sanitize(&r.id_token),
+            when(r.expires_at)
+        )))),
+        None => base.push(kv("reservation", "none")),
+    }
+    if let Some(w) = evse.offered_w {
+        let external = if evse.external_limit {
+            " (external)"
+        } else {
+            ""
+        };
+        base.push(kv("limit", format!("{:.1} kW{external}", w / 1000.0)));
+    }
     let tx = evse
         .transaction
         .as_ref()

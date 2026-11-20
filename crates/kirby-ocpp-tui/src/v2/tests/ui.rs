@@ -11,7 +11,8 @@ use kirby_ocpp_core::ocpp::v2::messages::{
 use kirby_ocpp_core::ocpp::v2::types::{ChargingState, WireEnum};
 use kirby_ocpp_core::station::{Direction, Event, FrameRecord, LogLevel, LogRecord};
 use kirby_ocpp_core::station2::{
-    ConnectorSnapshot2, EvseSnapshot, Snapshot2, TransactionSnapshot, VariableView,
+    ConnectorSnapshot2, EvseSnapshot, ReservationView2, Snapshot2, TransactionSnapshot,
+    VariableView,
 };
 use kirby_ocpp_core::text::is_unsafe_char;
 use kirby_ocpp_core::ws::ConnectionState;
@@ -76,6 +77,9 @@ fn evse(id: u32, status_name: &str, plugged: bool, tx: Option<&str>) -> EvseSnap
             remote_start_id: Some(7),
         }),
         meter_wh: 1200,
+        reservation: None,
+        offered_w: None,
+        external_limit: false,
     }
 }
 
@@ -264,6 +268,45 @@ fn details_show_the_full_transaction_id_and_wire_values() {
     assert!(text.contains("energy"), "{text}");
     assert!(text.contains("240 Wh"), "{text}");
     assert!(text.contains("next seqNo"), "{text}");
+}
+
+#[test]
+fn evse_details_show_the_reservation_and_the_limit() {
+    let mut a = app();
+    a.set_tab(Tab2::Evse);
+    let text = render(&a, 110, 40);
+    assert!(text.contains("reservation"), "{text}");
+    assert!(!text.contains("reserved #"), "{text}");
+    assert!(!text.contains(" kW"), "{text}");
+    let at = Utc.timestamp_millis_opt(1_700_000_000_000).unwrap();
+    a.snapshot.evses[0].reservation = Some(ReservationView2 {
+        id: 7,
+        id_token: "AB\u{1b}CD".to_owned(),
+        expires_at: at,
+    });
+    a.snapshot.evses[0].offered_w = Some(7200.0);
+    let text = render(&a, 110, 40);
+    assert!(text.contains("reserved #7 for AB"), "{text}");
+    assert!(text.contains("until 22:13:20 UTC"), "{text}");
+    assert!(text.contains("limit"), "{text}");
+    assert!(text.contains("7.2 kW"), "{text}");
+    assert!(!text.contains("(external)"), "{text}");
+    assert_clean(&text);
+    a.snapshot.evses[0].external_limit = true;
+    a.snapshot.evses[0].offered_w = Some(3000.0);
+    let text = render(&a, 110, 40);
+    assert!(text.contains("3.0 kW (external)"), "{text}");
+}
+
+#[test]
+fn station_tab_shows_the_local_list_and_the_profiles() {
+    let mut a = app();
+    a.snapshot.local_list_version = 4;
+    a.snapshot.local_list_entries = 2;
+    a.snapshot.charging_profiles = 3;
+    let text = render(&a, 110, 40);
+    assert!(text.contains("v4, 2 entries"), "{text}");
+    assert!(text.contains("3 charging profiles"), "{text}");
 }
 
 #[test]

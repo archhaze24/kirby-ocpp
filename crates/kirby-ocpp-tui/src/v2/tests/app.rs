@@ -49,6 +49,9 @@ fn evse(id: u32) -> EvseSnapshot {
         connectors: vec![connector(1)],
         transaction: None,
         meter_wh: 0,
+        reservation: None,
+        offered_w: None,
+        external_limit: false,
     }
 }
 
@@ -598,6 +601,103 @@ fn stop_transaction_picks_a_reason() {
             reason: StopReason::DeAuthorized
         }]
     );
+}
+
+#[test]
+fn set_external_limit_form_sends_a_schedule() {
+    let mut app = app();
+    press(&mut app, "2l");
+    assert_eq!(form_of(&app).title, "External limit");
+    // The defaults: the whole station, 16 A.
+    let fx = press_code(&mut app, KeyCode::Enter);
+    assert_eq!(
+        fx,
+        vec![send(
+            "set external limit",
+            vec![Command2::SetExternalLimit {
+                evse: 0,
+                limit: serde_json::json!({
+                    "id": 1000,
+                    "chargingRateUnit": "A",
+                    "chargingSchedulePeriod": [{"startPeriod": 0, "limit": 16.0}],
+                }),
+            }],
+            false
+        )]
+    );
+    // EVSE 2 in watts.
+    press(&mut app, "l");
+    press_code(&mut app, KeyCode::Backspace);
+    press(&mut app, "2");
+    press_code(&mut app, KeyCode::Tab);
+    press_code(&mut app, KeyCode::Backspace);
+    press_code(&mut app, KeyCode::Backspace);
+    press(&mut app, "3000.5");
+    press_code(&mut app, KeyCode::Tab);
+    press_code(&mut app, KeyCode::Right);
+    let fx = press_code(&mut app, KeyCode::Enter);
+    assert_eq!(
+        commands(&fx),
+        vec![Command2::SetExternalLimit {
+            evse: 2,
+            limit: serde_json::json!({
+                "id": 1002,
+                "chargingRateUnit": "W",
+                "chargingSchedulePeriod": [{"startPeriod": 0, "limit": 3000.5}],
+            }),
+        }]
+    );
+}
+
+#[test]
+fn set_external_limit_form_refuses_bad_numbers() {
+    let mut app = app();
+    press(&mut app, "2l");
+    // EVSE 3 does not exist (the station has 1 and 2).
+    press_code(&mut app, KeyCode::Backspace);
+    press(&mut app, "3");
+    assert!(form_of(&app).fields[0].error.is_some());
+    press_code(&mut app, KeyCode::Backspace);
+    press(&mut app, "0");
+    press_code(&mut app, KeyCode::Tab);
+    press_code(&mut app, KeyCode::Backspace);
+    press_code(&mut app, KeyCode::Backspace);
+    press(&mut app, "0");
+    assert!(form_of(&app).fields[1].error.is_some(), "limit 0 refused");
+    assert!(press_code(&mut app, KeyCode::Enter).is_empty());
+    assert!(matches!(app.mode, Mode2::Form(_)), "the form stays open");
+}
+
+#[test]
+fn clear_external_limit_form_sends_the_evse() {
+    let mut app = app();
+    press(&mut app, "2L");
+    assert_eq!(form_of(&app).title, "Clear external limit");
+    let fx = press_code(&mut app, KeyCode::Enter);
+    assert_eq!(
+        fx,
+        vec![send(
+            "clear external limit",
+            vec![Command2::ClearExternalLimit { evse: 0 }],
+            false
+        )]
+    );
+    press(&mut app, "L");
+    press_code(&mut app, KeyCode::Backspace);
+    press(&mut app, "1");
+    let fx = press_code(&mut app, KeyCode::Enter);
+    assert_eq!(
+        commands(&fx),
+        vec![Command2::ClearExternalLimit { evse: 1 }]
+    );
+}
+
+#[test]
+fn the_external_limit_actions_are_in_the_palette() {
+    let app = app();
+    let labels: Vec<&str> = app.catalog.iter().map(|a| a.label.as_str()).collect();
+    assert!(labels.contains(&"Set external limit..."));
+    assert!(labels.contains(&"Clear external limit..."));
 }
 
 #[test]

@@ -102,6 +102,10 @@ pub enum FieldKind {
     ProfileJson,
     /// An OCPP 2.x EVSE number: 1 to the form's `max_connector` (used as the EVSE count).
     Evse,
+    /// An OCPP 2.x EVSE number, 0 (the whole station) to the form's `max_connector`.
+    StationEvse,
+    /// A charging limit: a number above 0.
+    Limit,
     /// An OCPP 2.x `idToken`: required, at most the field's `max_chars` characters
     /// ([`ID_TOKEN_MAX`] without one).
     IdToken,
@@ -704,6 +708,16 @@ impl Form {
             FieldKind::Evse => match text.parse::<u32>() {
                 Ok(n) if (1..=max).contains(&n) => None,
                 _ => Some(format!("EVSE must be a number from 1 to {max}")),
+            },
+            FieldKind::StationEvse => match text.parse::<u32>() {
+                Ok(n) if n <= max => None,
+                _ => Some(format!(
+                    "EVSE must be a number from 0 (whole station) to {max}"
+                )),
+            },
+            FieldKind::Limit => match text.parse::<f64>() {
+                Ok(n) if n.is_finite() && n > 0.0 => None,
+                _ => Some("limit must be a number above 0".to_owned()),
             },
             FieldKind::IdToken => {
                 if text.is_empty() {

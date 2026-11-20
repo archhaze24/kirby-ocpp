@@ -75,6 +75,8 @@ pub enum ActionId2 {
     PlugToggle,
     FaultToggle,
     StatusNotification,
+    ExternalLimit,
+    ClearExternalLimit,
     // Transaction
     Authorize,
     /// Present a token at an EVSE (the outcome depends on the transaction start point).
@@ -216,6 +218,20 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             'n',
             "StatusNotification",
             "Re-send the current connector status of the selected EVSE.",
+        ),
+        def(
+            A::ExternalLimit,
+            T::Evse,
+            'l',
+            "Set external limit...",
+            "Apply a limit of an external system to an EVSE or the whole station, in A or W; the CSMS is notified.",
+        ),
+        def(
+            A::ClearExternalLimit,
+            T::Evse,
+            'L',
+            "Clear external limit...",
+            "Release the external limit of an EVSE or the whole station; the CSMS is notified.",
         ),
         def(
             A::Authorize,

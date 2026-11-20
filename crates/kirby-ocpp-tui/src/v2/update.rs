@@ -14,8 +14,9 @@ use super::actions::ActionId2;
 use super::app::{App2, Confirm2, ConfirmAction2, Effect2, Mode2, Msg2};
 use super::browser::DeviceBrowser;
 use super::forms::{
-    authorize_form, charging_state_choice, data_transfer_form, meter_custom_form,
-    present_token_form, raw_call_form, security_event_form, stop_reason_choice,
+    authorize_form, charging_state_choice, clear_external_limit_form, data_transfer_form,
+    external_limit_form, meter_custom_form, present_token_form, raw_call_form, security_event_form,
+    stop_reason_choice,
 };
 use super::keys;
 use crate::app::{Detail, Notice, NoticeLevel, PendingCall, ScenarioView, StepState, event_line};
@@ -318,6 +319,10 @@ impl App2 {
                     .and_then(|e| e.connectors.first())
                     .map_or(1, |c| c.id);
                 plain(fx, Command2::StatusNotification { evse, connector });
+            }
+            ActionId2::ExternalLimit => self.mode = Mode2::Form(external_limit_form(max_evse)),
+            ActionId2::ClearExternalLimit => {
+                self.mode = Mode2::Form(clear_external_limit_form(max_evse));
             }
             ActionId2::Authorize => self.mode = Mode2::Form(authorize_form(self.protocol)),
             ActionId2::PresentToken => {
