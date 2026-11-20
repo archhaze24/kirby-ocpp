@@ -1360,6 +1360,605 @@ payload_contains = { vendorId = "${vendor}", messageId = "done:local-list" }
 timeout_ms = 30000
 
 # ---------------------------------------------------------------------------------------
+# 14 conformance-v201-reservation
+
+[[steps]]
+name = "reservation: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reservation: EVSE 1 is reserved for CONF-RES-A"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 1, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: a reserved EVSE is Occupied for another token"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 2, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-B", type = "ISO14443" } }
+expect_status = "Occupied"
+
+[[steps]]
+name = "reservation: no EVSE is left for a reservation of any EVSE"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 3, expiryDateTime = "2099-01-01T00:00:00Z", idToken = { idToken = "CONF-RES-B", type = "ISO14443" } }
+expect_status = "Occupied"
+
+[[steps]]
+name = "reservation: a remote start with another token is Rejected"
+action = "call"
+station = "${station}"
+call = "RequestStartTransaction"
+payload = { remoteStartId = 1, evseId = 1, idToken = { idToken = "CONF-RES-B", type = "ISO14443" } }
+expect_status = "Rejected"
+
+[[steps]]
+name = "reservation: the same id replaces the reservation"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 1, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-B", type = "ISO14443" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:reservation-1" }
+
+[[steps]]
+name = "reservation: the transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-busy" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reservation: an EVSE in use is Occupied"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 4, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Occupied"
+
+[[steps]]
+name = "reservation: no EVSE is free for a reservation of any EVSE"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 5, expiryDateTime = "2099-01-01T00:00:00Z", idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Occupied"
+
+[[steps]]
+name = "reservation: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:reservation-busy" }
+
+[[steps]]
+name = "reservation: the EVSE is free"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-free" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reservation: an unknown reservation cannot be cancelled"
+action = "call"
+station = "${station}"
+call = "CancelReservation"
+payload = { reservationId = 99 }
+expect_status = "Rejected"
+
+[[steps]]
+name = "reservation: EVSE 1 is reserved"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 6, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: the reservation is cancelled"
+action = "call"
+station = "${station}"
+call = "CancelReservation"
+payload = { reservationId = 6 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: any EVSE is reserved"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 7, expiryDateTime = "2099-01-01T00:00:00Z", idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: a connector type finds every EVSE reserved"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 8, expiryDateTime = "2099-01-01T00:00:00Z", connectorType = "cType2", idToken = { idToken = "CONF-RES-B", type = "ISO14443" } }
+expect_status = "Occupied"
+
+[[steps]]
+name = "reservation: the reservation of any EVSE is cancelled"
+action = "call"
+station = "${station}"
+call = "CancelReservation"
+payload = { reservationId = 7 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: a connector type is reserved"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 9, expiryDateTime = "2099-01-01T00:00:00Z", connectorType = "cType2", idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: the reservation of the connector type is cancelled"
+action = "call"
+station = "${station}"
+call = "CancelReservation"
+payload = { reservationId = 9 }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: EVSE 1 is reserved for a group"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 10, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" }, groupIdToken = { idToken = "PARENTTAG", type = "Central" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:reservation-group" }
+
+[[steps]]
+name = "reservation: the group used the reservation"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-group-done" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reservation: any EVSE is reserved for a group"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 11, expiryDateTime = "2099-01-01T00:00:00Z", idToken = { idToken = "CONF-RES-A", type = "ISO14443" }, groupIdToken = { idToken = "PARENTTAG", type = "Central" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:reservation-any-group" }
+
+[[steps]]
+name = "reservation: the group used the reservation of any EVSE"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:reservation-unavailable" }
+timeout_ms = 30000
+
+[[steps]]
+name = "reservation: EVSE 1 is reserved"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 12, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: EVSE 1 is made Inoperative"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Inoperative", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: an unavailable EVSE cannot be reserved"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 13, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Unavailable"
+
+[[steps]]
+name = "reservation: no EVSE is available for a reservation of any EVSE"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 14, expiryDateTime = "2099-01-01T00:00:00Z", idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Unavailable"
+
+[[steps]]
+name = "reservation: EVSE 1 is made Operative"
+action = "call"
+station = "${station}"
+call = "ChangeAvailability"
+payload = { operationalStatus = "Operative", evse = { id = 1 } }
+expect_status = "Accepted"
+
+[[steps]]
+name = "reservation: reservations are switched off"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "false", component = { name = "ReservationCtrlr" }, variable = { name = "Enabled" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted" }] }
+
+[[steps]]
+name = "reservation: a reservation is Rejected while they are off"
+action = "call"
+station = "${station}"
+call = "ReserveNow"
+payload = { id = 15, expiryDateTime = "2099-01-01T00:00:00Z", evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+expect_status = "Rejected"
+
+[[steps]]
+name = "reservation: reservations are switched on"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "true", component = { name = "ReservationCtrlr" }, variable = { name = "Enabled" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted" }] }
+
+[[steps]]
+name = "reservation: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:reservation" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 15 conformance-v201-get-report
+
+[[steps]]
+name = "get-report: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:get-report" }
+timeout_ms = 30000
+
+[[steps]]
+name = "get-report: the criterion Enabled is Accepted"
+action = "call"
+station = "${station}"
+call = "GetReport"
+payload = { requestId = 41, componentCriteria = ["Enabled"] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "get-report: the report of the criterion arrives"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 41, seqNo = 0 }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: the station is done with the report"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:get-report-1" }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: a component and a variable are Accepted"
+action = "call"
+station = "${station}"
+call = "GetReport"
+payload = { requestId = 42, componentVariable = [{ component = { name = "EVSE", evse = { id = 1 } }, variable = { name = "AvailabilityState" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "get-report: the report of the variable arrives"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 42, seqNo = 0 }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: the station is done with the report"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:get-report-2" }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: the criterion Available and a variable are Accepted"
+action = "call"
+station = "${station}"
+call = "GetReport"
+payload = { requestId = 43, componentCriteria = ["Available"], componentVariable = [{ component = { name = "EVSE", evse = { id = 1 } }, variable = { name = "AvailabilityState" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "get-report: the report arrives"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 43, seqNo = 0 }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: the station is done with the report"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:get-report-3" }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: the criterion Problem finds nothing"
+action = "call"
+station = "${station}"
+call = "GetReport"
+payload = { requestId = 44, componentCriteria = ["Problem"], componentVariable = [{ component = { name = "EVSE", evse = { id = 1 } }, variable = { name = "AvailabilityState" } }] }
+expect_status = "EmptyResultSet"
+
+[[steps]]
+name = "get-report: a variable with an instance is Accepted"
+action = "call"
+station = "${station}"
+call = "GetReport"
+payload = { requestId = 45, componentVariable = [{ component = { name = "DeviceDataCtrlr" }, variable = { name = "ItemsPerMessage", instance = "GetReport" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "get-report: the report of one instance arrives"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 45, seqNo = 0 }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:get-report" }
+timeout_ms = 30000
+
+# ---------------------------------------------------------------------------------------
+# 16 conformance-v201-master-pass
+
+[[steps]]
+name = "master-pass: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:master-pass" }
+timeout_ms = 30000
+
+[[steps]]
+name = "master-pass: the master pass group is PARENTTAG"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "PARENTTAG", component = { name = "AuthCtrlr" }, variable = { name = "MasterPassGroupId" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted" }] }
+
+[[steps]]
+name = "master-pass: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:master-pass" }
+
+[[steps]]
+name = "master-pass: the transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:master-pass-1" }
+timeout_ms = 30000
+
+[[steps]]
+name = "master-pass: the next Authorize names the master pass group"
+action = "inject_fault"
+call = "Authorize"
+station = "${station}"
+kind = "invalid_payload"
+payload = { idTokenInfo = { status = "Accepted", groupIdToken = { idToken = "PARENTTAG", type = "Central" } } }
+times = 1
+
+[[steps]]
+name = "master-pass: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:master-pass-1" }
+
+[[steps]]
+name = "master-pass: the second transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:master-pass-2" }
+timeout_ms = 30000
+
+[[steps]]
+name = "master-pass: LocalPreAuthorize is turned on"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "true", component = { name = "AuthCtrlr" }, variable = { name = "LocalPreAuthorize" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted" }] }
+
+[[steps]]
+name = "master-pass: the next Authorize has no group"
+action = "inject_fault"
+call = "Authorize"
+station = "${station}"
+kind = "invalid_payload"
+payload = { idTokenInfo = { status = "Accepted" } }
+times = 1
+
+[[steps]]
+name = "master-pass: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:master-pass-2" }
+
+[[steps]]
+name = "master-pass: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:master-pass" }
+timeout_ms = 30000
+
+[[steps]]
+name = "master-pass: the first transaction was ended by the master pass"
+action = "wait_call"
+call = "TransactionEvent"
+station = "${station}"
+payload_contains = { eventType = "Ended", transactionInfo = { stoppedReason = "MasterPass" }, idToken = { idToken = "CONF-MP-M" } }
+
+[[steps]]
+name = "master-pass: the second transaction was ended by the master pass"
+action = "wait_call"
+call = "TransactionEvent"
+station = "${station}"
+payload_contains = { eventType = "Ended", transactionInfo = { stoppedReason = "MasterPass" }, idToken = { idToken = "PARENTAUTH" } }
+
+[[steps]]
+name = "master-pass: both prepared Authorize answers were used"
+action = "faults"
+station = "${station}"
+expect_count = 0
+
+# ---------------------------------------------------------------------------------------
+# 17 conformance-v201-local-list-auth
+
+[[steps]]
+name = "local-list-auth: station ready"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:local-list-auth" }
+timeout_ms = 30000
+
+[[steps]]
+name = "local-list-auth: a full list holds four tokens"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 5, updateType = "Full", localAuthorizationList = [{ idToken = { idToken = "BADTAG", type = "ISO14443" }, idTokenInfo = { status = "Blocked" } }, { idToken = { idToken = "EXPIREDAUTH", type = "ISO14443" }, idTokenInfo = { status = "Expired" } }, { idToken = { idToken = "PARENTAUTH", type = "ISO14443" }, idTokenInfo = { status = "Accepted", groupIdToken = { idToken = "PARENTTAG", type = "Central" } } }, { idToken = { idToken = "CONF-LIST-G3", type = "ISO14443" }, idTokenInfo = { status = "Invalid", groupIdToken = { idToken = "PARENTTAG", type = "Central" } } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list-auth: the station is reset"
+action = "call"
+station = "${station}"
+call = "Reset"
+payload = { type = "OnIdle" }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list-auth: the station booted again"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:local-list-auth-rebooted" }
+timeout_ms = 30000
+
+[[steps]]
+name = "local-list-auth: the list is still version 5 after the reboot"
+action = "call"
+station = "${station}"
+call = "GetLocalListVersion"
+expect_payload = { versionNumber = 5 }
+
+[[steps]]
+name = "local-list-auth: LocalPreAuthorize is turned on"
+action = "call"
+station = "${station}"
+call = "SetVariables"
+payload = { setVariableData = [{ attributeValue = "true", component = { name = "AuthCtrlr" }, variable = { name = "LocalPreAuthorize" } }] }
+expect_payload = { setVariableResult = [{ attributeStatus = "Accepted" }] }
+
+[[steps]]
+name = "local-list-auth: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:local-list-auth" }
+
+[[steps]]
+name = "local-list-auth: the transaction runs"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:local-list-auth-invalid" }
+timeout_ms = 30000
+
+[[steps]]
+name = "local-list-auth: the next Authorize is Invalid, with the group"
+action = "inject_fault"
+call = "Authorize"
+station = "${station}"
+kind = "invalid_payload"
+payload = { idTokenInfo = { status = "Invalid", groupIdToken = { idToken = "PARENTTAG", type = "Central" } } }
+times = 1
+
+[[steps]]
+name = "local-list-auth: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:local-list-auth-invalid" }
+
+[[steps]]
+name = "local-list-auth: scenario over"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "done:local-list-auth" }
+timeout_ms = 30000
+
+[[steps]]
+name = "local-list-auth: the prepared Authorize answer was used"
+action = "faults"
+station = "${station}"
+expect_count = 0
+
+# ---------------------------------------------------------------------------------------
 # End: the station takes the answer to its last message before the connection closes.
 
 [[steps]]

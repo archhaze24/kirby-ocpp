@@ -1,0 +1,191 @@
+name = "conformance-v201-local-list-auth"
+ocpp_version = "2.0.1"
+description = "A Local Authorization List that survives a reboot, and online authorization with LocalPreAuthorize: Blocked and Expired entries are checked with the CSMS, and an Invalid entry of the group of a running transaction neither starts nor changes it"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends a full list (version 5) of four tokens: BADTAG (Blocked), EXPIREDAUTH
+# (Expired), PARENTAUTH (Accepted) and CONF-LIST-G3 (Invalid), the last two in the group
+# PARENTTAG (the CSMS names that group in its answers for PARENTAUTH). It resets the station, reads the list version, and turns
+# LocalPreAuthorize on. The CSMS answers an Authorize for BADTAG with Blocked and one for
+# EXPIREDAUTH with Expired; for CONF-LIST-G3 it is told to answer Invalid, with the group.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:local-list-auth"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:local-list-auth" }
+
+[[steps]]
+name = "SendLocalList Full arrives"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Full", versionNumber = 5 }
+
+# The list survives a reboot
+
+[[steps]]
+name = "Reset (OnIdle) arrives"
+action = "expect_call"
+call = "Reset"
+direction = "in"
+match = { type = "OnIdle" }
+
+[[steps]]
+name = "the station boots again after the reset"
+action = "expect_call"
+call = "BootNotification"
+direction = "out"
+match = { reason = "RemoteReset" }
+timeout_ms = 10000
+
+[[steps]]
+name = "the registration is accepted"
+action = "wait_for"
+condition = { kind = "registration", status = "Accepted" }
+timeout_ms = 10000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connected" }
+
+[[steps]]
+name = "tell the CSMS the station booted again"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:local-list-auth-rebooted"
+
+[[steps]]
+name = "GetLocalListVersion arrives after the reboot"
+action = "expect_call"
+call = "GetLocalListVersion"
+direction = "in"
+
+[[steps]]
+name = "SetVariables turns LocalPreAuthorize on"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ attributeValue = "true", component = { name = "AuthCtrlr" }, variable = { name = "LocalPreAuthorize" } }] }
+
+[[steps]]
+name = "the CSMS has turned LocalPreAuthorize on"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:local-list-auth" }
+
+# A Blocked and an Expired entry: the station asks the CSMS, which refuses
+
+[[steps]]
+name = "the Blocked token is presented"
+action = "start_tx"
+evse = 1
+id_token = "BADTAG"
+expect = { status = "Blocked" }
+
+[[steps]]
+name = "the station asks the CSMS about the Blocked entry"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "BADTAG", type = "ISO14443" } }
+timeout_ms = 5000
+
+[[steps]]
+name = "the Expired token is presented"
+action = "start_tx"
+evse = 1
+id_token = "EXPIREDAUTH"
+expect = { status = "Expired" }
+
+[[steps]]
+name = "the station asks the CSMS about the Expired entry"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "EXPIREDAUTH", type = "ISO14443" } }
+timeout_ms = 5000
+
+# An Invalid token of the group
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "a listed token starts the transaction"
+action = "start_tx"
+evse = 1
+id_token = "PARENTAUTH"
+
+[[steps]]
+name = "the transaction starts with the listed token"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", idToken = { idToken = "PARENTAUTH" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:local-list-auth-invalid"
+
+[[steps]]
+name = "the CSMS will answer the next Authorize with Invalid"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:local-list-auth-invalid" }
+
+[[steps]]
+name = "the Invalid token of the group is presented"
+action = "present_token"
+evse = 1
+id_token = "CONF-LIST-G3"
+expect = { status = "Invalid" }
+
+[[steps]]
+name = "the station asks the CSMS about the Invalid entry"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "CONF-LIST-G3", type = "ISO14443" } }
+timeout_ms = 5000
+
+[[steps]]
+name = "the token that started the transaction ends it"
+action = "present_token"
+evse = 1
+id_token = "PARENTAUTH"
+
+[[steps]]
+name = "the transaction event of the stop follows, none came for the Invalid token"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { triggerReason = "StopAuthorized" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:local-list-auth"

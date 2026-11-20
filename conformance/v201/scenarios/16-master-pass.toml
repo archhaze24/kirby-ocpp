@@ -1,0 +1,183 @@
+name = "conformance-v201-master-pass"
+ocpp_version = "2.0.1"
+description = "A token of the group set in AuthCtrlr.MasterPassGroupId starts no transaction and ends the running one with the stop reason MasterPass, whether the CSMS names the group in its Authorize answer or the station knows it from the authorization cache"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sets MasterPassGroupId to PARENTTAG. It answers an Authorize for PARENTAUTH
+# with that group; for CONF-MP-M it is told to do so once, and for the cached presentation
+# of PARENTAUTH it is told once to answer without a group, so only the cache can name it.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:master-pass"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:master-pass" }
+
+[[steps]]
+name = "SetVariables sets the master pass group"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ attributeValue = "PARENTTAG", component = { name = "AuthCtrlr" }, variable = { name = "MasterPassGroupId" } }] }
+
+[[steps]]
+name = "the CSMS has set the group"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:master-pass" }
+
+# The master pass starts no transaction
+
+[[steps]]
+name = "the master pass is presented with no transaction running"
+action = "present_token"
+evse = 1
+id_token = "PARENTAUTH"
+
+[[steps]]
+name = "the station asks the CSMS about the master pass"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "PARENTAUTH", type = "ISO14443" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "an ordinary token starts the transaction, so the master pass did not"
+action = "start_tx"
+evse = 1
+id_token = "CONF-MP-1"
+
+[[steps]]
+name = "the transaction started with the ordinary token"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", idToken = { idToken = "CONF-MP-1" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+# The master pass ends the running transaction; the Authorize answer names the group
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:master-pass-1"
+
+[[steps]]
+name = "the CSMS will name the group for CONF-MP-M"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:master-pass-1" }
+
+[[steps]]
+name = "the master pass CONF-MP-M is presented"
+action = "present_token"
+evse = 1
+id_token = "CONF-MP-M"
+
+[[steps]]
+name = "the station asks the CSMS about CONF-MP-M"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "CONF-MP-M", type = "ISO14443" } }
+timeout_ms = 5000
+
+[[steps]]
+name = "the transaction ends with the stop reason MasterPass"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended", transactionInfo = { stoppedReason = "MasterPass" }, idToken = { idToken = "CONF-MP-M" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+# The master pass is in the authorization cache: the station knows its group. With
+# LocalPreAuthorize on it still asks the CSMS to confirm the token
+
+[[steps]]
+name = "the transaction starts again"
+action = "start_tx"
+evse = 1
+id_token = "CONF-MP-2"
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the transaction runs"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:master-pass-2"
+
+[[steps]]
+name = "SetVariables turns LocalPreAuthorize on"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ attributeValue = "true", component = { name = "AuthCtrlr" }, variable = { name = "LocalPreAuthorize" } }] }
+
+[[steps]]
+name = "the CSMS will answer the next Authorize without a group"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:master-pass-2" }
+
+[[steps]]
+name = "the cached master pass PARENTAUTH is presented"
+action = "present_token"
+evse = 1
+id_token = "PARENTAUTH"
+
+[[steps]]
+name = "the station asks the CSMS to confirm the cached token"
+action = "expect_call"
+call = "Authorize"
+direction = "out"
+match = { idToken = { idToken = "PARENTAUTH", type = "ISO14443" } }
+timeout_ms = 5000
+
+[[steps]]
+name = "the transaction ends with the stop reason MasterPass"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended", transactionInfo = { stoppedReason = "MasterPass" }, idToken = { idToken = "PARENTAUTH" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "no_pending_messages" }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:master-pass"

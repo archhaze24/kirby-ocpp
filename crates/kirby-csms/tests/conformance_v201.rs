@@ -189,7 +189,7 @@ fn family() -> Vec<Scenario> {
 #[test]
 fn every_scenario_of_the_family_is_tagged_and_named_after_the_family() {
     let scenarios = family();
-    assert!(scenarios.len() >= 13, "{}", scenarios.len());
+    assert!(scenarios.len() >= 17, "{}", scenarios.len());
     let mut names = std::collections::BTreeSet::new();
     for scenario in &scenarios {
         for tag in ["conformance", "ocpp2.0.1"] {

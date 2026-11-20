@@ -1,0 +1,117 @@
+name = "conformance-v201-get-report"
+ocpp_version = "2.0.1"
+description = "GetReport with component criteria, with a component and variable, with both, with a criterion nothing meets, and with one instance of a variable that has several"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends one GetReport after the other and waits for the report of each one.
+# The station refuses a request while it still sends the previous report, so the scenario
+# sends a ready message once the report went out; its next message reaches the CSMS after the
+# answer to the last chunk.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:get-report"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:get-report" }
+
+# Component criteria
+
+[[steps]]
+name = "GetReport with the criterion Enabled arrives"
+action = "expect_call"
+call = "GetReport"
+direction = "in"
+match = { requestId = 41, componentCriteria = ["Enabled"] }
+
+[[steps]]
+name = "the station sends the report of requestId 41"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { requestId = 41, seqNo = 0 }
+
+[[steps]]
+name = "let the CSMS send the next report request"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:get-report-1"
+
+# A component and a variable
+
+[[steps]]
+name = "GetReport for the availability state of EVSE 1 arrives"
+action = "expect_call"
+call = "GetReport"
+direction = "in"
+match = { requestId = 42 }
+
+[[steps]]
+name = "the report holds that one variable"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { requestId = 42, seqNo = 0, reportData = [{ component = { name = "EVSE", evse = { id = 1 } }, variable = { name = "AvailabilityState" }, variableCharacteristics = { dataType = "OptionList" }, variableAttribute = [{ type = "Actual", mutability = "ReadOnly" }] }] }
+
+[[steps]]
+name = "let the CSMS send the next report request"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:get-report-2"
+
+# A criterion and a variable together, then a criterion nothing meets
+
+[[steps]]
+name = "GetReport with the criterion Available and a variable arrives"
+action = "expect_call"
+call = "GetReport"
+direction = "in"
+match = { requestId = 43, componentCriteria = ["Available"] }
+
+[[steps]]
+name = "the report holds that one variable"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { requestId = 43, seqNo = 0, reportData = [{ component = { name = "EVSE", evse = { id = 1 } }, variable = { name = "AvailabilityState" } }] }
+
+[[steps]]
+name = "let the CSMS send the next report request"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:get-report-3"
+
+[[steps]]
+name = "GetReport with the criterion Problem and a variable arrives"
+action = "expect_call"
+call = "GetReport"
+direction = "in"
+match = { requestId = 44, componentCriteria = ["Problem"] }
+
+# A variable with several instances, asked with one of them
+
+[[steps]]
+name = "GetReport for ItemsPerMessage of one instance arrives"
+action = "expect_call"
+call = "GetReport"
+direction = "in"
+match = { requestId = 45 }
+
+[[steps]]
+name = "the report holds that instance only"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { requestId = 45, seqNo = 0, reportData = [{ variable = { name = "ItemsPerMessage", instance = "GetReport" } }] }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:get-report"

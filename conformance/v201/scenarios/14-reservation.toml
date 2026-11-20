@@ -1,0 +1,504 @@
+name = "conformance-v201-reservation"
+ocpp_version = "2.0.1"
+description = "ReserveNow for a specific EVSE, any EVSE, a connector type and a group (accepted, occupied, unavailable, rejected, replaced), use of the reservation, CancelReservation, removal of a reservation when the EVSE becomes unavailable"
+tags = ["conformance", "ocpp2.0.1"]
+
+# The CSMS script sends the commands and checks the answers; the station has one EVSE. A
+# command that needs an action of the station (the cable, a token) is preceded by a
+# `go:reservation-<n>` message, which the scenario waits for. Tokens: CONF-RES-A and
+# CONF-RES-B are plain tokens; PARENTAUTH is answered by the CSMS with the group PARENTTAG.
+
+[[steps]]
+name = "tell the CSMS the station is ready"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation"
+
+[[steps]]
+name = "start of the observation window"
+action = "expect_call"
+call = "DataTransfer"
+direction = "out"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "ready:reservation" }
+
+# A specific EVSE: accepted, then occupied for another token, then replaced
+
+[[steps]]
+name = "ReserveNow for EVSE 1 and CONF-RES-A arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 1, evseId = 1, idToken = { idToken = "CONF-RES-A", type = "ISO14443" } }
+
+[[steps]]
+name = "the connector is reported Reserved"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
+timeout_ms = 5000
+
+[[steps]]
+name = "ReserveNow for the reserved EVSE arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 2, evseId = 1 }
+
+[[steps]]
+name = "ReserveNow without an EVSE arrives while the only EVSE is reserved"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 3 }
+
+[[steps]]
+name = "RequestStartTransaction with another token arrives"
+action = "expect_call"
+call = "RequestStartTransaction"
+direction = "in"
+match = { remoteStartId = 1, evseId = 1, idToken = { idToken = "CONF-RES-B" } }
+
+[[steps]]
+name = "ReserveNow with the same id and CONF-RES-B replaces the reservation"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 1, evseId = 1, idToken = { idToken = "CONF-RES-B", type = "ISO14443" } }
+
+[[steps]]
+name = "the CSMS has seen the answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:reservation-1" }
+
+# Use of the reservation
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "the transaction starts with CONF-RES-B"
+action = "start_tx"
+evse = 1
+id_token = "CONF-RES-B"
+
+[[steps]]
+name = "the transaction event carries the reservation"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", reservationId = 1, idToken = { idToken = "CONF-RES-B" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_active", evse = 1 }
+
+[[steps]]
+name = "tell the CSMS the EVSE is in use"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-busy"
+
+[[steps]]
+name = "ReserveNow for the EVSE in use arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 4, evseId = 1 }
+
+[[steps]]
+name = "ReserveNow without an EVSE arrives while the only EVSE is in use"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 5 }
+
+[[steps]]
+name = "the CSMS has seen the answers"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:reservation-busy" }
+
+[[steps]]
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "the transaction ends"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+[[steps]]
+action = "unplug"
+evse = 1
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connector_status", evse = 1, connector = 1, status = "Available" }
+
+[[steps]]
+name = "tell the CSMS the EVSE is free"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-free"
+
+# CancelReservation: unknown id, then a reservation of an EVSE
+
+[[steps]]
+name = "CancelReservation for an unknown id arrives"
+action = "expect_call"
+call = "CancelReservation"
+direction = "in"
+match = { reservationId = 99 }
+
+[[steps]]
+name = "ReserveNow for EVSE 1 arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 6, evseId = 1 }
+
+[[steps]]
+name = "the connector is reported Reserved"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
+timeout_ms = 5000
+
+[[steps]]
+name = "CancelReservation for reservation 6 arrives"
+action = "expect_call"
+call = "CancelReservation"
+direction = "in"
+match = { reservationId = 6 }
+
+[[steps]]
+name = "the connector is reported Available"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+# Any EVSE: the single EVSE is held, and a connector type finds it taken
+
+[[steps]]
+name = "ReserveNow without an EVSE arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 7 }
+
+[[steps]]
+name = "the connector is reported Reserved"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
+timeout_ms = 5000
+
+[[steps]]
+name = "ReserveNow with a connector type arrives while every EVSE is reserved"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 8, connectorType = "cType2" }
+
+[[steps]]
+name = "CancelReservation for reservation 7 arrives"
+action = "expect_call"
+call = "CancelReservation"
+direction = "in"
+match = { reservationId = 7 }
+
+[[steps]]
+name = "the connector is reported Available"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+# A connector type
+
+[[steps]]
+name = "ReserveNow with a connector type arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 9, connectorType = "cType2" }
+
+[[steps]]
+name = "the connector is reported Reserved"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
+timeout_ms = 5000
+
+[[steps]]
+name = "CancelReservation for reservation 9 arrives"
+action = "expect_call"
+call = "CancelReservation"
+direction = "in"
+match = { reservationId = 9 }
+
+[[steps]]
+name = "the connector is reported Available"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+# A reservation for a group: another token of the group uses it
+
+[[steps]]
+name = "ReserveNow for EVSE 1 with a group arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 10, evseId = 1, groupIdToken = { idToken = "PARENTTAG", type = "Central" } }
+
+[[steps]]
+name = "the connector is reported Reserved"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the CSMS has seen the answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:reservation-group" }
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "the transaction starts with a token of the group"
+action = "start_tx"
+evse = 1
+id_token = "PARENTAUTH"
+
+[[steps]]
+name = "the transaction event carries the reservation of the group"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", reservationId = 10, idToken = { idToken = "PARENTAUTH" } }
+timeout_ms = 5000
+
+[[steps]]
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "the transaction ends"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+[[steps]]
+action = "unplug"
+evse = 1
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connector_status", evse = 1, connector = 1, status = "Available" }
+
+[[steps]]
+name = "tell the CSMS the EVSE is free"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-group-done"
+
+# A reservation of any EVSE for a group
+
+[[steps]]
+name = "ReserveNow without an EVSE and with a group arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 11, groupIdToken = { idToken = "PARENTTAG", type = "Central" } }
+
+[[steps]]
+name = "the connector is reported Reserved"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the CSMS has seen the answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:reservation-any-group" }
+
+[[steps]]
+action = "plug"
+evse = 1
+
+[[steps]]
+name = "the transaction starts with a token of the group"
+action = "start_tx"
+evse = 1
+id_token = "PARENTAUTH"
+
+[[steps]]
+name = "the transaction event carries the reservation"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", reservationId = 11 }
+timeout_ms = 5000
+
+[[steps]]
+action = "stop_tx"
+evse = 1
+
+[[steps]]
+name = "the transaction ends"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+[[steps]]
+action = "unplug"
+evse = 1
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "connector_status", evse = 1, connector = 1, status = "Available" }
+
+[[steps]]
+name = "tell the CSMS the EVSE is free"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:reservation-unavailable"
+
+# The EVSE becomes unavailable: the reservation is removed
+
+[[steps]]
+name = "ReserveNow for EVSE 1 arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 12, evseId = 1 }
+
+[[steps]]
+name = "the connector is reported Reserved"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Reserved" }
+timeout_ms = 5000
+
+[[steps]]
+name = "ChangeAvailability (EVSE 1, Inoperative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Inoperative", evse = { id = 1 } }
+
+[[steps]]
+name = "the reservation is reported Removed"
+action = "expect_call"
+call = "ReservationStatusUpdate"
+direction = "out"
+match = { reservationId = 12, reservationUpdateStatus = "Removed" }
+timeout_ms = 5000
+
+[[steps]]
+name = "the connector is Unavailable"
+action = "wait_for"
+condition = { kind = "connector_status", evse = 1, connector = 1, status = "Unavailable" }
+
+[[steps]]
+name = "ReserveNow for the unavailable EVSE arrives"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 13, evseId = 1 }
+
+[[steps]]
+name = "ReserveNow without an EVSE arrives while the only EVSE is unavailable"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 14 }
+
+[[steps]]
+name = "ChangeAvailability (EVSE 1, Operative) arrives"
+action = "expect_call"
+call = "ChangeAvailability"
+direction = "in"
+match = { operationalStatus = "Operative", evse = { id = 1 } }
+
+[[steps]]
+name = "the connector is reported Available"
+action = "expect_call"
+call = "StatusNotification"
+direction = "out"
+match = { evseId = 1, connectorId = 1, connectorStatus = "Available" }
+timeout_ms = 5000
+
+# Reservations switched off
+
+[[steps]]
+name = "SetVariables switches ReservationCtrlr off"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ attributeValue = "false", component = { name = "ReservationCtrlr" }, variable = { name = "Enabled" } }] }
+
+[[steps]]
+name = "ReserveNow arrives while reservations are off"
+action = "expect_call"
+call = "ReserveNow"
+direction = "in"
+match = { id = 15, evseId = 1 }
+
+[[steps]]
+name = "SetVariables switches ReservationCtrlr on"
+action = "expect_call"
+call = "SetVariables"
+direction = "in"
+match = { setVariableData = [{ attributeValue = "true", component = { name = "ReservationCtrlr" }, variable = { name = "Enabled" } }] }
+
+[[steps]]
+name = "tell the CSMS the scenario is over"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "done:reservation"
