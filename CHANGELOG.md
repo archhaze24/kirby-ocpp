@@ -15,6 +15,8 @@ tag as the GitHub release notes.
 - Scenarios and CSMS scripts accept `ocpp_version = "2.1"` (2.x grammar; id tokens up to 255 characters with any token type). The eight 2.0.1 built-in scenarios also run as 2.1; reports carry `2.1` and JUnit class names `ocpp2.1.<name>`.
 - `kirby-csms` on OCPP 2.1 sessions: station SEND messages (such as `NotifyPeriodicEventStream`) and CALLRESULTERROR frames are recorded and never answered; an invalid SEND is reported as a malformed frame.
 - OCPP 2.0.1 and 2.1 emulator: Local Authorization List (`SendLocalList`, `GetLocalListVersion`, `LocalAuthListCtrlr`). Listed tokens authorize offline (`LocalAuthorizeOffline`) and online without `Authorize` (`LocalPreAuthorize`), take precedence over the authorization cache, and the list survives a restart. `kirby-csms` has forms for both commands on 2.x stations.
+- OCPP 2.0.1 and 2.1 emulator: reservations. `ReserveNow` holds an EVSE, or any EVSE, for an `idToken` or its group, the connectors report `Reserved`, `CancelReservation` frees it, `ReservationStatusUpdate` reports `Expired` and `Removed`, and reservations survive a restart.
+- OCPP 2.0.1 and 2.1 emulator: `GetReport` limits a report by component criteria and by component and variable, and sends it in `NotifyReport` chunks. `kirby-csms` has forms for `GetReport`, `ReserveNow` and `CancelReservation` on 2.x stations.
 - Release archives carry a build provenance attestation; check one with `gh attestation verify <archive> --repo archhaze24/kirby-ocpp`.
 
 ### Changed

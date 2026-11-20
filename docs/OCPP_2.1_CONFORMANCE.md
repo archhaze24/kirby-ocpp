@@ -66,7 +66,7 @@ A 2.1 session is handled by the same listener as 1.6 and 2.0.1 and like a 2.0.1 
 | Subprotocol | The default policy is `require:ocpp1.6,ocpp2.0.1,ocpp2.1`; the client's order of preference decides |
 | Station id | The 2.0.1 rule: 1 to 48 `identifierString` characters, no colon |
 | Inbound validation | Station CALLs are validated against the 2.1 schemas with 2.x error codes; the 91-action catalog decides between `NotSupported` (defined, but not a station CALL) and `NotImplemented` (unknown name). `NotifyPeriodicEventStream` is a SEND message, so a CALL of that name gets `NotSupported` |
-| Commands | `SendLocalList` and `GetLocalListVersion` have forms, as for 2.0.1 |
+| Commands | `SendLocalList`, `GetLocalListVersion`, `ReserveNow`, `CancelReservation` and `GetReport` have forms, as for 2.0.1 |
 | Replies | The 36 station CALLs get answers valid against the 2.1 response schemas: the 2.0.1 answers for the shared actions; `OpenPeriodicEventStream` and `PullDynamicScheduleUpdate` `Accepted`; `VatNumberValidation` `Accepted`, echoing the request; `GetCertificateChainStatus` `Failed` for each certificate; an empty result for the other new actions. Rules and faults can replace them |
 | State | The 2.0.1 fold (EVSEs, transactions, meter values); `state.v2.protocol` is `ocpp2.1` |
 | Commands | Typed commands and forms are the 2.0.1 ones; the 15 CSMS actions new in 2.1 are sent as raw payloads, checked against the 2.1 schemas |
