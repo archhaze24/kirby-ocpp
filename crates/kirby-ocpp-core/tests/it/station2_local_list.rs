@@ -77,7 +77,7 @@ impl Rig {
     }
 }
 
-async fn variable_of(csms: &MockCsms, component: &str, name: &str) -> String {
+pub(super) async fn variable_of(csms: &MockCsms, component: &str, name: &str) -> String {
     let frame = csms
         .send_call(
             "GetVariables",

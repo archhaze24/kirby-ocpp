@@ -51,6 +51,8 @@ pub(crate) struct Connector {
     pub(super) fault: bool,
     /// An `Inoperative` request waits for the transaction on the EVSE to end.
     pub(super) pending_inoperative: bool,
+    /// A reservation holds the EVSE (see `reservation`).
+    pub(super) reserved: bool,
     /// The status the CSMS was last told about, or would have been told while offline. Only
     /// used to notice a change; the current status is always derived.
     pub(super) accounted: ConnectorStatus,
@@ -92,6 +94,7 @@ impl Evse {
                     ev_connected: false,
                     fault: false,
                     pending_inoperative: false,
+                    reserved: false,
                     accounted: ConnectorStatus::Available,
                     changed_at: now,
                 })

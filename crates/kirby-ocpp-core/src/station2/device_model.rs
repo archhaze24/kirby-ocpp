@@ -20,8 +20,8 @@ use super::types::{ItemsPer, LiveVar, Reply2, StartStopPoint};
 use crate::config::StationConfig;
 use crate::error::StationError;
 use crate::ocpp::v2::messages::{
-    DataType, Mutability, NotifyReportRequest, ReportBase, ReportData, VariableAttribute,
-    VariableCharacteristics,
+    ComponentCriterion, ComponentVariable, DataType, Mutability, NotifyReportRequest, ReportBase,
+    ReportData, VariableAttribute, VariableCharacteristics,
 };
 use crate::ocpp::v2::types::{
     AttributeType, Component, Evse as EvseRef, Measurand, Variable, WireEnum,
@@ -193,6 +193,7 @@ const OCPP: &str = "OCPPCommCtrlr";
 const AUTH: &str = "AuthCtrlr";
 const CACHE: &str = "AuthCacheCtrlr";
 const LOCAL_LIST: &str = "LocalAuthListCtrlr";
+const RESERVATION: &str = "ReservationCtrlr";
 const TX: &str = "TxCtrlr";
 const SAMPLED: &str = "SampledDataCtrlr";
 const ALIGNED: &str = "AlignedDataCtrlr";
@@ -368,6 +369,10 @@ pub(crate) static TABLE: &[VarSpec] = &[
     int(LOCAL_LIST, "BytesPerMessage", Fixed("262144")),
     flag(LOCAL_LIST, "SupportsExpiryDateTime", "true"),
     flag(LOCAL_LIST, "DisablePostAuthorize", "false").rw(),
+    // ReservationCtrlr
+    flag(RESERVATION, "Enabled", "true").rw(),
+    flag(RESERVATION, "Available", "true"),
+    flag(RESERVATION, "NonEvseSpecific", "true"),
     // AuthCacheCtrlr
     flag(CACHE, "Enabled", "true").rw(),
     int(CACHE, "LifeTime", Fixed("86400")).rw().u("s"),
@@ -650,6 +655,35 @@ impl Default for DeviceModel {
 
 fn non_empty(text: Option<&String>) -> Option<&str> {
     text.map(String::as_str).filter(|text| !text.is_empty())
+}
+
+/// Whether the variable of `target` is the one `selector` names: the component name, instance
+/// and EVSE (with connector) must match exactly; an absent variable selects them all.
+fn selector_matches(selector: &ComponentVariable, target: &Target) -> bool {
+    let component = &selector.component;
+    let spec = target.spec;
+    if component.name != spec.component || non_empty(component.instance.as_ref()).is_some() {
+        return false;
+    }
+    let place_ok = match &component.evse {
+        None => spec.scope == Scope::Station,
+        Some(EvseRef {
+            id, connector_id, ..
+        }) => {
+            u32::try_from(*id).is_ok_and(|id| Some(id) == target.evse)
+                && match connector_id {
+                    None => spec.scope == Scope::Evse,
+                    Some(connector) => {
+                        spec.scope == Scope::Connector
+                            && u32::try_from(*connector).ok() == target.connector
+                    }
+                }
+        }
+    };
+    place_ok
+        && selector.variable.as_ref().is_none_or(|variable| {
+            variable.name == spec.variable && non_empty(variable.instance.as_ref()) == spec.instance
+        })
 }
 
 impl DeviceModel {
@@ -953,6 +987,78 @@ impl DeviceModel {
         items
     }
 
+    /// The report data of a `GetReport` (B08): the variables of the components that match any
+    /// of `criteria` (all components when there are none) and one of `selectors` (everything
+    /// when there are none). Components are matched exactly like in `GetVariables`.
+    pub(crate) fn report_items_for(
+        &self,
+        criteria: &[ComponentCriterion],
+        selectors: &[ComponentVariable],
+        live: LiveFn<'_>,
+    ) -> Vec<ReportData> {
+        let mut targets: Vec<Target> = Vec::new();
+        for spec in TABLE.iter().filter(|s| s.scope == Scope::Station) {
+            targets.push(Target {
+                spec,
+                evse: None,
+                connector: None,
+            });
+        }
+        for evse in 1..=self.evse_count {
+            for (scope, connector) in [(Scope::Evse, None), (Scope::Connector, Some(1))] {
+                for spec in TABLE.iter().filter(|s| s.scope == scope) {
+                    targets.push(Target {
+                        spec,
+                        evse: Some(evse),
+                        connector,
+                    });
+                }
+            }
+        }
+        let component_ok = |target: &Target| {
+            criteria.is_empty()
+                || criteria.iter().any(|criterion| {
+                    let name = match criterion {
+                        ComponentCriterion::Active => "Active",
+                        ComponentCriterion::Available => "Available",
+                        ComponentCriterion::Enabled => "Enabled",
+                        ComponentCriterion::Problem => "Problem",
+                    };
+                    // A component without the variable meets `Active`, `Available` and
+                    // `Enabled` (B08.FR.07 to FR.09), never `Problem` (B08.FR.10).
+                    let flag = TABLE.iter().find(|s| {
+                        s.scope == target.spec.scope
+                            && s.component == target.spec.component
+                            && s.variable == name
+                            && s.instance.is_none()
+                    });
+                    match flag {
+                        Some(spec) => {
+                            let flag = Target {
+                                spec,
+                                evse: target.evse,
+                                connector: target.connector,
+                            };
+                            self.read(&flag, live)
+                                .is_some_and(|value| value.eq_ignore_ascii_case("true"))
+                        }
+                        None => !matches!(criterion, ComponentCriterion::Problem),
+                    }
+                })
+        };
+        let selected = |target: &Target| {
+            selectors.is_empty()
+                || selectors
+                    .iter()
+                    .any(|selector| selector_matches(selector, target))
+        };
+        targets
+            .iter()
+            .filter(|target| component_ok(target) && selected(target))
+            .map(|target| self.report_item(target, true, live))
+            .collect()
+    }
+
     fn report_item(&self, target: &Target, characteristics: bool, live: LiveFn<'_>) -> ReportData {
         let spec = target.spec;
         let component = Component {
@@ -1049,6 +1155,8 @@ impl Station2Actor {
                 }
             }
             (SECURITY, "BasicAuthPassword") => self.mark_secrets_dirty(),
+            // Held EVSEs show as reserved only while reservations are enabled.
+            (RESERVATION, "Enabled") => self.notify_status_changes(),
             _ => {}
         }
         self.flush_now();

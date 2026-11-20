@@ -61,6 +61,16 @@ wire_enum! {
 }
 
 wire_enum! {
+    /// Component selector of `GetReport` (`ComponentCriterionEnumType`).
+    ComponentCriterion {
+        Active = "Active",
+        Available = "Available",
+        Enabled = "Enabled",
+        Problem = "Problem",
+    }
+}
+
+wire_enum! {
     /// Result of `GetBaseReport` (`GenericDeviceModelStatusEnumType`).
     GenericDeviceModelStatus {
         Accepted = "Accepted",
@@ -222,6 +232,38 @@ payload! {
 }
 
 payload! {
+    /// A component and, optionally, one of its variables (`ComponentVariableType`).
+    ComponentVariable {
+        pub component: Component,
+        /// Absent means every variable of the component.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub variable: Option<Variable>,
+    }
+}
+
+payload! {
+    /// `GetReport.req`.
+    GetReportRequest {
+        pub request_id: i32,
+        /// Absent or 1 to 4 entries.
+        #[serde(default, skip_serializing_if = "helpers::omit_empty")]
+        pub component_criteria: Option<Vec<ComponentCriterion>>,
+        /// Absent or non-empty.
+        #[serde(default, skip_serializing_if = "helpers::omit_empty")]
+        pub component_variable: Option<Vec<ComponentVariable>>,
+    }
+}
+
+payload! {
+    /// `GetReport.conf`.
+    GetReportResponse {
+        pub status: GenericDeviceModelStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub status_info: Option<StatusInfo>,
+    }
+}
+
+payload! {
     /// `NotifyReport.req`.
     NotifyReportRequest {
         /// The `requestId` of the `GetBaseReport` (or similar) request.
@@ -254,6 +296,10 @@ action! {
 action! {
     /// `GetBaseReport` (CSMS -> station).
     GetBaseReport = "GetBaseReport", GetBaseReportRequest => GetBaseReportResponse, InboundAction
+}
+action! {
+    /// `GetReport` (CSMS -> station).
+    GetReport = "GetReport", GetReportRequest => GetReportResponse, InboundAction
 }
 action! {
     /// `NotifyReport` (station -> CSMS).
@@ -383,6 +429,24 @@ mod tests {
                 "variable": {"name": "V"}
             }]}),
         );
+    }
+
+    #[test]
+    fn get_report() {
+        check_enum::<ComponentCriterion>("GetReportRequest.json", "ComponentCriterionEnumType");
+        check_action::<GetReport>(
+            &json!({
+                "customData": cd(),
+                "requestId": 5,
+                "componentCriteria": ["Active", "Available", "Enabled", "Problem"],
+                "componentVariable": [
+                    {"customData": cd(), "component": component(), "variable": variable()},
+                    {"component": {"name": "EVSE"}}
+                ]
+            }),
+            &json!({"customData": cd(), "status": "EmptyResultSet", "statusInfo": status_info()}),
+        );
+        check_action::<GetReport>(&json!({"requestId": 0}), &json!({"status": "Accepted"}));
     }
 
     #[test]

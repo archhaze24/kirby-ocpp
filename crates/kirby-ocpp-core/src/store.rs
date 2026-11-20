@@ -40,7 +40,9 @@ use crate::station::offline::{OfflineQueue, SampleQueue};
 use crate::station::reservation::Reservation;
 use crate::station::security::PendingSecurityEvent;
 use crate::station::transaction::TransactionState;
-use crate::station2::{AuthCachePersist, DeviceModelPersist, EvseAvail, QueuePersist, TxPersist};
+use crate::station2::{
+    AuthCachePersist, DeviceModelPersist, EvseAvail, QueuePersist, ReservationPersist, TxPersist,
+};
 
 /// Current on-disk format version.
 /// Version 3 added the install time of charging profiles (`StoredProfile::installed_at`).
@@ -158,6 +160,8 @@ pub struct PersistedStation2 {
     pub tx: TxPersist,
     /// Transaction events waiting for delivery.
     pub queue: QueuePersist,
+    /// Reservations (added without a version bump: a file without them loads as none).
+    pub reservations: ReservationPersist,
     /// How many times the station booted.
     pub boot_count: u64,
 }
@@ -184,6 +188,7 @@ impl Default for PersistedStation2 {
             auth_cache: AuthCachePersist::default(),
             tx: TxPersist::default(),
             queue: QueuePersist::default(),
+            reservations: ReservationPersist::default(),
             boot_count: 0,
         }
     }

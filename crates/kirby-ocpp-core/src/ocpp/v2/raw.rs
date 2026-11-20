@@ -1,6 +1,6 @@
 //! Untyped 2.0.1 actions: a runtime action name with a JSON object payload.
 //!
-//! [`RawAction`] carries the 42 actions without a typed payload, and any name an explicit
+//! [`RawAction`] carries the 38 actions without a typed payload, and any name an explicit
 //! negative test wants to send. It does not implement
 //! [`Action`](crate::ocpp::action::Action), whose name is a compile-time constant. Unknown
 //! names are representable on purpose; validation reports them as

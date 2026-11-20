@@ -3,19 +3,16 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use serde_json::{Value, json};
-
 use crate::ocpp::Protocol;
 use crate::ocpp::frame::ErrorCode;
-use crate::ocpp::responder::{ReplyHandle, Responder};
+use crate::ocpp::responder::Responder;
 use crate::ocpp::v2::messages::{
     GenericDeviceModelStatus, GetBaseReport, GetBaseReportRequest, GetBaseReportResponse,
-    GetVariableData, GetVariableResult, GetVariableStatus, GetVariables, GetVariablesRequest,
-    GetVariablesResponse, SetVariableData, SetVariableResult, SetVariableStatus, SetVariables,
-    SetVariablesRequest, SetVariablesResponse,
+    GetReport, GetReportRequest, GetReportResponse, GetVariableData, GetVariableResult,
+    GetVariableStatus, GetVariables, GetVariablesRequest, GetVariablesResponse, SetVariableData,
+    SetVariableResult, SetVariableStatus, SetVariables, SetVariablesRequest, SetVariablesResponse,
 };
 use crate::ocpp::v2::types::{AttributeType, StatusInfo};
-use crate::station::LogLevel;
 use crate::station2::actor::{Station2Actor, TimerKey2};
 use crate::station2::device_model::{
     Applied, DeviceModel, LiveFn, Lookup, ReportJob, SetFailure, is_basic_auth_password,
@@ -217,21 +214,55 @@ pub(in crate::station2) fn get_base_report(
     actor.timers.set(TimerKey2::ReportChunk, Duration::ZERO);
 }
 
-/// `GetReport` has no typed payload: the handler gets the raw reply and payload. Component
-/// criteria are not supported.
+/// `GetReport` (B08): a report limited by component criteria and component/variable selectors.
 pub(in crate::station2) fn get_report(
     actor: &mut Station2Actor,
-    reply: ReplyHandle,
-    _payload: Value,
+    responder: Responder<GetReport>,
+    request: GetReportRequest,
 ) {
-    let answer = json!({
-        "status": "NotSupported",
-        "statusInfo": {"reasonCode": "UnsupportedRequest"},
-    });
-    if let Err(error) = reply.accept_value(answer) {
-        actor.log(
-            LogLevel::Warn,
-            format!("could not reply to GetReport: {error}"),
+    let reply = |status, info| GetReportResponse {
+        status,
+        status_info: info,
+        custom_data: None,
+    };
+    let selectors = request.component_variable.unwrap_or_default();
+    let limit = actor.items_per_message(ItemsPer::GetReport);
+    if selectors.len() > limit {
+        // B08.FR.06: the CSMS stays within `ItemsPerMessage`.
+        actor.respond_error(
+            responder,
+            ErrorCode::occurrence_constraint_violation(Protocol::V201),
+            format!("more than {limit} component variables in one request"),
         );
+        return;
     }
+    if actor.dm.report.is_some() {
+        let info = status_info("Unspecified", "an earlier report is still being sent");
+        actor.respond(
+            responder,
+            reply(GenericDeviceModelStatus::Rejected, Some(info)),
+        );
+        return;
+    }
+    actor.dm.security_profile = actor.state.security_profile;
+    let criteria = request.component_criteria.unwrap_or_default();
+    let items = {
+        let live = |live| actor.live_value(live);
+        actor.dm.report_items_for(&criteria, &selectors, &live)
+    };
+    if items.is_empty() {
+        actor.respond(
+            responder,
+            reply(GenericDeviceModelStatus::EmptyResultSet, None),
+        );
+        return;
+    }
+    actor.dm.report = Some(ReportJob {
+        request_id: request.request_id,
+        remaining: VecDeque::from(items),
+        seq_no: 0,
+        in_flight: false,
+    });
+    actor.respond(responder, reply(GenericDeviceModelStatus::Accepted, None));
+    actor.timers.set(TimerKey2::ReportChunk, Duration::ZERO);
 }

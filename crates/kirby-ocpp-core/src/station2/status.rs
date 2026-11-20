@@ -17,8 +17,8 @@ use crate::station::LogLevel;
 use crate::ws::ConnectionState;
 
 /// The status of a connector: `Faulted` if a fault is set, `Unavailable` if the station, the
-/// EVSE or the connector is inoperative, `Occupied` with an EV connected, else `Available`.
-/// `Reserved` is never derived (no reservations).
+/// EVSE or the connector is inoperative, `Occupied` with an EV connected, `Reserved` while a
+/// reservation holds the EVSE, else `Available`.
 pub(super) fn derive_status(
     station_operative: bool,
     evse_operative: bool,
@@ -30,6 +30,8 @@ pub(super) fn derive_status(
         ConnectorStatus::Unavailable
     } else if connector.ev_connected {
         ConnectorStatus::Occupied
+    } else if connector.reserved {
+        ConnectorStatus::Reserved
     } else {
         ConnectorStatus::Available
     }
@@ -39,6 +41,7 @@ impl Station2Actor {
     /// Records the current status of every connector as already accounted for, without
     /// sending anything.
     pub(super) fn account_all_statuses(&mut self) {
+        self.reservation_sync_flags();
         let station = self.state.availability_operative;
         for evse in &mut self.evses {
             let evse_operative = evse.gate();
@@ -52,6 +55,15 @@ impl Station2Actor {
     /// and sends one notification per changed connector. Connectors that did not change
     /// stay quiet (G01.FR.08).
     pub(super) fn notify_status_changes(&mut self) {
+        for (evse, connector) in self.record_status_changes() {
+            self.send_status(evse, connector, Origin2::Station);
+        }
+    }
+
+    /// Ends the reservations that are over, then records the connectors whose status
+    /// changed since it was accounted for, and returns them.
+    fn record_status_changes(&mut self) -> Vec<(u32, u32)> {
+        self.reservation_review();
         let now = self.clock.now_utc();
         let station = self.state.availability_operative;
         let mut changed = Vec::new();
@@ -66,9 +78,7 @@ impl Station2Actor {
                 }
             }
         }
-        for (evse, connector) in changed {
-            self.send_status(evse, connector, Origin2::Station);
-        }
+        changed
     }
 
     /// The request that reports the current status of a connector.
@@ -104,6 +114,9 @@ impl Station2Actor {
     /// Sends the status of every connector, or only of those that changed at or after the
     /// given time.
     pub(super) fn send_all_statuses(&mut self, only_changed_since: Option<DateTime<Utc>>) {
+        // Reservations that ended while the link was down are reported first; the statuses
+        // they changed go out below, not twice.
+        self.record_status_changes();
         let due: Vec<(u32, u32)> = self
             .evses
             .iter()

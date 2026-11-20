@@ -77,11 +77,11 @@ const fn send(name: &'static str, direction: ActionDirection) -> ActionInfo {
 }
 
 /// All 64 actions in byte-wise alphabetical order: 24 sent by the station, 39 by the CSMS
-/// and `DataTransfer` by either. 22 of them are typed.
+/// and `DataTransfer` by either. 26 of them are typed.
 pub const ACTIONS: [ActionInfo; 64] = [
     info("Authorize", STATION, true),
     info("BootNotification", STATION, true),
-    info("CancelReservation", CSMS, false),
+    info("CancelReservation", CSMS, true),
     info("CertificateSigned", CSMS, false),
     info("ChangeAvailability", CSMS, true),
     info("ClearCache", CSMS, true),
@@ -104,7 +104,7 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("GetLocalListVersion", CSMS, true),
     info("GetLog", CSMS, false),
     info("GetMonitoringReport", CSMS, false),
-    info("GetReport", CSMS, false),
+    info("GetReport", CSMS, true),
     info("GetTransactionStatus", CSMS, true),
     info("GetVariables", CSMS, true),
     info("Heartbeat", STATION, true),
@@ -124,8 +124,8 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("ReportChargingProfiles", STATION, false),
     info("RequestStartTransaction", CSMS, true),
     info("RequestStopTransaction", CSMS, true),
-    info("ReservationStatusUpdate", STATION, false),
-    info("ReserveNow", CSMS, false),
+    info("ReservationStatusUpdate", STATION, true),
+    info("ReserveNow", CSMS, true),
     info("Reset", CSMS, true),
     info("SecurityEventNotification", STATION, true),
     info("SendLocalList", CSMS, true),
@@ -156,7 +156,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("Authorize", STATION, true),
     info("BatterySwap", STATION, false),
     info("BootNotification", STATION, true),
-    info("CancelReservation", CSMS, false),
+    info("CancelReservation", CSMS, true),
     info("CertificateSigned", CSMS, false),
     info("ChangeAvailability", CSMS, true),
     info("ChangeTransactionTariff", CSMS, false),
@@ -186,7 +186,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("GetLog", CSMS, false),
     info("GetMonitoringReport", CSMS, false),
     info("GetPeriodicEventStream", CSMS, false),
-    info("GetReport", CSMS, false),
+    info("GetReport", CSMS, true),
     info("GetTariffs", CSMS, false),
     info("GetTransactionStatus", CSMS, true),
     info("GetVariables", CSMS, true),
@@ -218,8 +218,8 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("RequestBatterySwap", CSMS, false),
     info("RequestStartTransaction", CSMS, true),
     info("RequestStopTransaction", CSMS, true),
-    info("ReservationStatusUpdate", STATION, false),
-    info("ReserveNow", CSMS, false),
+    info("ReservationStatusUpdate", STATION, true),
+    info("ReserveNow", CSMS, true),
     info("Reset", CSMS, true),
     info("SecurityEventNotification", STATION, true),
     info("SendLocalList", CSMS, true),
@@ -344,6 +344,7 @@ mod tests {
             station_sent::<m::NotifyReport>(),
             station_sent::<m::SecurityEventNotification>(),
             station_sent::<m::DataTransfer>(),
+            station_sent::<m::ReservationStatusUpdate>(),
         ];
         let inbound = vec![
             csms_sent::<m::Reset>(),
@@ -355,11 +356,14 @@ mod tests {
             csms_sent::<m::GetVariables>(),
             csms_sent::<m::SetVariables>(),
             csms_sent::<m::GetBaseReport>(),
+            csms_sent::<m::GetReport>(),
             csms_sent::<m::ClearCache>(),
             csms_sent::<m::GetTransactionStatus>(),
             csms_sent::<m::DataTransfer>(),
             csms_sent::<m::SendLocalList>(),
             csms_sent::<m::GetLocalListVersion>(),
+            csms_sent::<m::ReserveNow>(),
+            csms_sent::<m::CancelReservation>(),
         ];
         (outbound, inbound)
     }
@@ -390,7 +394,7 @@ mod tests {
             .filter(|entry| entry.typed)
             .map(|entry| entry.name)
             .collect();
-        assert_eq!(typed.len(), 22);
+        assert_eq!(typed.len(), 26);
         let markers: BTreeSet<&str> = outbound.iter().chain(&inbound).copied().collect();
         assert_eq!(markers, typed);
         for name in &typed {

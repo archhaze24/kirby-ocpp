@@ -768,6 +768,8 @@ impl Station2Actor {
                 now,
             ));
         }
+        // H01.FR.15: the event after a reservation was used names it.
+        let reservation_id = self.take_reservation_claim(evse);
         let tx = self.tx.active.get_mut(&evse)?;
         let runtime = self.tx.runtime.entry(evse).or_default();
         let seq_no = tx.next_seq_no;
@@ -810,7 +812,7 @@ impl Station2Actor {
             offline: offline.then_some(true),
             number_of_phases_used: None,
             cable_max_current: None,
-            reservation_id: None,
+            reservation_id,
             transaction_info: Transaction {
                 transaction_id: tx.id.0.clone(),
                 charging_state,
@@ -1212,6 +1214,7 @@ impl Station2Actor {
                 None,
             );
         } else if self.tx.pending.remove(&evse).is_some() {
+            self.reservation_forget_claim(evse);
             self.log(
                 LogLevel::Info,
                 format!("EV did not connect to EVSE {evse} in time: authorization dropped"),

@@ -364,11 +364,14 @@ async fn second_base_report_while_chunking_is_rejected() {
 }
 
 #[tokio::test]
-async fn get_report_is_not_supported() {
+async fn unhandled_device_model_actions_are_not_answered_with_a_report() {
     let csms = v201_csms().await;
     let (station, task) = booted_station(&csms).await;
-    let answer = call(&csms, "GetReport", json!({"requestId": 4})).await;
-    assert_eq!(answer["status"], json!("NotSupported"));
+    let frame = csms
+        .send_call("SetMonitoringBase", json!({"monitoringBase": "All"}))
+        .await
+        .expect("the station answers");
+    assert!(matches!(frame, Frame::CallError { .. }), "{frame:?}");
     assert_eq!(calls_of(&csms, "NotifyReport").len(), 0);
     stop(&station, task).await;
 }

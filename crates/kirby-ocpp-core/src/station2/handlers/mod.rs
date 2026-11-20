@@ -31,13 +31,15 @@ use super::actor::Station2Actor;
 use super::link::sanitize;
 use super::local_list;
 use super::remote;
+use super::reservation;
 use crate::ocpp::action::{Action, InboundAction};
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::responder::{ReplyHandle, Responder};
 use crate::ocpp::v2::messages::{
-    ChangeAvailability, ClearCache, DataTransfer, GetBaseReport, GetLocalListVersion,
-    GetTransactionStatus, GetVariables, RequestStartTransaction, RequestStopTransaction, Reset,
-    SendLocalList, SetVariables, TriggerMessage, UnlockConnector,
+    CancelReservation, ChangeAvailability, ClearCache, DataTransfer, GetBaseReport,
+    GetLocalListVersion, GetReport, GetTransactionStatus, GetVariables, RequestStartTransaction,
+    RequestStopTransaction, ReserveNow, Reset, SendLocalList, SetVariables, TriggerMessage,
+    UnlockConnector,
 };
 use crate::ocpp::v2::registry::unhandled_error_code_for;
 use crate::station::LogLevel;
@@ -45,9 +47,6 @@ use crate::ws::IncomingCall;
 
 /// A handler for the inbound action `A`.
 type Handler<A> = fn(&mut Station2Actor, Responder<A>, <A as Action>::Req);
-
-/// The name of `GetReport`, which has no typed payload.
-const GET_REPORT: &str = "GetReport";
 
 impl Station2Actor {
     /// Routes an incoming CALL to its handler.
@@ -76,7 +75,9 @@ impl Station2Actor {
             GetBaseReport::NAME => {
                 self.invoke::<GetBaseReport>(payload, reply, device_model::get_base_report);
             }
-            GET_REPORT => device_model::get_report(self, reply, payload),
+            GetReport::NAME => {
+                self.invoke::<GetReport>(payload, reply, device_model::get_report);
+            }
             ChangeAvailability::NAME => {
                 self.invoke::<ChangeAvailability>(
                     payload,
@@ -117,6 +118,10 @@ impl Station2Actor {
                     reply,
                     local_list::get_local_list_version,
                 );
+            }
+            ReserveNow::NAME => self.invoke::<ReserveNow>(payload, reply, reservation::reserve_now),
+            CancelReservation::NAME => {
+                self.invoke::<CancelReservation>(payload, reply, reservation::cancel_reservation);
             }
             ClearCache::NAME => self.invoke::<ClearCache>(payload, reply, control::clear_cache),
             DataTransfer::NAME => {

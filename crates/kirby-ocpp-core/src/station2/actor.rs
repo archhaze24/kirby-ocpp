@@ -69,6 +69,8 @@ pub(crate) enum TimerKey2 {
     ResetDelay,
     /// The next `NotifyReport` chunk is due.
     ReportChunk,
+    /// The earliest reservation expires.
+    ReservationExpiry,
 }
 
 /// Completions and log messages delivered to the actor loop.
@@ -119,6 +121,8 @@ pub(crate) struct Station2Actor {
     pub(super) auth: AuthState,
     /// The Local Authorization List.
     pub(super) local_list: super::local_list::LocalListPersist,
+    /// The reservations.
+    pub(super) reservations: super::reservation::ReservationState,
     pub(super) reset: Option<ResetPlan>,
     pub(super) persistence: Persistence2,
     /// Answers armed by scenario `reply` steps (runtime only, see `scripted`).
@@ -167,6 +171,7 @@ impl Station2Actor {
             queue: TxQueue::default(),
             auth: AuthState::default(),
             local_list: super::local_list::LocalListPersist::default(),
+            reservations: super::reservation::ReservationState::default(),
             reset: None,
             persistence,
             scripted_replies: ReplyList::default(),

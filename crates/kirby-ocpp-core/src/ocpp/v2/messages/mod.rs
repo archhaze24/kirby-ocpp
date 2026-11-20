@@ -10,8 +10,9 @@
 //! | `authorization` | `Authorize`, `ClearCache` |
 //! | `transactions` | `TransactionEvent`, `MeterValues`, `GetTransactionStatus` |
 //! | `remote_control` | `Reset`, `ChangeAvailability`, `RequestStartTransaction`, `RequestStopTransaction`, `UnlockConnector`, `TriggerMessage` |
-//! | `device_model` | `GetVariables`, `SetVariables`, `GetBaseReport`, `NotifyReport` |
+//! | `device_model` | `GetVariables`, `SetVariables`, `GetBaseReport`, `GetReport`, `NotifyReport` |
 //! | `local_list` | `SendLocalList`, `GetLocalListVersion` |
+//! | `reservation` | `ReserveNow`, `CancelReservation`, `ReservationStatusUpdate` |
 //! | `data_security` | `DataTransfer`, `SecurityEventNotification` |
 //!
 //! Each test block holds a table of fixtures that exercise every optional
@@ -45,6 +46,7 @@ mod data_security;
 mod device_model;
 mod local_list;
 mod remote_control;
+mod reservation;
 mod transactions;
 
 pub use authorization::{
@@ -61,7 +63,8 @@ pub use data_security::{
     SecurityEventNotification, SecurityEventNotificationRequest, SecurityEventNotificationResponse,
 };
 pub use device_model::{
-    DataType, GenericDeviceModelStatus, GetBaseReport, GetBaseReportRequest, GetBaseReportResponse,
+    ComponentCriterion, ComponentVariable, DataType, GenericDeviceModelStatus, GetBaseReport,
+    GetBaseReportRequest, GetBaseReportResponse, GetReport, GetReportRequest, GetReportResponse,
     GetVariableData, GetVariableResult, GetVariableStatus, GetVariables, GetVariablesRequest,
     GetVariablesResponse, Mutability, NotifyReport, NotifyReportRequest, NotifyReportResponse,
     ReportBase, ReportData, SetVariableData, SetVariableResult, SetVariableStatus, SetVariables,
@@ -80,6 +83,12 @@ pub use remote_control::{
     ResetKind, ResetRequest, ResetResponse, ResetStatus, TriggerMessage, TriggerMessageRequest,
     TriggerMessageResponse, TriggerMessageStatus, UnlockConnector, UnlockConnectorRequest,
     UnlockConnectorResponse, UnlockStatus,
+};
+pub use reservation::{
+    CancelReservation, CancelReservationRequest, CancelReservationResponse,
+    CancelReservationStatus, ReservationStatusUpdate, ReservationStatusUpdateRequest,
+    ReservationStatusUpdateResponse, ReservationUpdateStatus, ReserveNow, ReserveNowRequest,
+    ReserveNowResponse, ReserveNowStatus,
 };
 pub use transactions::{
     GetTransactionStatus, GetTransactionStatusRequest, GetTransactionStatusResponse, MeterValues,

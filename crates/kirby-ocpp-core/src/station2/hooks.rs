@@ -21,6 +21,7 @@ impl Station2Actor {
             TimerKey2::EvConnectTimeout(evse) => self.on_ev_connect_timeout(evse),
             TimerKey2::ResetDelay => self.on_reset_timer(),
             TimerKey2::ReportChunk => self.on_report_chunk(),
+            TimerKey2::ReservationExpiry => self.on_reservation_timer(),
             TimerKey2::PersistFlush => self.on_persist_flush(),
         }
     }

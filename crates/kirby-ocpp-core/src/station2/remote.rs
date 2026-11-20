@@ -4,8 +4,10 @@
 //! stop points are the transaction engine's business: this module only decides whether the
 //! request is accepted and hands the token over.
 
+use serde_json::Value;
+
 use super::actor::Station2Actor;
-use super::authorization::AuthDecision;
+use super::authorization::{AuthDecision, group_in};
 use super::link::sanitize;
 use super::types::IdTokenRef;
 use crate::ocpp::responder::Responder;
@@ -56,24 +58,38 @@ impl Station2Actor {
 
     /// The EVSE a remote start applies to: the requested one, or the first that accepts it
     /// (F01.FR.06).
-    fn remote_start_evse(&self, requested: Option<i32>) -> Result<u32, &'static str> {
+    fn remote_start_evse(
+        &self,
+        requested: Option<i32>,
+        token: &IdTokenRef,
+    ) -> Result<u32, &'static str> {
         if !self.registration_accepted() {
             // B02.FR.05
             return Err("NotRegistered");
         }
+        // H03: an EVSE held for another token is not offered; the group is the one the
+        // station knows for the token.
+        let group = self.group_of_token(token, None);
+        let refusal = |id: u32| {
+            self.remote_start_refusal(id)?;
+            if self.reservation_blocks(id, token, group.as_deref()) {
+                return Err("Reserved");
+            }
+            Ok(())
+        };
         match requested {
             Some(id) => {
                 let evse = u32::try_from(id)
                     .ok()
                     .filter(|id| *id > 0)
                     .ok_or("UnknownEvse")?;
-                self.remote_start_refusal(evse).map(|()| evse)
+                refusal(evse).map(|()| evse)
             }
             None => self
                 .evses
                 .iter()
                 .map(|e| e.id)
-                .find(|id| self.remote_start_refusal(*id).is_ok())
+                .find(|id| refusal(*id).is_ok())
                 .ok_or("NoFreeEvse"),
         }
     }
@@ -84,12 +100,7 @@ impl Station2Actor {
         let trigger = TriggerReason::RemoteStart;
         // F01.FR.02/03, C05.FR.01: the CSMS checks the token in the `TransactionEvent`.
         if token.kind == IdTokenType::Central || !self.authorize_remote_start() {
-            if let Err(error) = self.on_authorized(evse, token, Some(remote_start_id), trigger) {
-                self.log(
-                    LogLevel::Warn,
-                    format!("remote start on EVSE {evse} failed: {error}"),
-                );
-            }
+            self.start_with_reservation(evse, &token, None, false, Some(remote_start_id), trigger);
             return;
         }
         let presented = token.clone();
@@ -109,14 +120,52 @@ impl Station2Actor {
                 AuthDecision::Accepted(info) => info,
                 _ => None,
             };
-            match actor.on_authorized(evse, presented.clone(), Some(remote_start_id), trigger) {
-                Ok(()) => actor.note_authorization_group(evse, &presented, info.as_ref()),
-                Err(error) => actor.log(
+            actor.start_with_reservation(
+                evse,
+                &presented,
+                info.as_ref(),
+                true,
+                Some(remote_start_id),
+                trigger,
+            );
+        });
+    }
+
+    /// Hands an authorized token to the transaction engine, using the reservation the token
+    /// holds. An EVSE held for another token (known only now, from the group the CSMS named)
+    /// is not started; the CALL was answered already.
+    fn start_with_reservation(
+        &mut self,
+        evse: u32,
+        token: &IdTokenRef,
+        info: Option<&Value>,
+        note_group: bool,
+        remote_start_id: Option<i32>,
+        trigger: TriggerReason,
+    ) {
+        let group = self.group_of_token(token, group_in(info));
+        if self.reservation_blocks(evse, token, group.as_deref()) {
+            self.log(
+                LogLevel::Warn,
+                format!("remote start on EVSE {evse}: the EVSE is reserved for another token"),
+            );
+            return;
+        }
+        self.reservation_claim(evse, token, group.as_deref());
+        match self.on_authorized(evse, token.clone(), remote_start_id, trigger) {
+            Ok(()) => {
+                if note_group {
+                    self.note_authorization_group(evse, token, info);
+                }
+            }
+            Err(error) => {
+                self.reservation_release_claim(evse);
+                self.log(
                     LogLevel::Warn,
                     format!("remote start on EVSE {evse} failed: {error}"),
-                ),
+                );
             }
-        });
+        }
     }
 }
 
@@ -125,7 +174,11 @@ pub(super) fn request_start_transaction(
     responder: Responder<RequestStartTransaction>,
     request: RequestStartTransactionRequest,
 ) {
-    let evse = match actor.remote_start_evse(request.evse_id) {
+    let token = IdTokenRef {
+        id_token: request.id_token.id_token,
+        kind: request.id_token.kind,
+    };
+    let evse = match actor.remote_start_evse(request.evse_id, &token) {
         Ok(evse) => evse,
         Err(reason) => {
             actor.log(
@@ -162,10 +215,6 @@ pub(super) fn request_start_transaction(
             custom_data: None,
         },
     );
-    let token = IdTokenRef {
-        id_token: request.id_token.id_token,
-        kind: request.id_token.kind,
-    };
     actor.begin_remote_start(evse, token, request.remote_start_id);
 }
 

@@ -99,7 +99,7 @@ fn needs_no_check(kind: &IdTokenType) -> bool {
 }
 
 /// The `groupIdToken` of an `idTokenInfo` as received.
-fn group_in(info: Option<&Value>) -> Option<&str> {
+pub(super) fn group_in(info: Option<&Value>) -> Option<&str> {
     info?.pointer("/groupIdToken/idToken")?.as_str()
 }
 
@@ -542,7 +542,12 @@ impl Station2Actor {
             };
         }
         let ids: Vec<u32> = self.evses.iter().map(|e| e.id).collect();
-        let free = |id: &u32| self.authorized_token(*id).is_none() && self.active_tx(*id).is_none();
+        let group = self.group_of_token(token, None);
+        let free = |id: &u32| {
+            self.authorized_token(*id).is_none()
+                && self.active_tx(*id).is_none()
+                && !self.reservation_blocks(*id, token, group.as_deref())
+        };
         let connected = |id: &u32| {
             self.evse(*id)
                 .is_some_and(|e| e.connectors.iter().any(|c| c.ev_connected))
@@ -563,7 +568,7 @@ impl Station2Actor {
     }
 
     /// The group of an accepted `token`: the one the fresh answer named, else the cache's.
-    fn group_of_token(&self, token: &IdTokenRef, fresh: Option<&str>) -> Option<String> {
+    pub(super) fn group_of_token(&self, token: &IdTokenRef, fresh: Option<&str>) -> Option<String> {
         fresh.map(str::to_owned).or_else(|| {
             self.cache_peek(&token_key(token))
                 .filter(|entry| entry.status == ACCEPTED)
@@ -638,22 +643,42 @@ impl Station2Actor {
                 status: AuthorizationStatus::ConcurrentTx.as_str().to_owned(),
                 id_token_info: info,
             })
+        } else if self.reservation_blocks(
+            evse,
+            &token,
+            self.group_of_token(&token, group_in(info.as_ref()))
+                .as_deref(),
+        ) {
+            // H03: the EVSE is held for another token.
+            self.log(
+                LogLevel::Warn,
+                format!("EVSE {evse} is reserved for another token"),
+            );
+            Ok(Outcome2::Authorized {
+                status: AuthorizationStatus::NotAtThisLocation.as_str().to_owned(),
+                id_token_info: info,
+            })
         } else {
             let had_transaction = self.active_tx(evse).is_some();
-            self.on_authorized(evse, token.clone(), None, TriggerReason::Authorized)
-                .map(|()| {
-                    self.note_authorization_group(evse, &token, info.as_ref());
-                    match self.active_tx(evse) {
-                        Some(tx) if !had_transaction => Outcome2::TransactionStarted {
-                            evse,
-                            transaction_id: tx.id.0.clone(),
-                        },
-                        _ => Outcome2::Authorized {
-                            status,
-                            id_token_info: info,
-                        },
-                    }
-                })
+            let group = self.group_of_token(&token, group_in(info.as_ref()));
+            self.reservation_claim(evse, &token, group.as_deref());
+            let started = self.on_authorized(evse, token.clone(), None, TriggerReason::Authorized);
+            if started.is_err() {
+                self.reservation_release_claim(evse);
+            }
+            started.map(|()| {
+                self.note_authorization_group(evse, &token, info.as_ref());
+                match self.active_tx(evse) {
+                    Some(tx) if !had_transaction => Outcome2::TransactionStarted {
+                        evse,
+                        transaction_id: tx.id.0.clone(),
+                    },
+                    _ => Outcome2::Authorized {
+                        status,
+                        id_token_info: info,
+                    },
+                }
+            })
         };
         // The requester may have gone away; nothing to do about that.
         let _ = reply.send(outcome);
