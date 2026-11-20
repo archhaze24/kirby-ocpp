@@ -3,12 +3,12 @@
 [![CI](https://github.com/archhaze24/kirby-ocpp/actions/workflows/rust.yml/badge.svg?branch=main)](https://github.com/archhaze24/kirby-ocpp/actions/workflows/rust.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/archhaze24/kirby-ocpp/blob/main/LICENSE)
 
-Terminal tools for testing OCPP 1.6J and OCPP 2.0.1, written in Rust: a charge point emulator and a central system (CSMS) that talk to each other or to your own firmware and backend.
-Both validate every payload against the official JSON schemas of the protocol in use, speak `ws://`, `wss://` and mutual TLS, and support security profiles 1-3 (for 1.6 the full Security Whitepaper). Each has a terminal UI and a headless mode for CI. OCPP 2.0.1 coverage is listed in [docs/OCPP_2.0.1_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_2.0.1_CONFORMANCE.md).
+Terminal tools for testing OCPP 1.6J, OCPP 2.0.1 and OCPP 2.1, written in Rust: a charge point emulator and a central system (CSMS) that talk to each other or to your own firmware and backend.
+Both validate every payload against the official JSON schemas of the protocol in use, speak `ws://`, `wss://` and mutual TLS, and support security profiles 1-3 (for 1.6 the full Security Whitepaper). Each has a terminal UI and a headless mode for CI. OCPP 2.0.1 coverage is listed in [docs/OCPP_2.0.1_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_2.0.1_CONFORMANCE.md), OCPP 2.1 in [docs/OCPP_2.1_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_2.1_CONFORMANCE.md).
 
 **`kirby-ocpp`**, the charge point emulator:
 
-- OCPP 1.6J by default; `--protocol ocpp2.0.1` runs an OCPP 2.0.1 station (EVSEs, `TransactionEvent`, device model).
+- OCPP 1.6J by default; `--protocol ocpp2.0.1` runs an OCPP 2.0.1 station (EVSEs, `TransactionEvent`, device model), `--protocol ocpp2.1` the same station on OCPP 2.1.
 - Terminal UI, or a headless event logger with JSON lines.
 - Scenario runner and suite runner for CI, with JSON and JUnit reports.
 - Fleet mode: up to 1000 stations in one process.
@@ -16,7 +16,7 @@ Both validate every payload against the official JSON schemas of the protocol in
 
 **`kirby-csms`**, the central system:
 
-- Accepts any number of stations, OCPP 1.6J and 2.0.1 on one listener, answers with canned replies.
+- Accepts any number of stations, OCPP 1.6J, 2.0.1 and 2.1 on one listener, answers with canned replies.
 - Sends commands, injects faults, applies response rules.
 - Terminal UI, headless mode, JSON-lines commands on stdin, TOML scripts.
 - Local HTTP control API for any language or CI.
@@ -137,7 +137,7 @@ The full index is in [docs/README.md](https://github.com/archhaze24/kirby-ocpp/b
 | Security profiles, TLS, mutual TLS, certificates, security events | [docs/security.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/security.md) |
 | Every flag and environment variable | [docs/configuration.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/configuration.md) |
 | All install channels | [docs/distribution.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/distribution.md) |
-| Protocol coverage and deviations from the spec | [docs/OCPP_1.6J_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_1.6J_CONFORMANCE.md), [docs/OCPP_2.0.1_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_2.0.1_CONFORMANCE.md) |
+| Protocol coverage and deviations from the spec | [docs/OCPP_1.6J_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_1.6J_CONFORMANCE.md), [docs/OCPP_2.0.1_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_2.0.1_CONFORMANCE.md), [docs/OCPP_2.1_CONFORMANCE.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/OCPP_2.1_CONFORMANCE.md) |
 | Architecture, development loop, tests | [docs/architecture.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/architecture.md), [docs/development.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/development.md), [docs/testing.md](https://github.com/archhaze24/kirby-ocpp/blob/main/docs/testing.md) |
 | Releasing and history | [RELEASING.md](https://github.com/archhaze24/kirby-ocpp/blob/main/RELEASING.md), [CHANGELOG.md](https://github.com/archhaze24/kirby-ocpp/blob/main/CHANGELOG.md) |
 

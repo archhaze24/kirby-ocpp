@@ -19,15 +19,15 @@ The allowed top-level keys are `name`, `description`, `vars`, `steps` and three 
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `ocpp_version` | string | `"1.6"` | Protocol the file is written for: `"1.6"` or `"2.0.1"`. A scenario without the key is a 1.6 scenario. Any other value is a load error (`this build supports OCPP 1.6 and 2.0.1 only`, naming the value). A CSMS script accepts both values (its steps are protocol-neutral) and its report names the declared version; a script without the key reports `1.6`. See [OCPP 2.0.1 scenarios](#ocpp-201-scenarios). |
+| `ocpp_version` | string | `"1.6"` | Protocol the file is written for: `"1.6"`, `"2.0.1"` or `"2.1"`. A scenario without the key is a 1.6 scenario. Any other value is a load error (`this build supports OCPP 1.6, 2.0.1 and 2.1 only`, naming the value). A CSMS script takes the same values (its steps are protocol-neutral) and its report names the declared version; a script without the key reports `1.6`. See [OCPP 2.0.1 scenarios](#ocpp-201-scenarios). |
 | `schema` | integer | `1` | Version of the file format. Any other value is a load error (`unsupported schema N`). |
 | `tags` | array of strings | none | Free-form labels. Each entry must be a string (any other type is a load error); the text is not checked further. `suite --tag` and `--skip-tag` select on them (exact, case-sensitive match); built-in scenarios have none. |
 
-Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key. The version keys are read and checked before anything else, so a file written for a later version fails with `unsupported schema N` or `this build supports OCPP 1.6 and 2.0.1 only` even when it also uses keys this build does not know. A value of the wrong type fails with a plain message such as `` `schema` must be an integer``.
+Both CSMS scripts and emulator scenarios take these keys and reject every other top-level key. The version keys are read and checked before anything else, so a file written for a later version fails with `unsupported schema N` or `this build supports OCPP 1.6, 2.0.1 and 2.1 only` even when it also uses keys this build does not know. A value of the wrong type fails with a plain message such as `` `schema` must be an integer``.
 
 Reserved step keys: `evse` and `id_token` belong to OCPP 2.0.1 steps. In a 1.6 file (no `ocpp_version`, or `"1.6"`) any step that uses them fails to load with ``action `x`: `evse` is reserved for OCPP 2.x steps; not supported in this build (use `ocpp_version = "2.0.1"` for OCPP 2.0.1 scenarios)``. A CSMS script rejects them the same way.
 
-The version picks the grammar. A file is read as 1.6 or as 2.0.1 and never as a mix: there is no fallback, so a 1.6 mistake in a 2.0.1 file is reported as a mistake, not guessed at.
+The version picks the grammar. A file is read as 1.6 or as 2.x (2.0.1 and 2.1 share one grammar) and never as a mix: there is no fallback, so a 1.6 mistake in a 2.0.1 or 2.1 file is reported as a mistake, not guessed at.
 
 ### Example
 
@@ -222,6 +222,8 @@ Steps that send a CALL (`start_tx`, `send_raw`, ...) finish when the CSMS has an
 
 `ocpp_version = "2.0.1"` selects the 2.0.1 grammar. EVSE numbers start at 1, tokens are `id_token` plus `type`, and `reason` and `state` use the 2.0.1 names. A scenario without `ocpp_version` is never run on a 2.0.1 station.
 
+`ocpp_version = "2.1"` reads the same grammar and runs on a station started with `--protocol ocpp2.1`. Three things differ: `id_token` may have up to 255 characters (2.0.1: 36); `type` may be any text of at most 20 characters, not only the eight 2.0.1 kinds; `reason` of `stop_tx` also accepts `ReqEnergyTransferRejected`. A 2.0.1 file that uses a value only 2.1 has is a load error, worded as for any unknown value. `reply` checks `call` against the commands of the file's version, so a command that only 2.1 defines needs a 2.1 file. Messages that name the version name `2.1` in a 2.1 file. A 2.0.1 file never runs on a 2.1 station, nor a 2.1 file on a 2.0.1 station (see [Running scenarios](#running-scenarios)).
+
 ```toml
 name = "charge-and-stop"
 ocpp_version = "2.0.1"
@@ -383,7 +385,7 @@ Semantics:
 | `security-event` | SecurityEventNotification `StartupOfTheDevice`, asserts the CALL went out |
 | `reconnect` | Disconnect, wait until down, connect, wait for an accepted registration, Heartbeat |
 
-On an OCPP 2.0.1 station the same names resolve to the 2.0.1 set (`ocpp_version = "2.0.1"`, EVSE 1, token `KIRBY-OCPP-TAG`); `finish-session` has no 2.0.1 counterpart. They need an EVSE 1 that is Available and pass against any CSMS that answers `Accepted` (any status for `data-transfer`).
+On an OCPP 2.0.1 station the same names resolve to the 2.0.1 set (`ocpp_version = "2.0.1"`, EVSE 1, token `KIRBY-OCPP-TAG`); `finish-session` has no 2.0.1 counterpart. On an OCPP 2.1 station (`--protocol ocpp2.1`) the same eight run as 2.1: same names, same steps, `ocpp_version` `2.1` in the scenario, the report and the JUnit class name; `scenarios show` prints them with `ocpp_version = "2.1"`. They need an EVSE 1 that is Available and pass against any CSMS that answers `Accepted` (any status for `data-transfer`).
 
 | Name | What it does |
 | --- | --- |
@@ -416,12 +418,12 @@ kirby-ocpp [station options] run --scenario NAME_OR_FILE [--report report.json] 
 | `--report PATH` | Write the report as JSON |
 | `--junit PATH` | Write a JUnit XML report |
 | `--timeout SECONDS` | Overall limit, connecting included (default 60). On expiry the running step fails with `cancelled` and the rest are skipped |
-| `--id-tag TAG` | Replace the idTag in the scenario (the `id_token`, 1 to 36 characters, for OCPP 2.0.1) |
+| `--id-tag TAG` | Replace the idTag in the scenario (the `id_token`, 1 to 36 characters for OCPP 2.0.1, 1 to 255 for 2.1) |
 | `--json` | Print events and the report as JSON lines |
 | `--persist` | Keep station state in the state file (a `run` is ephemeral by default) |
 | `-v`, `-q` | Also print the event lines / print only the verdict line |
 
-The scenario must be written for the OCPP version of the station (`--protocol`, default `ocpp1.6`): a file says so with the top-level key `ocpp_version` (see [OCPP 2.0.1 scenarios](#ocpp-201-scenarios)), and a file without it is a 1.6 scenario. A mismatch exits 2 before any connection with `scenario NAME is for OCPP 2.0.1; this station speaks ocpp1.6` (or the reverse). A built-in name resolves for the station's version, so `--protocol ocpp2.0.1 run --scenario charge-session` runs the 2.0.1 `charge-session`; `--connector` is then the EVSE and `--id-tag` the `id_token` of the built-in (a file keeps the EVSE and token it names, unless `--id-tag` is given). Reports and the JUnit file carry the station's version, also when the station never booted.
+The scenario must be written for the OCPP version of the station (`--protocol`, default `ocpp1.6`): a file says so with the top-level key `ocpp_version` (see [OCPP 2.0.1 scenarios](#ocpp-201-scenarios)), and a file without it is a 1.6 scenario. A mismatch exits 2 before any connection with `scenario NAME is for OCPP 2.0.1; this station speaks ocpp1.6` (or the reverse; the same for 2.1 against a 2.0.1 station and the other way round). A built-in name resolves for the station's version, so `--protocol ocpp2.0.1 run --scenario charge-session` runs the 2.0.1 `charge-session` and `--protocol ocpp2.1` the 2.1 one; `--connector` is then the EVSE and `--id-tag` the `id_token` of the built-in (a file keeps the EVSE and token it names, unless `--id-tag` is given). Reports and the JUnit file carry the station's version, also when the station never booted.
 
 `kirby-ocpp scenarios list` and `scenarios show NAME` follow `--protocol` the same way; `scenarios validate` accepts files of either version and names the version in its summary line only when it is not 1.6.
 
@@ -640,7 +642,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 --stagger-ms 
 ## CSMS scripts
 
 `kirby-csms --script FILE` starts the server, runs the script against the stations that connect, prints the report and exits with its verdict. The stations are external processes (for example `kirby-ocpp`) that connect while the script waits. Steps run in order and the first failing step stops the run (later steps are `SKIP`).
-- Top-level keys are `name` (required, not empty), an optional `[vars]` table (see [Variables, capture and payload checks](#script-variables-capture-and-payload-checks)) and `[[steps]]` (at least one); other top-level keys are rejected, except `description`, `ocpp_version`, `schema` and `tags`. Unknown fields inside a step are rejected, naming the step.
+- Top-level keys are `name` (required, not empty), an optional `[vars]` table (see [Variables, capture and payload checks](#script-variables-capture-and-payload-checks)) and `[[steps]]` (at least one); other top-level keys are rejected, except `description`, `ocpp_version`, `schema` and `tags`. `ocpp_version` is `"1.6"` (the default), `"2.0.1"` or `"2.1"`; the 2.0.1 and 2.1 grammars are the same, and the report and the JUnit class name (`ocpp2.1.<script name>`) carry the declared version. Unknown fields inside a step are rejected, naming the step.
 
 ### Example
 
@@ -813,7 +815,7 @@ Report fields:
 | Field | Level | Meaning |
 | --- | --- | --- |
 | `schema` | run, suite, fleet, station entry | Report format version, currently `1`. |
-| `ocpp_version` | run, suite, suite scenario, fleet, station entry | Protocol of the station that ran it: `"1.6"`, or `"2.0.1"` for an OCPP 2.0.1 station. |
+| `ocpp_version` | run, suite, suite scenario, fleet, station entry | Protocol of the station that ran it: `"1.6"`, `"2.0.1"` for an OCPP 2.0.1 station or `"2.1"` for an OCPP 2.1 station. |
 | `tool_version` | run, suite, fleet, station entry | Version of the tool that wrote the report. |
 | `station` | run, suite scenario, fleet entry | Station id. Absent for CSMS script reports. |
 | `source` | run, suite scenario, fleet, station entry | Scenario file path or `builtin:NAME`; for a CSMS script, its file path. |
@@ -860,7 +862,7 @@ Naming:
 
 * `name` of a test case is the step's stable `label`, never its position. Names are unique within a suite: a repeated label gets ` #2`, ` #3` (a number already taken by an explicit label is skipped), and steps in loops already carry their ` [n]` suffix.
 * The 1-based position is a `<property name="index">` of the test case, next to `action`.
-* `classname` is `ocpp1.6.<suite name>`, so a fleet run gives `ocpp1.6.scenario [CP-1]`; a run on an OCPP 2.0.1 station gives `ocpp2.0.1.<suite name>` and the `ocpp_version` property `2.0.1`, also for a `setup` case. It is a grouping label, not a structure to parse: names may contain `.` and `]`, and control characters are replaced by spaces.
+* `classname` is `ocpp1.6.<suite name>`, so a fleet run gives `ocpp1.6.scenario [CP-1]`; a run on an OCPP 2.0.1 station gives `ocpp2.0.1.<suite name>` and the `ocpp_version` property `2.0.1`, and on an OCPP 2.1 station `ocpp2.1.<suite name>` and `2.1`, also for a `setup` case. It is a grouping label, not a structure to parse: names may contain `.` and `]`, and control characters are replaced by spaces.
 * Each `<testsuite>` has `<properties>` `ocpp_version`, `station` (when known), `tool_version` and `source` (when known). A suite run with `--retries` above 0 adds `attempts` and, for a flaky pass, `flaky`; see [Retries](#retries-and-flaky-scenarios) for the `<flakyFailure>` and `<rerunFailure>` elements.
 * The text of a `<failure>` holds the reason, then `action:`, `params:`, `expected:` and `actual:` lines where the report has them (params and expected are clipped).
 

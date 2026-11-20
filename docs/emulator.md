@@ -1,6 +1,6 @@
 # Emulator (`kirby-ocpp`)
 
-`kirby-ocpp` is a terminal OCPP charge point (station) for 1.6J and, with `--protocol ocpp2.0.1`, 2.0.1 (see [OCPP 2.0.1](#ocpp-201)); the rest of this page describes the 1.6 station unless it says otherwise. It connects to a central system (CSMS), answers its commands, and lets you drive the station by hand (terminal UI), log it (headless) or script it ([scenarios](scenarios.md)). The Security Whitepaper messages are supported too.
+`kirby-ocpp` is a terminal OCPP charge point (station) for 1.6J and, with `--protocol ocpp2.0.1` or `--protocol ocpp2.1`, 2.0.1 and 2.1 (see [OCPP 2.0.1](#ocpp-201) and [OCPP 2.1](#ocpp-21)); the rest of this page describes the 1.6 station unless it says otherwise. It connects to a central system (CSMS), answers its commands, and lets you drive the station by hand (terminal UI), log it (headless) or script it ([scenarios](scenarios.md)). The Security Whitepaper messages are supported too.
 
 Contents: [Quick start](#quick-start) · [Modes](#modes) · [Terminal UI](#terminal-ui) · [Headless mode and exit codes](#headless-mode-and-exit-codes) · [Connection errors](#connection-errors) · [Output levels and color](#output-levels-and-color) · [Version, completions and validation](#version-completions-and-validation) · [Suite mode](#suite-mode) · [Recording and replay](#recording-and-replay) · [Fleet mode](#fleet-mode) · [OCPP 2.0.1](#ocpp-201) · [Response rules](#response-rules) · [State persistence](#state-persistence) · [TLS](#tls) · [Related pages](#related-pages)
 
@@ -83,7 +83,7 @@ Security Whitepaper actions: `C` creates a key pair and a CSR and sends `SignCer
 
 ### For OCPP 2.0.1
 
-With `--protocol ocpp2.0.1` the same layout shows the 2.0.1 station. Six tabs (`1`-`6`): Station, EVSE, Transaction, Data, Logs, Scenarios. The left pane lists the EVSEs with the connector status as sent (`Available`, `Occupied`, `Reserved`, `Unavailable`, `Faulted`), a plug marker, the first 8 characters of the transaction id and the meter in Wh; the details show the full transaction id, its charging state (`Charging`, `EVConnected`, `SuspendedEV`, `SuspendedEVSE`, `Idle`) and `idToken`, and the Station tab shows the registration, the boot reason, the queued transaction events and the security events sent since the UI started.
+With `--protocol ocpp2.0.1` (or `ocpp2.1`, which shows `OCPP 2.1` where this page says 2.0.1) the same layout shows the 2.x station. Six tabs (`1`-`6`): Station, EVSE, Transaction, Data, Logs, Scenarios. The left pane lists the EVSEs with the connector status as sent (`Available`, `Occupied`, `Reserved`, `Unavailable`, `Faulted`), a plug marker, the first 8 characters of the transaction id and the meter in Wh; the details show the full transaction id, its charging state (`Charging`, `EVConnected`, `SuspendedEV`, `SuspendedEVSE`, `Idle`) and `idToken`, and the Station tab shows the registration, the boot reason, the queued transaction events and the security events sent since the UI started.
 
 | Tab | Actions (accelerator) |
 | --- | --- |
@@ -213,7 +213,7 @@ Human output (not `--json`, not the terminal UI) colors PASS green, FAIL red and
 
 ## Version, completions and validation
 
-* `kirby-ocpp --version` prints one line. `kirby-ocpp version` prints the version, git commit, build date, target triple and supported protocols (`OCPP 1.6J, OCPP 2.0.1`); `kirby-ocpp version --json` prints them as one JSON object (`protocols` holds display names, `protocol_tokens` the subprotocol tokens such as `ocpp1.6`).
+* `kirby-ocpp --version` prints one line. `kirby-ocpp version` prints the version, git commit, build date, target triple and supported protocols (`OCPP 1.6J, OCPP 2.0.1, OCPP 2.1`); `kirby-ocpp version --json` prints them as one JSON object (`protocols` holds display names, `protocol_tokens` the subprotocol tokens such as `ocpp1.6`).
 * `kirby-ocpp scenarios validate FILE|DIR|NAME...` parses scenarios without connecting and without `--url`: `ok PATH (N steps)` per valid scenario, the load error with the path otherwise, exit 0 or 2. A directory is scanned like `suite` does. A file named twice is checked once, a scenario name used by two files gives a `warning:` line (exit stays 0), and `*.toml` entries that are not regular files (dangling symlinks) are skipped with a `note:` line.
 
 ### Shell completions
@@ -362,7 +362,7 @@ Relative paths in the file resolve against the directory of the file. A password
 
 ## OCPP 2.0.1
 
-`--protocol ocpp2.0.1` (or `OCPP_PROTOCOL`, or `protocol = "ocpp2.0.1"` at the top of the configuration file) makes the station speak OCPP 2.0.1. The default is `ocpp1.6`; `ocpp2.1` exits 2 with `OCPP 2.1 is not supported by this build`.
+`--protocol ocpp2.0.1` (or `OCPP_PROTOCOL`, or `protocol = "ocpp2.0.1"` at the top of the configuration file) makes the station speak OCPP 2.0.1. The default is `ocpp1.6`; `ocpp2.1` selects [OCPP 2.1](#ocpp-21).
 
 ```bash
 kirby-ocpp --url ws://localhost:9000/ocpp --protocol ocpp2.0.1 --no-tui
@@ -402,6 +402,23 @@ Flags that exist for 1.6 only exit 2 when they are given (by flag, environment v
 | `--additional-root-certificate-check` | A 1.6 read-only configuration key |
 
 These flags map to the 2.0.1 station: `--connectors` (EVSE count), `--connector` (initial EVSE), `--heartbeat` (default `HeartbeatInterval`), `--nominal-power-w`, `--voltage-v` and `--phases` (power model and `SupplyPhases`), `--ws-ping`, `--call-timeout-ms`, the TLS flags, the reconnect flags, `--state-dir`, `--no-persist`, `--record` and `--show-secrets`.
+
+### OCPP 2.1
+
+`--protocol ocpp2.1` (or `OCPP_PROTOCOL`, or `protocol = "ocpp2.1"` at the top of the configuration file) runs the 2.0.1 station on OCPP 2.1: it offers the subprotocol `ocpp2.1`, validates every frame against the 2.1 schemas, and behaves as described above otherwise. A recording carries `ocpp_version` `2.1` in its header, and `version` lists `OCPP 2.1`. What differs from 2.0.1:
+
+* A command that only 2.1 defines (for example `AFRRSignal`) is answered with the CALLERROR `NotSupported`; 2.0.1 answers `NotImplemented`, because it does not define the action. A name no version defines is `NotImplemented` in both.
+* Values that only 2.1 has get an answer, never a CALLERROR:
+
+| Request | Answer |
+| --- | --- |
+| `Reset` with `type` `ImmediateAndResume` | `Rejected`, with `statusInfo.reasonCode` `UnsupportedParam`; the station does not reboot |
+| `TriggerMessage` with `requestedMessage` `CustomTrigger` or `SignV2G20Certificate` | `NotImplemented` |
+
+* An `idToken` may carry any `type` of at most 20 characters (2.0.1 allows the eight enumerated kinds) and up to 255 characters (2.0.1: 36). A station started with `--protocol ocpp2.0.1` still refuses both before they leave the station or reach its handlers.
+* The 255-character limit applies to the token forms of the terminal UI, to `id_token` in scenario files and to `--id-tag`; the `type` of a scenario step may be any text. The UI offers the 2.0.1 token kinds, plus the stop reason `ReqEnergyTransferRejected`, and shows `OCPP 2.1` where it shows the version.
+* The state files are the 2.0.1 ones, `<id>.station2.json` and `<id>.station2.secrets.json`, with the same format version: the same id started with 2.0.1 and 2.1 shares its state. See [State persistence](#state-persistence).
+* `--count` above 1, `replay` and `scenarios from-recording` exit 2 with the version in the message, as for 2.0.1. `run`, `suite`, `scenarios` and `check` accept `--protocol ocpp2.1`; the built-in scenarios are the 2.0.1 ones run as 2.1 (see [scenarios.md](scenarios.md#running-scenarios)).
 
 ## Response rules
 
@@ -446,7 +463,7 @@ The state directory is `--state-dir` (`KIRBY_OCPP_STATE_DIR`), else `~/.kirby-oc
 
 Files are `0600` on Unix, versioned, and written atomically (temp file plus rename, then the directory is fsynced). A file with a newer version than the binary supports is an error and is left alone. A corrupt file, or one that belongs to another charge point, is moved to `<file>.bak` and the station starts clean. Two cases leave the file untouched and run the station without persistence, with a warning: a file that exists but cannot be read, and a file of a station id that differs from this one only by case (such ids share one file on the case-insensitive file systems of macOS and Windows). `state reset` deletes nothing in that second case. `--no-persist` disables both loading and saving. Response rules are never saved.
 
-**OCPP 2.0.1.** A station started with `--protocol ocpp2.0.1` uses its own files, `<id>.station2.json` and `<id>.station2.secrets.json`, with their own format version (2; files of version 1 load). The same id used with both protocols keeps two independent file sets: neither protocol reads, moves aside or deletes the files of the other. The 2.0.1 state file holds:
+**OCPP 2.0.1.** A station started with `--protocol ocpp2.0.1` uses its own files, `<id>.station2.json` and `<id>.station2.secrets.json`, with their own format version (2; files of version 1 load). The same id used with both protocols keeps two independent file sets: neither protocol reads, moves aside or deletes the files of the other. A station started with `--protocol ocpp2.1` uses these 2.x files too (same names, same format version), so an id moves between 2.0.1 and 2.1 without losing its state. The 2.x state file holds:
 
 * availability of the station, each EVSE and each connector, and an `Inoperative` request at any of these levels that waits for a transaction to end;
 * device-model values that differ from their defaults (the `BasicAuthPassword` goes to the secrets file only);
@@ -457,7 +474,7 @@ Files are `0600` on Unix, versioned, and written atomically (temp file plus rena
 
 At start every transaction that was running is ended with the stopped reason `PowerLoss` and the trigger `AbnormalCondition`; the event is queued first and sent after the `BootNotification` is accepted, and its `seqNo` continues from the stored value. Every queued event is flagged `offline`, because the process was down. A file with a newer version than the binary supports, or a secrets file that cannot be read, is never overwritten; the station runs without writing it. The name-length rule above applies to both file kinds.
 
-`kirby-ocpp state path --id ID` prints the file of a station, `state show --id ID` summarizes what it holds (the secrets file is not read; its presence is reported) and `state reset --id ID` deletes the state of that station, after a confirmation on a terminal or with `--yes`. With `--protocol ocpp2.0.1` the three commands work on the `.station2` files; without it they use the OCPP 1.6 files. Details and exit codes: [configuration reference](configuration.md#kirby-ocpp-subcommands).
+`kirby-ocpp state path --id ID` prints the file of a station, `state show --id ID` summarizes what it holds (the secrets file is not read; its presence is reported) and `state reset --id ID` deletes the state of that station, after a confirmation on a terminal or with `--yes`. With `--protocol ocpp2.0.1` or `--protocol ocpp2.1` the three commands work on the `.station2` files; without it they use the OCPP 1.6 files. Details and exit codes: [configuration reference](configuration.md#kirby-ocpp-subcommands).
 
 ## TLS
 

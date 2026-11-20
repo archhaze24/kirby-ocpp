@@ -9,6 +9,10 @@ tag as the GitHub release notes.
 
 ### Added
 
+- OCPP 2.1 in the emulator: `--protocol ocpp2.1` runs the 2.x station on the `ocpp2.1` subprotocol with the official 2.1 schemas. State files, flags, `run`, `suite`, `scenarios`, `check` and `state` work as for 2.0.1, and the terminal UI shows `OCPP 2.1`. Requests only 2.1 defines get refusals: `Reset` `ImmediateAndResume` is `Rejected`, `TriggerMessage` `CustomTrigger` and `SignV2G20Certificate` are `NotImplemented`, the 15 new CSMS actions get `NotSupported`. Coverage: [docs/OCPP_2.1_CONFORMANCE.md](docs/OCPP_2.1_CONFORMANCE.md).
+- OCPP 2.1 message types 5 (CALLRESULTERROR) and 6 (SEND) on the station's connection: a received SEND is validated and never answered, a received CALLRESULTERROR is logged, and a schema-invalid CALLRESULT to a station CALL is answered with a CALLRESULTERROR. On 1.6 and 2.0.1 connections both stay unknown message types.
+- OCPP 2.1 in `kirby-csms`: sessions that negotiate `ocpp2.1` are validated against the 2.1 schemas and tracked like 2.0.1 sessions (`protocol` `ocpp2.1` in station objects, events and state). The 11 new station actions get canned replies; the action registry, palette and forms list the 15 new CSMS actions as raw payloads.
+- Scenarios and CSMS scripts accept `ocpp_version = "2.1"` (2.x grammar; id tokens up to 255 characters with any token type). The eight 2.0.1 built-in scenarios also run as 2.1; reports carry `2.1` and JUnit class names `ocpp2.1.<name>`.
 - Release archives carry a build provenance attestation; check one with `gh attestation verify <archive> --repo archhaze24/kirby-ocpp`.
 
 ### Changed
@@ -17,6 +21,8 @@ tag as the GitHub release notes.
 - `kirby-csms` forms show the hint of the focused field under it.
 - The lag note of a `GET /v1/events?station=ID` stream says that its count covers events of all stations lost from the shared stream.
 - The state file of OCPP 2.0.1 stations is format version 2; files of version 1 still load.
+- The default `kirby-csms --subprotocol` policy is `require:ocpp1.6,ocpp2.0.1,ocpp2.1`.
+- `kirby-ocpp-core`: the 2.x typed enums carry the OCPP 2.1 values; `IdTokenType` decodes any string (`Other` keeps the text), is no longer `Copy` and lists the 2.0.1 kinds in `KNOWN` instead of `ALL`; `SignedMeterValue.public_key` and `signing_method` are optional.
 
 ### Fixed
 
