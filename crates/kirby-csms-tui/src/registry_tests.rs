@@ -397,6 +397,7 @@ fn typed_input(action: &str) -> Vec<(&'static str, &'static str)> {
         "RequestStartTransaction" => vec![("idToken.idToken", "TAG1")],
         "DataTransfer" => vec![("vendorId", "vendor")],
         "UnlockConnector" => vec![("evseId", "1"), ("connectorId", "1")],
+        "SendLocalList" => vec![("versionNumber", "1")],
         "GetVariables" => vec![(
             "getVariableData",
             r#"[{"component":{"name":"ChargingStation"},"variable":{"name":"Model"}}]"#,
@@ -629,13 +630,13 @@ fn every_2_0_1_form_builds_a_schema_valid_request() {
     let mut typed = 0;
     let mut raw = 0;
     for spec in table201().csms_actions {
-        if spec.name == "ClearCache" {
+        if matches!(spec.name, "ClearCache" | "GetLocalListVersion") {
             // no input: sent without a form
             let mut fx = Vec::new();
             let i = table201()
                 .csms_actions
                 .iter()
-                .position(|s| s.name == "ClearCache")
+                .position(|s| s.name == spec.name)
                 .unwrap();
             app.run_action(ActionId::Call(i), &mut fx);
             let (_, command) = match <[Effect; 1]>::try_from(fx) {
@@ -651,7 +652,7 @@ fn every_2_0_1_form_builds_a_schema_valid_request() {
             assert_eq!(
                 command,
                 Command::Raw {
-                    action: "ClearCache".into(),
+                    action: spec.name.into(),
                     payload: json!({})
                 }
             );
@@ -704,8 +705,8 @@ fn every_2_0_1_form_builds_a_schema_valid_request() {
     }
     assert_eq!(
         (typed, raw),
-        (11, 28),
-        "ClearCache is the twelfth typed action"
+        (12, 26),
+        "ClearCache and GetLocalListVersion are the other two typed actions"
     );
 }
 

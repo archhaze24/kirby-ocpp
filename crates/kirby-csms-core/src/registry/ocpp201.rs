@@ -95,6 +95,7 @@ const EVSE_CONNECTOR: FieldSpec = with_hint(
 );
 const OPERATIONAL_STATUSES: &[&str] = &["Inoperative", "Operative"];
 const RESET_TYPES: &[&str] = &["Immediate", "OnIdle"];
+const UPDATE_TYPES: &[&str] = &["Differential", "Full"];
 const ID_TOKEN_TYPES: &[&str] = &[
     "Central",
     "eMAID",
@@ -271,10 +272,11 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
         "Get installed certificate ids",
         "GetInstalledCertificateIds (raw payload)",
     ),
-    raw(
+    action(
         "GetLocalListVersion",
         "Get local list version",
-        "GetLocalListVersion (raw payload)",
+        "GetLocalListVersion: the version of the local authorization list",
+        &[],
     ),
     raw("GetLog", "Get log", "GetLog (raw payload)"),
     raw(
@@ -350,10 +352,25 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
             ),
         ],
     ),
-    raw(
+    action(
         "SendLocalList",
         "Send local list",
-        "SendLocalList (raw payload)",
+        "SendLocalList: full or differential local authorization list",
+        &[
+            number("versionNumber", "versionNumber", true),
+            with_default(
+                choice("updateType", "updateType", UPDATE_TYPES, true),
+                "Full",
+            ),
+            with_hint(
+                json(
+                    "localAuthorizationList",
+                    "localAuthorizationList (optional)",
+                    false,
+                ),
+                "JSON array of {idToken:{idToken, type}, idTokenInfo:{status}}",
+            ),
+        ],
     ),
     raw(
         "SetChargingProfile",
@@ -499,7 +516,7 @@ pub(in crate::registry) mod tests {
             .iter()
             .filter(|spec| core::is_typed(spec.name))
             .count();
-        assert_eq!(typed, 12);
+        assert_eq!(typed, 14);
     }
 
     fn request_schema(protocol: Protocol, action: &str) -> Value {
