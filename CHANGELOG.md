@@ -19,6 +19,8 @@ tag as the GitHub release notes.
 - OCPP 2.0.1 and 2.1 emulator: `GetReport` limits a report by component criteria and by component and variable, and sends it in `NotifyReport` chunks. `kirby-csms` has forms for `GetReport`, `ReserveNow` and `CancelReservation` on 2.x stations.
 - OCPP 2.0.1 conformance family: `local-list` covers `TC_D_01_CS` to `TC_D_06_CS`, `TC_D_08_CS`, `TC_D_10_CS` and `TC_C_31_CS`.
 - OCPP 2.0.1 and 2.1 emulator: master pass (C16). A token in the group set by `AuthCtrlr.MasterPassGroupId` starts no transaction and ends all running ones with stop reason `MasterPass`.
+- OCPP 2.0.1 and 2.1 emulator: smart charging (K01, K05, K08 to K13). `SetChargingProfile`, `ClearChargingProfile`, `GetChargingProfiles` with `ReportChargingProfiles`, `GetCompositeSchedule` and the profile of `RequestStartTransaction`; `SmartChargingCtrlr` in the device model; the meter follows the limit in force; profiles except `TxProfile`s survive a restart. The library API can set and clear an external limit, which sends `NotifyChargingLimit` and `ClearedChargingLimit`. `kirby-csms` has forms for the four commands on 2.x stations.
+- OCPP 2.0.1 conformance family: `reservation` covers `TC_H_01_CS` to `TC_H_04_CS`, `TC_H_06_CS`, `TC_H_08_CS` to `TC_H_10_CS`, `TC_H_12_CS`, `TC_H_14_CS` to `TC_H_19_CS` and `TC_H_21_CS` to `TC_H_24_CS`; `get-report` covers `TC_B_16_CS`, `TC_B_17_CS`, `TC_B_18_CS` and `TC_B_55_CS`; `master-pass` covers `TC_C_14_CS`, `TC_C_45_CS` and `TC_C_49_CS`; `local-list-auth` covers `TC_D_07_CS`, `TC_C_29_CS`, `TC_C_30_CS` and `TC_C_43_CS`.
 - Release archives carry a build provenance attestation; check one with `gh attestation verify <archive> --repo archhaze24/kirby-ocpp`.
 
 ### Changed

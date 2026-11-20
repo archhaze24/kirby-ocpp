@@ -42,6 +42,7 @@ OCPP-J 2.1 adds message types 5 (CALLRESULTERROR) and 6 (SEND). This section des
 | --- | --- |
 | Typed payloads | The typed enums carry the 2.1 values (`Measurand`, `Location` `Upstream`, `MessageFormat` `QRCODE`, `TriggerReason`, `Reason` `ReqEnergyTransferRejected`); `IdToken.type` is a free string; `SignedMeterValue.publicKey` and `signingMethod` are optional |
 | Id tokens | Up to 255 characters (36 on 2.0.1) |
+| Smart charging | As for 2.0.1 ([Smart charging](OCPP_2.0.1_CONFORMANCE.md#smart-charging)). A profile is kept as received, so the 2.1 fields the station accepts survive (`operationMode` `ChargingOnly`, `powerTolerance`, price schedules, which have no effect). Refused with the code OCPP 2.1 names: the purposes `PriorityCharging` and `LocalGeneration` (`UnsupportedPurpose`), the kind `Dynamic` (`UnsupportedKind`), other operation modes (`InvalidOperationMode`), `limit_L2` and `limit_L3` (`PhaseConflict`), `limitAtSoC`, `useLocalTime`, `randomizedDelay` and `evseSleep` (`InvalidSchedule`), `maxOfflineDuration`, `invalidAfterOfflineDuration` and the discharge, setpoint and V2X fields (`UnsupportedParam`). The limit sources in `ReportChargingProfiles`, `NotifyChargingLimit` and `ClearedChargingLimit` are `CSO` and `EMS` |
 | `Reset` | `ImmediateAndResume` is `Rejected` with `statusInfo.reasonCode` `UnsupportedParam`; the station does not reboot |
 | `TriggerMessage` | `CustomTrigger` and `SignV2G20Certificate` are `NotImplemented` |
 | New CSMS actions | CALLERROR `NotSupported` |
@@ -66,7 +67,7 @@ A 2.1 session is handled by the same listener as 1.6 and 2.0.1 and like a 2.0.1 
 | Subprotocol | The default policy is `require:ocpp1.6,ocpp2.0.1,ocpp2.1`; the client's order of preference decides |
 | Station id | The 2.0.1 rule: 1 to 48 `identifierString` characters, no colon |
 | Inbound validation | Station CALLs are validated against the 2.1 schemas with 2.x error codes; the 91-action catalog decides between `NotSupported` (defined, but not a station CALL) and `NotImplemented` (unknown name). `NotifyPeriodicEventStream` is a SEND message, so a CALL of that name gets `NotSupported` |
-| Commands | `SendLocalList`, `GetLocalListVersion`, `ReserveNow`, `CancelReservation` and `GetReport` have forms, as for 2.0.1 |
+| Commands | `SendLocalList`, `GetLocalListVersion`, `ReserveNow`, `CancelReservation`, `GetReport`, `SetChargingProfile`, `ClearChargingProfile`, `GetChargingProfiles` and `GetCompositeSchedule` have forms, as for 2.0.1 |
 | Replies | The 36 station CALLs get answers valid against the 2.1 response schemas: the 2.0.1 answers for the shared actions; `OpenPeriodicEventStream` and `PullDynamicScheduleUpdate` `Accepted`; `VatNumberValidation` `Accepted`, echoing the request; `GetCertificateChainStatus` `Failed` for each certificate; an empty result for the other new actions. Rules and faults can replace them |
 | State | The 2.0.1 fold (EVSEs, transactions, meter values); `state.v2.protocol` is `ocpp2.1` |
 | Commands | Typed commands and forms are the 2.0.1 ones; the 15 CSMS actions new in 2.1 are sent as raw payloads, checked against the 2.1 schemas |
