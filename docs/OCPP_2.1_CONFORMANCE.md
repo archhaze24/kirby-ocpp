@@ -79,6 +79,8 @@ The 2.1 functional blocks beyond 2.0.1: bidirectional power transfer (V2X), DER 
 
 ## Known limits
 
+- `GetCompositeSchedule` has whole-second periods: when a `Dynamic` profile's `duration` runs out within a second, the composite may show its limit up to one second longer than the meter applies it.
+
 - The emulator's terminal UI offers the eight 2.0.1 token types in the token form; another type can be sent with `send_raw`.
 - `replay` and `scenarios from-recording` are not available for 2.1, and a fleet (`--count` above 1) runs headless only, as for 2.0.1.
 - A station id used with 2.0.1 and 2.1 shares one file set; the files record the protocol that wrote them, which is not checked on load.
