@@ -47,6 +47,7 @@ fn active_tx(evse: u32, id: &str, next_seq_no: i32) -> ActiveTx {
         evse,
         next_seq_no,
         started_at: started_at(),
+        ready_at: None,
         charging_state: ChargingState::Charging,
         token: Some(IdTokenRef {
             id_token: "TAG-1".to_owned(),

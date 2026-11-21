@@ -103,6 +103,9 @@ pub struct ActiveTx {
     /// `seqNo` of the next event.
     pub next_seq_no: i32,
     pub started_at: DateTime<Utc>,
+    /// When authorization and EV connection first coincided.
+    #[serde(default)]
+    pub ready_at: Option<DateTime<Utc>>,
     pub charging_state: ChargingState,
     pub token: Option<IdTokenRef>,
     pub remote_start_id: Option<i32>,
@@ -210,6 +213,8 @@ struct MeterRt {
 pub(crate) struct TxEngine {
     active: BTreeMap<u32, ActiveTx>,
     pending: BTreeMap<u32, PendingAuth>,
+    /// Remote starts awaiting Authorize, including canceled ones until their reply arrives.
+    pub(super) remote_authorizing: BTreeMap<u32, Option<i32>>,
     /// The `groupIdToken` of the token that authorizes the transaction, by EVSE id.
     groups: BTreeMap<u32, String>,
     runtime: BTreeMap<u32, TxRuntime>,
@@ -322,6 +327,16 @@ fn decimal(value: f64) -> Option<Number> {
 }
 
 impl Station2Actor {
+    fn drop_pending_authorization(&mut self, evse: u32) -> bool {
+        let Some(pending) = self.tx.pending.remove(&evse) else {
+            return false;
+        };
+        if let Some(id) = pending.remote_start_id {
+            self.sc_forget_pending(evse, id);
+        }
+        true
+    }
+
     // ----- queries ---------------------------------------------------------------------
 
     /// The transaction in progress on `evse`.
@@ -936,9 +951,9 @@ impl Station2Actor {
         } else {
             ChargingState::Idle
         });
-        self.tx.pending.remove(&evse);
-        self.tx.groups.remove(&evse);
         self.sc_tx_started(evse, &id.0, spec.remote_start_id);
+        self.drop_pending_authorization(evse);
+        self.tx.groups.remove(&evse);
         self.tx.active.insert(
             evse,
             ActiveTx {
@@ -946,6 +961,7 @@ impl Station2Actor {
                 evse,
                 next_seq_no: 0,
                 started_at: now,
+                ready_at: (spec.authorized && connected).then_some(now),
                 charging_state: state,
                 token: spec.token,
                 remote_start_id: spec.remote_start_id,
@@ -1056,9 +1072,14 @@ impl Station2Actor {
             tx.token = Some(token);
             tx.token_sent = false;
             let connected = tx.ev_connected;
+            if connected {
+                tx.ready_at.get_or_insert_with(|| self.clock.now_utc());
+            }
             if remote_start_id.is_some() {
                 tx.remote_start_id = remote_start_id;
+                let tx_id = tx.id.0.clone();
                 self.tx.runtime.entry(evse).or_default().remote_sent = false;
+                self.sc_tx_started(evse, &tx_id, remote_start_id);
             }
             if !connected {
                 self.timers.set(
@@ -1103,7 +1124,7 @@ impl Station2Actor {
                 initial,
             )?;
         } else {
-            self.tx.pending.insert(
+            let previous = self.tx.pending.insert(
                 evse,
                 PendingAuth {
                     token,
@@ -1111,6 +1132,11 @@ impl Station2Actor {
                     group: None,
                 },
             );
+            if let Some(id) = previous.and_then(|pending| pending.remote_start_id)
+                && Some(id) != remote_start_id
+            {
+                self.sc_forget_pending(evse, id);
+            }
             if !connected {
                 self.timers.set(
                     TimerKey2::EvConnectTimeout(evse),
@@ -1131,6 +1157,9 @@ impl Station2Actor {
         if let Some(tx) = self.tx.active.get_mut(&evse) {
             self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
             tx.ev_connected = true;
+            if tx.authorized {
+                tx.ready_at.get_or_insert_with(|| self.clock.now_utc());
+            }
             tx.evse_sent = false;
             tx.charging_state = ChargingState::EvConnected;
             self.tx_event(
@@ -1188,7 +1217,7 @@ impl Station2Actor {
             }
             Err(error) => {
                 // The connect timeout is cancelled, so a kept authorization would never expire.
-                self.tx.pending.remove(&evse);
+                self.drop_pending_authorization(evse);
                 self.log(LogLevel::Warn, format!("transaction not started: {error}"));
             }
         }
@@ -1238,7 +1267,7 @@ impl Station2Actor {
                 TriggerReason::EvConnectTimeout,
                 None,
             );
-        } else if self.tx.pending.remove(&evse).is_some() {
+        } else if self.drop_pending_authorization(evse) {
             self.reservation_forget_claim(evse);
             self.log(
                 LogLevel::Info,
@@ -1345,8 +1374,9 @@ impl Station2Actor {
         presented: Option<IdTokenRef>,
     ) {
         self.settle_tx_meters();
+        self.cancel_remote_authorization(evse);
         let Some(tx) = self.tx.active.get(&evse) else {
-            self.tx.pending.remove(&evse);
+            self.drop_pending_authorization(evse);
             self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
             return;
         };
@@ -1410,7 +1440,8 @@ impl Station2Actor {
     /// and a waiting authorization is dropped.
     pub(super) fn on_fault(&mut self, evse: u32) {
         self.settle_tx_meters();
-        self.tx.pending.remove(&evse);
+        self.cancel_remote_authorization(evse);
+        self.drop_pending_authorization(evse);
         if self.tx.active.contains_key(&evse) {
             self.finish(
                 evse,
@@ -1536,7 +1567,7 @@ impl Station2Actor {
             }
         }
         self.tx.runtime.remove(&evse);
-        self.tx.pending.remove(&evse);
+        self.drop_pending_authorization(evse);
         self.tx.groups.remove(&evse);
         if let Some(meter) = self.tx.meters.get_mut(&evse) {
             meter.charging = false;
@@ -2260,6 +2291,7 @@ mod tests {
             evse: 1,
             next_seq_no: seq,
             started_at: Utc::now(),
+            ready_at: None,
             charging_state: ChargingState::Charging,
             token: Some(token("TAG")),
             remote_start_id: None,

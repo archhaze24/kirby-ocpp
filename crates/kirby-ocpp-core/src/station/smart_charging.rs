@@ -18,7 +18,7 @@
 //!
 //! 1. Only profiles in the requested `chargingRateUnit` take part (no A/W
 //!    conversion). Without a requested unit, the unit of the highest-priority
-//!    valid profile is used (TxProfile, then TxDefaultProfile, then
+//!    profile that applies in the requested window is used (TxProfile, then TxDefaultProfile, then
 //!    ChargePointMaxProfile, highest stack level first; `A` if none).
 //! 2. Within a purpose the highest stack level that is *active at that
 //!    instant* wins. A higher stack that has ended or not started yet falls
@@ -329,6 +329,23 @@ pub fn composite_schedule(
     entries: &[StoredProfile],
     req: &CompositeRequest,
 ) -> Result<CompositeSchedule, CompositeError> {
+    let mut result = composite_schedule_full(entries, req)?;
+    let schedule = &mut result.charging_schedule;
+    if let Some(first_cut) = schedule.charging_schedule_period.get(MAX_COMPOSITE_PERIODS) {
+        schedule.duration = Some(first_cut.start_period);
+        schedule
+            .charging_schedule_period
+            .truncate(MAX_COMPOSITE_PERIODS);
+    }
+    Ok(result)
+}
+
+/// Computes the schedule before applying the period cap, so callers can merge schedules
+/// before checking whether the final result fits.
+pub(crate) fn composite_schedule_full(
+    entries: &[StoredProfile],
+    req: &CompositeRequest,
+) -> Result<CompositeSchedule, CompositeError> {
     if !is_known_connector(req.connector, req.connector_count) {
         return Err(CompositeError::UnknownConnector(req.connector));
     }
@@ -338,10 +355,10 @@ pub fn composite_schedule(
 
     let duration_s = req.duration_s.min(MAX_COMPOSITE_DURATION_S);
     let start = truncate_to_second(req.now);
+    let window_end = start + TimeDelta::seconds(i64::from(duration_s));
     let unit = req
         .unit
-        .unwrap_or_else(|| default_unit(entries, req, start));
-    let window_end = start + TimeDelta::seconds(i64::from(duration_s));
+        .unwrap_or_else(|| default_unit(entries, req, start, window_end));
 
     // Profiles of this unit that can affect the connector: its own and connector 0's.
     let usable: Vec<(&StoredProfile, DateTime<Utc>)> = entries
@@ -364,10 +381,7 @@ pub fn composite_schedule(
     let mut offsets: Vec<i64> = vec![0];
     for &(entry, base) in &usable {
         for instant in change_instants(&entry.profile, base, start, window_end) {
-            let ms = (instant - start).num_milliseconds();
-            // The first whole second at or after the change, and the first one strictly after it.
-            offsets.push((ms + 999).div_euclid(1000));
-            offsets.push(ms.div_euclid(1000) + 1);
+            offsets.extend(change_offsets(start, instant));
         }
     }
     offsets.retain(|offset| *offset >= 0 && *offset * 1000 < window_ms);
@@ -416,14 +430,6 @@ pub fn composite_schedule(
         });
     }
 
-    let mut duration_s = duration_s;
-    if periods.len() > MAX_COMPOSITE_PERIODS {
-        if let Some(first_cut) = periods.get(MAX_COMPOSITE_PERIODS) {
-            duration_s = first_cut.start_period.min(duration_s);
-        }
-        periods.truncate(MAX_COMPOSITE_PERIODS);
-    }
-
     Ok(CompositeSchedule {
         connector_id: req.connector,
         schedule_start: start,
@@ -435,6 +441,12 @@ pub fn composite_schedule(
             min_charging_rate,
         },
     })
+}
+
+/// Grid points at and immediately after a potential schedule change.
+fn change_offsets(start: DateTime<Utc>, instant: DateTime<Utc>) -> [i64; 2] {
+    let ms = (instant - start).num_milliseconds();
+    [(ms + 999).div_euclid(1000), ms.div_euclid(1000) + 1]
 }
 
 fn round_tenth(value: f64) -> f64 {
@@ -527,6 +539,7 @@ fn default_unit(
     entries: &[StoredProfile],
     req: &CompositeRequest,
     start: DateTime<Utc>,
+    end: DateTime<Utc>,
 ) -> ChargingRateUnitType {
     let priority = |entry: &StoredProfile| -> Option<(u8, i32)> {
         let class = match entry.profile.charging_profile_purpose {
@@ -550,7 +563,15 @@ fn default_unit(
                 0
             }
         };
-        is_valid_at(&entry.profile, start).then_some((class, entry.profile.stack_level))
+        let profile = &entry.profile;
+        let base = schedule_base(profile, req.tx_started_at, entry.installed_at, start);
+        let applies = period_at(profile, start, base).is_some()
+            || change_instants(profile, base, start, end)
+                .into_iter()
+                .flat_map(|instant| change_offsets(start, instant))
+                .map(|offset| start + TimeDelta::seconds(offset))
+                .any(|at| at < end && period_at(profile, at, base).is_some());
+        applies.then_some((class, profile.stack_level))
     };
 
     entries
@@ -1016,6 +1037,25 @@ mod tests {
         future.valid_from = Some(at(60));
         accepted(&mut store, 1, future);
         assert_limits(&composite(&mut store, &request(1, 60)), &[20.0]);
+    }
+
+    #[test]
+    fn composite_selects_the_unit_of_a_future_profile_in_the_window() {
+        let mut store = ChargingProfileStore::new();
+        let mut future = with_unit(
+            tx_default(9, 0, vec![period(0, 500.0)]),
+            ChargingRateUnitType::W,
+        );
+        future.valid_from = Some(at(10));
+        future.charging_schedule.start_schedule = Some(at(10));
+        accepted(&mut store, 1, future);
+        let schedule = composite(&mut store, &request(1, 60));
+        assert_eq!(
+            schedule.charging_schedule.charging_rate_unit,
+            ChargingRateUnitType::W
+        );
+        assert_limits(&schedule, &[7200.0, 500.0]);
+        assert_eq!(starts_of(&schedule), vec![0, 10]);
     }
 
     #[test]

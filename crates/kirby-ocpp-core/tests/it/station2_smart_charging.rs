@@ -9,11 +9,11 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Timelike, Utc};
 use kirby_ocpp_core::config::ReconnectConfig;
 use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::frame::Frame;
-use kirby_ocpp_core::ocpp::v2::types::{ChargingState, StopReason};
+use kirby_ocpp_core::ocpp::v2::types::{ChargingState, IdTokenType, StopReason};
 use kirby_ocpp_core::station::{Direction, FrameRecord};
 use kirby_ocpp_core::store::{FileKind, LoadOutcome2, PersistedStation2, StationStore};
 use kirby_ocpp_core::{
@@ -60,6 +60,15 @@ fn external_schedule(unit: &str, limit: f64) -> Value {
         "chargingRateUnit": unit,
         "chargingSchedulePeriod": [{"startPeriod": 0, "limit": limit}],
     })
+}
+
+fn relative_zero_profile(now: DateTime<Utc>) -> Value {
+    let mut raw = profile(now, 42, 0, "TxProfile", "W", 0.0);
+    raw["chargingProfileKind"] = json!("Relative");
+    let schedule = raw["chargingSchedule"][0].as_object_mut().unwrap();
+    schedule.remove("startSchedule");
+    schedule.insert("duration".to_owned(), json!(60));
+    raw
 }
 
 fn is_call(record: &FrameRecord, action: &str) -> bool {
@@ -364,6 +373,34 @@ async fn the_store_holds_ten_profiles() {
     rig.stop().await;
 }
 
+#[tokio::test]
+async fn profile_admission_caps_serialized_size() {
+    let rig = Rig::new().await;
+    let mut raw = profile(rig.now(), 1, 0, "TxDefaultProfile", "W", 500.0);
+    raw["customData"] = json!({"vendorId": "test", "data": "x".repeat(70 * 1024)});
+    let refused = set_profile(&rig, 1, raw.clone()).await;
+    assert_eq!(reason_of(&refused), ("Rejected", "TooLarge"));
+    assert_eq!(
+        get_profiles(&rig, json!({}), Some(1), 0).await.0["status"],
+        "NoProfiles"
+    );
+    raw["chargingProfilePurpose"] = json!("TxProfile");
+    let refused = rig
+        .call("RequestStartTransaction", start_body(1, Some(raw.clone())))
+        .await;
+    assert_eq!(reason_of(&refused), ("Rejected", "TooLarge"));
+    assert!(matches!(
+        rig.station.set_external_limit(1, raw.clone()).await,
+        Err(StationError::InvalidArgument(message)) if message.contains("TooLarge")
+    ));
+    raw["chargingProfilePurpose"] = json!("TxDefaultProfile");
+    raw["customData"]["data"] = json!("");
+    let overhead = raw.to_string().len();
+    raw["customData"]["data"] = json!("x".repeat(64 * 1024 - overhead - 1));
+    set_accepted(&rig, 1, raw).await;
+    rig.stop().await;
+}
+
 // ---- K09: GetChargingProfiles ----------------------------------------------------------------
 
 #[tokio::test]
@@ -537,6 +574,88 @@ async fn the_composite_schedule_stacks_and_caps() {
     // A profile of the other unit does not take part in the composite.
     set_accepted(&rig, 1, profile(now, 4, 2, "TxDefaultProfile", "W", 1000.0)).await;
     assert!((limit_of(&ask(1).await) - 4.0).abs() < 1e-9);
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn composite_selects_the_unit_of_a_future_profile_in_the_window() {
+    let rig = Rig::new().await;
+    rig.clock.set(rig.now().with_nanosecond(0).unwrap());
+    let start = stamp(rig.now() + Duration::seconds(10));
+    let mut raw = profile(rig.now(), 1, 0, "TxDefaultProfile", "W", 500.0);
+    raw["validFrom"] = json!(start);
+    raw["chargingSchedule"][0]["startSchedule"] = json!(start);
+    set_accepted(&rig, 1, raw).await;
+    let reply = rig
+        .call("GetCompositeSchedule", json!({"evseId": 1, "duration": 60}))
+        .await;
+    assert_eq!(reply["schedule"]["chargingRateUnit"], "W");
+    let period = &reply["schedule"]["chargingSchedulePeriod"][1];
+    assert_eq!(period["startPeriod"], 10);
+    assert_eq!(period["limit"], 500.0);
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn composite_refuses_overlong_windows_on_both_protocols() {
+    for protocol in [Protocol::V201, Protocol::V21] {
+        let (csms, station, join, _) = rig_for(protocol, |_| {}).await;
+        let ask = |duration| {
+            call(
+                &csms,
+                "GetCompositeSchedule",
+                json!({"evseId": 1, "duration": duration, "chargingRateUnit": "W"}),
+            )
+        };
+        assert_eq!(
+            reason_of(&ask(604_801).await),
+            ("Rejected", "UnsupportedRequest")
+        );
+        let reply = ask(604_800).await;
+        assert_eq!(reply["status"], "Accepted");
+        assert_eq!(reply["schedule"]["duration"], 604_800);
+        stop_21(csms, station, join).await;
+    }
+}
+
+#[tokio::test]
+async fn composite_refuses_a_schedule_that_exceeds_the_period_cap() {
+    let rig = Rig::new().await;
+    rig.set_variable("SmartChargingCtrlr", "PeriodsPerSchedule", "150")
+        .await;
+    rig.clock.set(rig.now().with_nanosecond(0).unwrap());
+    let mut raw = profile(rig.now(), 1, 0, "TxDefaultProfile", "W", 500.0);
+    raw["chargingProfileKind"] = json!("Recurring");
+    raw["recurrencyKind"] = json!("Daily");
+    let schedule = &mut raw["chargingSchedule"][0];
+    schedule["startSchedule"] = json!(stamp(rig.now()));
+    schedule["chargingSchedulePeriod"] = json!(
+        (0..150)
+            .map(|offset| { json!({"startPeriod": offset, "limit": 500 + offset % 2}) })
+            .collect::<Vec<_>>()
+    );
+    set_accepted(&rig, 1, raw).await;
+    let ask = || {
+        rig.call(
+            "GetCompositeSchedule",
+            json!({"evseId": 1, "duration": 604_800, "chargingRateUnit": "W"}),
+        )
+    };
+    assert_eq!(reason_of(&ask().await), ("Rejected", "UnsupportedRequest"));
+    rig.station
+        .set_external_limit(1, external_schedule("W", 400.0))
+        .await
+        .expect("external limit");
+    let reply = ask().await;
+    assert_eq!(reply["status"], "Accepted", "{reply}");
+    assert_eq!(reply["schedule"]["duration"], 604_800);
+    assert_eq!(
+        reply["schedule"]["chargingSchedulePeriod"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     rig.stop().await;
 }
 
@@ -727,6 +846,88 @@ async fn a_remote_start_installs_its_profile_for_the_new_transaction() {
 }
 
 #[tokio::test]
+async fn a_pending_remote_start_reserves_a_profile_slot() {
+    let rig = Rig::new().await;
+    rig.set_variable("TxCtrlr", "TxStartPoint", "PowerPathClosed")
+        .await;
+    let now = rig.now();
+    for stack in 0..9 {
+        set_accepted(
+            &rig,
+            1,
+            profile(now, stack + 1, stack, "TxDefaultProfile", "W", 1000.0),
+        )
+        .await;
+    }
+    let reply = rig
+        .call(
+            "RequestStartTransaction",
+            start_body(1, Some(relative_zero_profile(now))),
+        )
+        .await;
+    assert_eq!(reply["status"], "Accepted");
+    let reply = set_profile(
+        &rig,
+        1,
+        profile(now, 10, 9, "TxDefaultProfile", "W", 1000.0),
+    )
+    .await;
+    assert_eq!(reason_of(&reply), ("Rejected", "TooManyElements"));
+    let reply = rig
+        .call(
+            "RequestStartTransaction",
+            start_body(2, Some(profile(now, 11, 0, "TxProfile", "W", 500.0))),
+        )
+        .await;
+    assert_eq!(reason_of(&reply), ("Rejected", "TooManyElements"));
+    rig.send(Command2::PlugIn { evse: 1 }).await;
+    wait_charging(&rig, 1).await;
+    assert_eq!(rig.station.snapshot().evse(1).unwrap().offered_w, Some(0.0));
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn a_rejected_remote_start_preserves_the_earlier_profile() {
+    let rig = Rig::new().await;
+    rig.set_variable("AuthCtrlr", "AuthorizeRemoteStart", "true")
+        .await;
+    rig.set_variable("TxCtrlr", "TxStartPoint", "PowerPathClosed")
+        .await;
+    rig.csms.respond("Authorize", |_| Reply::Silence);
+    let now = rig.now();
+    let mut a = start_body(1, Some(relative_zero_profile(now)));
+    a["remoteStartId"] = json!(7);
+    a["idToken"]["type"] = json!("ISO14443");
+    assert_eq!(
+        rig.call("RequestStartTransaction", a).await["status"],
+        "Accepted"
+    );
+    rig.wait_calls("Authorize", 1).await;
+    let auth = rig
+        .csms
+        .received()
+        .into_iter()
+        .find(|call| call.action == "Authorize")
+        .expect("authorize");
+    let mut b = start_body(1, Some(profile(now, 43, 0, "TxDefaultProfile", "W", 500.0)));
+    b["remoteStartId"] = json!(8);
+    assert_eq!(
+        rig.call("RequestStartTransaction", b).await["status"],
+        "Rejected"
+    );
+    rig.csms
+        .send_raw(json!([3, auth.message_id, {"idTokenInfo": {"status": "Accepted"}}]).to_string())
+        .expect("authorize response");
+    rig.send(Command2::PlugIn { evse: 1 }).await;
+    wait_charging(&rig, 1).await;
+    let snapshot = rig.station.snapshot();
+    let evse = snapshot.evse(1).unwrap();
+    assert_eq!(evse.transaction.as_ref().unwrap().remote_start_id, Some(7));
+    assert_eq!(evse.offered_w, Some(0.0));
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn a_remote_start_with_a_profile_that_is_not_valid_is_rejected() {
     let rig = Rig::new().await;
     let now = rig.now();
@@ -823,6 +1024,47 @@ async fn an_external_limit_is_notified_installed_and_released() {
         matches!(again, Err(StationError::InvalidState { .. })),
         "{again:?}"
     );
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn generated_external_ids_do_not_replace_csms_profiles() {
+    let rig = Rig::new().await;
+    rig.start_transaction(1).await;
+    set_accepted(
+        &rig,
+        1,
+        profile(rig.now(), -1, 0, "TxDefaultProfile", "W", 1000.0),
+    )
+    .await;
+    let offered = || rig.station.snapshot().evse(1).unwrap().offered_w;
+    settle(&rig).await;
+    assert_eq!(offered(), Some(1000.0));
+    rig.station
+        .set_external_limit(1, external_schedule("W", 500.0))
+        .await
+        .expect("external limit");
+    settle(&rig).await;
+    assert_eq!(offered(), Some(500.0));
+    rig.station.clear_external_limit(1).await.expect("cleared");
+    settle(&rig).await;
+    assert_eq!(offered(), Some(1000.0));
+    rig.stop().await;
+}
+
+#[tokio::test]
+async fn explicit_external_ids_cannot_replace_csms_profiles() {
+    let rig = Rig::new().await;
+    let raw = profile(rig.now(), -1, 0, "TxDefaultProfile", "W", 1000.0);
+    set_accepted(&rig, 1, raw.clone()).await;
+    let result = rig.station.set_external_limit(1, raw.clone()).await;
+    assert!(
+        matches!(result, Err(StationError::InvalidArgument(_))),
+        "{result:?}"
+    );
+    let (_, reports) =
+        get_profiles(&rig, json!({"chargingLimitSource": ["CSO"]}), Some(1), 1).await;
+    assert_eq!(reports[0]["chargingProfile"], json!([raw]));
     rig.stop().await;
 }
 
@@ -1203,8 +1445,15 @@ async fn a_state_file_without_charging_profiles_still_loads() {
 
 /// A booted OCPP 2.1 station on a mock CSMS that answers the station's calls with `{}`.
 async fn rig_21() -> (MockCsms, Station2Handle, JoinHandle<()>, ManualClock) {
+    rig_for(Protocol::V21, |_| {}).await
+}
+
+async fn rig_for(
+    protocol: Protocol,
+    tweak: impl FnOnce(&mut StationConfig),
+) -> (MockCsms, Station2Handle, JoinHandle<()>, ManualClock) {
     let csms = MockCsms::start(CsmsOptions {
-        subprotocol: SubprotocolPolicy::Require("ocpp2.1".to_owned()),
+        subprotocol: SubprotocolPolicy::Require(protocol.token().to_owned()),
         ..CsmsOptions::default()
     })
     .await
@@ -1221,6 +1470,7 @@ async fn rig_21() -> (MockCsms, Station2Handle, JoinHandle<()>, ManualClock) {
         "ReportChargingProfiles",
         "NotifyChargingLimit",
         "ClearedChargingLimit",
+        "TransactionEvent",
     ] {
         csms.respond(action, |_| Reply::Result(json!({})));
     }
@@ -1231,12 +1481,114 @@ async fn rig_21() -> (MockCsms, Station2Handle, JoinHandle<()>, ManualClock) {
         .with_heartbeat_interval_secs(3600)
         .without_persistence();
     config.ws_ping_interval_secs = 0;
-    Protocol::V21.token().clone_into(&mut config.ws_subprotocol);
-    config.protocol = Protocol::V21;
+    protocol.token().clone_into(&mut config.ws_subprotocol);
+    config.protocol = protocol;
+    tweak(&mut config);
     let (station, join) = Station2::spawn(config, Arc::new(clock.clone()));
     station.connect().await.expect("connect");
     wait_booted(&station).await;
     (csms, station, join, clock)
+}
+
+async fn relative_profile_after_late_authorization(protocol: Protocol, offered_w: Option<f64>) {
+    let (csms, station, join, clock) = rig_for(protocol, |_| {}).await;
+    let reply = call(
+        &csms,
+        "SetVariables",
+        json!({"setVariableData": [{
+            "component": {"name": "TxCtrlr"}, "variable": {"name": "TxStartPoint"},
+            "attributeValue": "EVConnected"
+        }]}),
+    )
+    .await;
+    assert_eq!(reply["setVariableResult"][0]["attributeStatus"], "Accepted");
+    station
+        .send(Command2::PlugIn { evse: 1 })
+        .await
+        .expect("plugged in");
+    let snapshot = wait_snapshot(&station, "an unauthorized transaction", |s| {
+        s.evse(1)
+            .and_then(|e| e.transaction.as_ref())
+            .is_some_and(|t| t.charging_state == ChargingState::EvConnected)
+    })
+    .await;
+    let transaction = snapshot.evse(1).unwrap().transaction.as_ref().unwrap();
+    let mut raw = relative_zero_profile(clock.now_utc());
+    raw["transactionId"] = json!(transaction.transaction_id);
+    let reply = call(
+        &csms,
+        "SetChargingProfile",
+        json!({"evseId": 1, "chargingProfile": raw}),
+    )
+    .await;
+    assert_eq!(reply["status"], "Accepted");
+    clock.advance(Duration::seconds(61));
+    station
+        .send(Command2::PresentToken {
+            evse: Some(1),
+            id_token: "LATE".to_owned(),
+            token_type: IdTokenType::Central,
+        })
+        .await
+        .expect("authorized");
+    let snapshot = wait_snapshot(&station, "a charging EVSE", |s| {
+        s.evse(1)
+            .and_then(|e| e.transaction.as_ref())
+            .is_some_and(|t| t.charging_state == ChargingState::Charging)
+    })
+    .await;
+    assert_eq!(snapshot.evse(1).unwrap().offered_w, offered_w);
+    stop_21(csms, station, join).await;
+}
+
+#[tokio::test]
+async fn a_relative_profile_on_21_starts_when_authorized_and_connected() {
+    relative_profile_after_late_authorization(Protocol::V21, Some(0.0)).await;
+}
+
+#[tokio::test]
+async fn a_relative_profile_on_201_starts_with_the_transaction() {
+    relative_profile_after_late_authorization(Protocol::V201, None).await;
+}
+
+#[tokio::test]
+async fn profiles_are_restored_only_on_the_protocol_that_stored_them() {
+    let dir = tempfile::tempdir().expect("dir");
+    let persistent = |config: &mut StationConfig| {
+        config.persist = true;
+        ID.clone_into(&mut config.charge_point_id);
+        config.state_dir = Some(dir.path().to_owned());
+    };
+    let (csms, station, join, clock) = rig_for(Protocol::V21, persistent).await;
+    let mut raw = profile(clock.now_utc(), 1, 0, "TxDefaultProfile", "W", 500.0);
+    raw["chargingSchedule"][0]["powerTolerance"] = json!(2.5);
+    let reply = call(
+        &csms,
+        "SetChargingProfile",
+        json!({"evseId": 1, "chargingProfile": raw}),
+    )
+    .await;
+    assert_eq!(reply["status"], "Accepted");
+    stop_21(csms, station, join).await;
+
+    let criteria = json!({"requestId": 1, "chargingProfile": {}});
+    let (csms, station, join, _) = rig_for(Protocol::V21, persistent).await;
+    let reply = call(&csms, "GetChargingProfiles", criteria.clone()).await;
+    assert_eq!(reply["status"], "Accepted");
+    let reports = csms
+        .wait_for_call_count_after(0, "ReportChargingProfiles", 1, |_| true, STEP)
+        .await
+        .expect("profile restored");
+    assert_eq!(reports[0]["chargingProfile"], json!([raw]));
+    stop_21(csms, station, join).await;
+
+    let csms = v201_csms().await;
+    run_once(&csms, dir.path(), &clock, async |_| {
+        let reply = call(&csms, "GetChargingProfiles", criteria).await;
+        assert_eq!(reply["status"], "NoProfiles");
+    })
+    .await;
+    csms.shutdown().await;
 }
 
 async fn stop_21(csms: MockCsms, station: Station2Handle, join: JoinHandle<()>) {

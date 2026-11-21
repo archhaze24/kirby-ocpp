@@ -50,7 +50,7 @@ impl Station2Actor {
         // A transaction that is not authorized yet can be matched with the request.
         let authorized = self.active_tx(evse).is_some_and(|tx| tx.authorized)
             || self.authorized_token(evse).is_some();
-        if authorized {
+        if authorized || self.tx.remote_authorizing.contains_key(&evse) {
             return Err("Occupied");
         }
         Ok(())
@@ -100,16 +100,23 @@ impl Station2Actor {
         let trigger = TriggerReason::RemoteStart;
         // F01.FR.02/03, C05.FR.01: the CSMS checks the token in the `TransactionEvent`.
         if token.kind == IdTokenType::Central || !self.authorize_remote_start() {
-            self.start_with_reservation(evse, &token, None, false, Some(remote_start_id), trigger);
+            self.start_with_reservation(evse, &token, None, false, remote_start_id, trigger);
             return;
         }
         let presented = token.clone();
+        self.tx
+            .remote_authorizing
+            .insert(evse, Some(remote_start_id));
         self.authorize_asking_csms(token, Some(evse), move |actor, decision| {
+            if actor.tx.remote_authorizing.remove(&evse).flatten() != Some(remote_start_id) {
+                return;
+            }
             let accepted = matches!(
                 decision,
                 AuthDecision::Accepted(_) | AuthDecision::Offline { accepted: true }
             );
             if !accepted {
+                actor.sc_forget_pending(evse, remote_start_id);
                 actor.log(
                     LogLevel::Warn,
                     format!("remote start on EVSE {evse}: the token was not authorized"),
@@ -118,9 +125,18 @@ impl Station2Actor {
             }
             // C16.FR.03: a master pass token starts no transaction.
             if actor.is_master_pass(&presented, &decision) {
+                actor.sc_forget_pending(evse, remote_start_id);
                 actor.log(
                     LogLevel::Warn,
                     format!("remote start on EVSE {evse}: a master pass token starts nothing"),
+                );
+                return;
+            }
+            if let Err(reason) = actor.remote_start_refusal(evse) {
+                actor.sc_forget_pending(evse, remote_start_id);
+                actor.log(
+                    LogLevel::Warn,
+                    format!("remote start on EVSE {evse} failed: {reason}"),
                 );
                 return;
             }
@@ -133,10 +149,22 @@ impl Station2Actor {
                 &presented,
                 info.as_ref(),
                 true,
-                Some(remote_start_id),
+                remote_start_id,
                 trigger,
             );
         });
+    }
+
+    /// Cancels an outstanding remote authorization and its profile reservation.
+    pub(super) fn cancel_remote_authorization(&mut self, evse: u32) {
+        if let Some(id) = self
+            .tx
+            .remote_authorizing
+            .get_mut(&evse)
+            .and_then(Option::take)
+        {
+            self.sc_forget_pending(evse, id);
+        }
     }
 
     /// Hands an authorized token to the transaction engine, using the reservation the token
@@ -148,11 +176,12 @@ impl Station2Actor {
         token: &IdTokenRef,
         info: Option<&Value>,
         note_group: bool,
-        remote_start_id: Option<i32>,
+        remote_start_id: i32,
         trigger: TriggerReason,
     ) {
         let group = self.group_of_token(token, group_in(info));
         if self.reservation_blocks(evse, token, group.as_deref()) {
+            self.sc_forget_pending(evse, remote_start_id);
             self.log(
                 LogLevel::Warn,
                 format!("remote start on EVSE {evse}: the EVSE is reserved for another token"),
@@ -160,13 +189,14 @@ impl Station2Actor {
             return;
         }
         self.reservation_claim(evse, token, group.as_deref());
-        match self.on_authorized(evse, token.clone(), remote_start_id, trigger) {
+        match self.on_authorized(evse, token.clone(), Some(remote_start_id), trigger) {
             Ok(()) => {
                 if note_group {
                     self.note_authorization_group(evse, token, info);
                 }
             }
             Err(error) => {
+                self.sc_forget_pending(evse, remote_start_id);
                 self.reservation_release_claim(evse);
                 self.log(
                     LogLevel::Warn,
@@ -206,7 +236,6 @@ pub(super) fn request_start_transaction(
         }
     };
     // K05: a charging profile must be a valid TxProfile; it takes effect with the transaction.
-    actor.sc_forget_pending(evse);
     if let Some(profile) = &request.charging_profile
         && let Err(info) = actor.sc_remote_start_profile(evse, profile, request.remote_start_id)
     {

@@ -54,10 +54,10 @@ use serde_json::{Value, json};
 use super::actor::{Station2Actor, TimerKey2};
 use super::calls::call_failure;
 use super::command::Outcome2;
+use super::link::sanitize;
 use super::types::{Origin2, Reply2};
 use crate::error::StationError;
 use crate::ids::{ConnectorId, TxId};
-use crate::ocpp::SchemaRegistry;
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::messages::{
     ChargingProfile as LegacyProfile, ChargingSchedule as LegacySchedule,
@@ -80,17 +80,19 @@ use crate::ocpp::v2::messages::{
     SetChargingProfileResponse,
 };
 use crate::ocpp::v2::types::{StatusInfo, WireEnum};
+use crate::ocpp::{Protocol, SchemaRegistry};
 use crate::station::LogLevel;
 use crate::station::charging_profiles::StoredProfile as LegacyStored;
 use crate::station::metering::{PowerModel, energy_wh_for};
 use crate::station::smart_charging::{
     CompositeError, CompositeRequest, CompositeSchedule as LegacyComposite,
-    MAX_COMPOSITE_DURATION_S, PowerRequest, change_instants, composite_schedule, limit_w_at,
-    schedule_base, shape_error, truncate_to_second,
+    MAX_COMPOSITE_DURATION_S, MAX_COMPOSITE_PERIODS, PowerRequest, change_instants,
+    composite_schedule_full, limit_w_at, schedule_base, shape_error, truncate_to_second,
 };
 
 /// The most profiles the station holds (`SmartChargingCtrlr.Entries` maximum).
 pub(super) const MAX_PROFILES: i32 = 10;
+const MAX_PROFILE_BYTES: usize = 64 * 1024;
 
 /// `chargingLimitSource` of the profiles the CSMS sets.
 const CSMS_SOURCE: &str = "CSO";
@@ -122,6 +124,8 @@ pub struct StoredProfile2 {
 #[serde(default)]
 pub struct SmartChargingPersist {
     pub profiles: Vec<StoredProfile2>,
+    #[serde(default)]
+    pub protocol: Option<String>,
 }
 
 /// An installed profile with the parsed copies the evaluation reads.
@@ -257,6 +261,7 @@ fn legacy_of(stored: &StoredProfile2, typed: &ChargingProfile) -> Option<LegacyS
 pub(super) struct TxView<'a> {
     pub id: &'a str,
     pub started_at: DateTime<Utc>,
+    pub relative_start: Option<DateTime<Utc>>,
 }
 
 /// Evaluates installed profiles with the 1.6 math (see the module docs).
@@ -297,7 +302,18 @@ impl Eval<'_> {
                 entry.purpose() != ChargingProfilePurpose::TxProfile
                     || tx.is_some_and(|tx| entry.stored.transaction_id.as_deref() == Some(tx.id))
             })
-            .map(|entry| entry.legacy.clone())
+            .filter_map(|entry| {
+                let mut legacy = entry.legacy.clone();
+                if !external
+                    && legacy.profile.charging_profile_kind == ChargingProfileKindType::Relative
+                    && let Some(tx) = tx
+                {
+                    // A bound relative schedule has no periods until its anchor is known.
+                    legacy.profile.charging_schedule.start_schedule = Some(tx.relative_start?);
+                    legacy.profile.charging_profile_kind = ChargingProfileKindType::Absolute;
+                }
+                Some(legacy)
+            })
             .collect()
     }
 
@@ -388,14 +404,14 @@ impl Eval<'_> {
             tx_started_at: tx.map(|tx| tx.started_at),
             model: self.model,
         };
-        let regular = composite_schedule(&self.legacy(tx, false), &request(unit));
+        let regular = composite_schedule_full(&self.legacy(tx, false), &request(unit));
         let external_unit = unit.or_else(|| {
             regular
                 .as_ref()
                 .ok()
                 .map(|schedule| schedule.charging_schedule.charging_rate_unit)
         });
-        let external = composite_schedule(&self.legacy(tx, true), &request(external_unit));
+        let external = composite_schedule_full(&self.legacy(tx, true), &request(external_unit));
         match (regular, external) {
             (
                 Err(
@@ -444,11 +460,9 @@ impl Eval<'_> {
 
 /// The period of `schedule` in force `offset` seconds after its start.
 fn period_at(schedule: &LegacySchedule, offset: i32) -> Option<&LegacyPeriod> {
-    schedule
-        .charging_schedule_period
-        .iter()
-        .rev()
-        .find(|period| period.start_period <= offset)
+    let periods = &schedule.charging_schedule_period;
+    let next = periods.partition_point(|period| period.start_period <= offset);
+    next.checked_sub(1).and_then(|index| periods.get(index))
 }
 
 /// The lower of two composite schedules over the same window (same start and unit).
@@ -857,6 +871,9 @@ pub(super) fn admit(
     now: DateTime<Utc>,
     source: &str,
 ) -> Result<Entry, Rejection> {
+    if raw.to_string().len() > MAX_PROFILE_BYTES {
+        return Err(reject("TooLarge", "the charging profile exceeds 64 KiB"));
+    }
     let limits = ctx.limits;
     let typed: ChargingProfile = serde_json::from_value(raw.clone())
         .map_err(|error| reject("InvalidProfile", format!("the profile is invalid: {error}")))?;
@@ -896,14 +913,16 @@ pub(super) fn admit(
         typed,
         legacy,
     };
-    if ctx.origin != Origin::External
-        && entries
-            .iter()
-            .any(|existing| existing.is_external() && existing.id() == entry.id())
-    {
+    if entries.iter().any(|existing| {
+        existing.id() == entry.id() && existing.is_external() != entry.is_external()
+    }) {
         return Err(reject(
             "InvalidProfileId",
-            "the id belongs to an external constraint",
+            if entry.is_external() {
+                "the id belongs to a CSMS profile"
+            } else {
+                "the id belongs to an external constraint"
+            },
         ));
     }
     if purpose == ChargingProfilePurpose::TxDefaultProfile
@@ -948,6 +967,38 @@ pub(crate) struct SmartCharging {
 }
 
 impl SmartCharging {
+    fn admit(
+        &self,
+        evse: i32,
+        raw: &Value,
+        ctx: &Admit<'_>,
+        now: DateTime<Utc>,
+        source: &str,
+    ) -> Result<Entry, Rejection> {
+        let entry = admit(&self.entries, evse, raw, ctx, now, source)?;
+        if self
+            .pending
+            .values()
+            .any(|pending| pending.entry.id() == entry.id())
+        {
+            return Err(reject(
+                "InvalidProfileId",
+                "the id belongs to a pending remote start",
+            ));
+        }
+        let max = ctx.limits.max_entries;
+        let available = max.saturating_sub(self.pending.len());
+        let has_room = if ctx.origin == Origin::RemoteStart {
+            self.entries.len() < available
+        } else {
+            has_room(&self.entries, &entry, available)
+        };
+        if !has_room {
+            return Err(reject("TooManyElements", format!("at most {max} profiles")));
+        }
+        Ok(entry)
+    }
+
     /// A report is queued or on its way.
     fn report_busy(&self) -> bool {
         self.report_in_flight || !self.reports.is_empty()
@@ -996,6 +1047,11 @@ impl Station2Actor {
         self.active_tx(evse).map(|tx| TxView {
             id: &tx.id.0,
             started_at: tx.started_at,
+            relative_start: if self.protocol() == Protocol::V21 {
+                tx.ready_at
+            } else {
+                Some(tx.started_at)
+            },
         })
     }
 
@@ -1076,10 +1132,9 @@ impl Station2Actor {
 
     /// A transaction started on `evse`: binds the `TxProfile` its remote start carried (K05).
     pub(super) fn sc_tx_started(&mut self, evse: u32, tx_id: &str, remote_start_id: Option<i32>) {
-        let Some(pending) = self.charging.pending.remove(&evse) else {
-            return;
-        };
-        if remote_start_id == Some(pending.remote_start_id) {
+        if let Some(id) = remote_start_id
+            && let Some(pending) = self.sc_take_pending(evse, id)
+        {
             self.sc_bind(pending.entry, tx_id);
         }
     }
@@ -1087,17 +1142,6 @@ impl Station2Actor {
     fn sc_bind(&mut self, entry: Entry, tx_id: &str) {
         let now = self.clock.now_utc();
         let entry = entry.bound(tx_id, now);
-        let room = usize::try_from(MAX_PROFILES).unwrap_or(usize::MAX);
-        if !has_room(&self.charging.entries, &entry, room) {
-            self.log(
-                LogLevel::Warn,
-                format!(
-                    "the TxProfile {} of a remote start is dropped: no room for it",
-                    entry.id()
-                ),
-            );
-            return;
-        }
         self.log(
             LogLevel::Info,
             format!("TxProfile {} installed for the remote start", entry.id()),
@@ -1107,10 +1151,22 @@ impl Station2Actor {
         self.mark_dirty();
     }
 
-    /// A `RequestStartTransaction` without a profile: what an earlier one left for `evse`
-    /// is void.
-    pub(super) fn sc_forget_pending(&mut self, evse: u32) {
-        self.charging.pending.remove(&evse);
+    fn sc_take_pending(&mut self, evse: u32, remote_start_id: i32) -> Option<PendingStart> {
+        if self
+            .charging
+            .pending
+            .get(&evse)
+            .is_some_and(|pending| pending.remote_start_id == remote_start_id)
+        {
+            self.charging.pending.remove(&evse)
+        } else {
+            None
+        }
+    }
+
+    /// Releases the profile reservation of a remote start that will not use it.
+    pub(super) fn sc_forget_pending(&mut self, evse: u32, remote_start_id: i32) {
+        self.sc_take_pending(evse, remote_start_id);
     }
 
     /// The profile of a `RequestStartTransaction` (K05). `Ok` when it is accepted or ignored
@@ -1122,7 +1178,6 @@ impl Station2Actor {
         raw: &Value,
         remote_start_id: i32,
     ) -> Result<(), StatusInfo> {
-        self.charging.pending.remove(&evse);
         if !self.smart_charging_enabled() {
             self.log(
                 LogLevel::Info,
@@ -1139,27 +1194,29 @@ impl Station2Actor {
             limits: &limits,
             active_tx: None,
         };
-        let entry = admit(
-            &self.charging.entries,
-            i32::try_from(evse).unwrap_or(i32::MAX),
-            raw,
-            &ctx,
-            now,
-            CSMS_SOURCE,
-        )
-        .map_err(|rejection| rejection.status_info())?;
-        match self.active_tx(evse).map(|tx| tx.id.0.clone()) {
-            Some(tx_id) => self.sc_bind(entry, &tx_id),
-            None => {
-                self.charging.pending.insert(
-                    evse,
-                    PendingStart {
-                        remote_start_id,
-                        entry,
-                    },
-                );
-            }
+        let entry = self
+            .charging
+            .admit(
+                i32::try_from(evse).unwrap_or(i32::MAX),
+                raw,
+                &ctx,
+                now,
+                CSMS_SOURCE,
+            )
+            .map_err(|rejection| rejection.status_info())?;
+        if self.charging.pending.contains_key(&evse) {
+            return Err(status_info(
+                "Occupied",
+                "the EVSE has a pending remote start",
+            ));
         }
+        self.charging.pending.insert(
+            evse,
+            PendingStart {
+                remote_start_id,
+                entry,
+            },
+        );
         Ok(())
     }
 
@@ -1168,6 +1225,7 @@ impl Station2Actor {
     /// The profiles for the state file.
     pub(super) fn sc_persist(&self) -> SmartChargingPersist {
         SmartChargingPersist {
+            protocol: Some(self.protocol().token().to_owned()),
             profiles: self
                 .charging
                 .entries
@@ -1182,6 +1240,21 @@ impl Station2Actor {
     /// station has, with ids that are unique, up to the limit. A `TxProfile` is dropped: its
     /// transaction ended with the restart.
     pub(super) fn sc_restore(&mut self, persisted: SmartChargingPersist) {
+        let protocol = self.protocol().token();
+        if let Some(stored) = persisted
+            .protocol
+            .as_deref()
+            .filter(|stored| *stored != protocol)
+        {
+            self.log(
+                LogLevel::Warn,
+                format!(
+                    "charging profiles stored by {} are not restored on {protocol}",
+                    sanitize(stored)
+                ),
+            );
+            return;
+        }
         let evse_count = u32::try_from(self.evses.len()).unwrap_or(u32::MAX);
         let max = usize::try_from(MAX_PROFILES).unwrap_or(usize::MAX);
         let now = self.clock.now_utc();
@@ -1309,20 +1382,21 @@ impl Station2Actor {
             limits: &limits,
             active_tx: None,
         };
-        let entry = admit(
-            &self.charging.entries,
-            i32::try_from(evse).unwrap_or(i32::MAX),
-            &raw,
-            &ctx,
-            now,
-            EXTERNAL_SOURCE,
-        )
-        .map_err(|rejection| {
-            StationError::InvalidArgument(format!(
-                "the external limit is refused: {} ({})",
-                rejection.reason, rejection.info
-            ))
-        })?;
+        let entry = self
+            .charging
+            .admit(
+                i32::try_from(evse).unwrap_or(i32::MAX),
+                &raw,
+                &ctx,
+                now,
+                EXTERNAL_SOURCE,
+            )
+            .map_err(|rejection| {
+                StationError::InvalidArgument(format!(
+                    "the external limit is refused: {} ({})",
+                    rejection.reason, rejection.info
+                ))
+            })?;
         let schedules = raw
             .get("chargingSchedule")
             .and_then(Value::as_array)
@@ -1348,16 +1422,6 @@ impl Station2Actor {
                 "an external limit is a chargingSchedule or a charging profile".to_owned(),
             ));
         };
-        let next_id = self
-            .charging
-            .entries
-            .iter()
-            .filter(|entry| entry.is_external())
-            .map(Entry::id)
-            .min()
-            .unwrap_or(0)
-            .min(0)
-            .saturating_sub(1);
         let Some(object) = profile.as_object_mut() else {
             return Err(StationError::InvalidArgument(
                 "the profile must be a JSON object".to_owned(),
@@ -1367,7 +1431,29 @@ impl Station2Actor {
             "chargingProfilePurpose".to_owned(),
             json!(ChargingProfilePurpose::ChargingStationExternalConstraints.as_str()),
         );
-        object.entry("id").or_insert_with(|| json!(next_id));
+        if let serde_json::map::Entry::Vacant(id) = object.entry("id") {
+            let entries = &self.charging.entries;
+            let pending = &self.charging.pending;
+            let used = |id| {
+                entries.iter().any(|entry| entry.id() == id)
+                    || pending.values().any(|start| start.entry.id() == id)
+            };
+            let lowest = entries
+                .iter()
+                .filter(|entry| entry.is_external())
+                .map(Entry::id)
+                .min()
+                .unwrap_or(0)
+                .min(0);
+            let next = (i32::MIN..lowest)
+                .rev()
+                .chain((lowest..0).rev())
+                .find(|id| !used(*id))
+                .ok_or_else(|| {
+                    StationError::InvalidArgument("no external profile id is available".to_owned())
+                })?;
+            id.insert(json!(next));
+        }
         object.entry("stackLevel").or_insert_with(|| json!(0));
         object
             .entry("chargingProfileKind")
@@ -1469,8 +1555,7 @@ pub(super) fn set_charging_profile(
         limits: &limits,
         active_tx: active_tx.as_deref(),
     };
-    let outcome = admit(
-        &actor.charging.entries,
+    let outcome = actor.charging.admit(
         request.evse_id,
         &request.charging_profile,
         &ctx,
@@ -1711,6 +1796,15 @@ pub(super) fn get_composite_schedule(
         );
         return;
     }
+    if request.duration > MAX_COMPOSITE_DURATION_S {
+        reject_with(
+            actor,
+            responder,
+            "UnsupportedRequest",
+            "the requested duration exceeds the composite schedule limit",
+        );
+        return;
+    }
     if request.charging_rate_unit.is_some_and(|unit| {
         !actor
             .smart_rate_units()
@@ -1741,32 +1835,48 @@ pub(super) fn get_composite_schedule(
         );
         return;
     };
-    let schedule = composite.charging_schedule;
+    if composite.charging_schedule.charging_schedule_period.len() > MAX_COMPOSITE_PERIODS {
+        reject_with(
+            actor,
+            responder,
+            "UnsupportedRequest",
+            "the composite schedule has too many periods",
+        );
+        return;
+    }
     let response = GetCompositeScheduleResponse {
         status: CompositeScheduleStatus::Accepted,
         status_info: None,
-        schedule: Some(CompositeSchedule {
-            charging_schedule_period: schedule
-                .charging_schedule_period
-                .iter()
-                .map(|period| ChargingSchedulePeriod {
-                    start_period: period.start_period,
-                    limit: Some(period.limit),
-                    number_phases: period.number_phases,
-                    phase_to_use: None,
-                    operation_mode: None,
-                    custom_data: None,
-                })
-                .collect(),
-            evse_id: request.evse_id,
-            duration: schedule.duration.unwrap_or(request.duration),
-            schedule_start: composite.schedule_start,
-            charging_rate_unit: wire_unit(schedule.charging_rate_unit),
-            custom_data: None,
-        }),
+        schedule: Some(wire_composite(composite, &request)),
         custom_data: None,
     };
     actor.respond(responder, response);
+}
+
+fn wire_composite(
+    composite: LegacyComposite,
+    request: &GetCompositeScheduleRequest,
+) -> CompositeSchedule {
+    let schedule = composite.charging_schedule;
+    CompositeSchedule {
+        charging_schedule_period: schedule
+            .charging_schedule_period
+            .into_iter()
+            .map(|period| ChargingSchedulePeriod {
+                start_period: period.start_period,
+                limit: Some(period.limit),
+                number_phases: period.number_phases,
+                phase_to_use: None,
+                operation_mode: None,
+                custom_data: None,
+            })
+            .collect(),
+        evse_id: request.evse_id,
+        duration: schedule.duration.unwrap_or(request.duration),
+        schedule_start: composite.schedule_start,
+        charging_rate_unit: wire_unit(schedule.charging_rate_unit),
+        custom_data: None,
+    }
 }
 
 #[cfg(test)]
@@ -1914,6 +2024,7 @@ mod tests {
         TxView {
             id,
             started_at: t0(),
+            relative_start: Some(t0()),
         }
     }
 
@@ -2230,6 +2341,7 @@ mod tests {
         let started = TxView {
             id: "T1",
             started_at: at(1000),
+            relative_start: Some(at(1000)),
         };
         close(eval.limit_w(1, Some(started), 1, at(1030)), 6900.0);
         close(eval.limit_w(1, Some(started), 1, at(1060)), 4140.0);
@@ -2918,6 +3030,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pending_remote_start_profile_is_released_on_connect_timeout() {
+        let mut a = actor();
+        let raw = profile(7, 0, "TxProfile", "A", &[(0, 6.0)]);
+        a.sc_remote_start_profile(1, &raw, 5).expect("accepted");
+        a.on_authorized(
+            1,
+            super::super::types::IdTokenRef {
+                id_token: "REMOTE".to_owned(),
+                kind: crate::ocpp::v2::types::IdTokenType::Central,
+            },
+            Some(5),
+            TriggerReason::RemoteStart,
+        )
+        .expect("authorization waits for the EV");
+        assert_eq!(a.charging.pending.len(), 1);
+        a.on_ev_connect_timeout(1);
+        assert!(a.charging.pending.is_empty());
+    }
+
+    #[tokio::test]
     async fn a_remote_start_profile_binds_to_the_transaction_that_starts() {
         let mut a = actor();
         let raw = profile(7, 0, "TxProfile", "A", &[(0, 6.0)]);
@@ -2941,18 +3073,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_remote_start_profile_of_another_start_is_dropped() {
+    async fn a_remote_start_profile_is_kept_for_its_own_start() {
         let mut a = actor();
         let raw = profile(7, 0, "TxProfile", "A", &[(0, 6.0)]);
         a.sc_remote_start_profile(1, &raw, 5).expect("accepted");
         a.begin_transaction(1, start_spec(None))
             .expect("a local start");
         assert!(a.charging.entries.is_empty());
-        assert!(a.charging.pending.is_empty());
-        // A later request without a profile voids what an earlier one left.
-        a.sc_remote_start_profile(2, &raw, 6).expect("accepted");
         assert_eq!(a.charging.pending.len(), 1);
-        a.sc_forget_pending(2);
+        a.sc_forget_pending(1, 6);
+        assert_eq!(a.charging.pending.len(), 1);
+        a.sc_forget_pending(1, 5);
         assert!(a.charging.pending.is_empty());
     }
 
