@@ -311,7 +311,7 @@ Only emulator recordings of OCPP 1.6 replay. The recording of a CSMS (`role` `cs
 
 ## Fleet mode
 
-`--count N` (1 to 1000) runs N independent stations in one process against the same CSMS, for load and multi-station tests. The UI shows them on a TTY; otherwise they run headless.
+`--count N` (1 to 1000) runs N independent stations in one process against the same CSMS, for load and multi-station tests. The UI shows them on a TTY; otherwise they run headless. OCPP 2.0.1 and 2.1 fleets run headless and with `run` only: on a terminal add `--no-tui`.
 
 ```bash
 kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n:03}' --count 50 --stagger-ms 100 --no-tui
@@ -393,7 +393,7 @@ Differences from the 1.6 station:
 * The station boots at start and after a reset, not after every reconnect.
 * A station id that is longer than 48 characters, contains a colon or has characters outside `identifierString` prints a `note:` and is used as given.
 * The terminal UI shows the 2.0.1 tabs and actions; see [For OCPP 2.0.1](#for-ocpp-201).
-* `--count` above 1, `replay` and `scenarios from-recording` exit 2. `run` and `suite` work: a scenario written for the other OCPP version exits 2 with `scenario NAME is for OCPP 1.6; this station speaks ocpp2.0.1` (or the reverse). Built-in names resolve for the station's version, `--connector` is the EVSE and `--id-tag` the `id_token` of a built-in; see [scenarios.md](scenarios.md#running-scenarios).
+* `replay` and `scenarios from-recording` exit 2. `--count` above 1 runs a [fleet](#fleet-mode) headless (with `--no-tui` or `--json`, or without a terminal) and with `run`; the terminal UI does not show a 2.x fleet yet, so a fleet on a terminal without `--no-tui` exits 2. `run` and `suite` work: a scenario written for the other OCPP version exits 2 with `scenario NAME is for OCPP 1.6; this station speaks ocpp2.0.1` (or the reverse). Built-in names resolve for the station's version, `--connector` is the EVSE and `--id-tag` the `id_token` of a built-in; see [scenarios.md](scenarios.md#running-scenarios).
 
 Flags that exist for 1.6 only exit 2 when they are given (by flag, environment variable or configuration file) with `--protocol ocpp2.0.1`:
 
@@ -421,7 +421,7 @@ These flags map to the 2.0.1 station: `--connectors` (EVSE count), `--connector`
 * An `idToken` may carry any `type` of at most 20 characters (2.0.1 allows the eight enumerated kinds) and up to 255 characters (2.0.1: 36). A station started with `--protocol ocpp2.0.1` still refuses both before they leave the station or reach its handlers.
 * The 255-character limit applies to the token forms of the terminal UI, to `id_token` in scenario files and to `--id-tag`; the `type` of a scenario step may be any text. The UI offers the 2.0.1 token kinds, plus the stop reason `ReqEnergyTransferRejected`, and shows `OCPP 2.1` where it shows the version.
 * The state files are the 2.0.1 ones, `<id>.station2.json` and `<id>.station2.secrets.json`, with the same format version: the same id started with 2.0.1 and 2.1 shares its state. See [State persistence](#state-persistence).
-* `--count` above 1, `replay` and `scenarios from-recording` exit 2 with the version in the message, as for 2.0.1. `run`, `suite`, `scenarios` and `check` accept `--protocol ocpp2.1`; the built-in scenarios are the 2.0.1 ones run as 2.1 (see [scenarios.md](scenarios.md#running-scenarios)).
+* `replay` and `scenarios from-recording` exit 2 with the version in the message, and a fleet (`--count` above 1) runs headless only, as for 2.0.1. `run`, `suite`, `scenarios` and `check` accept `--protocol ocpp2.1`; the built-in scenarios are the 2.0.1 ones run as 2.1 (see [scenarios.md](scenarios.md#running-scenarios)).
 
 ## Response rules
 

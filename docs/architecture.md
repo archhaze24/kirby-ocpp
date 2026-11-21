@@ -39,6 +39,7 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 | `scenario/` | TOML scenario model (`model.rs`; the 2.0.1 steps in `model2.rs`), runner (`runner.rs`, generic over the sealed `ScenarioTarget`; the 2.0.1 station's side in `target2.rs`), variables and capture (`vars.rs`, shared with the `kirby-csms` scripts), JUnit renderer (`junit.rs`), built-ins (`builtin.rs`: nine for 1.6 in `crates/kirby-ocpp-core/scenarios/`, eight for 2.0.1 in `scenarios/v201/`; for 2.1 the same eight with the version declaration swapped at load, `builtin::source_text`). A 2.1 file uses the 2.x grammar of `model2.rs`; emulator files check their version with `check_scenario_keys`, separate from the version check of the `kirby-csms` scripts |
 | `recording/` | Session recordings, shared by the emulator and the CSMS: the JSON-lines format and its bounded reader (`read.rs`), the fail-on-lag recorder (`write.rs`: a bounded queue and a writer thread; it marks the recording incomplete instead of dropping frames), redaction of `AuthorizationKey` values and URL passwords (`redact.rs`), the conversion of an emulator recording into a scenario (`scenario.rs`) and the replay plan (`replay.rs`) |
 | `fleet.rs` | `Fleet`: N independent stations, id templates, merged event stream |
+| `fleet2.rs` | `Fleet2`: the same over OCPP 2.x stations, reusing the spec, events and summary types of `fleet.rs` |
 | `store.rs` | `StationStore`: atomic versioned JSON state; `inspect` (read-only load) and `remove` back `kirby-ocpp state show` and `state reset` |
 | `timers.rs`, `fs_util.rs` | Version-neutral plumbing: `TimerWheel` (also reachable as `station::timers`) and `write_atomic`, the durable replace-by-rename used by the store |
 | `config_file.rs` | Generic TOML configuration file loader: schema of tables and keys, unknown-key rejection, profiles, relative path resolution, secret-key refusal, rendering (no clap; the binaries supply their schema) |
@@ -161,7 +162,7 @@ The station does not connect by itself: the caller sends `Command::Connect`.
 | Certificates, security events, profiles (emulator) | `certificates.rs`, `security.rs`, `secure.rs`, `ws/tls.rs`, `ws/handshake.rs` |
 | Scenarios, variables, loops and reports | `kirby-ocpp-core/src/scenario/` (`vars.rs` for `${name}` and capture) |
 | Suite runs (several scenarios, summary, JUnit) | `kirby-ocpp/src/suite.rs` |
-| Fleet mode | `kirby-ocpp-core/src/fleet.rs`, `kirby-ocpp-tui/src/fleet.rs`, `kirby-ocpp/src/fleet.rs` |
+| Fleet mode | `kirby-ocpp-core/src/fleet.rs`, `kirby-ocpp-core/src/fleet2.rs`, `kirby-ocpp-tui/src/fleet.rs`, `kirby-ocpp/src/fleet.rs` |
 | Persistence | `kirby-ocpp-core/src/store.rs`, `persist_driver.rs`, `station/persistence.rs` |
 | CSMS engine, typed commands, faults, scoped rules, auth | `kirby-csms-core/src/` (`server.rs`, `typed.rs`, `fault.rs`, `rules.rs`, `auth.rs`, `tls.rs`, `ids.rs`, `defaults.rs`/`defaults201.rs`/`defaults21.rs`, `state.rs`/`state201.rs`) |
 | Per-protocol action registry (names, forms, palette texts, rule targets) | `kirby-csms-core/src/registry/` (`mod.rs` types and lookups, `ocpp16.rs`, `ocpp201.rs` and `ocpp21.rs` tables) |
