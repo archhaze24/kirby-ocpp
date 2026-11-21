@@ -39,6 +39,7 @@
 //! length stays bounded. The begin and end samples are never dropped. Changing an interval
 //! re-arms the sample timer of a running transaction, as for `TxUpdatedInterval`.
 
+mod cost;
 mod limits;
 
 use std::collections::{BTreeMap, VecDeque};
@@ -53,6 +54,7 @@ use uuid::Uuid;
 use super::actor::{Station2Actor, TimerKey2};
 use super::command::Outcome2;
 use super::snapshot::TransactionSnapshot;
+use super::tariff::Tariff;
 use super::tx_queue::QueuedEvent;
 use super::types::{IdTokenRef, Origin2, Reply2, StartStopPoint, TxId2};
 use crate::error::StationError;
@@ -68,6 +70,7 @@ use crate::ocpp::v2::types::{
 use crate::station::LogLevel;
 use crate::station::metering::{PowerModel, clock_aligned_delay};
 
+pub use cost::TransactionTariff;
 pub use limits::{LimitKind, TransactionLimit2};
 
 /// Stopped transaction ids kept for `GetTransactionStatus`.
@@ -137,6 +140,8 @@ pub struct ActiveTx {
     pub limit_reached: Option<LimitKind>,
     #[serde(default)]
     pub total_cost: Option<f64>,
+    #[serde(default)]
+    pub tariff: Option<TransactionTariff>,
 }
 
 /// What `GetTransactionStatus` needs to know about a transaction id.
@@ -161,6 +166,7 @@ pub struct TxPersist {
 struct PendingAuth {
     token: IdTokenRef,
     remote_start_id: Option<i32>,
+    offered_tariff: Option<Tariff>,
     /// The `groupIdToken` the CSMS named for the token.
     group: Option<String>,
 }
@@ -219,6 +225,8 @@ struct MeterRt {
     last_utc: Option<DateTime<Utc>>,
     /// The EVSE was charging at `last`.
     charging: bool,
+    /// The EV was connected and not charging at `last`.
+    idle: bool,
 }
 
 /// The transactions of the station.
@@ -347,6 +355,7 @@ impl Station2Actor {
         if let Some(id) = pending.remote_start_id {
             self.sc_forget_pending(evse, id);
         }
+        self.forget_driver_tariff(&pending.token);
         true
     }
 
@@ -450,35 +459,47 @@ impl Station2Actor {
 
     /// Adds the energy of the time that passed to every running meter.
     pub(super) fn settle_tx_meters(&mut self) {
+        self.settle_meters_before_limit(None);
+    }
+
+    fn settle_meters_before_limit(&mut self, checking: Option<u32>) {
         let now = Instant::now();
         let now_utc = self.clock.now_utc();
         let ids: Vec<u32> = self.evses.iter().map(|e| e.id).collect();
         for id in ids {
-            let charging_now = self
-                .tx
-                .active
-                .get(&id)
-                .is_some_and(|tx| tx.charging_state == ChargingState::Charging);
-            let (last, was_charging, last_utc) = {
+            let (charging_now, idle_now) = self.tx.active.get(&id).map_or((false, false), |tx| {
+                let charging = tx.charging_state == ChargingState::Charging;
+                (charging, tx.ev_connected && !charging)
+            });
+            let (last, was_charging, was_idle, last_utc) = {
                 let meter = self.tx.meters.entry(id).or_default();
-                (meter.last, meter.charging, meter.last_utc)
+                (meter.last, meter.charging, meter.idle, meter.last_utc)
             };
+            let elapsed = last.map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
             // The energy follows the charging profiles in force during the span.
-            let wh = match (last, was_charging) {
-                (Some(last), true) => {
-                    let elapsed = now.saturating_duration_since(last);
-                    let from = last_utc.unwrap_or(now_utc);
-                    self.sc_energy_wh(id, from, elapsed)
-                }
-                _ => 0.0,
+            let wh = if was_charging {
+                self.sc_energy_wh(id, last_utc.unwrap_or(now_utc), elapsed)
+            } else {
+                0.0
             };
             let meter = self.tx.meters.entry(id).or_default();
             meter.register_wh += wh;
             meter.last = Some(now);
             meter.last_utc = Some(now_utc);
             meter.charging = charging_now;
+            meter.idle = idle_now;
             if let Some(tx) = self.tx.active.get_mut(&id) {
                 tx.energy_wh += wh;
+                let charging = if was_charging {
+                    elapsed
+                } else {
+                    Duration::ZERO
+                };
+                let idle = if was_idle { elapsed } else { Duration::ZERO };
+                tx.add_local_usage(wh, charging, idle);
+                if Some(id) != checking {
+                    tx.refresh_local_cost();
+                }
                 self.arm_tx_limit(id);
             }
         }
@@ -800,6 +821,10 @@ impl Station2Actor {
 
     /// Builds the next event of the transaction on `evse`, merging the optional fields, and
     /// takes the next `seqNo`. `None` when there is no transaction.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "assigns sequence and once-only fields together"
+    )]
     fn build_event(
         &mut self,
         evse: u32,
@@ -823,6 +848,7 @@ impl Station2Actor {
         }
         // H01.FR.15: the event after a reservation was used names it.
         let reservation_id = self.take_reservation_claim(evse);
+        let running_cost = self.tariff_enabled("RunningCost");
         let tx = self.tx.active.get_mut(&evse)?;
         let seq_no = tx.next_seq_no;
         tx.next_seq_no = tx.next_seq_no.saturating_add(1);
@@ -894,6 +920,12 @@ impl Station2Actor {
                 .as_object_mut()?
                 .insert("transactionLimit".to_owned(), limit.to_wire());
         }
+        tx.write_tariff_fields(
+            &mut payload,
+            kind == TransactionEventKind::Ended,
+            running_cost,
+            trigger,
+        );
         Some(QueuedEvent {
             payload,
             evse,
@@ -938,7 +970,7 @@ impl Station2Actor {
         evse: u32,
         spec: StartSpec,
     ) -> Result<TxId2, StationError> {
-        self.begin_inner(evse, spec, None)
+        self.begin_inner(evse, spec, None, None)
     }
 
     #[allow(
@@ -950,6 +982,7 @@ impl Station2Actor {
         evse: u32,
         spec: StartSpec,
         initial: Option<ChargingState>,
+        offered_tariff: Option<Tariff>,
     ) -> Result<TxId2, StationError> {
         if self.evse(evse).is_none() {
             return Err(StationError::InvalidArgument(format!(
@@ -976,7 +1009,6 @@ impl Station2Actor {
             ChargingState::Idle
         });
         self.sc_tx_started(evse, &id.0, spec.remote_start_id);
-        self.drop_pending_authorization(evse);
         self.tx.groups.remove(&evse);
         self.tx.active.insert(
             evse,
@@ -1001,8 +1033,13 @@ impl Station2Actor {
                 csms_limit: TransactionLimit2::default(),
                 limit_reached: None,
                 total_cost: None,
+                tariff: None,
             },
         );
+        if spec.authorized {
+            self.associate_tariff(evse, offered_tariff);
+        }
+        self.drop_pending_authorization(evse);
         let begin = self.sample_value(
             evse,
             &self.tx_started_measurands(),
@@ -1088,6 +1125,7 @@ impl Station2Actor {
         if !self.tx.active.contains_key(&evse) && self.queue_full() {
             return Err(queue_full_error());
         }
+        let offered_tariff = self.take_unplaced_driver(&token);
         self.settle_tx_meters();
         if let Some(tx) = self.tx.active.get_mut(&evse) {
             if tx.authorized {
@@ -1112,6 +1150,7 @@ impl Station2Actor {
                     self.ev_connection_timeout(),
                 );
             }
+            self.associate_tariff(evse, offered_tariff);
             self.tx_event(
                 evse,
                 TransactionEventKind::Updated,
@@ -1147,20 +1186,27 @@ impl Station2Actor {
                     authorized: true,
                 },
                 initial,
+                offered_tariff,
             )?;
         } else {
             let previous = self.tx.pending.insert(
                 evse,
                 PendingAuth {
-                    token,
+                    token: token.clone(),
                     remote_start_id,
+                    offered_tariff,
                     group: None,
                 },
             );
-            if let Some(id) = previous.and_then(|pending| pending.remote_start_id)
-                && Some(id) != remote_start_id
-            {
-                self.sc_forget_pending(evse, id);
+            if let Some(previous) = previous {
+                if previous.token != token {
+                    self.forget_driver_tariff(&previous.token);
+                }
+                if let Some(id) = previous.remote_start_id
+                    && Some(id) != remote_start_id
+                {
+                    self.sc_forget_pending(evse, id);
+                }
             }
             if !connected {
                 self.timers.set(
@@ -1229,9 +1275,14 @@ impl Station2Actor {
         } else {
             (TriggerReason::CablePluggedIn, None)
         };
-        let (token, remote_start_id, group) = match pending {
-            Some(pending) => (Some(pending.token), pending.remote_start_id, pending.group),
-            None => (None, None, None),
+        let (token, remote_start_id, group, offered_tariff) = match pending {
+            Some(pending) => (
+                Some(pending.token),
+                pending.remote_start_id,
+                pending.group,
+                pending.offered_tariff,
+            ),
+            None => (None, None, None, None),
         };
         let spec = StartSpec {
             token,
@@ -1239,7 +1290,7 @@ impl Station2Actor {
             trigger,
             authorized,
         };
-        match self.begin_inner(evse, spec, initial) {
+        match self.begin_inner(evse, spec, initial, offered_tariff) {
             Ok(_) => {
                 if let Some(group) = group {
                     self.tx.groups.insert(evse, group);
@@ -1595,6 +1646,16 @@ impl Station2Actor {
         // The transaction is gone before the queue is written, so a saved state never holds
         // both the transaction and its `Ended` event.
         if let Some(tx) = self.tx.active.remove(&evse) {
+            if let Some((token, tariff_id)) = tx
+                .tariff
+                .as_ref()
+                .and_then(TransactionTariff::driver_binding)
+            {
+                self.remove_driver_tariff(token, Some(tariff_id));
+            }
+            if tx.has_local_cost() && !quiet {
+                self.set_tariff_problem(None);
+            }
             // K01.FR.04: the profiles of the transaction end with it.
             self.sc_tx_ended(&tx.id.0);
             self.tx.stopped.push_back(tx.id.0);
@@ -1607,12 +1668,14 @@ impl Station2Actor {
         self.tx.groups.remove(&evse);
         if let Some(meter) = self.tx.meters.get_mut(&evse) {
             meter.charging = false;
+            meter.idle = false;
         }
         self.timers.cancel(&TimerKey2::MeterPeriodic(evse));
         self.timers.cancel(&TimerKey2::TxEndedSample(evse));
         self.timers.cancel(&TimerKey2::TxEndedAligned(evse));
         self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
         self.timers.cancel(&TimerKey2::TxLimit(evse));
+        self.timers.cancel(&TimerKey2::RunningCost(evse));
         if self.tx.active.is_empty() {
             self.timers.cancel(&TimerKey2::MeterAligned);
             self.tx.seen_intervals = None;
@@ -1695,6 +1758,8 @@ impl Station2Actor {
         let in_transaction = match self.tx.active.get_mut(&evse) {
             Some(tx) => {
                 tx.energy_wh += delta;
+                tx.add_local_usage(delta, Duration::ZERO, Duration::ZERO);
+                tx.refresh_local_cost();
                 true
             }
             None => false,
@@ -1766,6 +1831,9 @@ impl Station2Actor {
         }
         for mut active in tx.active {
             let evse = active.evse;
+            if self.protocol() != Protocol::V21 && active.tariff.take().is_some() {
+                active.total_cost = None;
+            }
             if self.tx.active.contains_key(&evse) {
                 continue;
             }
@@ -1824,6 +1892,7 @@ impl Station2Actor {
         let charging_state = Some(tx.charging_state);
         self.tx.runtime.insert(evse, TxRuntime::default());
         self.tx.active.insert(evse, tx);
+        self.arm_running_cost(evse);
         if let Some(event) = self.build_event(
             evse,
             TransactionEventKind::Updated,
@@ -2433,6 +2502,7 @@ mod tests {
             csms_limit: TransactionLimit2::default(),
             limit_reached: None,
             total_cost: None,
+            tariff: None,
         }
     }
 

@@ -205,6 +205,7 @@ const LOCAL_LIST: &str = "LocalAuthListCtrlr";
 const RESERVATION: &str = "ReservationCtrlr";
 const SMART: &str = "SmartChargingCtrlr";
 const TX: &str = "TxCtrlr";
+pub(super) const TARIFF: &str = "TariffCostCtrlr";
 const SAMPLED: &str = "SampledDataCtrlr";
 const ALIGNED: &str = "AlignedDataCtrlr";
 const DEVICE: &str = "DeviceDataCtrlr";
@@ -432,6 +433,57 @@ pub(crate) static TABLE: &[VarSpec] = &[
         .v21_only(),
     flag(TX, "StopTxOnEVSideDisconnect", "true").rw(),
     flag(TX, "StopTxOnInvalidId", "true").rw(),
+    // TariffCostCtrlr
+    flag(TARIFF, "Available", "true").at("Tariff").v21_only(),
+    flag(TARIFF, "Enabled", "false")
+        .at("Tariff")
+        .rw()
+        .v21_only(),
+    flag(TARIFF, "Available", "true").at("Cost").v21_only(),
+    flag(TARIFF, "Enabled", "false").at("Cost").rw().v21_only(),
+    flag(TARIFF, "Enabled", "false")
+        .at("RunningCost")
+        .rw()
+        .v21_only(),
+    int(TARIFF, "Interval", Fixed("60"))
+        .at("Cost")
+        .rw()
+        .u("s")
+        .lo(1)
+        .v21_only(),
+    int(TARIFF, "Interval", Fixed("0"))
+        .at("Tariff")
+        .rw()
+        .u("s")
+        .v21_only(),
+    int(TARIFF, "MaxElements", Fixed("10"))
+        .at("Tariff")
+        .v21_only(),
+    flag(TARIFF, "ConditionsSupported", "false")
+        .at("Tariff")
+        .v21_only(),
+    row(
+        TARIFF,
+        Scope::Station,
+        "HandleFailedTariff",
+        DataType::OptionList,
+        Fixed("Deauthorize"),
+    )
+    .at("Tariff")
+    .rw()
+    .opts("Deauthorize,UseDefaultTariff,CentralCost")
+    .v21_only(),
+    text(TARIFF, "TariffFallbackMessage", "")
+        .rw()
+        .hi(512)
+        .v21_only(),
+    text(TARIFF, "TotalCostFallbackMessage", "")
+        .rw()
+        .hi(512)
+        .v21_only(),
+    flag(TARIFF, "Problem", "false")
+        .live(LiveVar::TariffProblem)
+        .v21_only(),
     // SampledDataCtrlr
     flag(SAMPLED, "Enabled", "true").rw(),
     members(
@@ -593,7 +645,17 @@ fn validate(spec: &VarSpec, text: &str) -> Result<String, SetFailure> {
         DataType::DateTime => DateTime::parse_from_rfc3339(text)
             .map(|_| text.to_owned())
             .map_err(|_| reject("InvalidValue", "expected an RFC 3339 date and time")),
-        DataType::String => Ok(text.to_owned()),
+        DataType::String => {
+            if let Some(max) = spec.max
+                && text.chars().count() > usize::try_from(max).unwrap_or(0)
+            {
+                return Err(reject(
+                    "ValueOutOfRange",
+                    format!("expected at most {max} characters"),
+                ));
+            }
+            Ok(text.to_owned())
+        }
         DataType::OptionList => {
             if spec
                 .values_list
@@ -927,7 +989,12 @@ impl DeviceModel {
     }
 
     /// The text of a station-level variable, empty for a name the table does not have.
-    fn station_text(&self, component: &str, variable: &str, instance: Option<&str>) -> String {
+    pub(super) fn station_text(
+        &self,
+        component: &str,
+        variable: &str,
+        instance: Option<&str>,
+    ) -> String {
         self.specs()
             .find(|s| {
                 s.scope == Scope::Station
@@ -938,7 +1005,7 @@ impl DeviceModel {
             .map_or_else(String::new, |spec| self.value(spec))
     }
 
-    fn uint(&self, component: &str, variable: &str, instance: Option<&str>) -> u32 {
+    pub(super) fn uint(&self, component: &str, variable: &str, instance: Option<&str>) -> u32 {
         self.station_text(component, variable, instance)
             .parse()
             .unwrap_or(0)
@@ -1144,7 +1211,10 @@ impl DeviceModel {
                 max_limit: spec.max.map(f64::from),
                 values_list: spec
                     .values_list
-                    .filter(|_| spec.is_list())
+                    .filter(|_| {
+                        spec.is_list()
+                            || spec.data_type == DataType::OptionList && spec.component == TARIFF
+                    })
                     .map(str::to_owned),
                 supports_monitoring: spec.supports_monitoring,
                 custom_data: None,
@@ -1188,6 +1258,7 @@ impl Station2Actor {
             LiveVar::CertificateEntries => "0".into(),
             LiveVar::LocalListEntries => self.local_list_len().to_string(),
             LiveVar::SmartChargingEntries => self.charging_profile_count().to_string(),
+            LiveVar::TariffProblem => self.tariffs.problem.to_string(),
         }
     }
 
@@ -1206,6 +1277,14 @@ impl Station2Actor {
             (SECURITY, "BasicAuthPassword") => self.mark_secrets_dirty(),
             // Held EVSEs show as reserved only while reservations are enabled.
             (RESERVATION, "Enabled") => self.notify_status_changes(),
+            (TARIFF, "Enabled" | "Interval")
+                if matches!(
+                    (spec.variable, spec.instance),
+                    ("Enabled", Some("RunningCost")) | ("Interval", Some("Cost"))
+                ) =>
+            {
+                self.rearm_running_cost();
+            }
             _ => {}
         }
         self.flush_now();

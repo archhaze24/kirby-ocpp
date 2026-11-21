@@ -67,4 +67,5 @@ pub enum LiveVar {
     CertificateEntries,
     LocalListEntries,
     SmartChargingEntries,
+    TariffProblem,
 }

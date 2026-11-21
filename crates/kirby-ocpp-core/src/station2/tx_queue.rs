@@ -103,6 +103,7 @@ fn carries_once_only_field(payload: &Value) -> bool {
     payload.get("evse").is_some()
         || payload.get("idToken").is_some()
         || payload.pointer("/transactionInfo/remoteStartId").is_some()
+        || payload.pointer("/transactionInfo/tariffId").is_some()
         || payload
             .get("meterValue")
             .and_then(Value::as_array)
@@ -457,14 +458,18 @@ mod tests {
                 5,
                 json!({"meterValue": [{"sampledValue": [{"context": "Transaction.Begin"}]}]}),
             ),
-            event(TransactionEventKind::Updated, 6),
-            event(TransactionEventKind::Updated, 7),
-            event(TransactionEventKind::Ended, 8),
+            carrying(6, json!({"transactionInfo": {"tariffId": "A"}})),
+            carrying(
+                7,
+                json!({"triggerReason": "RunningCost", "costDetails": {}}),
+            ),
+            event(TransactionEventKind::Updated, 8),
+            event(TransactionEventKind::Ended, 9),
         ]
         .into();
-        // Plain candidates after the head: 1, 6, 7; the second, 6, goes.
+        // The second candidate is a running cost update.
         assert_eq!(thin_updated(&mut events), 1);
-        assert_eq!(seqs(&events), [0, 1, 2, 3, 4, 5, 7, 8]);
+        assert_eq!(seqs(&events), [0, 1, 2, 3, 4, 5, 6, 8, 9]);
     }
 
     #[test]

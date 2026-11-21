@@ -20,6 +20,8 @@ impl Station2Actor {
             TimerKey2::TxEndedAligned(evse) => self.on_tx_ended_aligned(evse),
             TimerKey2::TxRetry => self.on_tx_retry_timer(),
             TimerKey2::TxLimit(evse) => self.check_tx_limits(evse),
+            TimerKey2::RunningCost(evse) => self.on_running_cost(evse),
+            TimerKey2::DefaultTariffActivation => self.on_tariff_activation(),
             TimerKey2::EvConnectTimeout(evse) => self.on_ev_connect_timeout(evse),
             TimerKey2::ResetDelay => self.on_reset_timer(),
             TimerKey2::ReportChunk => self.on_report_chunk(),
@@ -42,6 +44,7 @@ impl Station2Actor {
 
     /// Refreshes the reservation, limit and list rows of the snapshot from the live state.
     fn refresh_evse_views(&mut self) {
+        self.prune_default_tariffs();
         let views: Vec<_> = self
             .state
             .evses
@@ -54,6 +57,10 @@ impl Station2Actor {
                     .and_then(|tx| tx.limit_reached)
                     .map(|kind| kind.trigger().as_str().to_owned());
                 let cost = tx.and_then(|tx| tx.total_cost);
+                let tariff = tx
+                    .and_then(|tx| tx.tariff.as_ref())
+                    .map(|state| state.current().id.clone());
+                let default = self.default_tariff(e.id).map(|tariff| tariff.id.clone());
                 (
                     self.reservation_view(e.id),
                     offered,
@@ -61,10 +68,12 @@ impl Station2Actor {
                     limit,
                     reached,
                     cost,
+                    tariff,
+                    default,
                 )
             })
             .collect();
-        for (entry, (reservation, offered, external, limit, reached, cost)) in
+        for (entry, (reservation, offered, external, limit, reached, cost, tariff, default)) in
             self.state.evses.iter_mut().zip(views)
         {
             entry.reservation = reservation;
@@ -73,6 +82,8 @@ impl Station2Actor {
             entry.transaction_limit = limit;
             entry.limit_reached = reached;
             entry.total_cost = cost;
+            entry.tariff_id = tariff;
+            entry.default_tariff_id = default;
         }
         self.state.local_list_version = self.local_list.version;
         self.state.local_list_entries = self.local_list_len();

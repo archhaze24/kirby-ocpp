@@ -58,6 +58,8 @@ const CONNECTOR_TYPE: &str = "cType2";
 pub struct Reservation {
     pub id: i32,
     pub expires_at: DateTime<Utc>,
+    #[serde(default)]
+    pub received_at: Option<DateTime<Utc>>,
     /// The reserved EVSE; `None` holds any one EVSE.
     pub evse: Option<u32>,
     pub connector_type: Option<String>,
@@ -292,6 +294,10 @@ impl Station2Actor {
             .claims
             .remove(&evse)
             .map(|reservation| reservation.id)
+    }
+
+    pub(super) fn reservation_claim_on(&self, evse: u32) -> Option<&Reservation> {
+        self.reservations.claims.get(&evse)
     }
 
     // ---- H04: the end ---------------------------------------------------------------------
@@ -555,6 +561,8 @@ pub(super) fn reserve_now(
     actor.reservations.list.push(Reservation {
         id,
         expires_at: expiry_date_time,
+        received_at: (actor.protocol() == crate::ocpp::Protocol::V21)
+            .then(|| actor.clock.now_utc()),
         evse: evse_id.and_then(|evse| u32::try_from(evse).ok()),
         connector_type,
         id_token: IdTokenRef {
@@ -634,6 +642,7 @@ mod tests {
         Reservation {
             id: 1,
             expires_at: Utc.timestamp_opt(1_000, 0).single().expect("valid time"),
+            received_at: None,
             evse: None,
             connector_type: None,
             id_token: token("A"),

@@ -65,6 +65,8 @@ pub(crate) enum TimerKey2 {
     TxRetry,
     /// Check the energy and time limits of an ongoing transaction.
     TxLimit(u32),
+    RunningCost(u32),
+    DefaultTariffActivation,
     /// The EV did not connect in time after a remote start.
     EvConnectTimeout(u32),
     /// A reset waits for the moment to reboot.
@@ -127,6 +129,7 @@ pub(crate) struct Station2Actor {
     pub(super) local_list: super::local_list::LocalListPersist,
     /// The reservations.
     pub(super) reservations: super::reservation::ReservationState,
+    pub(super) tariffs: super::tariff::TariffState,
     /// The charging profiles.
     pub(super) charging: super::smart_charging::SmartCharging,
     pub(super) reset: Option<ResetPlan>,
@@ -178,6 +181,7 @@ impl Station2Actor {
             auth: AuthState::default(),
             local_list: super::local_list::LocalListPersist::default(),
             reservations: super::reservation::ReservationState::default(),
+            tariffs: super::tariff::TariffState::default(),
             charging: super::smart_charging::SmartCharging::default(),
             reset: None,
             persistence,

@@ -667,6 +667,7 @@ async fn a_restored_list_stays_within_the_evses() {
     let entry = |id: i32, evse: Option<u32>| Reservation {
         id,
         expires_at,
+        received_at: None,
         evse,
         connector_type: None,
         id_token: IdTokenRef {

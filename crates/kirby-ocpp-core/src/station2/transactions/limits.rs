@@ -9,6 +9,7 @@ use super::{ActiveTx, EventExtra};
 use crate::ocpp::Protocol;
 use crate::ocpp::v2::messages::{TransactionEventKind, TriggerReason};
 use crate::ocpp::v2::types::{ChargingState, StopReason};
+use crate::station::LogLevel;
 use crate::station2::actor::{Station2Actor, TimerKey2};
 use crate::station2::command::Outcome2;
 use crate::station2::types::StartStopPoint;
@@ -167,7 +168,11 @@ impl Station2Actor {
         let Some(tx) = self.tx.active.get_mut(&evse).filter(|tx| tx.id.0 == id) else {
             return;
         };
-        let cost = answer.get("totalCost").and_then(Value::as_f64);
+        let mut cost = answer.get("totalCost").and_then(Value::as_f64);
+        let ignored_cost = cost.is_some() && tx.has_local_cost();
+        if ignored_cost {
+            cost = None;
+        }
         if let Some(cost) = cost {
             tx.total_cost = Some(cost);
         }
@@ -184,6 +189,12 @@ impl Station2Actor {
         let changed = tx.limit != limit;
         let dirty = cost.is_some() || tx.csms_limit != csms_limit;
         tx.csms_limit = csms_limit;
+        if ignored_cost {
+            self.log(
+                LogLevel::Info,
+                "TransactionEventResponse cost ignored during local cost calculation".to_owned(),
+            );
+        }
         if changed {
             self.tx_limit_set(evse, incoming);
         } else {
@@ -201,6 +212,13 @@ impl Station2Actor {
         let Some(tx) = self.tx.active.values_mut().find(|tx| tx.id.0 == id) else {
             return;
         };
+        if tx.has_local_cost() {
+            self.log(
+                LogLevel::Info,
+                "CostUpdated ignored during local cost calculation".to_owned(),
+            );
+            return;
+        }
         tx.total_cost = Some(cost);
         let evse = tx.evse;
         self.mark_dirty();
@@ -265,9 +283,10 @@ impl Station2Actor {
         let timer = TimerKey2::TxLimit(evse);
         if self.protocol() == Protocol::V21
             && self.active_tx(evse).is_some_and(|tx| {
-                tx.charging_state == ChargingState::Charging
-                    && tx.limit_reached.is_none()
-                    && (tx.limit.max_energy_wh.is_some() || tx.limit.max_time_s.is_some())
+                tx.limit_reached.is_none()
+                    && ((tx.charging_state == ChargingState::Charging
+                        && (tx.limit.max_energy_wh.is_some() || tx.limit.max_time_s.is_some()))
+                        || (tx.has_local_cost() && tx.limit.max_cost.is_some()))
             })
         {
             self.timers.set_if_idle(timer, Duration::from_secs(1));
@@ -282,20 +301,20 @@ impl Station2Actor {
 
     fn evaluate_tx_limits(&mut self, evse: u32, limit_changed: bool) {
         let previous_energy = self.active_tx(evse).map(|tx| tx.energy_wh);
-        self.settle_tx_meters();
+        self.settle_meters_before_limit(Some(evse));
         let now = self.clock.now_utc();
         let Some(tx) = self.tx.active.get_mut(&evse) else {
             return;
         };
         let was_latched = tx.limit_reached.is_some();
         if was_latched && !limit_changed {
+            tx.refresh_local_cost();
             return;
         }
-        let Some(reached) = tx.reached_limit((now - tx.started_at).num_seconds()) else {
-            return;
-        };
+        let elapsed = (now - tx.started_at).num_seconds();
+        let reached = tx.reached_limit(elapsed);
         let meter = self.tx.meters.entry(evse).or_default();
-        if reached == LimitKind::Energy
+        if reached == Some(LimitKind::Energy)
             && let Some(max) = tx.limit.max_energy_wh
             && previous_energy.is_some_and(|energy| energy < max)
             && tx.energy_wh >= max
@@ -303,7 +322,12 @@ impl Station2Actor {
             let overshoot = tx.energy_wh - max;
             meter.register_wh -= overshoot;
             tx.energy_wh = max;
+            tx.add_local_usage(-overshoot, Duration::ZERO, Duration::ZERO);
         }
+        tx.refresh_local_cost();
+        let Some(reached) = tx.reached_limit(elapsed) else {
+            return;
+        };
         meter.charging = false;
         tx.limit_reached = Some(reached);
         let reset_suspended = self.auth.reset_prepared

@@ -109,6 +109,7 @@ impl Station2Actor {
             .insert(evse, Some(remote_start_id));
         self.authorize_asking_csms(token, Some(evse), move |actor, decision| {
             if actor.tx.remote_authorizing.remove(&evse).flatten() != Some(remote_start_id) {
+                actor.forget_driver_tariff(&presented);
                 return;
             }
             let accepted = matches!(
@@ -126,6 +127,7 @@ impl Station2Actor {
             // C16.FR.03: a master pass token starts no transaction.
             if actor.is_master_pass(&presented, &decision) {
                 actor.sc_forget_pending(evse, remote_start_id);
+                actor.forget_driver_tariff(&presented);
                 actor.log(
                     LogLevel::Warn,
                     format!("remote start on EVSE {evse}: a master pass token starts nothing"),
@@ -134,6 +136,7 @@ impl Station2Actor {
             }
             if let Err(reason) = actor.remote_start_refusal(evse) {
                 actor.sc_forget_pending(evse, remote_start_id);
+                actor.forget_driver_tariff(&presented);
                 actor.log(
                     LogLevel::Warn,
                     format!("remote start on EVSE {evse} failed: {reason}"),
@@ -182,6 +185,7 @@ impl Station2Actor {
         let group = self.group_of_token(token, group_in(info));
         if self.reservation_blocks(evse, token, group.as_deref()) {
             self.sc_forget_pending(evse, remote_start_id);
+            self.forget_driver_tariff(token);
             self.log(
                 LogLevel::Warn,
                 format!("remote start on EVSE {evse}: the EVSE is reserved for another token"),
@@ -198,6 +202,7 @@ impl Station2Actor {
             Err(error) => {
                 self.sc_forget_pending(evse, remote_start_id);
                 self.reservation_release_claim(evse);
+                self.forget_driver_tariff(token);
                 self.log(
                     LogLevel::Warn,
                     format!("remote start on EVSE {evse} failed: {error}"),

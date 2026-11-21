@@ -22,7 +22,7 @@ use crate::station2_support::{STEP, calls_of, v201_csms, wait_booted};
 const VERSIONS: [Protocol; 2] = [Protocol::V201, Protocol::V21];
 
 /// Every component of the device model, in report order.
-const ALL_COMPONENTS: [&str; 15] = [
+const ALL_COMPONENTS: [&str; 16] = [
     "AlignedDataCtrlr",
     "AuthCacheCtrlr",
     "AuthCtrlr",
@@ -37,8 +37,15 @@ const ALL_COMPONENTS: [&str; 15] = [
     "SampledDataCtrlr",
     "SecurityCtrlr",
     "SmartChargingCtrlr",
+    "TariffCostCtrlr",
     "TxCtrlr",
 ];
+
+fn components(protocol: Protocol) -> impl Iterator<Item = &'static str> {
+    ALL_COMPONENTS
+        .into_iter()
+        .filter(move |name| protocol == Protocol::V21 || *name != "TariffCostCtrlr")
+}
 
 async fn csms_for(protocol: Protocol) -> MockCsms {
     if protocol == Protocol::V201 {
@@ -326,7 +333,10 @@ async fn the_available_criterion_selects_components_with_available_true() {
         assert_eq!(status, "Accepted");
         // `Available` is true where it exists, and a component without it meets the criterion
         // too (B08.FR.08).
-        assert_eq!(names(&items, "component"), ALL_COMPONENTS);
+        assert_eq!(
+            names(&items, "component"),
+            components(protocol).collect::<Vec<_>>()
+        );
         // Whole components are reported, not only the variable that matched.
         assert!(items.iter().any(
             |item| item["variable"]["name"] == json!("AvailabilityState")
@@ -348,7 +358,7 @@ async fn a_missing_variable_meets_active_but_never_problem() {
     for protocol in VERSIONS {
         let csms = csms_for(protocol).await;
         let (station, task) = start(protocol, &csms).await;
-        // No component has a `Problem` variable (B08.FR.10).
+        // No component reports a problem by default (B08.FR.10).
         let (status, items) = report(
             &csms,
             json!({"requestId": 5, "componentCriteria": ["Problem"]}),
@@ -364,7 +374,10 @@ async fn a_missing_variable_meets_active_but_never_problem() {
         )
         .await;
         assert_eq!(status, "Accepted");
-        assert_eq!(names(&items, "component"), ALL_COMPONENTS);
+        assert_eq!(
+            names(&items, "component"),
+            components(protocol).collect::<Vec<_>>()
+        );
         stop(&station, task).await;
     }
 }
@@ -379,9 +392,9 @@ async fn the_enabled_criterion_follows_the_variable_value() {
             json!({"requestId": 6, "componentCriteria": ["Enabled"]}),
         )
         .await;
-        // Every component is enabled or has no `Enabled` variable (B08.FR.09).
+        // Every component is enabled or has no instance-less `Enabled` variable (B08.FR.09).
         let enabled = names(&items, "component");
-        assert_eq!(enabled, ALL_COMPONENTS);
+        assert_eq!(enabled, components(protocol).collect::<Vec<_>>());
         let set = call(
             &csms,
             "SetVariables",
@@ -401,9 +414,7 @@ async fn the_enabled_criterion_follows_the_variable_value() {
             json!({"requestId": 8, "componentCriteria": ["Enabled"]}),
         )
         .await;
-        let without: Vec<&str> = ALL_COMPONENTS
-            .iter()
-            .copied()
+        let without: Vec<&str> = components(protocol)
             .filter(|name| *name != "SampledDataCtrlr")
             .collect();
         assert_eq!(names(&items, "component"), without);

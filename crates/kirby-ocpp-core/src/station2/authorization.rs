@@ -55,6 +55,8 @@ pub struct CacheEntry {
     pub status: String,
     pub expires_at: Option<DateTime<Utc>>,
     pub group_id: Option<String>,
+    #[serde(default)]
+    pub tariff: Option<Value>,
 }
 
 /// The authorization cache, as persisted: `(token key, entry)` pairs.
@@ -185,7 +187,7 @@ impl Station2Actor {
     /// Stores what the CSMS said about `token` (C12.FR.06); `Central` and `NoAuthorization`
     /// tokens are never stored (C05.FR.02). An `idTokenInfo` that already expired removes the
     /// entry instead (C10).
-    fn cache_store(&mut self, token: &IdTokenRef, info: &IdTokenInfo) {
+    fn cache_store(&mut self, token: &IdTokenRef, info: &IdTokenInfo, tariff: Option<Value>) {
         if needs_no_check(&token.kind) || !self.cache_enabled() {
             return;
         }
@@ -216,6 +218,7 @@ impl Station2Actor {
                 status: info.status.as_str().to_owned(),
                 expires_at,
                 group_id: info.group_id_token.as_ref().map(|g| g.id_token.clone()),
+                tariff,
             },
         ));
         self.mark_dirty();
@@ -294,7 +297,7 @@ impl Station2Actor {
             self.link.conn.is_some() && self.may_send("Authorize", Origin2::Station).is_ok();
         let listed = self.local_list_entry(&token);
         if !online {
-            let decision = self.offline_decision(listed.as_ref(), cached.as_ref());
+            let decision = self.offline_decision(&token, listed.as_ref(), cached.as_ref());
             cont(self, decision);
             return;
         }
@@ -322,11 +325,14 @@ impl Station2Actor {
         }
         // A listed token never takes the cache shortcut: the list has priority (C14.FR.01).
         let cached = if listed.is_some() { None } else { cached };
-        if ask == Ask::CacheFirst && cached.as_ref().is_some_and(|e| e.status == ACCEPTED) {
-            if self.local_pre_authorize() {
+        if ask == Ask::CacheFirst
+            && let Some(entry) = cached.filter(|e| e.status == ACCEPTED)
+        {
+            let decision = self.tariff_authorization(&token, None, entry.tariff);
+            if self.local_pre_authorize() && matches!(decision, AuthDecision::Accepted(_)) {
                 self.refresh_cached(token, evse);
             }
-            cont(self, AuthDecision::Accepted(None));
+            cont(self, decision);
             return;
         }
         let request = AuthorizeRequest {
@@ -349,10 +355,11 @@ impl Station2Actor {
     ) -> AuthDecision {
         match result {
             Ok(response) => {
-                self.cache_store(token, &response.id_token_info);
+                let tariff = response.tariff.filter(|_| self.local_tariffs_enabled());
+                self.cache_store(token, &response.id_token_info, tariff.clone());
                 let info = serde_json::to_value(&response.id_token_info).ok();
                 if response.id_token_info.status == AuthorizationStatus::Accepted {
-                    AuthDecision::Accepted(info)
+                    self.tariff_authorization(token, info, tariff)
                 } else {
                     AuthDecision::Rejected {
                         status: response.id_token_info.status.as_str().to_owned(),
@@ -370,8 +377,26 @@ impl Station2Actor {
                 );
                 let cached = self.cache_lookup(&token_key(token));
                 let listed = self.local_list_entry(token);
-                self.offline_decision(listed.as_ref(), cached.as_ref())
+                self.offline_decision(token, listed.as_ref(), cached.as_ref())
             }
+        }
+    }
+
+    fn tariff_authorization(
+        &mut self,
+        token: &IdTokenRef,
+        mut info: Option<Value>,
+        tariff: Option<Value>,
+    ) -> AuthDecision {
+        if self.apply_driver_tariff(token, tariff) {
+            return AuthDecision::Accepted(info);
+        }
+        if let Some(info) = &mut info {
+            info["status"] = Value::String("Invalid".to_owned());
+        }
+        AuthDecision::Rejected {
+            status: "Invalid".to_owned(),
+            info,
         }
     }
 
@@ -381,7 +406,8 @@ impl Station2Actor {
     /// A token of the Local Authorization List is decided by its entry alone (C13.FR.01):
     /// only `Accepted` is let in, and a listed token is not an unknown one.
     fn offline_decision(
-        &self,
+        &mut self,
+        token: &IdTokenRef,
         listed: Option<&ListEntry>,
         cached: Option<&CacheEntry>,
     ) -> AuthDecision {
@@ -390,6 +416,16 @@ impl Station2Actor {
             (None, Some(entry)) => entry.status == ACCEPTED && self.local_authorize_offline(),
             (None, None) => self.offline_tx_for_unknown_id(),
         };
+        if accepted
+            && listed.is_none()
+            && let Some(tariff) = cached.and_then(|entry| entry.tariff.clone())
+            && !self.apply_driver_tariff(token, Some(tariff))
+        {
+            return AuthDecision::Rejected {
+                status: "Invalid".to_owned(),
+                info: None,
+            };
+        }
         AuthDecision::Offline { accepted }
     }
 
@@ -407,8 +443,11 @@ impl Station2Actor {
             let Ok(response) = result else {
                 return;
             };
-            actor.cache_store(&token, &response.id_token_info);
-            if response.id_token_info.status != AuthorizationStatus::Accepted
+            let tariff = response.tariff.filter(|_| actor.local_tariffs_enabled());
+            actor.cache_store(&token, &response.id_token_info, tariff.clone());
+            let accepted = response.id_token_info.status == AuthorizationStatus::Accepted
+                && actor.apply_driver_tariff(&token, tariff);
+            if !accepted
                 && let Some(evse) = evse
                 && actor.authorized_token(evse) == Some(&token)
             {
@@ -455,7 +494,10 @@ impl Station2Actor {
             None
         };
         if let Some(token) = event_token.or(of_transaction) {
-            self.cache_store(&token, &parsed);
+            let tariff = self
+                .cache_peek(&token_key(&token))
+                .and_then(|entry| entry.tariff.clone());
+            self.cache_store(&token, &parsed, tariff);
             if current.as_deref() == Some(transaction_id)
                 && parsed.status == AuthorizationStatus::Accepted
             {
@@ -706,10 +748,12 @@ impl Station2Actor {
             })
         } else if self.token_ends_authorization(evse, &token, group_in(info.as_ref())) {
             // The answer showed the token shares the group of the one that started.
+            self.forget_driver_tariff(&token);
             self.on_stopped_by_token(evse, token);
             Ok(Outcome2::Done)
         } else if self.authorized_token(evse).is_some() {
             // C01.FR.23: a second, unrelated token does not take over a running authorization.
+            self.forget_driver_tariff(&token);
             Ok(Outcome2::Authorized {
                 status: AuthorizationStatus::ConcurrentTx.as_str().to_owned(),
                 id_token_info: info,
@@ -721,6 +765,7 @@ impl Station2Actor {
                 .as_deref(),
         ) {
             // H03: the EVSE is held for another token.
+            self.forget_driver_tariff(&token);
             self.log(
                 LogLevel::Warn,
                 format!("EVSE {evse} is reserved for another token"),
@@ -736,6 +781,7 @@ impl Station2Actor {
             let started = self.on_authorized(evse, token.clone(), None, TriggerReason::Authorized);
             if started.is_err() {
                 self.reservation_release_claim(evse);
+                self.forget_driver_tariff(&token);
             }
             started.map(|()| {
                 self.note_authorization_group(evse, &token, info.as_ref());
@@ -755,8 +801,8 @@ impl Station2Actor {
         let _ = reply.send(outcome);
     }
 
-    /// `Command2::Authorize`: a bare `Authorize` CALL; nothing else happens with the answer
-    /// except that the cache learns it.
+    /// `Command2::Authorize`: records the authorization and any driver tariff without
+    /// starting a transaction.
     pub(super) fn cmd_authorize(
         &mut self,
         id_token: String,
@@ -776,10 +822,17 @@ impl Station2Actor {
         self.call::<Authorize>(Origin2::Station, &request, move |actor, result| {
             let outcome = match result {
                 Ok(response) => {
-                    actor.cache_store(&token, &response.id_token_info);
+                    let tariff = response.tariff.filter(|_| actor.local_tariffs_enabled());
+                    actor.cache_store(&token, &response.id_token_info, tariff.clone());
+                    let mut info = response.id_token_info;
+                    if info.status == AuthorizationStatus::Accepted
+                        && !actor.apply_driver_tariff(&token, tariff)
+                    {
+                        info.status = AuthorizationStatus::Invalid;
+                    }
                     Ok(Outcome2::Authorized {
-                        status: response.id_token_info.status.as_str().to_owned(),
-                        id_token_info: serde_json::to_value(&response.id_token_info).ok(),
+                        status: info.status.as_str().to_owned(),
+                        id_token_info: serde_json::to_value(&info).ok(),
                     })
                 }
                 Err(error) => Err(call_failure(error)),
@@ -860,7 +913,7 @@ mod tests {
         let mut actor = actor(&clock);
         let mut with_expiry = info(AuthorizationStatus::Accepted, None);
         with_expiry.cache_expiry_date_time = Some(clock.now_utc() + Duration::seconds(60));
-        actor.cache_store(&token("A"), &with_expiry);
+        actor.cache_store(&token("A"), &with_expiry, None);
         assert!(actor.cache_lookup(&token_key(&token("A"))).is_some());
         clock.advance(Duration::seconds(61));
         assert!(actor.cache_lookup(&token_key(&token("A"))).is_none());
@@ -872,7 +925,11 @@ mod tests {
         let clock = clock();
         let mut actor = actor(&clock);
         // Default `LifeTime` is 86400 s.
-        actor.cache_store(&token("A"), &info(AuthorizationStatus::Accepted, None));
+        actor.cache_store(
+            &token("A"),
+            &info(AuthorizationStatus::Accepted, None),
+            None,
+        );
         clock.advance(Duration::seconds(86_399));
         assert!(actor.cache_lookup(&token_key(&token("A"))).is_some());
         clock.advance(Duration::seconds(2));
@@ -883,31 +940,44 @@ mod tests {
     fn an_expired_info_removes_the_entry_and_central_is_never_stored() {
         let clock = clock();
         let mut actor = actor(&clock);
-        actor.cache_store(&token("A"), &info(AuthorizationStatus::Accepted, None));
+        actor.cache_store(
+            &token("A"),
+            &info(AuthorizationStatus::Accepted, None),
+            None,
+        );
         let mut expired = info(AuthorizationStatus::Accepted, None);
         expired.cache_expiry_date_time = Some(clock.now_utc() - Duration::seconds(1));
-        actor.cache_store(&token("A"), &expired);
+        actor.cache_store(&token("A"), &expired, None);
         assert_eq!(actor.auth_cache_persist().entries.len(), 0);
         let central = IdTokenRef {
             id_token: "C".to_owned(),
             kind: IdTokenType::Central,
         };
-        actor.cache_store(&central, &info(AuthorizationStatus::Accepted, None));
+        actor.cache_store(&central, &info(AuthorizationStatus::Accepted, None), None);
         assert_eq!(actor.auth_cache_persist().entries.len(), 0);
     }
 
     #[test]
     fn a_full_cache_drops_rejected_entries_first_then_the_oldest() {
         let mut actor = actor(&clock());
-        actor.cache_store(&token("blocked"), &info(AuthorizationStatus::Blocked, None));
+        actor.cache_store(
+            &token("blocked"),
+            &info(AuthorizationStatus::Blocked, None),
+            None,
+        );
         for n in 0..CACHE_LIMIT - 1 {
             actor.cache_store(
                 &token(&format!("T{n}")),
                 &info(AuthorizationStatus::Accepted, None),
+                None,
             );
         }
         assert_eq!(actor.auth_cache_persist().entries.len(), CACHE_LIMIT);
-        actor.cache_store(&token("new"), &info(AuthorizationStatus::Accepted, None));
+        actor.cache_store(
+            &token("new"),
+            &info(AuthorizationStatus::Accepted, None),
+            None,
+        );
         let keys: Vec<String> = actor
             .auth_cache_persist()
             .entries
@@ -917,7 +987,11 @@ mod tests {
         assert_eq!(keys.len(), CACHE_LIMIT);
         assert!(!keys.contains(&token_key(&token("blocked"))));
         assert!(keys.contains(&token_key(&token("T0"))));
-        actor.cache_store(&token("newer"), &info(AuthorizationStatus::Accepted, None));
+        actor.cache_store(
+            &token("newer"),
+            &info(AuthorizationStatus::Accepted, None),
+            None,
+        );
         let keys: Vec<String> = actor
             .auth_cache_persist()
             .entries
@@ -937,6 +1011,7 @@ mod tests {
             status: ACCEPTED.to_owned(),
             expires_at,
             group_id: None,
+            tariff: None,
         };
         actor.auth_cache_restore(AuthCachePersist {
             entries: vec![
@@ -961,6 +1036,7 @@ mod tests {
         actor.cache_store(
             &token("A"),
             &info(AuthorizationStatus::Accepted, Some("GROUP")),
+            None,
         );
         let entry = actor.cache_peek(&token_key(&token("A"))).unwrap();
         assert_eq!(entry.group_id.as_deref(), Some("GROUP"));

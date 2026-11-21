@@ -116,7 +116,7 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("NotifyDisplayMessages", STATION, false),
     info("NotifyEVChargingNeeds", STATION, false),
     info("NotifyEVChargingSchedule", STATION, false),
-    info("NotifyEvent", STATION, false),
+    info("NotifyEvent", STATION, true),
     info("NotifyMonitoringReport", STATION, false),
     info("NotifyReport", STATION, true),
     info("PublishFirmware", CSMS, false),
@@ -202,7 +202,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("NotifyDisplayMessages", STATION, false),
     info("NotifyEVChargingNeeds", STATION, false),
     info("NotifyEVChargingSchedule", STATION, false),
-    info("NotifyEvent", STATION, false),
+    info("NotifyEvent", STATION, true),
     info("NotifyMonitoringReport", STATION, false),
     send("NotifyPeriodicEventStream", STATION),
     info("NotifyPriorityCharging", STATION, false),
@@ -342,6 +342,7 @@ mod tests {
             station_sent::<m::TransactionEvent>(),
             station_sent::<m::MeterValues>(),
             station_sent::<m::NotifyReport>(),
+            station_sent::<m::NotifyEvent>(),
             station_sent::<m::SecurityEventNotification>(),
             station_sent::<m::DataTransfer>(),
             station_sent::<m::ReservationStatusUpdate>(),
@@ -402,7 +403,7 @@ mod tests {
             .filter(|entry| entry.typed)
             .map(|entry| entry.name)
             .collect();
-        assert_eq!(typed.len(), 34);
+        assert_eq!(typed.len(), 35);
         let markers: BTreeSet<&str> = outbound.iter().chain(&inbound).copied().collect();
         assert_eq!(markers, typed);
         for name in &typed {

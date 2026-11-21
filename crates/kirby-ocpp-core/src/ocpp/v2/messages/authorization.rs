@@ -44,6 +44,8 @@ payload! {
     AuthorizeResponse {
         pub id_token_info: IdTokenInfo,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub tariff: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         pub certificate_status: Option<AuthorizeCertificateStatus>,
     }
 }

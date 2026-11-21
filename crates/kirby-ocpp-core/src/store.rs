@@ -167,6 +167,9 @@ pub struct PersistedStation2 {
     pub queue: QueuePersist,
     /// Reservations (added without a version bump: a file without them loads as none).
     pub reservations: ReservationPersist,
+    /// Installed 2.1 defaults. Each entry is validated independently on load.
+    #[serde(default)]
+    pub default_tariffs: Vec<serde_json::Value>,
     /// Charging profiles (added without a version bump: a file without them loads as none).
     pub charging_profiles: SmartChargingPersist,
     /// How many times the station booted.
@@ -197,6 +200,7 @@ impl Default for PersistedStation2 {
             tx: TxPersist::default(),
             queue: QueuePersist::default(),
             reservations: ReservationPersist::default(),
+            default_tariffs: Vec::new(),
             charging_profiles: SmartChargingPersist::default(),
             boot_count: 0,
         }

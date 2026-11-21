@@ -131,6 +131,7 @@ impl Station2Actor {
         self.restore_device_model(persisted.device_model);
         self.sc_restore(persisted.charging_profiles);
         self.restore_auth_cache(persisted.auth_cache);
+        self.restore_default_tariffs(persisted.default_tariffs);
         self.tx_restore(persisted.tx, persisted.saved_at);
         self.restore_queue(persisted.queue);
         self.reservations_restore(persisted.reservations);
@@ -139,7 +140,8 @@ impl Station2Actor {
     }
 
     /// The state worth keeping.
-    fn build_persisted(&self) -> PersistedStation2 {
+    fn build_persisted(&mut self) -> PersistedStation2 {
+        let default_tariffs = self.persist_default_tariffs();
         PersistedStation2 {
             charge_point_id: self.config.charge_point_id.clone(),
             protocol: self.protocol().token().to_owned(),
@@ -151,6 +153,7 @@ impl Station2Actor {
             tx: self.persist_transactions(),
             queue: self.persist_queue(),
             reservations: self.reservations_persist(),
+            default_tariffs,
             charging_profiles: self.sc_persist(),
             boot_count: self.persistence.boot_count,
             ..PersistedStation2::default()
@@ -301,6 +304,7 @@ mod tests {
             status: "Accepted".to_owned(),
             expires_at,
             group_id: None,
+            tariff: None,
         };
         let mut cache = AuthCachePersist {
             local_list: LocalListPersist::default(),

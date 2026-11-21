@@ -408,6 +408,7 @@ impl Station2Actor {
         });
         self.send_all_statuses(since);
         self.flush_queue();
+        self.flush_tariff_events();
         self.flush_security_events();
         self.send_heartbeat(Origin2::Station, None);
         self.arm_heartbeat();
@@ -634,6 +635,7 @@ impl Station2Actor {
         self.send_all_statuses(None);
         self.finish_reset_resume();
         self.flush_queue();
+        self.flush_tariff_events();
         // A04.FR.01: the startup or reboot of the station is a critical security event.
         self.flush_security_events();
         self.arm_heartbeat();

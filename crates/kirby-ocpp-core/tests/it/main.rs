@@ -24,6 +24,7 @@ mod station2_scripted_reply;
 mod station2_smart_charging;
 mod station2_status;
 mod station2_support;
+mod station2_tariff;
 mod station2_transactions;
 mod station2_tx_ended;
 mod station2_tx_limits;

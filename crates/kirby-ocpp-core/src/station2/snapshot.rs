@@ -87,9 +87,13 @@ pub struct EvseSnapshot {
     /// Trigger reason of the limit that suspended energy transfer.
     #[serde(default)]
     pub limit_reached: Option<String>,
-    /// Last running cost reported by the CSMS for the ongoing transaction.
+    /// Local cost including tax, or the last cost reported by the CSMS.
     #[serde(default)]
     pub total_cost: Option<f64>,
+    #[serde(default)]
+    pub tariff_id: Option<String>,
+    #[serde(default)]
+    pub default_tariff_id: Option<String>,
 }
 
 /// A reservation as the snapshot shows it.

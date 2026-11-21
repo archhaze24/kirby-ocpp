@@ -66,6 +66,7 @@ fn active_tx(evse: u32, id: &str, next_seq_no: i32) -> ActiveTx {
         csms_limit: TransactionLimit2::default(),
         limit_reached: None,
         total_cost: None,
+        tariff: None,
     }
 }
 
@@ -120,6 +121,7 @@ fn sample() -> PersistedStation2 {
                 status: "Accepted".to_owned(),
                 expires_at: Some(started_at()),
                 group_id: Some("G".to_owned()),
+                tariff: None,
             },
         )],
         ..AuthCachePersist::default()

@@ -34,6 +34,8 @@ use super::local_list;
 use super::remote;
 use super::reservation;
 use super::smart_charging;
+use super::tariff;
+use crate::ocpp::Protocol;
 use crate::ocpp::action::{Action, InboundAction};
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::responder::{ReplyHandle, Responder};
@@ -43,6 +45,9 @@ use crate::ocpp::v2::messages::{
     GetReport, GetTransactionStatus, GetVariables, RequestStartTransaction, RequestStopTransaction,
     ReserveNow, Reset, SendLocalList, SetChargingProfile, SetVariables, TriggerMessage,
     UnlockConnector,
+};
+use crate::ocpp::v2::messages::{
+    ChangeTransactionTariff, ClearTariffs, GetTariffs, SetDefaultTariff,
 };
 use crate::ocpp::v2::registry::unhandled_error_code_for;
 use crate::station::LogLevel;
@@ -162,6 +167,22 @@ impl Station2Actor {
             ClearCache::NAME => self.invoke::<ClearCache>(payload, reply, control::clear_cache),
             DataTransfer::NAME => {
                 self.invoke::<DataTransfer>(payload, reply, control::data_transfer);
+            }
+            SetDefaultTariff::NAME if self.protocol() == Protocol::V21 => {
+                self.invoke::<SetDefaultTariff>(payload, reply, tariff::set_default_tariff);
+            }
+            GetTariffs::NAME if self.protocol() == Protocol::V21 => {
+                self.invoke::<GetTariffs>(payload, reply, tariff::get_tariffs);
+            }
+            ClearTariffs::NAME if self.protocol() == Protocol::V21 => {
+                self.invoke::<ClearTariffs>(payload, reply, tariff::clear_tariffs);
+            }
+            ChangeTransactionTariff::NAME if self.protocol() == Protocol::V21 => {
+                self.invoke::<ChangeTransactionTariff>(
+                    payload,
+                    reply,
+                    tariff::change_transaction_tariff,
+                );
             }
             other => {
                 let code = unhandled_error_code_for(self.protocol(), other);
