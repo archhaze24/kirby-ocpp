@@ -536,6 +536,26 @@ fn footer_keeps_help_and_palette_hints_in_narrow_terminals() {
 }
 
 #[test]
+fn the_fleet_footer_hints_the_station_keys() {
+    let mut a = app();
+    let footer = |a: &App, w: u16| render(a, w, 30).lines().last().unwrap().to_owned();
+    assert!(!footer(&a, 120).contains("< > station"));
+    a.in_fleet = true;
+    let wide = footer(&a, 120);
+    assert!(
+        wide.contains("< > station") && wide.contains("[ ] connector"),
+        "{wide}"
+    );
+    // At 80 columns `[ ] connector` makes room; quit and the pinned hints stay.
+    let narrow = footer(&a, 80);
+    assert!(narrow.contains("< > station"), "{narrow}");
+    assert!(
+        narrow.contains("q quit") && narrow.contains("? help"),
+        "{narrow}"
+    );
+}
+
+#[test]
 fn pending_command_shows_waiting_marker() {
     let mut a = app();
     a.pending.push(PendingCall {

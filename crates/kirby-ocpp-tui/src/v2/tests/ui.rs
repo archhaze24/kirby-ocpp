@@ -567,6 +567,44 @@ fn scenarios_tab_lists_the_built_in_scenarios() {
 }
 
 #[test]
+fn the_2_1_actions_are_listed_and_in_the_help_only_for_2_1() {
+    let a = app();
+    assert_eq!(a.protocol, Protocol::V201);
+    assert!(
+        a.catalog
+            .iter()
+            .all(|d| d.label != "Transaction limit..." && d.label != "Priority charging")
+    );
+    let help = help_lines2(Protocol::V201).join("\n");
+    assert!(!help.contains("transaction limit"), "{help}");
+    assert!(!help.contains("priority"), "{help}");
+    assert!(help.contains("g charging state."), "{help}");
+    let help = help_lines2(Protocol::V21).join("\n");
+    assert!(help.contains("i transaction limit (2.1)"), "{help}");
+    assert!(help.contains("P priority charging"), "{help}");
+}
+
+#[test]
+fn the_fleet_footer_hints_the_station_keys() {
+    let mut a = app();
+    let footer = |a: &App2, w: u16| render(a, w, 30).lines().last().unwrap().to_owned();
+    assert!(!footer(&a, 120).contains("< > station"));
+    a.in_fleet = true;
+    let wide = footer(&a, 120);
+    assert!(
+        wide.contains("< > station") && wide.contains("[ ] EVSE"),
+        "{wide}"
+    );
+    // At 80 columns `[ ] EVSE` makes room; quit and the pinned hints stay.
+    let narrow = footer(&a, 80);
+    assert!(narrow.contains("< > station"), "{narrow}");
+    assert!(
+        narrow.contains("q quit") && narrow.contains("? help"),
+        "{narrow}"
+    );
+}
+
+#[test]
 fn a_2_1_station_shows_the_2_1_version_where_2_0_1_shows_its_own() {
     let mut snapshot = app().snapshot;
     snapshot.protocol = "ocpp2.1".to_owned();

@@ -175,6 +175,15 @@ impl App2 {
             for def in &mut catalog {
                 def.desc = def.desc.replace("OCPP 2.0.1", "OCPP 2.1");
             }
+        } else {
+            // Transaction limits and priority charging exist only in 2.1; without an entry the
+            // keys and the palette do nothing for them.
+            catalog.retain(|def| {
+                !matches!(
+                    def.id,
+                    ActionId2::TransactionLimit | ActionId2::PriorityCharging
+                )
+            });
         }
         let evse = snapshot.evses.first().map_or(0, |e| e.id);
         Self {

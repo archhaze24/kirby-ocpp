@@ -276,13 +276,13 @@ fn hints(app: &App2) -> Vec<(&'static str, &'static str)> {
             } else if app.focus == Focus::Actions {
                 v.push(("Enter", "run"));
             }
-            v.extend([
-                ("↑↓", "move"),
-                ("←→", "pane"),
-                ("1-6", "tab"),
-                ("[ ]", "EVSE"),
-                ("q", "quit"),
-            ]);
+            v.extend([("↑↓", "move"), ("←→", "pane"), ("1-6", "tab")]);
+            if app.in_fleet {
+                // `[ ]` goes last: at 80 columns the line has room for one hint less.
+                v.extend([("< >", "station"), ("q", "quit"), ("[ ]", "EVSE")]);
+            } else {
+                v.extend([("[ ]", "EVSE"), ("q", "quit")]);
+            }
             v
         }
         Mode2::Pending(_) => vec![("↑↓", "select"), ("x/Del", "cancel"), ("Esc", "close")],
@@ -409,7 +409,12 @@ pub fn help_lines2(protocol: Protocol) -> Vec<String> {
 pub fn help_lines2_for(protocol: Protocol, fleet: bool) -> Vec<String> {
     let mut lines: Vec<String> = HELP2
         .iter()
+        // The 2.1 keys have no entry on a 2.0.1 station.
+        .filter(|line| protocol == Protocol::V21 || !line.contains("transaction limit (2.1)"))
         .map(|line| {
+            if protocol != Protocol::V21 && line.ends_with("g charging state,") {
+                return line.trim_end_matches(',').to_owned() + ".";
+            }
             let line = if fleet && line.starts_with("q or Ctrl-C ") {
                 "q or Ctrl-C             quit (asks while a scenario or transaction runs, or in a fleet)"
             } else {

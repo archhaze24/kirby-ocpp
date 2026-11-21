@@ -234,12 +234,23 @@ fn command_done(
             });
         }
         Ok(Outcome2::Authorized { status, .. }) => {
-            let level = if status == "Accepted" {
+            let accepted = status == "Accepted";
+            let level = if accepted {
                 NoticeLevel::Success
             } else {
                 NoticeLevel::Error
             };
-            app.notify(level, format!("{label}: {status}"));
+            // An accepted token that did not start a transaction was answered with
+            // `Authorized`; `TransactionStarted` is the outcome of one that did.
+            let text = if accepted && label == "present token" {
+                format!("{label}: {status}; the transaction starts when the EV is plugged in")
+            } else {
+                format!("{label}: {status}")
+            };
+            app.notify(level, text);
+        }
+        Ok(Outcome2::Rejected { reason }) => {
+            app.notify(NoticeLevel::Error, format!("{label}: refused: {reason}"));
         }
         Ok(Outcome2::TransactionStarted {
             evse,

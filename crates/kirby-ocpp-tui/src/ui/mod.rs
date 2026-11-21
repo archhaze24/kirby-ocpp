@@ -364,13 +364,13 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 // Enter on the connector list does nothing, so it is not hinted there.
                 v.push(("Enter", "run"));
             }
-            v.extend([
-                ("↑↓", "move"),
-                ("←→", "pane"),
-                ("1-7", "tab"),
-                ("[ ]", "connector"),
-                ("q", "quit"),
-            ]);
+            v.extend([("↑↓", "move"), ("←→", "pane"), ("1-7", "tab")]);
+            if app.in_fleet {
+                // `[ ]` goes last: at 80 columns the line has room for one hint less.
+                v.extend([("< >", "station"), ("q", "quit"), ("[ ]", "connector")]);
+            } else {
+                v.extend([("[ ]", "connector"), ("q", "quit")]);
+            }
             v
         }
         Mode::Pending(_) => vec![("x", "cancel"), ("↑↓", "select"), ("Esc", "close")],

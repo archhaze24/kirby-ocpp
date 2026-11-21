@@ -91,6 +91,13 @@ fn app() -> App2 {
     app_with(snapshot())
 }
 
+/// A connected station that speaks OCPP 2.1.
+fn app21() -> App2 {
+    let mut snap = snapshot();
+    snap.protocol = "ocpp2.1".to_owned();
+    app_with(snap)
+}
+
 fn plugged(app: &mut App2, id: u32) {
     for e in &mut app.snapshot.evses {
         if e.id == id {
@@ -709,7 +716,7 @@ fn the_external_limit_actions_are_in_the_palette() {
 #[test]
 fn transaction_limit_form_needs_a_limit_and_converts_kwh_to_wh() {
     use kirby_ocpp_core::station2::TransactionLimit2;
-    let mut app = app();
+    let mut app = app21();
     with_transaction(&mut app, 1);
     press(&mut app, "3i");
     assert_eq!(form_of(&app).title, "Transaction limit");
@@ -736,7 +743,7 @@ fn transaction_limit_form_needs_a_limit_and_converts_kwh_to_wh() {
 
 #[test]
 fn transaction_limit_form_refuses_bad_numbers() {
-    let mut app = app();
+    let mut app = app21();
     press(&mut app, "3i");
     press_code(&mut app, KeyCode::Tab);
     press_code(&mut app, KeyCode::Tab);
@@ -746,8 +753,77 @@ fn transaction_limit_form_refuses_bad_numbers() {
 }
 
 #[test]
-fn priority_charging_key_toggles_by_the_snapshot() {
+fn the_2_1_keys_do_nothing_on_a_2_0_1_station() {
     let mut app = app();
+    with_transaction(&mut app, 1);
+    press(&mut app, "3");
+    assert!(press(&mut app, "P").is_empty());
+    assert!(app.notice.is_none());
+    press(&mut app, "i");
+    assert!(matches!(app.mode, Mode2::Normal));
+    assert!(app.notice.is_none());
+    assert!(app.catalog.iter().all(|a| !matches!(
+        a.id,
+        ActionId2::TransactionLimit | ActionId2::PriorityCharging
+    )));
+    // The same keys work on 2.1.
+    let mut app21 = app21();
+    assert!(
+        app21
+            .catalog
+            .iter()
+            .any(|a| a.id == ActionId2::TransactionLimit)
+    );
+    with_transaction(&mut app21, 1);
+    press(&mut app21, "3i");
+    assert!(matches!(app21.mode, Mode2::Form(_)));
+}
+
+#[test]
+fn a_rejected_command_shows_its_reason() {
+    let mut app = app21();
+    update2(
+        &mut app,
+        Msg2::CommandDone {
+            label: "SetTransactionLimit".to_owned(),
+            show_response: false,
+            result: Ok(Outcome2::Rejected {
+                reason: "above the CSMS limit\u{1b}[31m".to_owned(),
+            }),
+        },
+    );
+    let (text, level) = notice(&app);
+    assert_eq!(level, NoticeLevel::Error);
+    assert!(text.starts_with("SetTransactionLimit: refused: above the CSMS limit"));
+    assert!(!text.contains('\u{1b}'));
+}
+
+#[test]
+fn an_accepted_token_without_a_transaction_says_it_waits_for_the_plug() {
+    let mut app = app();
+    update2(
+        &mut app,
+        Msg2::CommandDone {
+            label: "present token".to_owned(),
+            show_response: false,
+            result: Ok(Outcome2::Authorized {
+                status: "Accepted".to_owned(),
+                id_token_info: None,
+            }),
+        },
+    );
+    assert_eq!(
+        notice(&app),
+        (
+            "present token: Accepted; the transaction starts when the EV is plugged in".to_owned(),
+            NoticeLevel::Success
+        )
+    );
+}
+
+#[test]
+fn priority_charging_key_toggles_by_the_snapshot() {
+    let mut app = app21();
     with_transaction(&mut app, 1);
     press(&mut app, "3");
     let fx = press(&mut app, "P");
