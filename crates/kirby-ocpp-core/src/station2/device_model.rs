@@ -409,6 +409,16 @@ pub(crate) static TABLE: &[VarSpec] = &[
     flag(SMART, "ExternalControlSignalsEnabled", "true").rw(),
     flag(SMART, "NotifyChargingLimitWithSchedules", "true").rw(),
     flag(SMART, "ACPhaseSwitchingSupported", "false"),
+    members(
+        SMART,
+        "SupportedAdditionalPurposes",
+        "PriorityCharging",
+        "PriorityCharging,LocalGeneration",
+    )
+    .v21_only(),
+    flag(SMART, "SupportsFeature", "true")
+        .at("DynamicProfiles")
+        .v21_only(),
     // AuthCacheCtrlr
     flag(CACHE, "Enabled", "true").rw(),
     int(CACHE, "LifeTime", Fixed("86400")).rw().u("s"),
@@ -1277,6 +1287,7 @@ impl Station2Actor {
             (SECURITY, "BasicAuthPassword") => self.mark_secrets_dirty(),
             // Held EVSEs show as reserved only while reservations are enabled.
             (RESERVATION, "Enabled") => self.notify_status_changes(),
+            (SMART, "Enabled") => self.arm_dynamic_profiles(),
             (TARIFF, "Enabled" | "Interval")
                 if matches!(
                     (spec.variable, spec.instance),

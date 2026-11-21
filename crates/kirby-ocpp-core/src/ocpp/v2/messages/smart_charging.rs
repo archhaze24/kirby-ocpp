@@ -125,12 +125,16 @@ payload! {
         pub charging_schedule: Vec<ChargingSchedule>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub transaction_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub dyn_update_interval: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub dyn_update_time: Option<DateTime<Utc>>,
     }
 }
 
 payload! {
     /// `SetChargingProfile.req`. The profile stays raw JSON: the station validates it and
-    /// parses it into [`ChargingProfile`] itself, and reports it back unchanged.
+    /// parses it into [`ChargingProfile`], preserving optional fields in reports.
     SetChargingProfileRequest {
         pub evse_id: i32,
         pub charging_profile: Value,

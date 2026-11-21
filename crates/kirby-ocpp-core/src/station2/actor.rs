@@ -77,6 +77,8 @@ pub(crate) enum TimerKey2 {
     ReservationExpiry,
     /// The next `ReportChargingProfiles` is due.
     ProfileReport,
+    /// The next Dynamic profile pull or smart charging validity boundary.
+    DynamicProfiles,
 }
 
 /// Completions and log messages delivered to the actor loop.

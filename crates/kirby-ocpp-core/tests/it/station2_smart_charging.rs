@@ -1644,16 +1644,10 @@ async fn an_ocpp_21_station_keeps_the_profile_with_its_21_fields() {
             .as_str()
             .map(str::to_owned)
     };
-    let mut priority = profile(now, 2, 0, "PriorityCharging", "W", 4000.0);
+    let local_generation = profile(now, 2, 0, "LocalGeneration", "W", 4000.0);
     assert_eq!(
-        reason(&install(1, &priority).await).as_deref(),
+        reason(&install(1, &local_generation).await).as_deref(),
         Some("UnsupportedPurpose")
-    );
-    priority["chargingProfilePurpose"] = json!("TxDefaultProfile");
-    priority["chargingProfileKind"] = json!("Dynamic");
-    assert_eq!(
-        reason(&install(1, &priority).await).as_deref(),
-        Some("UnsupportedKind")
     );
     let mut mode = profile(now, 3, 1, "TxDefaultProfile", "W", 4000.0);
     mode["chargingSchedule"][0]["chargingSchedulePeriod"][0]["operationMode"] =

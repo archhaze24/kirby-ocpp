@@ -138,6 +138,8 @@ pub struct ActiveTx {
     pub csms_limit: TransactionLimit2,
     #[serde(default)]
     pub limit_reached: Option<LimitKind>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub priority_charging: bool,
     #[serde(default)]
     pub total_cost: Option<f64>,
     #[serde(default)]
@@ -364,6 +366,10 @@ impl Station2Actor {
     /// The transaction in progress on `evse`.
     pub(super) fn active_tx(&self, evse: u32) -> Option<&ActiveTx> {
         self.tx.active.get(&evse)
+    }
+
+    pub(super) fn active_tx_mut(&mut self, evse: u32) -> Option<&mut ActiveTx> {
+        self.tx.active.get_mut(&evse)
     }
 
     /// A transaction by id: ongoing, stopped, or unknown (`None`).
@@ -1038,6 +1044,7 @@ impl Station2Actor {
                 limit_reached: None,
                 total_cost: None,
                 tariff: None,
+                priority_charging: false,
             },
         );
         if spec.authorized {
@@ -2509,6 +2516,7 @@ mod tests {
             limit_reached: None,
             total_cost: None,
             tariff: None,
+            priority_charging: false,
         }
     }
 
@@ -2528,6 +2536,7 @@ mod tests {
         tx.total_cost = Some(5.5);
         tx.remote_start_id = Some(42);
         tx.remote_sent = true;
+        tx.priority_charging = true;
         let mut value = serde_json::to_value(&tx).unwrap();
         assert_eq!(
             serde_json::from_value::<ActiveTx>(value.clone()).unwrap(),
@@ -2540,6 +2549,7 @@ mod tests {
             "limit_reached",
             "total_cost",
             "remote_sent",
+            "priority_charging",
             "begin_sample",
         ] {
             object.remove(key);
@@ -2550,6 +2560,7 @@ mod tests {
         assert_eq!(old.limit_reached, None);
         assert_eq!(old.total_cost, None);
         assert!(!old.remote_sent);
+        assert!(!old.priority_charging);
         assert!(old.begin_sample.is_none());
     }
 

@@ -33,31 +33,34 @@
 //!
 //! See [`admit`]: the first rule that fails decides the `reasonCode` of the `Rejected` answer.
 //! Profiles that the station does not implement are refused with the code OCPP 2.1 names for
-//! them: the purposes `PriorityCharging` and `LocalGeneration`, the kind `Dynamic`, any
+//! them: the purpose `LocalGeneration`, any
 //! operation mode but `ChargingOnly`, the ISO 15118 and V2X fields.
 //!
 //! # State
 //!
 //! A profile is stored as the validated JSON that arrived (`StoredProfile2`), so a
-//! `ReportChargingProfiles` repeats it unchanged, together with the parsed copy the
+//! `ReportChargingProfiles` can retain its optional fields, together with the parsed copy the
 //! evaluation uses. A new profile replaces the stored one with the same id, and the one with
 //! the same EVSE, purpose and stack level. A `TxProfile` ends with its transaction. Everything
 //! else survives a restart (K01.FR.27).
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::time::Instant;
 
 use super::actor::{Station2Actor, TimerKey2};
 use super::calls::call_failure;
 use super::command::Outcome2;
 use super::link::sanitize;
 use super::types::{Origin2, Reply2};
-use crate::error::StationError;
+use crate::error::{CallError, StationError};
 use crate::ids::{ConnectorId, TxId};
+use crate::ocpp::action::Action;
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::messages::{
     ChargingProfile as LegacyProfile, ChargingSchedule as LegacySchedule,
@@ -75,9 +78,13 @@ use crate::ocpp::v2::messages::{
     CompositeSchedule, CompositeScheduleStatus, GetChargingProfileStatus, GetChargingProfiles,
     GetChargingProfilesRequest, GetChargingProfilesResponse, GetCompositeSchedule,
     GetCompositeScheduleRequest, GetCompositeScheduleResponse, NotifyChargingLimit,
-    NotifyChargingLimitRequest, RecurrencyKind, ReportChargingProfiles,
+    NotifyChargingLimitRequest, NotifyPriorityCharging, NotifyPriorityChargingRequest,
+    PriorityChargingStatus, PullDynamicScheduleUpdate, PullDynamicScheduleUpdateRequest,
+    PullDynamicScheduleUpdateResponse, RecurrencyKind, ReportChargingProfiles,
     ReportChargingProfilesRequest, SetChargingProfile, SetChargingProfileRequest,
-    SetChargingProfileResponse,
+    SetChargingProfileResponse, UpdateDynamicSchedule, UpdateDynamicScheduleRequest,
+    UpdateDynamicScheduleResponse, UsePriorityCharging, UsePriorityChargingRequest,
+    UsePriorityChargingResponse,
 };
 use crate::ocpp::v2::types::{ChargingState, StatusInfo, WireEnum};
 use crate::ocpp::{Protocol, SchemaRegistry};
@@ -93,6 +100,8 @@ use crate::station::smart_charging::{
 /// The most profiles the station holds (`SmartChargingCtrlr.Entries` maximum).
 pub(super) const MAX_PROFILES: i32 = 10;
 const MAX_PROFILE_BYTES: usize = 64 * 1024;
+const MAX_PRIORITY_NOTICES: usize = 16;
+const NS: TimeDelta = TimeDelta::nanoseconds(1);
 
 /// `chargingLimitSource` of the profiles the CSMS sets.
 const CSMS_SOURCE: &str = "CSO";
@@ -107,7 +116,7 @@ const BOUND: TxId = TxId::Local(0);
 pub struct StoredProfile2 {
     /// The EVSE the profile was set for; 0 is the station.
     pub evse: u32,
-    /// The `ChargingProfileType` as validated, reported back unchanged.
+    /// The validated `ChargingProfileType`, including the latest Dynamic limit and timestamp.
     pub profile: Value,
     /// The transaction a `TxProfile` belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -118,8 +127,7 @@ pub struct StoredProfile2 {
     pub source: String,
 }
 
-/// The charging profiles as persisted. `TxProfile`s are left out: the transactions they
-/// belong to do not survive a restart.
+/// The charging profiles as persisted. `TxProfile`s are left out.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SmartChargingPersist {
@@ -134,6 +142,14 @@ pub(crate) struct Entry {
     stored: StoredProfile2,
     typed: ChargingProfile,
     legacy: LegacyStored,
+    dynamic: Option<DynamicState>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DynamicState {
+    /// A pull answer is applied only to the revision that requested it.
+    revision: Arc<()>,
+    retry_at: Option<Instant>,
 }
 
 impl Entry {
@@ -141,11 +157,18 @@ impl Entry {
     fn new(stored: StoredProfile2) -> Result<Self, String> {
         let typed: ChargingProfile =
             serde_json::from_value(stored.profile.clone()).map_err(|error| error.to_string())?;
-        let legacy = legacy_of(&stored, &typed).ok_or("the profile cannot be evaluated")?;
-        Ok(Self {
+        Self::from_typed(stored, typed).ok_or_else(|| "the profile cannot be evaluated".to_owned())
+    }
+
+    fn from_typed(stored: StoredProfile2, typed: ChargingProfile) -> Option<Self> {
+        let legacy = legacy_of(&stored, &typed)?;
+        let dynamic = (typed.charging_profile_kind == ChargingProfileKind::Dynamic)
+            .then(DynamicState::default);
+        Some(Self {
             stored,
             typed,
             legacy,
+            dynamic,
         })
     }
 
@@ -164,6 +187,31 @@ impl Entry {
     /// `validTo` is exclusive (K01.FR.37).
     fn expired(&self, now: DateTime<Utc>) -> bool {
         self.typed.valid_to.is_some_and(|to| to <= now)
+    }
+
+    fn dynamic_end(&self) -> Option<DateTime<Utc>> {
+        let duration = self.legacy.profile.charging_schedule.duration?;
+        self.typed
+            .dyn_update_time?
+            .checked_add_signed(TimeDelta::seconds(i64::from(duration)))
+    }
+
+    fn valid_until(&self) -> Option<DateTime<Utc>> {
+        self.legacy
+            .profile
+            .valid_to
+            .into_iter()
+            .chain(self.dynamic_end())
+            .min()
+    }
+
+    fn priority_on(&self, evse: u32) -> bool {
+        self.purpose() == ChargingProfilePurpose::PriorityCharging
+            && (self.stored.evse == evse || self.stored.evse == 0)
+    }
+
+    fn pull_interval(&self) -> Option<TimeDelta> {
+        TimeDelta::try_seconds(self.typed.dyn_update_interval?.max(1))
     }
 
     /// The same profile for the transaction `tx_id`, installed at `now`.
@@ -204,17 +252,22 @@ fn legacy_of(stored: &StoredProfile2, typed: &ChargingProfile) -> Option<LegacyS
         }
         (
             ChargingProfilePurpose::ChargingStationExternalConstraints
-            | ChargingProfilePurpose::TxDefaultProfile,
+            | ChargingProfilePurpose::TxDefaultProfile
+            | ChargingProfilePurpose::PriorityCharging,
             evse,
         ) => (evse, ChargingProfilePurposeType::TxDefaultProfile),
         (ChargingProfilePurpose::TxProfile, evse) => (evse, ChargingProfilePurposeType::TxProfile),
         _ => return None,
     };
+    let mut start = schedule.start_schedule;
     let kind = match typed.charging_profile_kind {
         ChargingProfileKind::Absolute => ChargingProfileKindType::Absolute,
         ChargingProfileKind::Recurring => ChargingProfileKindType::Recurring,
         ChargingProfileKind::Relative => ChargingProfileKindType::Relative,
-        ChargingProfileKind::Dynamic => return None,
+        ChargingProfileKind::Dynamic => {
+            start = Some(typed.dyn_update_time?);
+            ChargingProfileKindType::Absolute
+        }
     };
     let periods = schedule
         .charging_schedule_period
@@ -240,10 +293,10 @@ fn legacy_of(stored: &StoredProfile2, typed: &ChargingProfile) -> Option<LegacyS
                 RecurrencyKind::Weekly => RecurrencyKindType::Weekly,
             }),
             valid_from: typed.valid_from,
-            valid_to: typed.valid_to.map(|to| to - TimeDelta::nanoseconds(1)),
+            valid_to: typed.valid_to.and_then(|to| to.checked_sub_signed(NS)),
             charging_schedule: LegacySchedule {
                 duration: schedule.duration,
-                start_schedule: schedule.start_schedule,
+                start_schedule: start,
                 charging_rate_unit: legacy_unit(schedule.charging_rate_unit),
                 charging_schedule_period: periods,
                 min_charging_rate: schedule.min_charging_rate,
@@ -262,6 +315,7 @@ pub(super) struct TxView<'a> {
     pub id: &'a str,
     pub started_at: DateTime<Utc>,
     pub relative_start: Option<DateTime<Utc>>,
+    pub priority_charging: bool,
 }
 
 /// Evaluates installed profiles with the 1.6 math (see the module docs).
@@ -292,29 +346,95 @@ fn round_tenth(value: f64) -> f64 {
 }
 
 impl Eval<'_> {
+    /// The gaps between the validity windows of the EVSE's priority profiles. Regular
+    /// transaction profiles can apply only in these gaps while priority charging is enabled.
+    fn non_priority_windows(&self, evse: u32) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+        let mut windows: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|entry| entry.priority_on(evse))
+            .map(|entry| {
+                (
+                    entry.typed.valid_from.unwrap_or(DateTime::<Utc>::MIN_UTC),
+                    entry.valid_until().unwrap_or(DateTime::<Utc>::MAX_UTC),
+                )
+            })
+            .filter(|(from, to)| from <= to)
+            .collect();
+        windows.sort_unstable();
+        let mut gaps = Vec::new();
+        let mut next = DateTime::<Utc>::MIN_UTC;
+        for (from, to) in windows {
+            if next < from {
+                gaps.push((next, from - NS));
+            }
+            let Some(after) = to.checked_add_signed(NS) else {
+                return gaps;
+            };
+            next = next.max(after);
+        }
+        gaps.push((next, DateTime::<Utc>::MAX_UTC));
+        gaps
+    }
+
     /// The 1.6 form of the profiles that can apply: the regular ones, or the external
     /// constraints. A `TxProfile` stays only when it belongs to the running transaction.
-    fn legacy(&self, tx: Option<TxView<'_>>, external: bool) -> Vec<LegacyStored> {
-        self.entries
+    fn legacy(&self, evse: u32, tx: Option<TxView<'_>>, external: bool) -> Vec<LegacyStored> {
+        let priority = !external && tx.is_some_and(|tx| tx.priority_charging);
+        let gaps = priority.then(|| self.non_priority_windows(evse));
+        let mut profiles = Vec::new();
+        for entry in self
+            .entries
             .iter()
             .filter(|entry| entry.is_external() == external)
-            .filter(|entry| {
-                entry.purpose() != ChargingProfilePurpose::TxProfile
-                    || tx.is_some_and(|tx| entry.stored.transaction_id.as_deref() == Some(tx.id))
-            })
-            .filter_map(|entry| {
-                let mut legacy = entry.legacy.clone();
-                if !external
-                    && legacy.profile.charging_profile_kind == ChargingProfileKindType::Relative
-                    && let Some(tx) = tx
-                {
-                    // A bound relative schedule has no periods until its anchor is known.
-                    legacy.profile.charging_schedule.start_schedule = Some(tx.relative_start?);
-                    legacy.profile.charging_profile_kind = ChargingProfileKindType::Absolute;
+        {
+            let purpose = entry.purpose();
+            if (purpose == ChargingProfilePurpose::PriorityCharging
+                && !(priority && entry.priority_on(evse)))
+                || (purpose == ChargingProfilePurpose::TxProfile
+                    && tx.is_none_or(|tx| entry.stored.transaction_id.as_deref() != Some(tx.id)))
+            {
+                continue;
+            }
+            let mut legacy = entry.legacy.clone();
+            if entry.dynamic.is_some() {
+                // Dynamic duration expires strictly after its endpoint. Use the inclusive
+                // validity bound to express this in the legacy evaluator.
+                legacy.profile.valid_to = entry.valid_until();
+                legacy.profile.charging_schedule.duration = None;
+            }
+            if !external
+                && legacy.profile.charging_profile_kind == ChargingProfileKindType::Relative
+                && let Some(tx) = tx
+            {
+                // A bound relative schedule has no periods until its anchor is known.
+                let Some(start) = tx.relative_start else {
+                    continue;
+                };
+                legacy.profile.charging_schedule.start_schedule = Some(start);
+                legacy.profile.charging_profile_kind = ChargingProfileKindType::Absolute;
+            }
+            if let Some(gaps) = &gaps
+                && matches!(
+                    purpose,
+                    ChargingProfilePurpose::TxDefaultProfile | ChargingProfilePurpose::TxProfile
+                )
+            {
+                for &(from, to) in gaps {
+                    let from = from.max(legacy.profile.valid_from.unwrap_or(from));
+                    let to = to.min(legacy.profile.valid_to.unwrap_or(to));
+                    if from <= to {
+                        let mut slice = legacy.clone();
+                        slice.profile.valid_from = Some(from);
+                        slice.profile.valid_to = Some(to);
+                        profiles.push(slice);
+                    }
                 }
-                Some(legacy)
-            })
-            .collect()
+            } else {
+                profiles.push(legacy);
+            }
+        }
+        profiles
     }
 
     fn power_request(&self, evse: u32, tx: Option<TxView<'_>>, charging: u32) -> PowerRequest {
@@ -338,8 +458,8 @@ impl Eval<'_> {
     ) -> Option<f64> {
         let request = self.power_request(evse, tx, charging);
         min_f64(
-            limit_w_at(&self.legacy(tx, false), &request, at),
-            limit_w_at(&self.legacy(tx, true), &request, at),
+            limit_w_at(&self.legacy(evse, tx, false), &request, at),
+            limit_w_at(&self.legacy(evse, tx, true), &request, at),
         )
     }
 
@@ -357,8 +477,8 @@ impl Eval<'_> {
             return 0.0;
         }
         let request = self.power_request(evse, tx, charging);
-        let regular = self.legacy(tx, false);
-        let external = self.legacy(tx, true);
+        let regular = self.legacy(evse, tx, false);
+        let external = self.legacy(evse, tx, true);
         let mut cuts = vec![from, to];
         for entry in regular.iter().chain(&external) {
             let base = schedule_base(
@@ -394,6 +514,16 @@ impl Eval<'_> {
         now: DateTime<Utc>,
         tx: Option<TxView<'_>>,
     ) -> Result<LegacyComposite, CompositeError> {
+        // A freshly applied 2.1 limit must appear in the first period, even when
+        // its update or validity boundary falls within the current second.
+        let start = if tx.is_some_and(|tx| tx.priority_charging)
+            || self.entries.iter().any(|entry| {
+                entry.dynamic.is_some() && (entry.stored.evse == evse || entry.stored.evse == 0)
+            }) {
+            now
+        } else {
+            truncate_to_second(now)
+        };
         let request = |unit| CompositeRequest {
             connector: ConnectorId::new(evse),
             duration_s,
@@ -404,14 +534,15 @@ impl Eval<'_> {
             tx_started_at: tx.map(|tx| tx.started_at),
             model: self.model,
         };
-        let regular = composite_schedule_full(&self.legacy(tx, false), &request(unit));
+        let regular = composite_schedule_full(&self.legacy(evse, tx, false), &request(unit), start);
         let external_unit = unit.or_else(|| {
             regular
                 .as_ref()
                 .ok()
                 .map(|schedule| schedule.charging_schedule.charging_rate_unit)
         });
-        let external = composite_schedule_full(&self.legacy(tx, true), &request(external_unit));
+        let external =
+            composite_schedule_full(&self.legacy(evse, tx, true), &request(external_unit), start);
         match (regular, external) {
             (
                 Err(
@@ -422,7 +553,7 @@ impl Eval<'_> {
             ) => Err(error),
             (Ok(first), Ok(second)) => Ok(merge_min(&first, &second)),
             (Ok(only), Err(_)) | (Err(_), Ok(only)) => Ok(only),
-            (Err(_), Err(_)) => Ok(self.station_schedule(evse, duration_s, unit, now)),
+            (Err(_), Err(_)) => Ok(self.station_schedule(evse, duration_s, unit, start)),
         }
     }
 
@@ -432,14 +563,13 @@ impl Eval<'_> {
         evse: u32,
         duration_s: i32,
         unit: Option<ChargingRateUnitType>,
-        now: DateTime<Utc>,
+        start: DateTime<Utc>,
     ) -> LegacyComposite {
         let unit = unit.unwrap_or(ChargingRateUnitType::W);
         let limit = match unit {
             ChargingRateUnitType::W => self.model.nominal_w,
             ChargingRateUnitType::A => round_tenth(self.model.watts_to_amps(self.model.nominal_w)),
         };
-        let start = truncate_to_second(now);
         LegacyComposite {
             connector_id: ConnectorId::new(evse),
             schedule_start: start,
@@ -609,12 +739,6 @@ fn unsupported_fields(raw: &Value) -> Option<Rejection> {
             "maxOfflineDuration is not supported",
         ));
     }
-    if has(raw, "dynUpdateInterval") || has(raw, "dynUpdateTime") {
-        return Some(reject(
-            "InvalidProfile",
-            "dynUpdateInterval and dynUpdateTime need a Dynamic profile",
-        ));
-    }
     let schedule = raw.get("chargingSchedule")?.as_array()?.first()?;
     if has(schedule, "limitAtSoC") {
         return Some(reject("InvalidSchedule", "limitAtSoC is not supported"));
@@ -686,7 +810,7 @@ fn check_placement(
     origin: Origin,
 ) -> Result<(), Rejection> {
     match (purpose, origin) {
-        (ChargingProfilePurpose::PriorityCharging | ChargingProfilePurpose::LocalGeneration, _) => {
+        (ChargingProfilePurpose::LocalGeneration, _) => {
             return Err(reject(
                 "UnsupportedPurpose",
                 format!("{} is not supported", purpose.as_str()),
@@ -711,10 +835,10 @@ fn check_placement(
             return Err(reject("InvalidProfile", "not an external constraint"));
         }
     }
-    if kind == ChargingProfileKind::Dynamic {
+    if kind == ChargingProfileKind::Dynamic && origin == Origin::External {
         return Err(reject(
             "UnsupportedKind",
-            "Dynamic profiles are not supported",
+            "Dynamic profiles from an external system are not supported",
         ));
     }
     match purpose {
@@ -820,6 +944,14 @@ fn check_schedule(
 /// Rule 7 of [`admit`]: the transaction a `TxProfile` names.
 fn check_transaction(typed: &ChargingProfile, ctx: &Admit<'_>) -> Result<(), Rejection> {
     if typed.charging_profile_purpose != ChargingProfilePurpose::TxProfile {
+        if typed.charging_profile_purpose == ChargingProfilePurpose::PriorityCharging
+            && typed.transaction_id.is_some()
+        {
+            return Err(reject(
+                "InvalidProfile",
+                "a PriorityCharging profile has no transactionId",
+            ));
+        }
         return Ok(());
     }
     match (ctx.origin, typed.transaction_id.as_deref()) {
@@ -838,18 +970,64 @@ fn check_transaction(typed: &ChargingProfile, ctx: &Admit<'_>) -> Result<(), Rej
     }
 }
 
+/// Validates the Dynamic format and initializes its update time (K28.FR.01–05).
+fn prepare_profile(
+    raw: &Value,
+    typed: &mut ChargingProfile,
+    now: DateTime<Utc>,
+) -> Result<Value, Rejection> {
+    let mut profile = raw.clone();
+    if typed.charging_profile_kind == ChargingProfileKind::Dynamic {
+        if typed
+            .dyn_update_interval
+            .is_some_and(|interval| interval < 1)
+        {
+            return Err(reject(
+                "InvalidProfile",
+                "dynUpdateInterval must be at least 1",
+            ));
+        }
+        if typed.dyn_update_time.is_none() {
+            typed.dyn_update_time = Some(now);
+            profile["dynUpdateTime"] = json!(now);
+        }
+    } else if raw.get("dynUpdateInterval").is_some() || raw.get("dynUpdateTime").is_some() {
+        return Err(reject(
+            "InvalidProfile",
+            "dynUpdateInterval and dynUpdateTime need a Dynamic profile",
+        ));
+    }
+    let dynamic = typed.charging_profile_kind == ChargingProfileKind::Dynamic;
+    if dynamic
+        && !matches!(
+            typed.charging_schedule.as_slice(),
+            [schedule] if matches!(
+                schedule.charging_schedule_period.as_slice(),
+                [period] if period.start_period == 0 && period.limit.is_some()
+            )
+        )
+    {
+        return Err(reject(
+            "InvalidSchedule",
+            "a Dynamic profile needs one schedule and one period at 0 with a limit",
+        ));
+    }
+    Ok(profile)
+}
+
 /// Checks a profile for `evse` against the rules of K01 and builds the entry to install.
 ///
 /// The rules, in the order they are checked (the first failure decides):
 ///
 /// 1. The profile parses; the EVSE exists (`UnknownEVSE`).
-/// 2. The purpose: `PriorityCharging` and `LocalGeneration` are `UnsupportedPurpose`; the
+/// 2. The purpose: `LocalGeneration` is `UnsupportedPurpose`; the
 ///    CSMS may not set `ChargingStationExternalConstraints` (K01.FR.22); a remote start
-///    carries a `TxProfile` only (K05.FR.02). The kind `Dynamic` is `UnsupportedKind`.
+///    carries a `TxProfile` only (K05.FR.02). External constraints cannot be `Dynamic`.
 /// 3. A max profile belongs on EVSE 0 and is not `Relative` (K01.FR.38); a `TxProfile` on an
 ///    EVSE above 0 (K01.FR.16).
 /// 4. The 2.1 fields the station does not implement ([`unsupported_fields`]).
-/// 5. One schedule only (K01.FR.34); stack level within `ProfileStackLevel`; at most
+/// 5. One schedule only (K01.FR.34); a `Dynamic` schedule has one period (K28.FR.01);
+///    stack level within `ProfileStackLevel`; at most
 ///    `PeriodsPerSchedule` periods (`TooManyElements`); every period has a limit; the first
 ///    starts at 0 and starts increase (K01.FR.31/35); `Absolute` and `Recurring` need
 ///    `startSchedule` (K01.FR.40), `Relative` has none (K01.FR.41); `Recurring` needs
@@ -875,7 +1053,7 @@ pub(super) fn admit(
         return Err(reject("TooLarge", "the charging profile exceeds 64 KiB"));
     }
     let limits = ctx.limits;
-    let typed: ChargingProfile = serde_json::from_value(raw.clone())
+    let mut typed: ChargingProfile = serde_json::from_value(raw.clone())
         .map_err(|error| reject("InvalidProfile", format!("the profile is invalid: {error}")))?;
     let evse = u32::try_from(evse)
         .ok()
@@ -883,6 +1061,7 @@ pub(super) fn admit(
         .ok_or_else(|| reject("UnknownEVSE", "the EVSE does not exist"))?;
     let purpose = typed.charging_profile_purpose;
     check_placement(purpose, typed.charging_profile_kind, evse, ctx.origin)?;
+    let profile = prepare_profile(raw, &mut typed, now)?;
     if let Some(rejection) = unsupported_fields(raw) {
         return Err(rejection);
     }
@@ -896,23 +1075,18 @@ pub(super) fn admit(
     check_transaction(&typed, ctx)?;
     let stored = StoredProfile2 {
         evse,
-        profile: raw.clone(),
+        profile,
         transaction_id: (purpose == ChargingProfilePurpose::TxProfile)
             .then(|| typed.transaction_id.clone())
             .flatten(),
         installed_at: now,
         source: source.to_owned(),
     };
-    let legacy = legacy_of(&stored, &typed)
+    let entry = Entry::from_typed(stored, typed)
         .ok_or_else(|| reject("InvalidProfile", "the profile cannot be evaluated"))?;
-    if let Some(error) = shape_error(&legacy.profile) {
+    if let Some(error) = shape_error(&entry.legacy.profile) {
         return Err(reject("InvalidSchedule", error.to_string()));
     }
-    let entry = Entry {
-        stored,
-        typed,
-        legacy,
-    };
     if entries.iter().any(|existing| {
         existing.id() == entry.id() && existing.is_external() != entry.is_external()
     }) {
@@ -925,17 +1099,21 @@ pub(super) fn admit(
             },
         ));
     }
-    if purpose == ChargingProfilePurpose::TxDefaultProfile
-        && entries.iter().any(|existing| {
-            existing.purpose() == ChargingProfilePurpose::TxDefaultProfile
-                && existing.typed.stack_level == entry.typed.stack_level
-                && existing.id() != entry.id()
-                && (existing.stored.evse == 0) != (entry.stored.evse == 0)
-        })
-    {
+    if matches!(
+        purpose,
+        ChargingProfilePurpose::TxDefaultProfile | ChargingProfilePurpose::PriorityCharging
+    ) && entries.iter().any(|existing| {
+        existing.purpose() == purpose
+            && existing.typed.stack_level == entry.typed.stack_level
+            && existing.id() != entry.id()
+            && (existing.stored.evse == 0) != (entry.stored.evse == 0)
+    }) {
         return Err(reject(
             "DuplicateProfile",
-            "another TxDefaultProfile has this stack level on EVSE 0 or on a specific EVSE",
+            format!(
+                "another {} has this stack level on EVSE 0 or on a specific EVSE",
+                purpose.as_str()
+            ),
         ));
     }
     if !has_room(entries, &entry, limits.max_entries) {
@@ -964,6 +1142,9 @@ pub(crate) struct SmartCharging {
     /// `ReportChargingProfiles` requests still to send, in order.
     reports: VecDeque<ReportChargingProfilesRequest>,
     report_in_flight: bool,
+    priority_notices: VecDeque<NotifyPriorityChargingRequest>,
+    priority_notice_in_flight: bool,
+    dynamic_pulls: BTreeSet<i32>,
 }
 
 impl SmartCharging {
@@ -1052,6 +1233,7 @@ impl Station2Actor {
             } else {
                 Some(tx.started_at)
             },
+            priority_charging: self.protocol() == Protocol::V21 && tx.priority_charging,
         })
     }
 
@@ -1125,6 +1307,7 @@ impl Station2Actor {
         let before = self.charging.entries.len();
         self.charging.entries.retain(|entry| !entry.expired(now));
         if self.charging.entries.len() != before {
+            self.arm_dynamic_profiles();
             self.mark_dirty();
         }
     }
@@ -1135,6 +1318,7 @@ impl Station2Actor {
             !(entry.purpose() == ChargingProfilePurpose::TxProfile
                 && entry.stored.transaction_id.as_deref() == Some(tx_id))
         });
+        self.arm_dynamic_profiles();
     }
 
     /// A transaction started on `evse`: binds the `TxProfile` its remote start carried (K05).
@@ -1154,6 +1338,7 @@ impl Station2Actor {
             format!("TxProfile {} installed for the remote start", entry.id()),
         );
         install(&mut self.charging.entries, entry);
+        self.arm_dynamic_profiles();
         // The profile may have replaced a stored one.
         self.mark_dirty();
     }
@@ -1274,6 +1459,10 @@ impl Station2Actor {
                 continue;
             };
             if entry.purpose() == ChargingProfilePurpose::TxProfile
+                || (self.protocol() != Protocol::V21
+                    && (entry.dynamic.is_some()
+                        || entry.purpose() == ChargingProfilePurpose::PriorityCharging))
+                || (entry.dynamic.is_some() && entry.is_external())
                 || entry.expired(now)
                 || entries.iter().any(|known| known.id() == entry.id())
             {
@@ -1282,6 +1471,274 @@ impl Station2Actor {
             entries.push(entry);
         }
         self.charging.entries = entries;
+        self.arm_dynamic_profiles();
+    }
+
+    // ---- priority charging (K21, K22) ------------------------------------------------
+
+    pub(super) fn set_priority_charging(
+        &mut self,
+        evse: u32,
+        activate: bool,
+    ) -> Result<Outcome2, StationError> {
+        if self.protocol() != Protocol::V21 {
+            return Err(StationError::InvalidArgument(
+                "priority charging requires OCPP 2.1".to_owned(),
+            ));
+        }
+        self.change_priority_charging(evse, activate)
+            .map_err(|error| StationError::InvalidArgument(error.info))?;
+        self.flush_priority_notifications();
+        Ok(Outcome2::Done)
+    }
+
+    fn change_priority_charging(&mut self, evse: u32, activate: bool) -> Result<(), Rejection> {
+        let missing_tx = || reject("TxNotFound", "no ongoing transaction on the EVSE");
+        let already_active = self
+            .active_tx(evse)
+            .ok_or_else(missing_tx)?
+            .priority_charging;
+        let now = self.clock.now_utc();
+        if activate
+            && !self.sc_eval().entries.iter().any(|entry| {
+                entry.priority_on(evse)
+                    && entry.typed.valid_from.is_none_or(|from| from <= now)
+                    && entry.valid_until().is_none_or(|until| now <= until)
+            })
+        {
+            return Err(reject(
+                "NotFound",
+                "no priority charging profile applies to the EVSE",
+            ));
+        }
+        if already_active == activate {
+            return Ok(());
+        }
+        self.settle_meters();
+        let tx = self.active_tx_mut(evse).ok_or_else(missing_tx)?;
+        tx.priority_charging = activate;
+        let request = NotifyPriorityChargingRequest {
+            transaction_id: tx.id.0.clone(),
+            activated: activate,
+            custom_data: None,
+        };
+        let notices = &mut self.charging.priority_notices;
+        if notices.len() == MAX_PRIORITY_NOTICES {
+            notices.pop_front();
+        }
+        notices.push_back(request);
+        self.mark_dirty();
+        Ok(())
+    }
+
+    pub(super) fn flush_priority_notifications(&mut self) {
+        if self.charging.priority_notice_in_flight
+            || self.link.conn.is_none()
+            || self
+                .may_send(NotifyPriorityCharging::NAME, Origin2::Station)
+                .is_err()
+        {
+            return;
+        }
+        let Some(request) = self.charging.priority_notices.pop_front() else {
+            return;
+        };
+        self.charging.priority_notice_in_flight = true;
+        let retry = request.clone();
+        self.call::<NotifyPriorityCharging>(Origin2::Station, &request, move |actor, result| {
+            actor.charging.priority_notice_in_flight = false;
+            if matches!(
+                result,
+                Err(CallError::Closed { .. }
+                    | CallError::NotConnected
+                    | CallError::NotRegistered { .. })
+            ) {
+                let notices = &mut actor.charging.priority_notices;
+                if notices.len() < MAX_PRIORITY_NOTICES {
+                    notices.push_front(retry);
+                }
+            } else {
+                actor.flush_priority_notifications();
+            }
+        });
+    }
+
+    // ---- dynamic schedules (K28) -----------------------------------------------------
+
+    fn dynamic_update(&mut self, id: i32, update: Option<&Value>) -> Result<(), Rejection> {
+        let index = self
+            .charging
+            .entries
+            .iter()
+            .position(|entry| entry.id() == id && !entry.is_external())
+            .ok_or_else(|| reject("NotFound", "no CSMS profile with that id"))?;
+        let entry = &self.charging.entries[index];
+        if entry.dynamic.is_none() {
+            return Err(reject("InvalidProfile", "the profile is not Dynamic"));
+        }
+        let mut stored = entry.stored.clone();
+        if let Some(update) = update {
+            let fields = update
+                .as_object()
+                .ok_or_else(|| reject("UnsupportedParam", "scheduleUpdate must be an object"))?;
+            if fields
+                .keys()
+                .any(|key| !matches!(key.as_str(), "limit" | "customData"))
+            {
+                return Err(reject("UnsupportedParam", "only the limit can be updated"));
+            }
+            if let Some(limit) = fields.get("limit") {
+                if !limit
+                    .as_f64()
+                    .is_some_and(|limit| limit.is_finite() && limit >= 0.0)
+                {
+                    return Err(reject(
+                        "InvalidValue",
+                        "limit must be finite and non-negative",
+                    ));
+                }
+                let period = stored
+                    .profile
+                    .pointer_mut("/chargingSchedule/0/chargingSchedulePeriod/0")
+                    .ok_or_else(|| reject("InvalidProfile", "the Dynamic profile has no period"))?;
+                period["limit"] = limit.clone();
+            }
+        }
+        self.settle_meters();
+        stored.profile["dynUpdateTime"] = json!(self.clock.now_utc());
+        let entry = Entry::new(stored).map_err(|reason| reject("InvalidProfile", reason))?;
+        self.charging.entries[index] = entry;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    fn can_pull_dynamic(&self) -> bool {
+        self.link.conn.is_some()
+            && self
+                .may_send(PullDynamicScheduleUpdate::NAME, Origin2::Station)
+                .is_ok()
+            && self.charging.dynamic_pulls.len() < usize::try_from(MAX_PROFILES).unwrap_or_default()
+    }
+
+    fn pull_delay(&self, entry: &Entry, now: DateTime<Utc>) -> Option<Duration> {
+        let dynamic = entry.dynamic.as_ref()?;
+        if entry.expired(now) || self.charging.dynamic_pulls.contains(&entry.id()) {
+            return None;
+        }
+        if let Some(retry_at) = dynamic.retry_at {
+            return Some(retry_at.saturating_duration_since(Instant::now()));
+        }
+        let due = entry
+            .typed
+            .dyn_update_time?
+            .checked_add_signed(entry.pull_interval()?)?;
+        Some((due - now).to_std().unwrap_or_default())
+    }
+
+    pub(super) fn arm_dynamic_profiles(&mut self) {
+        if self.protocol() != Protocol::V21 {
+            return;
+        }
+        let now = self.clock.now_utc();
+        let pull = self.can_pull_dynamic();
+        let next = self
+            .sc_eval()
+            .entries
+            .iter()
+            .flat_map(|entry| {
+                let timed = entry.dynamic.is_some()
+                    || entry.purpose() == ChargingProfilePurpose::PriorityCharging;
+                let boundaries = [
+                    entry.typed.valid_from,
+                    entry.typed.valid_to,
+                    entry.typed.dyn_update_time,
+                    entry
+                        .dynamic_end()
+                        .and_then(|end| end.checked_add_signed(NS)),
+                ];
+                boundaries
+                    .into_iter()
+                    .flatten()
+                    .filter(move |at| timed && *at > now)
+                    .filter_map(move |at| (at - now).to_std().ok())
+                    .chain(pull.then(|| self.pull_delay(entry, now)).flatten())
+            })
+            .min();
+        if let Some(delay) = next {
+            self.timers.set(TimerKey2::DynamicProfiles, delay);
+        } else {
+            self.timers.cancel(&TimerKey2::DynamicProfiles);
+        }
+    }
+
+    pub(super) fn on_dynamic_profiles_timer(&mut self) {
+        if self.smart_charging_enabled() && self.can_pull_dynamic() {
+            let now = self.clock.now_utc();
+            let available = usize::try_from(MAX_PROFILES).unwrap_or_default()
+                - self.charging.dynamic_pulls.len();
+            let due: Vec<_> = self
+                .charging
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    self.pull_delay(entry, now).filter(Duration::is_zero)?;
+                    Some((entry.id(), Arc::clone(&entry.dynamic.as_ref()?.revision)))
+                })
+                .take(available)
+                .collect();
+            for (id, revision) in due {
+                self.charging.dynamic_pulls.insert(id);
+                let request = PullDynamicScheduleUpdateRequest {
+                    charging_profile_id: id,
+                    custom_data: None,
+                };
+                self.call::<PullDynamicScheduleUpdate>(
+                    Origin2::Station,
+                    &request,
+                    move |actor, result| {
+                        actor.charging.dynamic_pulls.remove(&id);
+                        let response = result
+                            .ok()
+                            .filter(|reply| reply.status == ChargingProfileStatus::Accepted);
+                        actor.complete_dynamic_pull(id, &revision, response.as_ref());
+                        actor.arm_dynamic_profiles();
+                    },
+                );
+            }
+        }
+        self.arm_dynamic_profiles();
+    }
+
+    fn complete_dynamic_pull(
+        &mut self,
+        id: i32,
+        revision: &Arc<()>,
+        accepted: Option<&PullDynamicScheduleUpdateResponse>,
+    ) {
+        let Some(index) = self.charging.entries.iter().position(|entry| {
+            entry.id() == id
+                && entry
+                    .dynamic
+                    .as_ref()
+                    .is_some_and(|dynamic| Arc::ptr_eq(&dynamic.revision, revision))
+        }) else {
+            return;
+        };
+        let retry_at = self.charging.entries[index]
+            .pull_interval()
+            .and_then(|interval| Instant::now().checked_add(interval.to_std().ok()?));
+        if let Some(response) = accepted {
+            match self.dynamic_update(id, response.schedule_update.as_ref()) {
+                Ok(()) => return,
+                Err(error) => self.log(
+                    LogLevel::Warn,
+                    format!("PullDynamicScheduleUpdate {id}: {}", error.info),
+                ),
+            }
+        }
+        if let Some(dynamic) = self.charging.entries[index].dynamic.as_mut() {
+            dynamic.retry_at = retry_at;
+        }
     }
 
     // ---- reports ----------------------------------------------------------------------
@@ -1538,6 +1995,74 @@ fn refuse_when_disabled<A: crate::ocpp::action::Action>(
     None
 }
 
+#[allow(clippy::needless_pass_by_value, reason = "handler signature")]
+pub(super) fn use_priority_charging(
+    actor: &mut Station2Actor,
+    responder: Responder<UsePriorityCharging>,
+    request: UsePriorityChargingRequest,
+) {
+    let Some(responder) = refuse_when_disabled(actor, responder) else {
+        return;
+    };
+    let outcome = actor
+        .evses
+        .iter()
+        .map(|evse| evse.id)
+        .find(|&evse| {
+            actor
+                .active_tx(evse)
+                .is_some_and(|tx| tx.id.0 == request.transaction_id)
+        })
+        .ok_or_else(|| reject("TxNotFound", "no ongoing transaction with that id"))
+        .and_then(|evse| actor.change_priority_charging(evse, request.activate));
+    let (status, status_info) = match outcome {
+        Ok(()) => (PriorityChargingStatus::Accepted, None),
+        Err(error) => (
+            if error.reason == "NotFound" {
+                PriorityChargingStatus::NoProfile
+            } else {
+                PriorityChargingStatus::Rejected
+            },
+            Some(error.status_info()),
+        ),
+    };
+    actor.respond(
+        responder,
+        UsePriorityChargingResponse {
+            status,
+            status_info,
+            custom_data: None,
+        },
+    );
+    actor.flush_priority_notifications();
+}
+
+#[allow(clippy::needless_pass_by_value, reason = "handler signature")]
+pub(super) fn update_dynamic_schedule(
+    actor: &mut Station2Actor,
+    responder: Responder<UpdateDynamicSchedule>,
+    request: UpdateDynamicScheduleRequest,
+) {
+    let Some(responder) = refuse_when_disabled(actor, responder) else {
+        return;
+    };
+    actor.sc_prune(actor.clock.now_utc());
+    let (status, status_info) =
+        match actor.dynamic_update(request.charging_profile_id, Some(&request.schedule_update)) {
+            Ok(()) => (ChargingProfileStatus::Accepted, None),
+            Err(error) => (ChargingProfileStatus::Rejected, Some(error.status_info())),
+        };
+    actor.respond(
+        responder,
+        UpdateDynamicScheduleResponse {
+            status,
+            status_info,
+            custom_data: None,
+        },
+    );
+    actor.arm_dynamic_profiles();
+}
+
 #[allow(
     clippy::needless_pass_by_value,
     reason = "handlers share the signature `fn(&mut Station2Actor, Responder<A>, A::Req)`"
@@ -1580,6 +2105,7 @@ pub(super) fn set_charging_profile(
                 ),
             );
             install(&mut actor.charging.entries, entry);
+            actor.arm_dynamic_profiles();
             actor.mark_dirty();
             SetChargingProfileResponse {
                 status: ChargingProfileStatus::Accepted,
@@ -1638,6 +2164,7 @@ pub(super) fn clear_charging_profile(
     });
     let removed = before - actor.charging.entries.len();
     let response = if removed > 0 {
+        actor.arm_dynamic_profiles();
         actor.mark_dirty();
         actor.log(
             LogLevel::Info,
@@ -2032,6 +2559,7 @@ mod tests {
             id,
             started_at: t0(),
             relative_start: Some(t0()),
+            priority_charging: false,
         }
     }
 
@@ -2349,6 +2877,7 @@ mod tests {
             id: "T1",
             started_at: at(1000),
             relative_start: Some(at(1000)),
+            priority_charging: false,
         };
         close(eval.limit_w(1, Some(started), 1, at(1030)), 6900.0);
         close(eval.limit_w(1, Some(started), 1, at(1060)), 4140.0);
@@ -2794,6 +3323,91 @@ mod tests {
     }
 
     #[test]
+    fn priority_charging_profiles_are_admitted_at_station_and_evse_scope() {
+        let raw = profile(1, 0, "PriorityCharging", "W", &[(0, 1000.0)]);
+        for evse in [0, 1] {
+            put(&mut Vec::new(), evse, &raw).expect("PriorityCharging admitted");
+        }
+        let bound = with(raw, "transactionId", json!("T1"));
+        assert_eq!(reason(put(&mut Vec::new(), 1, &bound)), "InvalidProfile");
+    }
+
+    #[test]
+    fn dynamic_admission_requires_one_schedule_and_period_and_sets_update_time() {
+        let raw = with(
+            profile(1, 0, "TxDefaultProfile", "W", &[(0, 2000.0)]),
+            "chargingProfileKind",
+            json!("Dynamic"),
+        );
+        let mut entries = Vec::new();
+        put(&mut entries, 1, &raw).expect("Dynamic profile admitted");
+        assert_eq!(entries[0].stored.profile["dynUpdateTime"], json!(t0()));
+        let supplied = with(raw.clone(), "dynUpdateTime", json!(at(900)));
+        put(&mut entries, 1, &supplied).expect("supplied timestamp accepted");
+        assert_eq!(entries[0].stored.profile["dynUpdateTime"], json!(at(900)));
+        let mut duplicate_schedule = raw.clone();
+        duplicate_schedule["chargingSchedule"] =
+            json!([raw["chargingSchedule"][0], raw["chargingSchedule"][0],]);
+        assert_eq!(
+            reason(put(&mut entries, 1, &duplicate_schedule)),
+            "InvalidSchedule"
+        );
+        for periods in [
+            json!([]),
+            json!([{"startPeriod": 0, "limit": 1000}, {"startPeriod": 1, "limit": 2000}]),
+            json!([{"startPeriod": 1, "limit": 1000}]),
+            json!([{"startPeriod": 0}]),
+        ] {
+            let mut bad = raw.clone();
+            bad["chargingSchedule"][0]["chargingSchedulePeriod"] = periods;
+            assert_eq!(reason(put(&mut entries, 1, &bad)), "InvalidSchedule");
+        }
+        let bad_interval = with(raw, "dynUpdateInterval", json!(0));
+        assert_eq!(
+            reason(put(&mut entries, 1, &bad_interval)),
+            "InvalidProfile"
+        );
+    }
+
+    #[test]
+    fn dynamic_priority_expiry_changes_meter_and_composite_at_the_same_boundary() {
+        let mut entries = Vec::new();
+        put(
+            &mut entries,
+            1,
+            &profile(1, 0, "TxDefaultProfile", "W", &[(0, 1000.0)]),
+        )
+        .expect("default profile");
+        let mut priority = profile(2, 0, "PriorityCharging", "W", &[(0, 2000.0)]);
+        let now = t0() + TimeDelta::milliseconds(250);
+        priority["chargingProfileKind"] = json!("Dynamic");
+        priority["dynUpdateTime"] = json!(now);
+        priority["chargingSchedule"][0]["duration"] = json!(2);
+        put(&mut entries, 0, &priority).expect("dynamic priority profile");
+        let eval = eval(&entries);
+        let tx = Some(TxView {
+            priority_charging: true,
+            ..view("T1")
+        });
+        close(eval.limit_w(1, tx, 1, now + TimeDelta::seconds(2)), 2000.0);
+        close(
+            eval.limit_w(1, tx, 1, now + TimeDelta::seconds(2) + NS),
+            1000.0,
+        );
+        let energy = eval.energy_wh(1, tx, 1, now, now + TimeDelta::seconds(4));
+        assert!((energy - 6000.0 / 3600.0).abs() < 1e-8, "{energy}");
+        let composite = eval
+            .composite(1, 5, Some(ChargingRateUnitType::W), now, tx)
+            .expect("composite");
+        assert_eq!(composite.schedule_start, now);
+        let periods = composite.charging_schedule.charging_schedule_period;
+        assert_eq!(periods.len(), 2);
+        assert_eq!(periods[0].limit.to_bits(), 2000.0_f64.to_bits());
+        assert_eq!(periods[1].limit.to_bits(), 1000.0_f64.to_bits());
+        assert_eq!(periods[1].start_period, 3);
+    }
+
+    #[test]
     fn what_the_station_does_not_implement_is_refused_with_the_code_of_ocpp_21() {
         let base = || profile(1, 0, "TxDefaultProfile", "A", &[(0, 6.0)]);
         let refused = |raw: Value| reason(put(&mut Vec::new(), 1, &raw));
@@ -2801,21 +3415,9 @@ mod tests {
             refused(with(
                 base(),
                 "chargingProfilePurpose",
-                json!("PriorityCharging")
-            )),
-            "UnsupportedPurpose"
-        );
-        assert_eq!(
-            refused(with(
-                base(),
-                "chargingProfilePurpose",
                 json!("LocalGeneration")
             )),
             "UnsupportedPurpose"
-        );
-        assert_eq!(
-            refused(with(base(), "chargingProfileKind", json!("Dynamic"))),
-            "UnsupportedKind"
         );
         assert_eq!(
             refused(with_period(

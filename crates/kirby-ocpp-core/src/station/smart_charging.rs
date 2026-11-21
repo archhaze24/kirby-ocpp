@@ -329,7 +329,7 @@ pub fn composite_schedule(
     entries: &[StoredProfile],
     req: &CompositeRequest,
 ) -> Result<CompositeSchedule, CompositeError> {
-    let mut result = composite_schedule_full(entries, req)?;
+    let mut result = composite_schedule_full(entries, req, truncate_to_second(req.now))?;
     let schedule = &mut result.charging_schedule;
     if let Some(first_cut) = schedule.charging_schedule_period.get(MAX_COMPOSITE_PERIODS) {
         schedule.duration = Some(first_cut.start_period);
@@ -345,6 +345,7 @@ pub fn composite_schedule(
 pub(crate) fn composite_schedule_full(
     entries: &[StoredProfile],
     req: &CompositeRequest,
+    start: DateTime<Utc>,
 ) -> Result<CompositeSchedule, CompositeError> {
     if !is_known_connector(req.connector, req.connector_count) {
         return Err(CompositeError::UnknownConnector(req.connector));
@@ -354,7 +355,6 @@ pub(crate) fn composite_schedule_full(
     }
 
     let duration_s = req.duration_s.min(MAX_COMPOSITE_DURATION_S);
-    let start = truncate_to_second(req.now);
     let window_end = start + TimeDelta::seconds(i64::from(duration_s));
     let unit = req
         .unit

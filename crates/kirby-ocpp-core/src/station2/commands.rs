@@ -73,6 +73,9 @@ impl Station2Actor {
             Command2::SetTransactionLimit { evse, limit } => {
                 let _ = reply.send(Ok(self.set_transaction_limit(evse, limit)));
             }
+            Command2::SetPriorityCharging { evse, activate } => {
+                let _ = reply.send(self.set_priority_charging(evse, activate));
+            }
             Command2::ClearExternalLimit { evse } => self.cmd_clear_external_limit(evse, reply),
             Command2::ArmScriptedReply { reply: scripted } => {
                 self.cmd_arm_scripted_reply(scripted, reply);

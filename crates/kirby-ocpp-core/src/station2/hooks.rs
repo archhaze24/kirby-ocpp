@@ -27,6 +27,7 @@ impl Station2Actor {
             TimerKey2::ReportChunk => self.on_report_chunk(),
             TimerKey2::ReservationExpiry => self.on_reservation_timer(),
             TimerKey2::ProfileReport => self.on_profile_report_timer(),
+            TimerKey2::DynamicProfiles => self.on_dynamic_profiles_timer(),
             TimerKey2::PersistFlush => self.on_persist_flush(),
         }
     }

@@ -99,6 +99,8 @@ pub enum Command2 {
     SetExternalLimit { evse: u32, limit: Value },
     /// Set one or more limits of the ongoing OCPP 2.1 transaction.
     SetTransactionLimit { evse: u32, limit: TransactionLimit2 },
+    /// Activate or deactivate priority charging for the ongoing OCPP 2.1 transaction.
+    SetPriorityCharging { evse: u32, activate: bool },
     /// The external system releases its limits on `evse`; the CSMS is told with
     /// `ClearedChargingLimit`.
     ClearExternalLimit { evse: u32 },
@@ -140,6 +142,7 @@ impl Command2 {
             Self::SampleMeter { .. } => "sample_meter",
             Self::SetExternalLimit { .. } => "set_external_limit",
             Self::SetTransactionLimit { .. } => "set_transaction_limit",
+            Self::SetPriorityCharging { .. } => "set_priority_charging",
             Self::ClearExternalLimit { .. } => "clear_external_limit",
             Self::ArmScriptedReply { .. } => "arm_scripted_reply",
             Self::ClearScriptedReplies => "clear_scripted_replies",

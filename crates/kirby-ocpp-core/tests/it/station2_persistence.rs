@@ -67,6 +67,7 @@ fn active_tx(evse: u32, id: &str, next_seq_no: i32) -> ActiveTx {
         limit_reached: None,
         total_cost: None,
         tariff: None,
+        priority_charging: false,
     }
 }
 

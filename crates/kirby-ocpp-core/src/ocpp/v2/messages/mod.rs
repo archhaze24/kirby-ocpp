@@ -49,6 +49,7 @@ mod local_list;
 mod remote_control;
 mod reservation;
 mod smart_charging;
+mod smart_charging21;
 mod tariff;
 mod transactions;
 
@@ -106,6 +107,7 @@ pub use smart_charging::{
     ReportChargingProfiles, ReportChargingProfilesRequest, ReportChargingProfilesResponse,
     SetChargingProfile, SetChargingProfileRequest, SetChargingProfileResponse,
 };
+pub use smart_charging21::*;
 pub use tariff::*;
 pub use transactions::{
     CostUpdated, CostUpdatedRequest, CostUpdatedResponse, GetTransactionStatus,

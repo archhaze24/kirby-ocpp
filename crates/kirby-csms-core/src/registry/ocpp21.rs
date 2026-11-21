@@ -241,15 +241,22 @@ mod tests {
 
     #[test]
     fn typed_forms_match_the_2_1_request_schemas() {
-        let typed: Vec<ActionSpec> = CSMS_ACTIONS
+        let (forms, raw): (Vec<ActionSpec>, Vec<ActionSpec>) = CSMS_ACTIONS
             .iter()
             .copied()
             .filter(|spec| {
                 core::lookup_for(Protocol::V21, spec.name).is_some_and(|entry| entry.typed)
             })
-            .collect();
-        assert_eq!(typed.len(), 22);
-        assert_forms_match_schemas(Protocol::V21, &typed);
+            .partition(|spec| {
+                !matches!(spec.name, "UpdateDynamicSchedule" | "UsePriorityCharging")
+            });
+        assert_eq!(forms.len(), 22);
+        assert_forms_match_schemas(Protocol::V21, &forms);
+        assert_eq!(
+            raw.iter().map(|spec| spec.name).collect::<BTreeSet<_>>(),
+            BTreeSet::from(["UpdateDynamicSchedule", "UsePriorityCharging"])
+        );
+        assert!(raw.iter().all(|spec| spec.fields.is_empty()));
     }
 
     #[test]

@@ -47,7 +47,8 @@ use crate::ocpp::v2::messages::{
     UnlockConnector,
 };
 use crate::ocpp::v2::messages::{
-    ChangeTransactionTariff, ClearTariffs, GetTariffs, SetDefaultTariff,
+    ChangeTransactionTariff, ClearTariffs, GetTariffs, SetDefaultTariff, UpdateDynamicSchedule,
+    UsePriorityCharging,
 };
 use crate::ocpp::v2::registry::unhandled_error_code_for;
 use crate::station::LogLevel;
@@ -162,6 +163,20 @@ impl Station2Actor {
                     payload,
                     reply,
                     smart_charging::get_composite_schedule,
+                );
+            }
+            UsePriorityCharging::NAME if self.protocol() == Protocol::V21 => {
+                self.invoke::<UsePriorityCharging>(
+                    payload,
+                    reply,
+                    smart_charging::use_priority_charging,
+                );
+            }
+            UpdateDynamicSchedule::NAME if self.protocol() == Protocol::V21 => {
+                self.invoke::<UpdateDynamicSchedule>(
+                    payload,
+                    reply,
+                    smart_charging::update_dynamic_schedule,
                 );
             }
             ClearCache::NAME => self.invoke::<ClearCache>(payload, reply, control::clear_cache),

@@ -116,6 +116,16 @@ impl Station2Handle {
             .await
     }
 
+    /// Activates or deactivates priority charging for the ongoing OCPP 2.1 transaction.
+    pub async fn set_priority_charging(
+        &self,
+        evse: u32,
+        activate: bool,
+    ) -> Result<Outcome2, StationError> {
+        self.send(Command2::SetPriorityCharging { evse, activate })
+            .await
+    }
+
     /// The external system releases its limits on `evse`; see [`Command2::ClearExternalLimit`].
     pub async fn clear_external_limit(&self, evse: u32) -> Result<Outcome2, StationError> {
         self.send(Command2::ClearExternalLimit { evse }).await

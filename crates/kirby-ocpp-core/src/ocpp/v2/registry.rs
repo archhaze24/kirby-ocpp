@@ -205,14 +205,14 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("NotifyEvent", STATION, true),
     info("NotifyMonitoringReport", STATION, false),
     send("NotifyPeriodicEventStream", STATION),
-    info("NotifyPriorityCharging", STATION, false),
+    info("NotifyPriorityCharging", STATION, true),
     info("NotifyReport", STATION, true),
     info("NotifySettlement", STATION, false),
     info("NotifyWebPaymentStarted", CSMS, false),
     info("OpenPeriodicEventStream", STATION, false),
     info("PublishFirmware", CSMS, false),
     info("PublishFirmwareStatusNotification", STATION, false),
-    info("PullDynamicScheduleUpdate", STATION, false),
+    info("PullDynamicScheduleUpdate", STATION, true),
     info("ReportChargingProfiles", STATION, true),
     info("ReportDERControl", STATION, false),
     info("RequestBatterySwap", CSMS, false),
@@ -238,9 +238,9 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("TriggerMessage", CSMS, true),
     info("UnlockConnector", CSMS, true),
     info("UnpublishFirmware", CSMS, false),
-    info("UpdateDynamicSchedule", CSMS, false),
+    info("UpdateDynamicSchedule", CSMS, true),
     info("UpdateFirmware", CSMS, false),
-    info("UsePriorityCharging", CSMS, false),
+    info("UsePriorityCharging", CSMS, true),
     info("VatNumberValidation", STATION, false),
 ];
 
@@ -697,10 +697,19 @@ mod tests {
             .collect();
         assert_eq!(added.len(), 27);
         assert_eq!(added, expected);
-        for name in &added {
-            let entry = lookup_for(Protocol::V21, name).unwrap();
-            assert!(!entry.typed, "{name}");
-        }
+        let typed: BTreeSet<_> = added
+            .into_iter()
+            .filter(|name| lookup_for(Protocol::V21, name).unwrap().typed)
+            .collect();
+        assert_eq!(
+            typed,
+            BTreeSet::from([
+                station_sent::<m::NotifyPriorityCharging>(),
+                station_sent::<m::PullDynamicScheduleUpdate>(),
+                csms_sent::<m::UpdateDynamicSchedule>(),
+                csms_sent::<m::UsePriorityCharging>(),
+            ])
+        );
     }
 
     #[test]
