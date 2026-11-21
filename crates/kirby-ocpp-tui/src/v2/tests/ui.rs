@@ -83,6 +83,8 @@ fn evse(id: u32, status_name: &str, plugged: bool, tx: Option<&str>) -> EvseSnap
         transaction_limit: None,
         limit_reached: None,
         total_cost: None,
+        tariff_id: None,
+        default_tariff_id: None,
     }
 }
 
