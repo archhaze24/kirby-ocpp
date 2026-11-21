@@ -1,7 +1,6 @@
 //! The Local Authorization List (D01, D02, C13, C14).
 //!
-//! The list maps a token (kind and text) to the status and expiry the CSMS sent. Only those
-//! two facts are kept: they are all the authorization decision reads.
+//! The list maps a token (kind and text) to the status, expiry and group the CSMS sent.
 //!
 //! `SendLocalList` is checked in this order, and the list is replaced only when every check
 //! passes, so a refused update leaves the list and its version as they were:
@@ -50,6 +49,9 @@ pub struct ListEntry {
     /// The `AuthorizationStatusEnumType` text.
     pub status: String,
     pub expires_at: Option<DateTime<Utc>>,
+    /// The `idToken` text of the entry's `groupIdToken`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 impl ListEntry {
@@ -103,6 +105,7 @@ impl LocalListPersist {
                         ListEntry {
                             status: info.status.as_str().to_owned(),
                             expires_at: info.cache_expiry_date_time,
+                            group_id: info.group_id_token.as_ref().map(|g| g.id_token.clone()),
                         },
                     );
                 }
@@ -238,6 +241,14 @@ pub(super) fn get_local_list_version(
 mod tests {
     use super::*;
     use crate::station2::device_model::{Dflt, TABLE};
+
+    #[test]
+    fn a_saved_entry_without_a_group_id_still_loads() {
+        let entry: ListEntry =
+            serde_json::from_str(r#"{"status":"Accepted","expires_at":null}"#).expect("loads");
+        assert!(entry.is_accepted());
+        assert_eq!(entry.group_id, None);
+    }
 
     #[test]
     fn the_table_reports_the_caps() {

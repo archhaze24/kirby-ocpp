@@ -229,7 +229,7 @@ async fn a_named_variable_reports_only_that_variable() {
 }
 
 #[tokio::test]
-async fn instances_and_evses_match_exactly() {
+async fn component_variable_wildcards() {
     let csms = csms_for(Protocol::V201).await;
     let (station, task) = start(Protocol::V201, &csms).await;
     let device = |variable: Value| {
@@ -246,27 +246,66 @@ async fn instances_and_evses_match_exactly() {
     assert_eq!(status, "Accepted");
     assert_eq!(items.len(), 1, "{items:?}");
     assert_eq!(items[0]["variable"]["instance"], json!("GetReport"));
-    // An instance that does not exist, or none for an instanced variable, matches nothing.
-    for variable in [
-        json!({"name": "ItemsPerMessage", "instance": "Nope"}),
-        json!({"name": "ItemsPerMessage"}),
-    ] {
-        let (status, _) = report(&csms, device(variable)).await;
-        assert_eq!(status, "EmptyResultSet");
-    }
+    let (status, _) = report(
+        &csms,
+        device(json!({"name": "ItemsPerMessage", "instance": "Nope"})),
+    )
+    .await;
+    assert_eq!(status, "EmptyResultSet");
+
+    let (status, items) = report(&csms, device(json!({"name": "ItemsPerMessage"}))).await;
+    assert_eq!(status, "Accepted");
+    let mut instances: Vec<_> = items
+        .iter()
+        .map(|item| item["variable"]["instance"].as_str().expect("an instance"))
+        .collect();
+    instances.sort_unstable();
+    assert_eq!(instances, ["GetReport", "GetVariables", "SetVariables"]);
+
+    let (status, items) = report(
+        &csms,
+        json!({"requestId": 3, "componentVariable": [
+            {"component": {"name": "EVSE"}, "variable": {"name": "AvailabilityState"}}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, "Accepted");
+    let mut evses: Vec<_> = items
+        .iter()
+        .map(|item| {
+            item["component"]["evse"]["id"]
+                .as_u64()
+                .expect("an EVSE id")
+        })
+        .collect();
+    evses.sort_unstable();
+    assert_eq!(evses, [1, 2]);
+
+    let (status, items) = report(
+        &csms,
+        json!({"requestId": 4, "componentCriteria": ["Available"], "componentVariable": [
+            {"component": {"name": "Connector", "evse": {"id": 1}}}
+        ]}),
+    )
+    .await;
+    assert_eq!(status, "Accepted");
+    assert_ne!(items, Vec::<Value>::new());
+    assert!(items.iter().all(|item| {
+        item["component"]["evse"]["id"] == json!(1)
+            && item["component"]["evse"]["connectorId"] == json!(1)
+    }));
     // A component instance, an unknown EVSE, a connector without a row and a name at the
     // wrong level match nothing.
     for component in [
         json!({"name": "ChargingStation", "instance": "x"}),
         json!({"name": "EVSE", "evse": {"id": 3}}),
-        json!({"name": "EVSE"}),
         json!({"name": "ChargingStation", "evse": {"id": 1}}),
         json!({"name": "Connector", "evse": {"id": 1, "connectorId": 2}}),
         json!({"name": "NoSuchComponent"}),
     ] {
         let (status, _) = report(
             &csms,
-            json!({"requestId": 3, "componentVariable": [{"component": component}]}),
+            json!({"requestId": 5, "componentVariable": [{"component": component}]}),
         )
         .await;
         assert_eq!(status, "EmptyResultSet", "{component}");

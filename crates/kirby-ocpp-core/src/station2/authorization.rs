@@ -567,7 +567,7 @@ impl Station2Actor {
     }
 
     /// Whether an accepted `decision` for `token` names the group `MasterPassGroupId`: from
-    /// the answer, else from the cache (C16.FR.04).
+    /// the answer, the local list or the cache (C16.FR.04/05).
     pub(super) fn is_master_pass(&self, token: &IdTokenRef, decision: &AuthDecision) -> bool {
         let Some(master) = self.master_pass_group_id() else {
             return false;
@@ -631,13 +631,20 @@ impl Station2Actor {
             })
     }
 
-    /// The group of an accepted `token`: the one the fresh answer named, else the cache's.
+    /// The group of an accepted `token` from the fresh answer, then the local list, then the cache.
     pub(super) fn group_of_token(&self, token: &IdTokenRef, fresh: Option<&str>) -> Option<String> {
-        fresh.map(str::to_owned).or_else(|| {
-            self.cache_peek(&token_key(token))
-                .filter(|entry| entry.status == ACCEPTED)
-                .and_then(|entry| entry.group_id.clone())
-        })
+        fresh
+            .map(str::to_owned)
+            .or_else(|| {
+                self.local_list_entry(token)
+                    .filter(ListEntry::is_accepted)
+                    .and_then(|entry| entry.group_id)
+            })
+            .or_else(|| {
+                self.cache_peek(&token_key(token))
+                    .filter(|entry| entry.status == ACCEPTED)
+                    .and_then(|entry| entry.group_id.clone())
+            })
     }
 
     /// Keeps the group of `token` with the authorization it just started on `evse`.
@@ -653,7 +660,8 @@ impl Station2Actor {
 
     /// Whether `token` is the one that authorized `evse`, or accepted with the same group
     /// (C01.FR.03). `fresh` is the group of the `Authorize` answer for `token`, when there is
-    /// one; the group of the authorization is the one kept with it, else the cache's.
+    /// one. The group of the authorization is the one kept with it, else the local list's or
+    /// the cache's.
     fn token_ends_authorization(&self, evse: u32, token: &IdTokenRef, fresh: Option<&str>) -> bool {
         let Some(started) = self.authorized_token(evse) else {
             return false;

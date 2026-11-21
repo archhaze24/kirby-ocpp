@@ -32,6 +32,12 @@ fn entry(id: &str, status: &str) -> Value {
     json!({"idToken": token(id), "idTokenInfo": {"status": status}})
 }
 
+fn grouped_entry(id: &str, group: &str) -> Value {
+    let mut entry = entry(id, "Accepted");
+    entry["idTokenInfo"]["groupIdToken"] = json!({"idToken": group, "type": "Central"});
+    entry
+}
+
 /// A differential entry that removes `id`.
 fn removal(id: &str) -> Value {
     json!({"idToken": token(id)})
@@ -391,6 +397,24 @@ async fn online_an_accepted_entry_starts_without_authorize_when_pre_authorizing(
 }
 
 #[tokio::test]
+async fn a_token_of_the_same_local_list_group_ends_the_authorization() {
+    let rig = rig_with_list(&[grouped_entry("A", "G"), grouped_entry("B", "G")]).await;
+    rig.set_variable("AuthCtrlr", "LocalPreAuthorize", "true")
+        .await;
+    let outcome = rig.present("A").await;
+    assert!(started(&outcome), "{outcome:?}");
+    assert_eq!(rig.calls("Authorize"), Vec::<Value>::new());
+
+    let outcome = rig.present("B").await;
+    assert!(matches!(outcome, Outcome2::Done), "{outcome:?}");
+    let ended = rig.wait_event("Ended").await;
+    assert_eq!(ended["triggerReason"], "StopAuthorized");
+    assert_eq!(ended["idToken"], token("B"));
+    assert_eq!(rig.calls("Authorize"), Vec::<Value>::new());
+    rig.stop().await;
+}
+
+#[tokio::test]
 async fn online_without_pre_authorize_the_csms_is_asked() {
     let rig = rig_with_list(&[entry("LISTED", "Accepted")]).await;
     let outcome = rig.present("LISTED").await;
@@ -558,7 +582,15 @@ async fn the_list_and_its_version_survive_a_restart() {
         let reply = csms
             .send_call(
                 "SendLocalList",
-                send_list(7, "Full", &[entry("A", "Accepted"), entry("B", "Blocked")]),
+                send_list(
+                    7,
+                    "Full",
+                    &[
+                        grouped_entry("A", "G"),
+                        entry("B", "Blocked"),
+                        grouped_entry("C", "G"),
+                    ],
+                ),
             )
             .await
             .expect("answered");
@@ -568,11 +600,19 @@ async fn the_list_and_its_version_survive_a_restart() {
         assert_eq!(payload["status"], "Accepted");
     })
     .await;
+    let store = StationStore::new_for(FileKind::V2, dir.path(), ID);
+    let LoadOutcome2::Loaded(state) = store.load2().expect("loads") else {
+        panic!("the file did not load");
+    };
+    let entries = &state.auth_cache.local_list.entries;
+    assert_eq!(entries["ISO14443|A"].group_id.as_deref(), Some("G"));
+    assert_eq!(entries["ISO14443|C"].group_id.as_deref(), Some("G"));
+
     run_once(&csms, dir.path(), async |station| {
         assert_eq!(version_of(&csms).await, 7);
         assert_eq!(
             variable_of(&csms, "LocalAuthListCtrlr", "Entries").await,
-            "2"
+            "3"
         );
         // The restored list serves an offline start.
         station
@@ -592,6 +632,15 @@ async fn the_list_and_its_version_survive_a_restart() {
             .await
             .expect("sent");
         assert!(started(&outcome), "{outcome:?}");
+        let outcome = station
+            .send(Command2::PresentToken {
+                evse: Some(1),
+                id_token: "C".to_owned(),
+                token_type: IdTokenType::Iso14443,
+            })
+            .await
+            .expect("sent");
+        assert!(matches!(outcome, Outcome2::Done), "{outcome:?}");
     })
     .await;
     csms.shutdown().await;

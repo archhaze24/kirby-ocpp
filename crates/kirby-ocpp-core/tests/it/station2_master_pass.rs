@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use kirby_ocpp_core::config::ReconnectConfig;
-use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::v2::types::{Component, IdTokenType, Variable};
+use kirby_ocpp_core::ocpp::{Protocol, frame::Frame};
 use kirby_ocpp_core::{
     Command2, ManualClock, Outcome2, Station2, Station2Handle, StationConfig, StationError,
 };
@@ -300,6 +300,68 @@ async fn a_master_pass_from_the_cache_ends_transactions_without_asking_again() {
             .filter(|c| c.action == "Authorize")
             .count();
         assert_eq!(asked, asked_after, "{protocol:?}: the cache answers");
+        rig.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_master_pass_from_the_local_list_ends_transactions_without_authorize() {
+    for protocol in VERSIONS {
+        let rig = Rig::new(protocol).await;
+        rig.set_master_group(MASTER_GROUP).await;
+        let reply = rig
+            .csms
+            .send_call(
+                "SendLocalList",
+                json!({
+                    "versionNumber": 1,
+                    "updateType": "Full",
+                    "localAuthorizationList": [{
+                        "idToken": {"idToken": "LISTED", "type": "ISO14443"},
+                        "idTokenInfo": {
+                            "status": "Accepted",
+                            "groupIdToken": {"idToken": MASTER_GROUP, "type": "Central"},
+                        },
+                    }],
+                }),
+            )
+            .await
+            .expect("answered");
+        let Frame::CallResult { payload, .. } = reply else {
+            panic!("not a CALLRESULT: {reply:?}");
+        };
+        assert_eq!(payload["status"], "Accepted");
+        rig.start_on(1, "CARD1").await;
+        rig.start_on(2, "CARD2").await;
+        rig.send(Command2::SetVariable {
+            component: Component {
+                name: "AuthCtrlr".to_owned(),
+                instance: None,
+                evse: None,
+                custom_data: None,
+            },
+            variable: Variable {
+                name: "LocalPreAuthorize".to_owned(),
+                instance: None,
+                custom_data: None,
+            },
+            value: "true".to_owned(),
+        })
+        .await;
+
+        let outcome = rig.present(None, "LISTED").await.expect("accepted");
+        assert!(matches!(outcome, Outcome2::Done), "{outcome:?}");
+        for event in rig.wait_events("Ended", 2).await {
+            assert_eq!(event["transactionInfo"]["stoppedReason"], "MasterPass");
+            assert_eq!(event["triggerReason"], "StopAuthorized");
+            assert_eq!(
+                event["idToken"],
+                json!({"idToken": "LISTED", "type": "ISO14443"})
+            );
+        }
+        assert!(!rig.csms.received().iter().any(|call| {
+            call.action == "Authorize" && call.payload["idToken"]["idToken"] == "LISTED"
+        }));
         rig.stop().await;
     }
 }

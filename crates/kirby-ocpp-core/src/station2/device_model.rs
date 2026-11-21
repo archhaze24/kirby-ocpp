@@ -684,32 +684,26 @@ fn non_empty(text: Option<&String>) -> Option<&str> {
     text.map(String::as_str).filter(|text| !text.is_empty())
 }
 
-/// Whether the variable of `target` is the one `selector` names: the component name, instance
-/// and EVSE (with connector) must match exactly; an absent variable selects them all.
+/// Whether `selector` selects this report row. Omitted instances, EVSE, connector and variable
+/// fields select every matching row at that level (B08.FR.20–25).
 fn selector_matches(selector: &ComponentVariable, target: &Target) -> bool {
     let component = &selector.component;
     let spec = target.spec;
+    // The model has no component instances; an empty instance is none.
     if component.name != spec.component || non_empty(component.instance.as_ref()).is_some() {
         return false;
     }
-    let place_ok = match &component.evse {
-        None => spec.scope == Scope::Station,
-        Some(EvseRef {
-            id, connector_id, ..
-        }) => {
-            u32::try_from(*id).is_ok_and(|id| Some(id) == target.evse)
-                && match connector_id {
-                    None => spec.scope == Scope::Evse,
-                    Some(connector) => {
-                        spec.scope == Scope::Connector
-                            && u32::try_from(*connector).ok() == target.connector
-                    }
-                }
-        }
-    };
+    let place_ok = component.evse.as_ref().is_none_or(|evse| {
+        u32::try_from(evse.id).is_ok_and(|id| Some(id) == target.evse)
+            && evse.connector_id.is_none_or(|connector| {
+                u32::try_from(connector).is_ok_and(|id| Some(id) == target.connector)
+            })
+    });
     place_ok
         && selector.variable.as_ref().is_none_or(|variable| {
-            variable.name == spec.variable && non_empty(variable.instance.as_ref()) == spec.instance
+            variable.name == spec.variable
+                && non_empty(variable.instance.as_ref())
+                    .is_none_or(|instance| Some(instance) == spec.instance)
         })
 }
 
@@ -1016,7 +1010,7 @@ impl DeviceModel {
 
     /// The report data of a `GetReport` (B08): the variables of the components that match any
     /// of `criteria` (all components when there are none) and one of `selectors` (everything
-    /// when there are none). Components are matched exactly like in `GetVariables`.
+    /// when there are none). Omitted selector fields act as wildcards.
     pub(crate) fn report_items_for(
         &self,
         criteria: &[ComponentCriterion],
