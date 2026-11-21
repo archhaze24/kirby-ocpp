@@ -71,12 +71,11 @@ pub struct AuthCachePersist {
 pub(crate) struct AuthState {
     /// Cache entries, oldest first.
     cache: Vec<(String, CacheEntry)>,
-    /// When the reset stops waiting for the transaction events to be delivered. It lives here
-    /// because `ResetPlan` is a shared type with fixed fields; `None` until the transactions
-    /// of the reset have been ended. Monotonic time: the actor clock may be a manual one.
+    /// When the reset stops waiting for its transaction events to be delivered.
+    /// Uses monotonic time because the station clock may be a manual one.
     pub(super) reset_deadline: Option<Instant>,
-    /// The transactions of an `Immediate` reset were ended already.
-    pub(super) reset_ended: bool,
+    /// The reset has already ended or suspended the transactions it found.
+    pub(super) reset_prepared: bool,
 }
 
 /// What a decision is for: a local presentation may use the cache instead of asking the CSMS.

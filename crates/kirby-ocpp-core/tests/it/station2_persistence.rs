@@ -33,7 +33,7 @@ const ID: &str = "CP-S6";
 /// A password that must never appear in the main state file.
 const SENTINEL: &str = "s3ntinel-p4ssword-0042";
 
-fn store(dir: &Path) -> StationStore {
+pub(crate) fn store(dir: &Path) -> StationStore {
     StationStore::new_for(FileKind::V2, dir, ID)
 }
 
@@ -138,7 +138,7 @@ fn sample() -> PersistedStation2 {
     state
 }
 
-fn loaded2(outcome: LoadOutcome2) -> PersistedStation2 {
+pub(crate) fn loaded2(outcome: LoadOutcome2) -> PersistedStation2 {
     match outcome {
         LoadOutcome2::Loaded(state) => *state,
         other => panic!("expected Loaded, got {other:?}"),
@@ -345,7 +345,7 @@ fn file_names_fit_the_budget_with_the_longest_suffix_and_backup() {
 
 // Stations against a mock CSMS.
 
-fn config(csms: &MockCsms, dir: &Path) -> StationConfig {
+pub(crate) fn config(csms: &MockCsms, dir: &Path) -> StationConfig {
     let mut config = StationConfig::new(csms.url())
         .with_charge_point_id(ID)
         .with_connectors(2)

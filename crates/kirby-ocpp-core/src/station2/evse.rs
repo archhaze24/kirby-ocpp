@@ -521,7 +521,7 @@ impl Station2Actor {
         }
     }
 
-    /// The transactions of the previous run have ended: applies what waited for them. The
+    /// Applies availability requests waiting for transactions that did not resume. The
     /// statuses are recorded without a notification, the boot sends them all.
     pub(super) fn release_restored_requests(&mut self) {
         let ids: Vec<u32> = self.evses.iter().map(|e| e.id).collect();

@@ -25,6 +25,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -151,6 +152,9 @@ pub struct PersistedStation2 {
     /// 2.1 station reads and writes the same files as a 2.0.1 one; nothing checks this field
     /// on load.
     pub protocol: String,
+    /// Station clock time of the most recent state write.
+    #[serde(default)]
+    pub saved_at: Option<DateTime<Utc>>,
     /// Availability of the whole station.
     pub station_operative: bool,
     pub evse_availability: Vec<EvseAvail>,
@@ -185,6 +189,7 @@ impl Default for PersistedStation2 {
             version: STORE2_VERSION,
             charge_point_id: String::new(),
             protocol: Protocol::V201.token().to_owned(),
+            saved_at: None,
             station_operative: true,
             evse_availability: Vec::new(),
             device_model: DeviceModelPersist::default(),
@@ -967,6 +972,16 @@ mod tests {
     use crate::fs_util::dir_sync_unsupported;
     use crate::ids::TxId;
     use crate::station::transaction::ActiveTransaction;
+
+    #[test]
+    fn persisted_station2_without_saved_at_loads() {
+        let state: PersistedStation2 = serde_json::from_value(serde_json::json!({
+            "version": STORE2_VERSION,
+            "charge_point_id": "CP-1",
+        }))
+        .expect("old state loads");
+        assert_eq!(state.saved_at, None);
+    }
 
     #[test]
     fn case_alias_requires_the_exact_directory_entry() {

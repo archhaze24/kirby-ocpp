@@ -10,7 +10,7 @@
 //!   flight; changes that arrive meanwhile cause one more write afterwards, so overlapping
 //!   writes cannot leave stale data behind.
 //! * **Shutdown:** [`Station2Actor::finish_persistence`] awaits the in-flight write, then
-//!   writes once more if anything is dirty.
+//!   writes once more for 2.1 or if anything is dirty.
 //! * **Startup:** [`Persistence2::open`] reads the file synchronously and
 //!   [`Station2Actor::restore_persisted`] applies it, so the first snapshot is the restored
 //!   one. A corrupt or foreign file is moved to `.bak` and the station starts fresh; a file of
@@ -18,9 +18,9 @@
 //!   file follows the same rule: one that cannot be read, or is newer, is never replaced.
 //!
 //! Restored: availability, device-model values, the authorization cache (expired entries are
-//! dropped), reservations, charging profiles (except `TxProfile`s), transactions in progress (their owner ends them after the boot is accepted), the
-//! event queue (every entry flagged `offline`: the process was down), the stopped ids and the
-//! energy register of every EVSE.
+//! dropped), reservations, charging profiles (except `TxProfile`s), active transactions, the
+//! event queue (every entry flagged `offline`: the process was down), the stopped ids, and
+//! the energy register of every EVSE.
 
 use std::path::Path;
 
@@ -32,6 +32,7 @@ use super::device_model::DeviceModelPersist;
 use super::transactions::TxPersist;
 use super::tx_queue::QueuePersist;
 use crate::config::StationConfig;
+use crate::ocpp::Protocol;
 use crate::persist_driver::{FLUSH_DELAY, LoadedState, StateFiles, StateWriter};
 use crate::station::LogLevel;
 use crate::store::{
@@ -130,7 +131,7 @@ impl Station2Actor {
         self.restore_device_model(persisted.device_model);
         self.sc_restore(persisted.charging_profiles);
         self.restore_auth_cache(persisted.auth_cache);
-        self.restore_transactions(persisted.tx);
+        self.tx_restore(persisted.tx, persisted.saved_at);
         self.restore_queue(persisted.queue);
         self.reservations_restore(persisted.reservations);
         // The new boot count is written with the next flush.
@@ -142,6 +143,7 @@ impl Station2Actor {
         PersistedStation2 {
             charge_point_id: self.config.charge_point_id.clone(),
             protocol: self.protocol().token().to_owned(),
+            saved_at: Some(self.clock.now_utc()),
             station_operative: self.station_operative(),
             evse_availability: self.availability_snapshot(),
             device_model: self.persist_device_model(),
@@ -217,9 +219,12 @@ impl Station2Actor {
         }
     }
 
-    /// Final write at shutdown: wait for the one in flight, then write what is dirty.
+    /// Final write at shutdown, including the interruption time for a 2.1 station.
     pub(super) async fn finish_persistence(&mut self) {
         self.timers.cancel(&TimerKey2::PersistFlush);
+        if self.protocol() == Protocol::V21 {
+            self.persistence.writer.mark_dirty();
+        }
         let Some(due) = self.persistence.writer.begin_final_write().await else {
             return;
         };
@@ -241,8 +246,6 @@ impl Station2Actor {
 /// Each part owns one slice of the persisted state and must give it out and take it back; the
 /// bodies forward to the module that holds the data (`device_model.rs`, `transactions.rs`, `tx_queue.rs`,
 /// `authorization.rs`; `evse.rs` provides `availability_snapshot` and `restore_availability`).
-/// Restoring transactions includes ending each restored active transaction with `PowerLoss` /
-/// `AbnormalCondition` as the first queued event after an accepted boot.
 impl Station2Actor {
     /// Device-model values that differ from their defaults, never secrets.
     fn persist_device_model(&self) -> DeviceModelPersist {
@@ -274,10 +277,6 @@ impl Station2Actor {
     /// Active transactions and the ids of the last stopped ones.
     fn persist_transactions(&self) -> TxPersist {
         self.tx_persist()
-    }
-
-    fn restore_transactions(&mut self, tx: TxPersist) {
-        self.tx_restore(tx);
     }
 
     /// The queued transaction events.

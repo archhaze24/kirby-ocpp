@@ -423,6 +423,13 @@ pub(crate) static TABLE: &[VarSpec] = &[
     )
     .v21_only(),
     int(TX, "EVConnectionTimeOut", Fixed("60")).rw().u("s"),
+    int(TX, "TxResumptionTimeout", Fixed("0"))
+        .rw()
+        .u("s")
+        .v21_only(),
+    flag(TX, "TxAllowEnergyTransferResumption", "true")
+        .rw()
+        .v21_only(),
     flag(TX, "StopTxOnEVSideDisconnect", "true").rw(),
     flag(TX, "StopTxOnInvalidId", "true").rw(),
     // SampledDataCtrlr
@@ -1425,6 +1432,16 @@ impl Station2Actor {
     /// `TxCtrlr.EVConnectionTimeOut`.
     pub(super) fn ev_connection_timeout(&self) -> Duration {
         Duration::from_secs(u64::from(self.dm.uint(TX, "EVConnectionTimeOut", None)))
+    }
+
+    /// `TxCtrlr.TxResumptionTimeout`, seconds. Zero disables resumption.
+    pub(super) fn tx_resumption_timeout(&self) -> u32 {
+        self.dm.uint(TX, "TxResumptionTimeout", None)
+    }
+
+    /// `TxCtrlr.TxAllowEnergyTransferResumption`.
+    pub(super) fn tx_allow_energy_transfer_resumption(&self) -> bool {
+        self.dm.flag(TX, "TxAllowEnergyTransferResumption")
     }
 
     /// `TxCtrlr.StopTxOnEVSideDisconnect`.

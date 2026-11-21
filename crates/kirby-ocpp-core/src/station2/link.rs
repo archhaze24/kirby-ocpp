@@ -13,8 +13,8 @@
 //! * `Disconnect` and shutdown cancel reconnect, boot retry and heartbeat and fail calls in
 //!   flight. A `Closed` event of a link the station closed itself never reaches the actor
 //!   (the link is dropped first), so it can never trigger a backoff. Frames the link had
-//!   already buffered are published first, up to a bound. A `Disconnect` also drops a reset
-//!   that is in its `Rebooting` phase, so the next boot is a power-up.
+//!   already buffered are published first, up to a bound. A `Disconnect` also drops an
+//!   ordinary reset in its `Rebooting` phase, so the next boot is a power-up.
 //! * Every task result carries the link generation; results of an older link are ignored.
 //!
 //! # Registration (B01 to B04)
@@ -64,7 +64,7 @@ use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::responder::ReplyHandle;
 use crate::ocpp::v2::messages::{
     BootNotification, BootNotificationRequest, BootNotificationResponse, BootReason, Heartbeat,
-    HeartbeatRequest, RegistrationStatus,
+    HeartbeatRequest, RegistrationStatus, ResetKind,
 };
 use crate::ocpp::v2::types::{ChargingStation, WireEnum};
 use crate::station::LogLevel;
@@ -203,12 +203,10 @@ impl Station2Actor {
 
     /// `Command2::Disconnect`.
     pub(super) fn cmd_disconnect(&mut self, reply: Reply2) {
-        // A reboot that was cut short: the next connect is a power-up, not the end of the reset.
-        if self
-            .reset
-            .as_ref()
-            .is_some_and(|plan| plan.phase == ResetPhase::Rebooting)
-        {
+        // An ordinary reset can be cut short. A resuming reset still has transactions to resume.
+        if self.reset.as_ref().is_some_and(|plan| {
+            plan.phase == ResetPhase::Rebooting && plan.kind != ResetKind::ImmediateAndResume
+        }) {
             self.reset = None;
         }
         self.disconnect();
@@ -387,11 +385,14 @@ impl Station2Actor {
             self.resume_after_reconnect();
             return;
         }
-        if rebooting && let Some(plan) = self.reset.take() {
-            // The reboot is over once its boot goes out; retries keep the reason.
+        if rebooting && let Some(plan) = &self.reset {
             self.link.retry_reason = Some(plan.reason);
-            self.raise_security_event("ResetOrReboot");
-            self.log(LogLevel::Info, "reset finished".to_owned());
+            if plan.kind != ResetKind::ImmediateAndResume {
+                // An ordinary reboot is over once its boot goes out; retries keep the reason.
+                self.reset = None;
+                self.raise_security_event("ResetOrReboot");
+                self.log(LogLevel::Info, "reset finished".to_owned());
+            }
         }
         let reason = self.link.retry_reason.unwrap_or(BootReason::PowerUp);
         self.send_boot(reason, None);
@@ -631,6 +632,7 @@ impl Station2Actor {
         // B01.FR.05: the statuses first, then the queued transaction events, then the
         // heartbeat timer.
         self.send_all_statuses(None);
+        self.finish_reset_resume();
         self.flush_queue();
         // A04.FR.01: the startup or reboot of the station is a critical security event.
         self.flush_security_events();
@@ -824,7 +826,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_manual_disconnect_ends_a_reboot_in_progress() {
-        use crate::ocpp::v2::messages::ResetKind;
         use crate::station2::reset::ResetPlan;
 
         let (mut actor, _observed, _ids) = actor_with_buffered_events(0);
@@ -832,6 +833,7 @@ mod tests {
             kind: ResetKind::Immediate,
             phase: ResetPhase::Rebooting,
             reason: BootReason::RemoteReset,
+            charging_before_reset: std::collections::BTreeMap::new(),
         });
         let (reply, _answer) = tokio::sync::oneshot::channel();
         actor.cmd_disconnect(reply);

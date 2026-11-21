@@ -79,7 +79,7 @@ use crate::ocpp::v2::messages::{
     ReportChargingProfilesRequest, SetChargingProfile, SetChargingProfileRequest,
     SetChargingProfileResponse,
 };
-use crate::ocpp::v2::types::{StatusInfo, WireEnum};
+use crate::ocpp::v2::types::{ChargingState, StatusInfo, WireEnum};
 use crate::ocpp::{Protocol, SchemaRegistry};
 use crate::station::LogLevel;
 use crate::station::charging_profiles::StoredProfile as LegacyStored;
@@ -1057,10 +1057,11 @@ impl Station2Actor {
 
     /// The power in watts an EVSE may draw now: the nominal power under the limit in force.
     pub(super) fn sc_offered_w(&self, evse: u32) -> f64 {
-        if self
-            .active_tx(evse)
-            .is_some_and(|tx| tx.limit_reached.is_some())
-        {
+        if self.active_tx(evse).is_some_and(|tx| {
+            tx.limit_reached.is_some()
+                || (self.protocol() == Protocol::V21
+                    && tx.charging_state == ChargingState::SuspendedEvse)
+        }) {
             return 0.0;
         }
         let eval = self.sc_eval();

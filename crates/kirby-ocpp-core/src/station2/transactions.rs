@@ -56,6 +56,7 @@ use super::snapshot::TransactionSnapshot;
 use super::tx_queue::QueuedEvent;
 use super::types::{IdTokenRef, Origin2, Reply2, StartStopPoint, TxId2};
 use crate::error::StationError;
+use crate::ocpp::Protocol;
 use crate::ocpp::v2::messages::{
     ConnectorStatus, MeterValuesRequest, TransactionEventKind, TransactionEventRequest,
     TriggerReason,
@@ -1753,11 +1754,18 @@ impl Station2Actor {
         }
     }
 
-    /// Takes back the persisted transactions at start. The process was down, so the EV counts
-    /// as disconnected and every restored transaction ends at once with `PowerLoss` and
-    /// `AbnormalCondition`; its `Ended` event continues the `seqNo` and waits in the queue
-    /// until the boot has been accepted.
-    pub(super) fn tx_restore(&mut self, tx: TxPersist) {
+    /// E17: resumes transactions after a short interruption when enabled. Otherwise, the EV
+    /// counts as disconnected and transactions end with `PowerLoss`. The events continue
+    /// each transaction's sequence and wait for the boot to be accepted.
+    pub(super) fn tx_restore(&mut self, tx: TxPersist, saved_at: Option<DateTime<Utc>>) {
+        let timeout = self.tx_resumption_timeout();
+        let resume = self.protocol() == Protocol::V21
+            && timeout > 0
+            && saved_at.is_some_and(|saved| {
+                let interruption = self.clock.now_utc() - saved;
+                interruption >= chrono::Duration::zero()
+                    && interruption <= chrono::Duration::seconds(i64::from(timeout))
+            });
         let skip = tx.stopped_ids.len().saturating_sub(STOPPED_HISTORY);
         self.tx.stopped = tx.stopped_ids.into_iter().skip(skip).collect();
         let mut restored_registers = Vec::new();
@@ -1772,12 +1780,16 @@ impl Station2Actor {
             if self.tx.active.contains_key(&evse) {
                 continue;
             }
-            active.ev_connected = false;
             if !restored_registers.contains(&evse) {
                 // A file from before the registers were stored.
                 self.tx.meters.entry(evse).or_default().register_wh =
                     wh_from(active.meter_start_wh) + active.energy_wh;
             }
+            if resume && self.evse(evse).is_some() {
+                self.restore_running_tx(active);
+                continue;
+            }
+            active.ev_connected = false;
             self.tx.active.insert(evse, active);
             self.tx.runtime.insert(evse, TxRuntime::default());
             if let Err(error) = self.end_core(
@@ -1794,7 +1806,84 @@ impl Station2Actor {
             }
         }
         self.release_restored_requests();
+        if resume && !self.tx.active.is_empty() {
+            self.account_all_statuses();
+            self.sync_evse_snapshot();
+            self.settle_tx_meters();
+        }
         self.sync_tx_snapshot();
+    }
+
+    fn restore_running_tx(&mut self, mut tx: ActiveTx) {
+        let evse = tx.evse;
+        if tx.ev_connected {
+            if let Some(evse) = self.evse_mut(evse) {
+                for connector in &mut evse.connectors {
+                    connector.ev_connected = true;
+                }
+            }
+            tx.charging_state = self.resumed_charging_state(tx.charging_state);
+        } else {
+            tx.charging_state = ChargingState::Idle;
+            if tx.authorized {
+                self.timers.set(
+                    TimerKey2::EvConnectTimeout(evse),
+                    self.ev_connection_timeout(),
+                );
+            }
+        }
+        let charging_state = Some(tx.charging_state);
+        self.tx.runtime.insert(
+            evse,
+            TxRuntime {
+                start_register_wh: wh_from(tx.meter_start_wh),
+                ..TxRuntime::default()
+            },
+        );
+        self.tx.active.insert(evse, tx);
+        if let Some(event) = self.build_event(
+            evse,
+            TransactionEventKind::Updated,
+            TriggerReason::TxResumed,
+            EventExtra {
+                charging_state,
+                ..EventExtra::default()
+            },
+        ) {
+            self.queue_enqueue(event);
+        }
+    }
+
+    /// The charging state to report after resumption if the EV is still connected.
+    pub(super) fn resumed_charging_state(&self, previous: ChargingState) -> ChargingState {
+        if previous == ChargingState::Charging && !self.tx_allow_energy_transfer_resumption() {
+            ChargingState::SuspendedEvse
+        } else {
+            previous
+        }
+    }
+
+    /// Power changes during a reset do not evaluate the transaction's stop points.
+    pub(super) fn tx_reset_update(
+        &mut self,
+        evse: u32,
+        state: ChargingState,
+        trigger: TriggerReason,
+    ) {
+        self.settle_tx_meters();
+        let Some(tx) = self.tx.active.get_mut(&evse) else {
+            return;
+        };
+        tx.charging_state = state;
+        self.tx_event(
+            evse,
+            TransactionEventKind::Updated,
+            trigger,
+            EventExtra {
+                charging_state: Some(state),
+                ..EventExtra::default()
+            },
+        );
     }
 }
 
@@ -2398,11 +2487,14 @@ mod tests {
             offline: false,
         };
         // The order of `restore_persisted`: transactions first, then the queue.
-        a.tx_restore(TxPersist {
-            active: vec![restored(5)],
-            stopped_ids: (0..70).map(|i| format!("old-{i}")).collect(),
-            ..TxPersist::default()
-        });
+        a.tx_restore(
+            TxPersist {
+                active: vec![restored(5)],
+                stopped_ids: (0..70).map(|i| format!("old-{i}")).collect(),
+                ..TxPersist::default()
+            },
+            None,
+        );
         a.queue_restore(crate::station2::QueuePersist {
             events: vec![queued(3), queued(4)],
         });
@@ -2717,7 +2809,7 @@ mod tests {
         let mut restored: TxPersist = serde_json::from_value(json).expect("loads");
         restored.meters.insert(2, -1.0);
         let mut b = actor();
-        b.tx_restore(restored);
+        b.tx_restore(restored, None);
         assert_eq!(b.state.evses[0].meter_wh, 1234);
         assert_eq!(
             b.state.evses[1].meter_wh, 0,
@@ -2733,11 +2825,14 @@ mod tests {
     #[tokio::test]
     async fn the_register_of_a_restored_transaction_wins_over_the_start_value() {
         let mut a = actor();
-        a.tx_restore(TxPersist {
-            active: vec![restored(5)],
-            meters: BTreeMap::from([(1, 999.5)]),
-            ..TxPersist::default()
-        });
+        a.tx_restore(
+            TxPersist {
+                active: vec![restored(5)],
+                meters: BTreeMap::from([(1, 999.5)]),
+                ..TxPersist::default()
+            },
+            None,
+        );
         assert_eq!(a.state.evses[0].meter_wh, 999);
     }
 }

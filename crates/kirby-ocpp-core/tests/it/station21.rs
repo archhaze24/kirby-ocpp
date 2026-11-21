@@ -22,7 +22,7 @@ use crate::station2_support::{STEP, v201_csms, wait_booted, wait_snapshot};
 
 /// A mock CSMS that accepts only `ocpp2.1`. Its answers do not depend on the mock's own
 /// 2.1 defaults: every action the station sends gets a 2.1-valid answer from here.
-async fn v21_csms() -> MockCsms {
+pub(crate) async fn v21_csms() -> MockCsms {
     let csms = MockCsms::start(CsmsOptions {
         subprotocol: SubprotocolPolicy::Require("ocpp2.1".to_owned()),
         ..CsmsOptions::default()
@@ -232,7 +232,7 @@ async fn an_action_only_2_1_defines_gets_not_supported() {
 }
 
 #[tokio::test]
-async fn reset_immediate_and_resume_is_rejected_on_2_1_and_refused_by_schema_on_2_0_1() {
+async fn reset_resume_requires_a_timeout_on_2_1_and_is_refused_by_schema_on_2_0_1() {
     let csms = v21_csms().await;
     let (station, task) = booted(&csms, Protocol::V21).await;
     let reply = result_of(ask(&csms, "Reset", json!({"type": "ImmediateAndResume"})).await);
