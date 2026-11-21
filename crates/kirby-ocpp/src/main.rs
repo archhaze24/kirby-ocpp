@@ -33,8 +33,8 @@ use kirby_ocpp_core::link_view::{LinkSnapshot, StationLike};
 use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::recording::RecordSink;
 use kirby_ocpp_core::scenario::{
-    CancelToken, JunitRun, JunitSuite, Scenario, ScenarioReport, StepStatus, Vars, builtin,
-    junit_xml_runs_for, run_scenario_subscribed,
+    CancelToken, JunitRun, JunitSuite, Scenario, ScenarioReport, ScenarioTarget, StepStatus, Vars,
+    builtin, junit_xml_runs_for, run_scenario_subscribed,
 };
 use kirby_ocpp_core::{
     Station, Station2, Station2Handle, StationConfig, StationHandle, SystemClock,
@@ -250,7 +250,9 @@ async fn real_main() -> ExitCode {
         );
     }
 
-    if let Some(reason) = mode_gate(command.as_ref(), is_fleet, config.protocol) {
+    // `--json` is for machines: it never opens the terminal UI.
+    let tui = !no_tui && !json && std::io::stdout().is_terminal();
+    if let Some(reason) = mode_gate(command.as_ref(), is_fleet && tui, config.protocol) {
         return usage_error(&reason);
     }
     match command {
@@ -290,8 +292,6 @@ async fn real_main() -> ExitCode {
             unreachable!("handled above")
         }
         None => {
-            // `--json` is for machines: it never opens the terminal UI.
-            let tui = !no_tui && !json && std::io::stdout().is_terminal();
             if is_fleet {
                 return fleet::interactive(config, spec, tui, json, log_file.as_deref()).await;
             }
@@ -305,18 +305,16 @@ pub(crate) fn usage_error(error: &str) -> ExitCode {
     ExitCode::from(EXIT_USAGE)
 }
 
-/// The reason a mode cannot run with `protocol`: fleets and `replay` drive the 1.6 station
-/// only. `None` when the mode is available.
-fn mode_gate(command: Option<&Cmd>, is_fleet: bool, protocol: Protocol) -> Option<String> {
+/// The reason a mode cannot run with `protocol`, or `None` when it is available.
+fn mode_gate(command: Option<&Cmd>, fleet_tui: bool, protocol: Protocol) -> Option<String> {
     if protocol == Protocol::V16 {
         return None;
     }
     let token = protocol.token();
     match command {
         Some(Cmd::Replay(_)) => Some(format!("`replay` is not available for {token} yet")),
-        Some(Cmd::Check(_) | Cmd::Suite(_)) => None,
-        _ if is_fleet => Some(format!(
-            "fleet mode (--count > 1) is not available for {token} yet"
+        None if fleet_tui => Some(format!(
+            "the terminal UI does not show a fleet for {token} yet; add --no-tui"
         )),
         _ => None,
     }
@@ -801,12 +799,7 @@ impl AnyStation {
     ) -> Result<ScenarioReport, String> {
         match self {
             Self::V16(handle, _) => connect_and_run(handle, scenario, cancel, overrides, 1).await,
-            Self::V2(handle, _) => {
-                connect_and_run_with(handle, cancel, |events| {
-                    run_scenario_subscribed(handle, scenario, cancel, None, overrides, 1, events)
-                })
-                .await
-            }
+            Self::V2(handle, _) => connect_and_run(handle, scenario, cancel, overrides, 1).await,
         }
     }
 
@@ -1163,8 +1156,8 @@ async fn connect_and_wait_boot<H: StationLike>(
     }
 }
 
-pub(crate) async fn connect_and_run(
-    handle: &StationHandle,
+pub(crate) async fn connect_and_run<H: StationLike + ScenarioTarget>(
+    handle: &H,
     scenario: &Scenario,
     cancel: &CancelToken,
     overrides: &Vars,
@@ -1430,17 +1423,33 @@ mod tests {
     }
 
     #[test]
-    fn fleets_and_replays_are_gated_for_2_x_only() {
+    fn mode_gate_allows_2_x_fleets_except_in_the_terminal_ui() {
         let suite = Some(Cmd::Suite(SuiteArgs::for_sources(Vec::new())));
-        assert_eq!(mode_gate(suite.as_ref(), false, Protocol::V16), None);
-        assert_eq!(mode_gate(suite.as_ref(), false, Protocol::V201), None);
+        let run = Cmd::Run(RunArgs {
+            scenario: "smoke".to_owned(),
+            report: None,
+            junit: None,
+            persist: false,
+            timeout: 60,
+            id_tag: None,
+            vars: Vec::new(),
+        });
         assert_eq!(mode_gate(None, true, Protocol::V16), None);
-        assert!(
-            mode_gate(None, true, Protocol::V201)
-                .unwrap()
-                .contains("fleet mode")
-        );
-        assert_eq!(mode_gate(None, false, Protocol::V201), None);
+        for protocol in [Protocol::V201, Protocol::V21] {
+            assert_eq!(mode_gate(suite.as_ref(), false, protocol), None);
+            assert_eq!(mode_gate(None, false, protocol), None);
+            assert_eq!(mode_gate(Some(&run), true, protocol), None);
+            assert_eq!(
+                mode_gate(None, true, protocol).as_deref(),
+                Some(
+                    format!(
+                        "the terminal UI does not show a fleet for {} yet; add --no-tui",
+                        protocol.token()
+                    )
+                    .as_str()
+                )
+            );
+        }
     }
 
     #[test]

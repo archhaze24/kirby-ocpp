@@ -8,15 +8,18 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use futures_util::future::join_all;
-use kirby_ocpp_core::fleet::{Fleet, FleetSpec};
+use futures_util::future::{Either, join_all};
+use kirby_ocpp_core::error::StationError;
+use kirby_ocpp_core::fleet::{Fleet, FleetError, FleetEvents, FleetSpec, FleetSummary};
+use kirby_ocpp_core::fleet2::Fleet2;
 use kirby_ocpp_core::ids::ConnectorId;
+use kirby_ocpp_core::link_view::StationLike;
+use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::scenario::{
-    CancelToken, JunitRun, JunitSuite, OCPP_VERSION, SCHEMA_VERSION, ScenarioReport, TOOL_VERSION,
-    now_rfc3339,
+    CancelToken, JunitRun, JunitSuite, SCHEMA_VERSION, Scenario, ScenarioReport, ScenarioTarget,
+    TOOL_VERSION, Vars, now_rfc3339,
 };
-use kirby_ocpp_core::station::Snapshot;
-use kirby_ocpp_core::{Clock, StationConfig, SystemClock};
+use kirby_ocpp_core::{Clock, Station2Handle, StationConfig, StationHandle, SystemClock};
 use kirby_ocpp_tui::TuiError;
 use kirby_ocpp_tui::text::sanitize;
 use serde_json::{Value, json};
@@ -28,8 +31,82 @@ use crate::{
     override_vars, print_report, usage_error, write_junit, write_report,
 };
 
-fn clock() -> Arc<dyn Clock> {
-    Arc::new(SystemClock)
+enum AnyFleet {
+    V16(Fleet),
+    V2(Fleet2),
+}
+
+type Stations<'a, H> = &'a [(String, H)];
+
+impl AnyFleet {
+    fn spawn(config: &StationConfig, spec: &FleetSpec) -> Result<Self, FleetError> {
+        let clock: Arc<dyn Clock> = Arc::new(SystemClock);
+        if config.protocol == Protocol::V16 {
+            Fleet::spawn(config, spec, &clock).map(Self::V16)
+        } else {
+            Fleet2::spawn(config, spec, &clock).map(Self::V2)
+        }
+    }
+
+    fn stations(&self) -> Either<Stations<'_, StationHandle>, Stations<'_, Station2Handle>> {
+        match self {
+            Self::V16(fleet) => Either::Left(fleet.stations()),
+            Self::V2(fleet) => Either::Right(fleet.stations()),
+        }
+    }
+
+    fn subscribe(&self) -> FleetEvents {
+        match self {
+            Self::V16(fleet) => fleet.subscribe(),
+            Self::V2(fleet) => fleet.subscribe(),
+        }
+    }
+
+    fn stagger(&self) -> Duration {
+        match self {
+            Self::V16(fleet) => fleet.stagger(),
+            Self::V2(fleet) => fleet.stagger(),
+        }
+    }
+
+    async fn connect_all(&self) -> Vec<(String, StationError)> {
+        match self {
+            Self::V16(fleet) => fleet.connect_all().await,
+            Self::V2(fleet) => fleet.connect_all().await,
+        }
+    }
+
+    fn summary(&self) -> FleetSummary {
+        match self {
+            Self::V16(fleet) => fleet.summary(),
+            Self::V2(fleet) => fleet.summary(),
+        }
+    }
+
+    async fn shutdown(&mut self) {
+        match self {
+            Self::V16(fleet) => fleet.shutdown().await,
+            Self::V2(fleet) => fleet.shutdown().await,
+        }
+    }
+}
+
+/// Subscribes before connecting. The returned future resolves when every station gives up.
+fn watch_stations<H: StationLike>(
+    stations: Stations<'_, H>,
+) -> impl Future<Output = Vec<(String, String)>> + use<H> {
+    let watches: Vec<_> = stations
+        .iter()
+        .map(|(id, handle)| (id.clone(), LinkWatch::new(handle)))
+        .collect();
+    async move {
+        join_all(
+            watches
+                .into_iter()
+                .map(|(id, mut watch)| async move { (id, watch.dead().await) }),
+        )
+        .await
+    }
 }
 
 /// Connects every station and shows them in the terminal UI, or logs tagged events until
@@ -42,20 +119,19 @@ pub async fn interactive(
     json: bool,
     log_file: Option<&Path>,
 ) -> ExitCode {
-    let mut fleet = match Fleet::spawn(&config, &spec, &clock()) {
+    let mut fleet = match AnyFleet::spawn(&config, &spec) {
         Ok(fleet) => fleet,
         Err(error) => return usage_error(&error.to_string()),
     };
     // One watcher per station, subscribed before anything connects (also before the terminal UI
     // does). When every station has given up reconnecting the headless run ends with code 1
     // instead of idling.
-    let mut watches: Vec<(String, LinkWatch<Snapshot>)> = fleet
-        .stations()
-        .iter()
-        .map(|(id, handle)| (id.clone(), LinkWatch::new(handle)))
-        .collect();
+    let dead = match fleet.stations() {
+        Either::Left(stations) => Either::Left(watch_stations(stations)),
+        Either::Right(stations) => Either::Right(watch_stations(stations)),
+    };
     let mut sink = None;
-    if tui {
+    if tui && let AnyFleet::V16(fleet) = &mut fleet {
         if log_file.is_some() {
             match Sink::spawn_fleet(fleet.subscribe(), json, log_file, false) {
                 Ok(started) => sink = Some(started),
@@ -123,14 +199,6 @@ pub async fn interactive(
             }
         },
     };
-    let dead = async {
-        let all_dead = futures_util::future::join_all(
-            watches
-                .iter_mut()
-                .map(|(id, watch)| async move { (id.clone(), watch.dead().await) }),
-        );
-        all_dead.await
-    };
     let mut dead = std::pin::pin!(dead);
     let mut shutdown = crate::Shutdown::new();
     let interrupted = tokio::select! {
@@ -190,7 +258,7 @@ pub async fn run(
     ) {
         return usage_error(&error);
     }
-    let mut fleet = match Fleet::spawn(&config, &spec, &clock()) {
+    let mut fleet = match AnyFleet::spawn(&config, &spec) {
         Ok(fleet) => fleet,
         Err(error) => return usage_error(&error.to_string()),
     };
@@ -219,23 +287,28 @@ pub async fn run(
     let stagger = fleet.stagger();
     let overrides = override_vars(&args.vars);
     let first_index = u64::from(spec.first_index);
-    let runs = fleet
-        .stations()
-        .iter()
-        .enumerate()
-        .map(|(index, (_, handle))| {
-            let (scenario, cancel, overrides) = (&scenario, &cancel, &overrides);
-            async move {
-                let delay = stagger.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX));
-                wait_or_cancel(delay, cancel).await;
-                let index = first_index.saturating_add(index as u64);
-                connect_and_run(handle, scenario, cancel, overrides, index).await
-            }
-        });
+    let runs = match fleet.stations() {
+        Either::Left(stations) => Either::Left(run_stations(
+            stations,
+            &scenario,
+            &cancel,
+            &overrides,
+            stagger,
+            first_index,
+        )),
+        Either::Right(stations) => Either::Right(run_stations(
+            stations,
+            &scenario,
+            &cancel,
+            &overrides,
+            stagger,
+            first_index,
+        )),
+    };
     let mut interrupted = false;
     let mut shutdown = crate::Shutdown::new();
     let outcomes = tokio::select! {
-        outcomes = join_all(runs) => Some(outcomes),
+        outcomes = runs => Some(outcomes),
         sigint = shutdown.recv() => {
             interrupted = sigint;
             cancel.cancel();
@@ -243,7 +316,12 @@ pub async fn run(
         }
     };
     timer.abort();
-    let ids: Vec<String> = fleet.stations().iter().map(|(id, _)| id.clone()).collect();
+    let ids: Vec<String> = fleet
+        .summary()
+        .stations
+        .into_iter()
+        .map(|station| station.id)
+        .collect();
     fleet.shutdown().await;
     sink.finish().await;
 
@@ -297,7 +375,7 @@ pub async fn run(
                 stations.push(json!({
                     "station": id,
                     "schema": SCHEMA_VERSION,
-                    "ocpp_version": OCPP_VERSION,
+                    "ocpp_version": config.protocol.ocpp_version(),
                     "tool_version": TOOL_VERSION,
                     "scenario": identity["scenario"],
                     "source": identity["source"],
@@ -328,6 +406,7 @@ pub async fn run(
         }
     }
     let head = FleetHead {
+        ocpp_version: config.protocol.ocpp_version(),
         scenario: &scenario.name,
         source: scenario.source.as_deref(),
         started_at: &started_at,
@@ -340,6 +419,28 @@ pub async fn run(
     } else {
         ExitCode::SUCCESS
     }
+}
+
+async fn run_stations<H: StationLike + ScenarioTarget>(
+    stations: Stations<'_, H>,
+    scenario: &Scenario,
+    cancel: &CancelToken,
+    overrides: &Vars,
+    stagger: Duration,
+    first_index: u64,
+) -> Vec<Result<ScenarioReport, String>> {
+    join_all(
+        stations
+            .iter()
+            .enumerate()
+            .map(|(index, (_, handle))| async move {
+                let delay = stagger.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX));
+                wait_or_cancel(delay, cancel).await;
+                let index = first_index.saturating_add(index as u64);
+                connect_and_run(handle, scenario, cancel, overrides, index).await
+            }),
+    )
+    .await
 }
 
 /// Sleeps for `delay`, or until the run is cancelled.
@@ -386,6 +487,7 @@ fn write_fleet_junit(
 
 /// Run-level fields of the fleet report.
 struct FleetHead<'a> {
+    ocpp_version: &'a str,
     scenario: &'a str,
     source: Option<&'a str>,
     started_at: &'a str,
@@ -410,14 +512,10 @@ fn print_aggregate(
     let passed = total - failed.len();
     if json {
         let count = |status: &str| stations.iter().filter(|s| s["status"] == status).count();
-        let ocpp_version = stations
-            .iter()
-            .find_map(|s| s["ocpp_version"].as_str())
-            .unwrap_or(OCPP_VERSION);
         let value = json!({
             "type": "fleet_report",
             "schema": SCHEMA_VERSION,
-            "ocpp_version": ocpp_version,
+            "ocpp_version": head.ocpp_version,
             "tool_version": TOOL_VERSION,
             "scenario": head.scenario,
             "source": head.source,

@@ -178,25 +178,31 @@ async fn version_lists_2_1() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_count_above_one_exits_2_naming_the_version() {
+async fn a_2_1_headless_fleet_exits_when_both_stations_give_up() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
     let output = kirby(strings(&[
         "--url",
-        URL,
+        csms.url(),
         "--protocol",
         "ocpp2.1",
         "--id",
         "CP-{n}",
         "--count",
         "2",
+        "--no-persist",
+        "--no-reconnect",
         "--no-tui",
     ]))
     .await;
-    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
-    assert!(
-        stderr(&output).contains("fleet mode") && stderr(&output).contains("ocpp2.1"),
-        "{}",
-        stderr(&output)
-    );
+    let errors = stderr(&output);
+    assert_eq!(output.status.code(), Some(1), "{errors}");
+    for id in ["CP-1", "CP-2"] {
+        assert!(
+            errors.contains(&format!("error: [{id}] reconnect stopped")),
+            "{errors}"
+        );
+    }
+    csms.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

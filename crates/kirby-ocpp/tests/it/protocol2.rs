@@ -490,37 +490,19 @@ fn version_lists_the_protocols() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fleet_suite_and_replay_exit_2_with_2_0_1() {
+async fn replay_exits_2_with_2_0_1_even_in_fleet_mode() {
     let dir = tempfile::tempdir().unwrap();
     let recording = write(
         dir.path(),
         "r.jsonl",
         &json!({"type": "header", "schema": 1, "ocpp_version": "1.6", "tool_version": "1", "role": "emulator", "station": "X", "started_at": "2026-01-01T00:00:00Z"}).to_string(),
     );
-    let cases: Vec<(Vec<&str>, &str)> = vec![
-        (
-            vec!["--id", "CP-{n}", "--count", "2", "--no-tui"],
-            "fleet mode",
-        ),
-        (
-            vec![
-                "--id",
-                "CP-{n}",
-                "--count",
-                "2",
-                "run",
-                "--scenario",
-                "charge-session",
-            ],
-            "fleet mode",
-        ),
-        (vec!["replay", &recording], "`replay`"),
-    ];
-    for (extra, needle) in cases {
+    for extra in [&[][..], &["--id", "CP-{n}", "--count", "2"][..]] {
         let mut args: Vec<String> = ["--url", URL, "--protocol", "ocpp2.0.1"]
             .map(String::from)
             .into();
         args.extend(extra.iter().map(|s| (*s).to_owned()));
+        args.extend(["replay".to_owned(), recording.clone()]);
         let output = run_async(args.clone()).await;
         assert_eq!(
             output.status.code(),
@@ -529,7 +511,7 @@ async fn fleet_suite_and_replay_exit_2_with_2_0_1() {
             stderr(&output)
         );
         assert!(
-            stderr(&output).contains(needle) && stderr(&output).contains("ocpp2.0.1"),
+            stderr(&output).contains("`replay` is not available for ocpp2.0.1 yet"),
             "{args:?}: {}",
             stderr(&output)
         );
@@ -621,6 +603,32 @@ fn run_refuses_a_scenario_for_another_version() {
     let text = rejected(&["--url", URL, "run", "--scenario", &v201], &[]);
     assert!(
         text.contains("scenario plain is for OCPP 2.0.1; this station speaks ocpp1.6"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_2_x_fleet_refuses_a_1_6_scenario() {
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = write(dir.path(), "v16.toml", SCENARIO_V16);
+    let text = rejected(
+        &[
+            "--url",
+            URL,
+            "--protocol",
+            "ocpp2.0.1",
+            "--id",
+            "CP-{n}",
+            "--count",
+            "2",
+            "run",
+            "--scenario",
+            &scenario,
+        ],
+        &[],
+    );
+    assert!(
+        text.contains("scenario plain is for OCPP 1.6; this station speaks ocpp2.0.1"),
         "{text}"
     );
 }

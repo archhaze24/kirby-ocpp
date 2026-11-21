@@ -5,12 +5,15 @@ use std::process::{Command, Output, Stdio};
 #[cfg(unix)]
 use std::time::Duration;
 
-use kirby_ocpp_testkit::{CsmsOptions, MockCsms};
+use kirby_ocpp_testkit::{CsmsOptions, MockCsms, SubprotocolPolicy};
 use serde_json::Value;
 use tempfile::TempDir;
 
 #[cfg(unix)]
 const STEP: Duration = Duration::from_secs(10);
+
+const SCENARIO_V21: &str =
+    "name = \"plain\"\nocpp_version = \"2.1\"\n\n[[steps]]\naction = \"heartbeat\"\n";
 
 fn command(args: &[&str]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_kirby-ocpp"));
@@ -300,13 +303,36 @@ async fn single_station_output_stays_untagged() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn headless_fleet_tags_lines_and_shuts_down_on_sigterm() {
-    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    headless_fleet_tags_boots("ocpp1.6").await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn headless_2_0_1_fleet_tags_lines_and_shuts_down_on_sigterm() {
+    headless_fleet_tags_boots("ocpp2.0.1").await;
+}
+
+#[cfg(unix)]
+async fn headless_fleet_tags_boots(protocol: &str) {
+    let csms = MockCsms::start(CsmsOptions {
+        subprotocol: SubprotocolPolicy::Require(protocol.to_owned()),
+        ..CsmsOptions::default()
+    })
+    .await
+    .unwrap();
     let dir = tempfile::tempdir().unwrap();
     let log = dir.path().join("events.log");
     let args = fleet_args(
         &csms,
         "3",
-        &["--log-file", log.to_str().unwrap(), "--stagger-ms", "5"],
+        &[
+            "--protocol",
+            protocol,
+            "--log-file",
+            log.to_str().unwrap(),
+            "--stagger-ms",
+            "5",
+        ],
     );
     let child = crate::support::ChildGuard::spawn(
         command(&args.iter().map(String::as_str).collect::<Vec<_>>())
@@ -340,6 +366,88 @@ async fn headless_fleet_tags_lines_and_shuts_down_on_sigterm() {
         text.lines().count(),
         "log file mirrors stdout"
     );
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_2_1_fleet_runs_the_scenario_on_each_station() {
+    let csms = MockCsms::start(CsmsOptions {
+        subprotocol: SubprotocolPolicy::Require("ocpp2.1".to_owned()),
+        ..CsmsOptions::default()
+    })
+    .await
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = write(&dir, "plain.toml", SCENARIO_V21);
+    let report = dir.path().join("report.json");
+    let junit = dir.path().join("junit.xml");
+    let args = [
+        "--protocol",
+        "ocpp2.1",
+        "run",
+        "--scenario",
+        &scenario,
+        "--report",
+        report.to_str().unwrap(),
+        "--junit",
+        junit.to_str().unwrap(),
+    ];
+    let output = run(fleet_args(&csms, "2", &args)).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("fleet: 2/2 stations PASSED"), "{text}");
+    let xml = std::fs::read_to_string(junit).unwrap();
+    for id in ["CP-1", "CP-2"] {
+        assert!(text.contains(&format!("[{id}] PASSED")), "{text}");
+        let file = std::fs::read(report.with_file_name(format!("report.{id}.json"))).unwrap();
+        let report: Value = serde_json::from_slice(&file).unwrap();
+        assert_eq!(report["ocpp_version"], "2.1");
+        assert_eq!(report["station"], id);
+        assert_eq!(report["status"], "passed");
+        assert!(
+            xml.contains(&format!("classname=\"ocpp2.1.plain [{id}]\"")),
+            "{xml}"
+        );
+    }
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fleet_json_reports_the_2_1_version_when_all_stations_fail_to_boot() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario = write(&dir, "plain.toml", SCENARIO_V21);
+    let output = run(fleet_args(
+        &csms,
+        "2",
+        &[
+            "--protocol",
+            "ocpp2.1",
+            "--no-reconnect",
+            "--json",
+            "run",
+            "--scenario",
+            &scenario,
+        ],
+    ))
+    .await;
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let lines = jsonl(&output);
+    let (aggregate, events) = lines.split_last().unwrap();
+    assert!(events.iter().all(|line| line["station"].is_string()));
+    assert_eq!(aggregate["type"], "fleet_report");
+    assert_eq!(aggregate["ocpp_version"], "2.1");
+    assert_eq!(aggregate["counts"]["error"], 2);
+    for (entry, id) in aggregate["stations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(["CP-1", "CP-2"])
+    {
+        assert_eq!(entry["station"], id);
+        assert_eq!(entry["ocpp_version"], "2.1");
+        assert_eq!(entry["status"], "error");
+    }
     csms.shutdown().await;
 }
 
