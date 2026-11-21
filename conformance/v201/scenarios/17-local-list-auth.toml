@@ -1,6 +1,6 @@
 name = "conformance-v201-local-list-auth"
 ocpp_version = "2.0.1"
-description = "A Local Authorization List that survives a reboot, and online authorization with LocalPreAuthorize: Blocked and Expired entries are checked with the CSMS, and an Invalid entry of the group of a running transaction neither starts nor changes it"
+description = "A Local Authorization List that survives a reboot, and online authorization with LocalPreAuthorize: Blocked and Expired entries are checked with the CSMS, an Invalid token of the same group leaves the transaction running, and an Accepted token of the same group can stop it"
 tags = ["conformance", "ocpp2.0.1"]
 
 # The CSMS script sends a full list (version 5) of four tokens: BADTAG (Blocked), EXPIREDAUTH
@@ -178,6 +178,60 @@ action = "expect_call"
 call = "TransactionEvent"
 direction = "out"
 match = { triggerReason = "StopAuthorized" }
+timeout_ms = 5000
+
+[[steps]]
+action = "wait_for"
+condition = { kind = "tx_idle", evse = 1 }
+
+# An Accepted token of the same group stops the transaction
+
+[[steps]]
+name = "tell the CSMS the station is ready for the list update"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:local-list-auth-group"
+
+[[steps]]
+name = "SendLocalList adds two Accepted tokens of the same group"
+action = "expect_call"
+call = "SendLocalList"
+direction = "in"
+match = { updateType = "Differential", versionNumber = 6 }
+
+[[steps]]
+name = "the CSMS has seen the list update answer"
+action = "expect_call"
+call = "DataTransfer"
+direction = "in"
+match = { vendorId = "kirby-ocpp.conformance", messageId = "go:local-list-auth-group" }
+
+[[steps]]
+name = "the first token of the group starts a transaction"
+action = "start_tx"
+evse = 1
+id_token = "CONF-LIST-A"
+
+[[steps]]
+name = "the transaction starts with the first token"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Started", idToken = { idToken = "CONF-LIST-A" } }
+timeout_ms = 5000
+
+[[steps]]
+name = "the second token of the group stops the transaction"
+action = "present_token"
+evse = 1
+id_token = "CONF-LIST-B"
+
+[[steps]]
+name = "the transaction ends with the second token"
+action = "expect_call"
+call = "TransactionEvent"
+direction = "out"
+match = { eventType = "Ended", triggerReason = "StopAuthorized", idToken = { idToken = "CONF-LIST-B" } }
 timeout_ms = 5000
 
 [[steps]]

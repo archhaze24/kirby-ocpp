@@ -1,6 +1,6 @@
 name = "conformance-v201-get-report"
 ocpp_version = "2.0.1"
-description = "GetReport with component criteria, with a component and variable, with both, with a criterion nothing meets, and with one instance of a variable that has several"
+description = "GetReport with component criteria, with a component and variable, with both, with a criterion nothing meets, and with selectors for one or all variable instances and EVSEs"
 tags = ["conformance", "ocpp2.0.1"]
 
 # The CSMS script sends one GetReport after the other and waits for the report of each one.
@@ -109,6 +109,48 @@ action = "expect_call"
 call = "NotifyReport"
 direction = "out"
 match = { requestId = 45, seqNo = 0, reportData = [{ variable = { name = "ItemsPerMessage", instance = "GetReport" } }] }
+
+[[steps]]
+name = "let the CSMS send the next report request"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:get-report-4"
+
+# A variable without an instance and a component without an EVSE id
+
+[[steps]]
+name = "GetReport for all ItemsPerMessage instances arrives"
+action = "expect_call"
+call = "GetReport"
+direction = "in"
+match = { requestId = 46, componentVariable = [{ component = { name = "DeviceDataCtrlr" }, variable = { name = "ItemsPerMessage" } }] }
+
+[[steps]]
+name = "the report holds every ItemsPerMessage instance"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { requestId = 46, seqNo = 0, reportData = [{ variable = { name = "ItemsPerMessage", instance = "GetReport" } }, { variable = { name = "ItemsPerMessage", instance = "GetVariables" } }, { variable = { name = "ItemsPerMessage", instance = "SetVariables" } }] }
+
+[[steps]]
+name = "let the CSMS send the next report request"
+action = "data_transfer"
+vendor_id = "kirby-ocpp.conformance"
+message_id = "ready:get-report-5"
+
+[[steps]]
+name = "GetReport for the availability state of every EVSE arrives"
+action = "expect_call"
+call = "GetReport"
+direction = "in"
+match = { requestId = 47, componentVariable = [{ component = { name = "EVSE" }, variable = { name = "AvailabilityState" } }] }
+
+[[steps]]
+name = "the report holds the availability state of the station's only EVSE"
+action = "expect_call"
+call = "NotifyReport"
+direction = "out"
+match = { requestId = 47, seqNo = 0, reportData = [{ component = { name = "EVSE", evse = { id = 1 } }, variable = { name = "AvailabilityState" } }] }
 
 [[steps]]
 name = "tell the CSMS the scenario is over"

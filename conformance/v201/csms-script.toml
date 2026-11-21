@@ -1842,6 +1842,54 @@ payload_contains = { requestId = 45, seqNo = 0 }
 timeout_ms = 10000
 
 [[steps]]
+name = "get-report: the station is done with the report"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:get-report-4" }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: a variable without an instance is Accepted"
+action = "call"
+station = "${station}"
+call = "GetReport"
+payload = { requestId = 46, componentVariable = [{ component = { name = "DeviceDataCtrlr" }, variable = { name = "ItemsPerMessage" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "get-report: the report of all instances arrives"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 46, seqNo = 0 }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: the station is done with the report"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:get-report-5" }
+timeout_ms = 10000
+
+[[steps]]
+name = "get-report: a component without an EVSE id is Accepted"
+action = "call"
+station = "${station}"
+call = "GetReport"
+payload = { requestId = 47, componentVariable = [{ component = { name = "EVSE" }, variable = { name = "AvailabilityState" } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "get-report: the report of all EVSEs arrives"
+action = "wait_call"
+call = "NotifyReport"
+station = "${station}"
+payload_contains = { requestId = 47, seqNo = 0 }
+timeout_ms = 10000
+
+[[steps]]
 name = "get-report: scenario over"
 action = "wait_call"
 call = "DataTransfer"
@@ -2039,6 +2087,29 @@ action = "call"
 station = "${station}"
 call = "DataTransfer"
 payload = { vendorId = "${vendor}", messageId = "go:local-list-auth-invalid" }
+
+[[steps]]
+name = "local-list-auth: the station is ready for the list update"
+action = "wait_call"
+call = "DataTransfer"
+station = "${station}"
+payload_contains = { vendorId = "${vendor}", messageId = "ready:local-list-auth-group" }
+timeout_ms = 30000
+
+[[steps]]
+name = "local-list-auth: two Accepted tokens share a group"
+action = "call"
+station = "${station}"
+call = "SendLocalList"
+payload = { versionNumber = 6, updateType = "Differential", localAuthorizationList = [{ idToken = { idToken = "CONF-LIST-A", type = "ISO14443" }, idTokenInfo = { status = "Accepted", groupIdToken = { idToken = "CONF-LIST-GROUP", type = "Central" } } }, { idToken = { idToken = "CONF-LIST-B", type = "ISO14443" }, idTokenInfo = { status = "Accepted", groupIdToken = { idToken = "CONF-LIST-GROUP", type = "Central" } } }] }
+expect_status = "Accepted"
+
+[[steps]]
+name = "local-list-auth: go"
+action = "call"
+station = "${station}"
+call = "DataTransfer"
+payload = { vendorId = "${vendor}", messageId = "go:local-list-auth-group" }
 
 [[steps]]
 name = "local-list-auth: scenario over"
