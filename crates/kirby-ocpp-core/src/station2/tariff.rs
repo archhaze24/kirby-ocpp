@@ -27,6 +27,8 @@ use crate::ocpp::v2::messages::{
 use crate::ocpp::v2::types::{Component, StatusInfo, Variable};
 use crate::station::LogLevel;
 
+/// Bounds the memory used by stored tariffs.
+const MAX_TARIFF_BYTES: usize = 16 * 1024;
 const FUTURE_LIMIT: usize = 4;
 const DRIVER_LIMIT: usize = 32;
 const CENTRAL_COST_LIMIT: usize = 1024;
@@ -90,6 +92,24 @@ fn number(value: &Value) -> Result<f64, InvalidTariff> {
         .ok_or(InvalidTariff::InvalidValue)
 }
 
+pub(super) fn tariff_size_ok(raw: &Value) -> bool {
+    serde_json::to_vec(raw).is_ok_and(|bytes| bytes.len() <= MAX_TARIFF_BYTES)
+}
+
+fn tax_stack(rate: &Value) -> i64 {
+    let Some(stack) = rate.get("stack") else {
+        return 0;
+    };
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "JSON Schema accepts integral floats; values outside i64 saturate"
+    )]
+    stack
+        .as_i64()
+        .or_else(|| stack.as_f64().map(|value| value as i64))
+        .unwrap_or_default()
+}
+
 fn tax_rates(field: &Value) -> Result<f64, InvalidTariff> {
     let Some(rates) = field.get("taxRates").and_then(Value::as_array) else {
         return Ok(1.0);
@@ -97,14 +117,13 @@ fn tax_rates(field: &Value) -> Result<f64, InvalidTariff> {
     let mut rates = rates
         .iter()
         .map(|rate| {
-            let stack = rate.get("stack").and_then(Value::as_f64).unwrap_or(0.0);
             let tax = number(rate.get("tax").unwrap_or(&Value::Null))?;
-            Ok((stack, tax / 100.0))
+            Ok((tax_stack(rate), tax / 100.0))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    rates.sort_by(|(a, _), (b, _)| a.total_cmp(b));
+    rates.sort_by_key(|(stack, _)| *stack);
     let mut factor = 1.0_f64;
-    for rates in rates.chunk_by(|(a, _), (b, _)| a.total_cmp(b).is_eq()) {
+    for rates in rates.chunk_by(|(a, _), (b, _)| a == b) {
         factor *= 1.0 + rates.iter().map(|(_, tax)| tax).sum::<f64>();
     }
     Ok(factor.min(f64::MAX))
@@ -120,6 +139,9 @@ fn cost_bound(field: &Value) -> Result<CostBound, InvalidTariff> {
 
 impl Tariff {
     pub(super) fn parse(raw: Value, max_elements: usize) -> Result<Self, InvalidTariff> {
+        if !tariff_size_ok(&raw) {
+            return Err(InvalidTariff::TooManyElements);
+        }
         let invalid = InvalidTariff::InvalidValue;
         let id = raw.get("tariffId").and_then(Value::as_str).ok_or(invalid)?;
         let currency = raw.get("currency").and_then(Value::as_str).ok_or(invalid)?;
@@ -371,7 +393,13 @@ impl Station2Actor {
     pub(super) fn forget_driver_tariff(&mut self, token: &IdTokenRef) {
         self.tariffs.central_cost.retain(|entry| entry != token);
         self.take_unplaced_driver(token);
-        self.remove_driver_tariff(token, None);
+        if let Some(index) =
+            self.tariffs.drivers.iter().position(|(entry, tariff)| {
+                entry == token && !self.driver_in_use(entry, &tariff.id)
+            })
+        {
+            self.tariffs.drivers.remove(index);
+        }
     }
 
     pub(super) fn take_unplaced_driver(&mut self, token: &IdTokenRef) -> Option<Tariff> {
@@ -390,13 +418,18 @@ impl Station2Actor {
         }
     }
 
-    pub(super) fn remove_driver_tariff(&mut self, token: &IdTokenRef, tariff_id: Option<&str>) {
-        if let Some(index) = self.tariffs.drivers.iter().position(|(entry, tariff)| {
-            entry == token
-                && tariff_id.is_none_or(|id| id == tariff.id)
-                && !self.driver_in_use(entry, &tariff.id)
+    pub(super) fn remove_ended_driver_tariff(&mut self, token: &IdTokenRef) {
+        if !self.evses.iter().any(|evse| {
+            self.active_tx(evse.id).is_some_and(|tx| {
+                tx.token.as_ref() == Some(token)
+                    || tx
+                        .tariff
+                        .as_ref()
+                        .and_then(|state| state.driver_binding())
+                        .is_some_and(|(bound, _)| bound == token)
+            })
         }) {
-            self.tariffs.drivers.remove(index);
+            self.tariffs.drivers.retain(|(entry, _)| entry != token);
         }
     }
 
@@ -458,19 +491,19 @@ impl Station2Actor {
         token: Option<&IdTokenRef>,
         offered: Option<Tariff>,
     ) -> Option<(Tariff, Option<IdTokenRef>)> {
-        if !self.local_tariffs_enabled() {
+        let central_cost = token
+            .and_then(|token| {
+                self.tariffs
+                    .central_cost
+                    .iter()
+                    .position(|entry| entry == token)
+            })
+            .and_then(|index| self.tariffs.central_cost.remove(index))
+            .is_some();
+        if central_cost || !self.local_tariffs_enabled() {
             return None;
         }
         if let Some(token) = token {
-            if let Some(index) = self
-                .tariffs
-                .central_cost
-                .iter()
-                .position(|entry| entry == token)
-            {
-                self.tariffs.central_cost.remove(index);
-                return None;
-            }
             if let Some(tariff) = offered {
                 return Some((tariff, Some(token.clone())));
             }
@@ -573,6 +606,12 @@ fn status_info(reason: &str) -> StatusInfo {
     }
 }
 
+fn known_tariff_evse(actor: &Station2Actor, id: u64) -> Option<u32> {
+    u32::try_from(id)
+        .ok()
+        .filter(|&id| id == 0 || actor.evse(id).is_some())
+}
+
 pub(super) fn set_default_tariff(
     actor: &mut Station2Actor,
     responder: Responder<SetDefaultTariff>,
@@ -607,10 +646,9 @@ fn install_default(
     request: SetDefaultTariffRequest,
 ) -> Result<(), (TariffSetStatus, Option<&'static str>)> {
     use TariffSetStatus as Status;
-    let evse = request.evse_id;
-    if evse != 0 && actor.evse(evse).is_none() {
+    let Some(evse) = known_tariff_evse(actor, request.evse_id) else {
         return Err((Status::Rejected, Some("UnknownEVSE")));
-    }
+    };
     let tariff = actor
         .parse_tariff(request.tariff)
         .map_err(|error| match error {
@@ -705,16 +743,16 @@ pub(super) fn get_tariffs(
         return;
     }
     actor.prune_default_tariffs();
-    let evse = request.evse_id;
-    let (status, reason, tariff_assignments) = if evse != 0 && actor.evse(evse).is_none() {
-        (TariffGetStatus::Rejected, Some("UnknownEVSE"), None)
-    } else {
+    let evse = known_tariff_evse(actor, request.evse_id);
+    let (status, reason, tariff_assignments) = if let Some(evse) = evse {
         let entries = assignments(actor, evse);
         if entries.is_empty() {
             (TariffGetStatus::NoTariff, None, None)
         } else {
             (TariffGetStatus::Accepted, None, Some(entries))
         }
+    } else {
+        (TariffGetStatus::Rejected, Some("UnknownEVSE"), None)
     };
     actor.respond(
         responder,
@@ -748,11 +786,9 @@ pub(super) fn clear_tariffs(
         custom_data: None,
     };
     actor.prune_default_tariffs();
-    let evse = request.evse_id.unwrap_or(0);
+    let evse = known_tariff_evse(actor, request.evse_id.unwrap_or(0));
     let mut removed = BTreeSet::new();
-    let clear_tariffs_result = if evse != 0 && actor.evse(evse).is_none() {
-        vec![result(Status::Rejected, None, Some("UnknownEVSE"))]
-    } else {
+    let clear_tariffs_result = if let Some(evse) = evse {
         let requested = request
             .tariff_ids
             .map(|ids| ids.into_iter().collect::<BTreeSet<_>>());
@@ -784,6 +820,8 @@ pub(super) fn clear_tariffs(
                 })
                 .collect()
         }
+    } else {
+        vec![result(Status::Rejected, None, Some("UnknownEVSE"))]
     };
     actor.respond(
         responder,
@@ -864,6 +902,13 @@ mod tests {
             raw["validFrom"] = json!(at);
         }
         raw
+    }
+
+    #[test]
+    fn tariff_review_tax_stacks_group_negative_zero_with_default() {
+        let field = json!({"taxRates":[{"type":"A","tax":10,"stack":-0.0},{"type":"B","tax":20}]});
+        let factor = tax_rates(&field).unwrap();
+        assert!((factor * 100.0 - 130.0).abs() < 1e-10, "factor: {factor}");
     }
 
     #[test]

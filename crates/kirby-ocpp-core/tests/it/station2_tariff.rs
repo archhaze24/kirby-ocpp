@@ -4,8 +4,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{TimeDelta, Utc};
-use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::v2::types::{ChargingState, IdTokenType};
+use kirby_ocpp_core::ocpp::{Protocol, SchemaRegistry};
 use kirby_ocpp_core::station::Event;
 use kirby_ocpp_core::{
     Clock, Command2, ManualClock, Outcome2, Station2, Station2Handle, SystemClock,
@@ -902,6 +902,304 @@ async fn tariff_change_sets_a_new_period_and_rejects_bad_targets() {
             .unwrap()
             .len(),
         1
+    );
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn tariff_review_rejects_oversized_payloads() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    enable(&csms, false).await;
+    let mut tariff = energy("oversized", 1.0);
+    tariff["description"] = json!(vec![
+        json!({
+            "format":"UTF8","content":"🟢".repeat(1024)
+        });
+        5
+    ]);
+    assert_eq!(
+        install(&csms, 1, tariff.clone()).await["status"],
+        "TooManyElements"
+    );
+    assert_eq!(get(&csms, 0).await, json!({"status":"NoTariff"}));
+
+    let started = start(&csms, &station).await;
+    assert_eq!(
+        call(
+            &csms,
+            "ChangeTransactionTariff",
+            json!({"transactionId":started["transactionInfo"]["transactionId"],"tariff":tariff})
+        )
+        .await["status"],
+        "TooManyElements"
+    );
+    end(&csms, &station).await;
+
+    csms.respond("Authorize", move |_| {
+        Reply::Result(json!({"idTokenInfo":{"status":"Accepted"},"tariff":tariff}))
+    });
+    let mark = csms.mark();
+    let result = send(
+        &station,
+        Command2::Authorize {
+            id_token: "oversized".to_owned(),
+            token_type: IdTokenType::Local,
+        },
+    )
+    .await;
+    assert!(matches!(result, Outcome2::Authorized { status, .. } if status == "Invalid"));
+    let raised = csms
+        .wait_for_call_after(mark, "NotifyEvent", |_| true, STEP)
+        .await
+        .unwrap();
+    assert_eq!(raised["eventData"][0]["techCode"], "TooManyElements");
+    stop(&station, task).await;
+    let state = loaded2(store(dir.path()).load2().unwrap());
+    assert_eq!(state.auth_cache.entries.len(), 0);
+}
+
+#[tokio::test]
+async fn tariff_review_ordinary_settle_caps_billed_energy() {
+    let csms = v21_csms().await;
+    csms.respond("TransactionEvent", |request| {
+        Reply::Result(if request["eventType"] == "Started" {
+            json!({"transactionLimit":{"maxEnergy":1.0}})
+        } else {
+            json!({})
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    enable(&csms, false).await;
+    let mut tariff = energy("energy", 1.0);
+    tariff["maxCost"] = json!({"exclTax":0.002});
+    install(&csms, 1, tariff).await;
+    let mark = csms.mark();
+    start(&csms, &station).await;
+    event(&csms, mark, "triggerReason", "LimitSet").await;
+
+    timeout(STEP, async {
+        loop {
+            let mark = csms.mark();
+            send(&station, Command2::SampleMeter { evse: 1 }).await;
+            event(&csms, mark, "triggerReason", "MeterValuePeriodic").await;
+            if station.snapshot().evse(1).unwrap().meter_wh >= 1 {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("ordinary meter samples reach the energy cap");
+    let ended = end(&csms, &station).await;
+    let cost = &ended["costDetails"];
+    assert_eq!(cost["totalUsage"]["energy"], 1.0);
+    assert_eq!(cost["totalCost"]["energy"]["exclTax"], 0.001);
+    assert_eq!(cost["totalCost"]["typeOfCost"], "NormalCost");
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn tariff_review_transaction_end_clears_refreshed_driver_tariff() {
+    let csms = v21_csms().await;
+    csms.respond("Authorize", |_| {
+        Reply::Result(json!({"idTokenInfo":{"status":"Accepted"},"tariff":energy("A", 1.0)}))
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    enable(&csms, false).await;
+    set_variables(
+        &csms,
+        &[
+            ("AuthCacheCtrlr", "Enabled", None, "true"),
+            ("AuthCtrlr", "LocalPreAuthorize", None, "true"),
+        ],
+    )
+    .await;
+    install(&csms, 1, energy("default", 1.0)).await;
+    let authorize = || Command2::Authorize {
+        id_token: "TAG".to_owned(),
+        token_type: IdTokenType::Local,
+    };
+    send(&station, authorize()).await;
+
+    csms.respond("Authorize", |_| {
+        Reply::Result(json!({"idTokenInfo":{"status":"Accepted"},"tariff":energy("B", 2.0)}))
+    });
+    let mark = csms.mark();
+    send(&station, Command2::PlugIn { evse: 1 }).await;
+    present(&station, "TAG", IdTokenType::Local).await;
+    let started = event(&csms, mark, "eventType", "Started").await;
+    assert_eq!(started["transactionInfo"]["tariffId"], "A");
+    assert_eq!(
+        get(&csms, 0).await["tariffAssignments"][2],
+        json!({"tariffId":"B","tariffKind":"DriverTariff","idTokens":["TAG"]})
+    );
+    end(&csms, &station).await;
+    assert_eq!(
+        get(&csms, 0).await["tariffAssignments"],
+        json!([{"tariffId":"default","tariffKind":"DefaultTariff","evseIds":[1]}])
+    );
+
+    csms.respond("Authorize", |_| {
+        Reply::Result(json!({"idTokenInfo":{"status":"Accepted"}}))
+    });
+    send(&station, authorize()).await;
+    let mark = csms.mark();
+    send(&station, Command2::PlugIn { evse: 1 }).await;
+    present(&station, "TAG", IdTokenType::Local).await;
+    let started = event(&csms, mark, "eventType", "Started").await;
+    assert_eq!(started["transactionInfo"]["tariffId"], "default");
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn tariff_review_offline_events_survive_downgrade_to_2_0_1() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    enable(&csms, false).await;
+    install(&csms, 1, energy("default", 1.0)).await;
+    send(&station, Command2::Disconnect).await;
+    send(&station, Command2::PlugIn { evse: 1 }).await;
+    present(&station, "TAG", IdTokenType::Central).await;
+    send(&station, Command2::Unplug { evse: 1 }).await;
+    stop(&station, task).await;
+
+    let state = loaded2(store(dir.path()).load2().unwrap());
+    let mut expected: Vec<_> = state.queue.events.into_iter().map(|e| e.payload).collect();
+    assert_eq!(expected[0]["transactionInfo"]["tariffId"], "default");
+    let ended = expected.last().unwrap();
+    assert_eq!(ended["eventType"], "Ended");
+    assert!(ended["costDetails"].is_object());
+    for payload in &mut expected {
+        payload.as_object_mut().unwrap().remove("costDetails");
+        let info = payload["transactionInfo"].as_object_mut().unwrap();
+        info.remove("tariffId");
+        info.remove("transactionLimit");
+    }
+
+    let csms = v201_csms().await;
+    let (station, task) = boot(&csms, dir.path(), Protocol::V201).await;
+    event(&csms, 0, "eventType", "Ended").await;
+    let actual: Vec<_> = csms
+        .calls_since(0)
+        .into_iter()
+        .filter(|e| e.action == "TransactionEvent")
+        .map(|e| e.payload)
+        .collect();
+    assert_eq!(actual, expected);
+    let schemas = SchemaRegistry::for_protocol(Protocol::V201).unwrap();
+    for payload in actual {
+        schemas
+            .validate_request("TransactionEvent", &payload)
+            .unwrap();
+    }
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn tariff_review_disabled_tariffs_still_consume_central_cost_mark() {
+    let csms = v21_csms().await;
+    csms.respond("Authorize", |_| {
+        Reply::Result(json!({"idTokenInfo":{"status":"Accepted"},"tariff":energy("invalid", -1.0)}))
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    enable(&csms, false).await;
+    set_variables(
+        &csms,
+        &[
+            ("AuthCacheCtrlr", "Enabled", None, "false"),
+            (
+                COMPONENT,
+                "HandleFailedTariff",
+                Some("Tariff"),
+                "CentralCost",
+            ),
+        ],
+    )
+    .await;
+    install(&csms, 1, energy("default", 1.0)).await;
+    let result = send(
+        &station,
+        Command2::Authorize {
+            id_token: "TAG".to_owned(),
+            token_type: IdTokenType::Local,
+        },
+    )
+    .await;
+    assert!(matches!(result, Outcome2::Authorized { status, .. } if status == "Accepted"));
+    csms.respond("Authorize", |_| {
+        Reply::Result(json!({"idTokenInfo":{"status":"Accepted"}}))
+    });
+
+    for (enabled, tariff_id) in [("false", None), ("true", Some("default"))] {
+        set_variables(&csms, &[(COMPONENT, "Enabled", Some("Tariff"), enabled)]).await;
+        let mark = csms.mark();
+        send(&station, Command2::PlugIn { evse: 1 }).await;
+        present(&station, "TAG", IdTokenType::Local).await;
+        let started = event(&csms, mark, "eventType", "Started").await;
+        assert_eq!(started["transactionInfo"]["tariffId"].as_str(), tariff_id);
+        end(&csms, &station).await;
+    }
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn tariff_review_interval_rejects_negative_values() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    let component = json!({"name":COMPONENT});
+    let interval = variable("Interval", Some("Tariff"));
+    let result = call(
+        &csms,
+        "SetVariables",
+        json!({"setVariableData":[{
+            "component":component,"variable":interval,"attributeValue":"-1"
+        }]}),
+    )
+    .await;
+    assert_eq!(
+        result["setVariableResult"][0]["attributeStatus"],
+        "Rejected"
+    );
+    let result = call(
+        &csms,
+        "GetVariables",
+        json!({"getVariableData":[{"component":component,"variable":interval}]}),
+    )
+    .await;
+    assert_eq!(result["getVariableResult"][0]["attributeValue"], "0");
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn tariff_review_evse_above_u32_is_unknown() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    enable(&csms, false).await;
+    let evse = u64::from(u32::MAX) + 1;
+    let rejected = json!({"status":"Rejected","statusInfo":{"reasonCode":"UnknownEVSE"}});
+    assert_eq!(
+        call(
+            &csms,
+            "SetDefaultTariff",
+            json!({"evseId":evse,"tariff":energy("default",1.0)})
+        )
+        .await,
+        rejected
+    );
+    assert_eq!(
+        call(&csms, "GetTariffs", json!({"evseId":evse})).await,
+        rejected
+    );
+    assert_eq!(
+        call(&csms, "ClearTariffs", json!({"evseId":evse})).await,
+        json!({"clearTariffsResult":[rejected]})
     );
     stop(&station, task).await;
 }

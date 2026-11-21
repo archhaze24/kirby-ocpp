@@ -459,10 +459,7 @@ impl Station2Actor {
 
     /// Adds the energy of the time that passed to every running meter.
     pub(super) fn settle_tx_meters(&mut self) {
-        self.settle_meters_before_limit(None);
-    }
-
-    fn settle_meters_before_limit(&mut self, checking: Option<u32>) {
+        let v21 = self.protocol() == Protocol::V21;
         let now = Instant::now();
         let now_utc = self.clock.now_utc();
         let ids: Vec<u32> = self.evses.iter().map(|e| e.id).collect();
@@ -477,11 +474,20 @@ impl Station2Actor {
             };
             let elapsed = last.map_or(Duration::ZERO, |last| now.saturating_duration_since(last));
             // The energy follows the charging profiles in force during the span.
-            let wh = if was_charging {
+            let mut wh = if was_charging {
                 self.sc_energy_wh(id, last_utc.unwrap_or(now_utc), elapsed)
             } else {
                 0.0
             };
+            // Hold energy at the cap until the limit check suspends charging.
+            if v21
+                && let Some(tx) = self.tx.active.get(&id)
+                && tx.limit_reached.is_none()
+                && let Some(max) = tx.limit.max_energy_wh
+                && tx.energy_wh <= max
+            {
+                wh = wh.min(max - tx.energy_wh);
+            }
             let meter = self.tx.meters.entry(id).or_default();
             meter.register_wh += wh;
             meter.last = Some(now);
@@ -497,9 +503,7 @@ impl Station2Actor {
                 };
                 let idle = if was_idle { elapsed } else { Duration::ZERO };
                 tx.add_local_usage(wh, charging, idle);
-                if Some(id) != checking {
-                    tx.refresh_local_cost();
-                }
+                tx.refresh_local_cost();
                 self.arm_tx_limit(id);
             }
         }
@@ -1646,12 +1650,14 @@ impl Station2Actor {
         // The transaction is gone before the queue is written, so a saved state never holds
         // both the transaction and its `Ended` event.
         if let Some(tx) = self.tx.active.remove(&evse) {
-            if let Some((token, tariff_id)) = tx
+            if let Some(token) = tx
                 .tariff
                 .as_ref()
                 .and_then(TransactionTariff::driver_binding)
+                .map(|(token, _)| token)
+                .or(tx.token.as_ref())
             {
-                self.remove_driver_tariff(token, Some(tariff_id));
+                self.remove_ended_driver_tariff(token);
             }
             if tx.has_local_cost() && !quiet {
                 self.set_tariff_problem(None);

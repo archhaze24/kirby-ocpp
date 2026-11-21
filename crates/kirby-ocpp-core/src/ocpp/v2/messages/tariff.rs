@@ -16,7 +16,7 @@ wire_enum! {
 
 payload! {
     SetDefaultTariffRequest {
-        pub evse_id: u32,
+        pub evse_id: u64,
         pub tariff: Value,
     }
 }
@@ -43,7 +43,7 @@ wire_enum! {
 
 payload! {
     GetTariffsRequest {
-        pub evse_id: u32,
+        pub evse_id: u64,
     }
 }
 
@@ -72,7 +72,7 @@ wire_enum! {
 payload! {
     ClearTariffsRequest {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        pub evse_id: Option<u32>,
+        pub evse_id: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub tariff_ids: Option<Vec<String>>,
     }

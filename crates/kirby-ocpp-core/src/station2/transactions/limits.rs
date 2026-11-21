@@ -300,35 +300,20 @@ impl Station2Actor {
     }
 
     fn evaluate_tx_limits(&mut self, evse: u32, limit_changed: bool) {
-        let previous_energy = self.active_tx(evse).map(|tx| tx.energy_wh);
-        self.settle_meters_before_limit(Some(evse));
+        self.settle_tx_meters();
         let now = self.clock.now_utc();
         let Some(tx) = self.tx.active.get_mut(&evse) else {
             return;
         };
         let was_latched = tx.limit_reached.is_some();
         if was_latched && !limit_changed {
-            tx.refresh_local_cost();
             return;
         }
         let elapsed = (now - tx.started_at).num_seconds();
-        let reached = tx.reached_limit(elapsed);
-        let meter = self.tx.meters.entry(evse).or_default();
-        if reached == Some(LimitKind::Energy)
-            && let Some(max) = tx.limit.max_energy_wh
-            && previous_energy.is_some_and(|energy| energy < max)
-            && tx.energy_wh >= max
-        {
-            let overshoot = tx.energy_wh - max;
-            meter.register_wh -= overshoot;
-            tx.energy_wh = max;
-            tx.add_local_usage(-overshoot, Duration::ZERO, Duration::ZERO);
-        }
-        tx.refresh_local_cost();
         let Some(reached) = tx.reached_limit(elapsed) else {
             return;
         };
-        meter.charging = false;
+        self.tx.meters.entry(evse).or_default().charging = false;
         tx.limit_reached = Some(reached);
         let reset_suspended = self.auth.reset_prepared
             && self

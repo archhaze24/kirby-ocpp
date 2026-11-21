@@ -29,6 +29,7 @@ use serde_json::Value;
 use super::actor::{Station2Actor, TimerKey2};
 use super::types::{IdTokenRef, Origin2};
 use crate::error::CallError;
+use crate::ocpp::Protocol;
 use crate::ocpp::v2::messages::TransactionEventKind;
 use crate::ocpp::v2::types::IdToken;
 use crate::station::LogLevel;
@@ -351,9 +352,20 @@ impl Station2Actor {
     /// queued before (an ended transaction), and every one of them counts as offline: the
     /// process was down.
     pub(super) fn queue_restore(&mut self, queue: QueuePersist) {
+        let v21 = self.protocol() == Protocol::V21;
         for mut event in queue.events.into_iter().rev() {
             event.offline = true;
             set_offline(&mut event.payload);
+            if !v21 && let Some(payload) = event.payload.as_object_mut() {
+                payload.remove("costDetails");
+                if let Some(info) = payload
+                    .get_mut("transactionInfo")
+                    .and_then(Value::as_object_mut)
+                {
+                    info.remove("tariffId");
+                    info.remove("transactionLimit");
+                }
+            }
             self.queue.events.push_front(event);
         }
         self.sync_queue_count();
@@ -394,6 +406,23 @@ mod tests {
 
     fn seqs(events: &VecDeque<QueuedEvent>) -> Vec<i32> {
         events.iter().map(|e| e.seq_no).collect()
+    }
+
+    #[test]
+    fn tariff_review_restore_strips_only_2_1_cost_and_limit_fields() {
+        let mut actor = actor();
+        let mut queued = event(TransactionEventKind::Ended, 1);
+        queued.payload = json!({
+            "seqNo":1,"costDetails":{},
+            "transactionInfo":{"transactionId":"tx","tariffId":"tariff","transactionLimit":{}}
+        });
+        actor.queue_restore(QueuePersist {
+            events: vec![queued],
+        });
+        assert_eq!(
+            actor.queue_persist().events[0].payload,
+            json!({"seqNo":1,"offline":true,"transactionInfo":{"transactionId":"tx"}})
+        );
     }
 
     #[test]

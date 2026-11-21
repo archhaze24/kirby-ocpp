@@ -23,6 +23,7 @@ use super::command::Outcome2;
 use super::device_model::Lookup;
 use super::link::sanitize;
 use super::local_list::{ListEntry, LocalListPersist};
+use super::tariff::tariff_size_ok;
 use super::types::{IdTokenRef, Origin2, Reply2};
 use crate::error::{CallError, StationError};
 use crate::ocpp::v2::messages::{Authorize, AuthorizeRequest, AuthorizeResponse, TriggerReason};
@@ -186,8 +187,8 @@ impl Station2Actor {
 
     /// Stores what the CSMS said about `token` (C12.FR.06); `Central` and `NoAuthorization`
     /// tokens are never stored (C05.FR.02). An `idTokenInfo` that already expired removes the
-    /// entry instead (C10).
-    fn cache_store(&mut self, token: &IdTokenRef, info: &IdTokenInfo, tariff: Option<Value>) {
+    /// entry instead (C10). An oversized tariff also prevents caching the authorization.
+    fn cache_store(&mut self, token: &IdTokenRef, info: &IdTokenInfo, tariff: Option<&Value>) {
         if needs_no_check(&token.kind) || !self.cache_enabled() {
             return;
         }
@@ -199,7 +200,8 @@ impl Station2Actor {
             (a, b) => a.or(b),
         };
         self.auth.cache.retain(|(k, _)| *k != key);
-        if expires_at.is_some_and(|at| at <= now) {
+        if expires_at.is_some_and(|at| at <= now) || tariff.is_some_and(|raw| !tariff_size_ok(raw))
+        {
             self.mark_dirty();
             return;
         }
@@ -218,7 +220,7 @@ impl Station2Actor {
                 status: info.status.as_str().to_owned(),
                 expires_at,
                 group_id: info.group_id_token.as_ref().map(|g| g.id_token.clone()),
-                tariff,
+                tariff: tariff.cloned(),
             },
         ));
         self.mark_dirty();
@@ -239,14 +241,17 @@ impl Station2Actor {
     }
 
     /// Takes back the persisted authorization cache at start: expired entries are dropped, at
-    /// most [`CACHE_LIMIT`] of the newest are kept.
+    /// most [`CACHE_LIMIT`] of the newest are kept. Entries with oversized tariffs are dropped.
     pub(super) fn auth_cache_restore(&mut self, cache: AuthCachePersist) {
         self.local_list_restore(cache.local_list);
         let now = self.clock.now_utc();
         let mut entries: Vec<_> = cache
             .entries
             .into_iter()
-            .filter(|(_, entry)| entry.expires_at.is_none_or(|at| at > now))
+            .filter(|(_, entry)| {
+                entry.expires_at.is_none_or(|at| at > now)
+                    && entry.tariff.as_ref().is_none_or(tariff_size_ok)
+            })
             .collect();
         let excess = entries.len().saturating_sub(CACHE_LIMIT);
         entries.drain(..excess);
@@ -356,7 +361,7 @@ impl Station2Actor {
         match result {
             Ok(response) => {
                 let tariff = response.tariff.filter(|_| self.local_tariffs_enabled());
-                self.cache_store(token, &response.id_token_info, tariff.clone());
+                self.cache_store(token, &response.id_token_info, tariff.as_ref());
                 let info = serde_json::to_value(&response.id_token_info).ok();
                 if response.id_token_info.status == AuthorizationStatus::Accepted {
                     self.tariff_authorization(token, info, tariff)
@@ -444,7 +449,7 @@ impl Station2Actor {
                 return;
             };
             let tariff = response.tariff.filter(|_| actor.local_tariffs_enabled());
-            actor.cache_store(&token, &response.id_token_info, tariff.clone());
+            actor.cache_store(&token, &response.id_token_info, tariff.as_ref());
             let accepted = response.id_token_info.status == AuthorizationStatus::Accepted
                 && actor.apply_driver_tariff(&token, tariff);
             if !accepted
@@ -497,7 +502,7 @@ impl Station2Actor {
             let tariff = self
                 .cache_peek(&token_key(&token))
                 .and_then(|entry| entry.tariff.clone());
-            self.cache_store(&token, &parsed, tariff);
+            self.cache_store(&token, &parsed, tariff.as_ref());
             if current.as_deref() == Some(transaction_id)
                 && parsed.status == AuthorizationStatus::Accepted
             {
@@ -823,7 +828,7 @@ impl Station2Actor {
             let outcome = match result {
                 Ok(response) => {
                     let tariff = response.tariff.filter(|_| actor.local_tariffs_enabled());
-                    actor.cache_store(&token, &response.id_token_info, tariff.clone());
+                    actor.cache_store(&token, &response.id_token_info, tariff.as_ref());
                     let mut info = response.id_token_info;
                     if info.status == AuthorizationStatus::Accepted
                         && !actor.apply_driver_tariff(&token, tariff)
