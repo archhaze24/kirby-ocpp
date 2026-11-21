@@ -399,6 +399,7 @@ fn typed_input(action: &str) -> Vec<(&'static str, &'static str)> {
         "UnlockConnector" => vec![("evseId", "1"), ("connectorId", "1")],
         "SendLocalList" => vec![("versionNumber", "1")],
         "CancelReservation" => vec![("reservationId", "1")],
+        "CostUpdated" => vec![("totalCost", "12.34"), ("transactionId", "tx-1")],
         // The criteria of the request are required by the schema: one filter at least.
         "GetChargingProfiles" => vec![("chargingProfile.stackLevel", "0")],
         "SetChargingProfile" => vec![(
@@ -716,7 +717,7 @@ fn every_2_0_1_form_builds_a_schema_valid_request() {
     }
     assert_eq!(
         (typed, raw),
-        (19, 19),
+        (20, 18),
         "ClearCache and GetLocalListVersion are the other two typed actions"
     );
 }

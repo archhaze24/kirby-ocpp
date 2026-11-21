@@ -80,6 +80,9 @@ fn evse(id: u32, status_name: &str, plugged: bool, tx: Option<&str>) -> EvseSnap
         reservation: None,
         offered_w: None,
         external_limit: false,
+        transaction_limit: None,
+        limit_reached: None,
+        total_cost: None,
     }
 }
 
