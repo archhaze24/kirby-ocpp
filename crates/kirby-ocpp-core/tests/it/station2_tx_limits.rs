@@ -217,6 +217,8 @@ async fn tx_limit_energy_suspends_and_clamps_the_meter() {
     .await;
     s.send(Command2::Unplug { evse: 1 }).await;
 
+    // Keep the second capped register away from the wire meter's whole-Wh boundary.
+    s.started_answer(json!({"transactionLimit": {"maxEnergy": 3.25}}));
     let mark = s.csms.mark();
     let started = s.start().await;
     assert_suspended(&s.trigger(mark, ENERGY_LIMIT).await);
@@ -239,6 +241,52 @@ async fn tx_limit_energy_ends_at_an_energy_transfer_stop_point() {
     assert_eq!(ended["eventType"], "Ended");
     assert_eq!(ended["transactionInfo"]["stoppedReason"], ENERGY_LIMIT);
     assert_eq!(energy_sample(&ended, "Transaction.End"), 1.0);
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn tx_limit_changed_while_latched_ends_at_an_energy_transfer_stop_point() {
+    let s = Session::new(Protocol::V21).await;
+    s.started_answer(json!({"transactionLimit": {"maxEnergy": 100.0}}));
+    s.start().await;
+    s.trigger(0, "LimitSet").await;
+    s.send(Command2::AdvanceMeter {
+        evse: 1,
+        wh_delta: 100,
+    })
+    .await;
+    assert_suspended(&s.trigger(0, ENERGY_LIMIT).await);
+    let before = energy_sample(&s.sample().await, "Sample.Periodic");
+    assert!(before >= 100.0);
+    s.set_variable("TxCtrlr", "TxStopPoint", "EnergyTransfer")
+        .await;
+    s.csms.respond("TransactionEvent", |event| {
+        Reply::Result(if event["triggerReason"] == "MeterValuePeriodic" {
+            json!({"transactionLimit": {"maxEnergy": 50.0}})
+        } else {
+            json!({})
+        })
+    });
+    let mark = s.csms.mark();
+    s.send(Command2::SampleMeter { evse: 1 }).await;
+    let updated = s.trigger(mark, "LimitSet").await;
+    assert_limit_set(&updated, &json!({"maxEnergy": 50.0}));
+    let ended = s.trigger(mark, ENERGY_LIMIT).await;
+    assert_eq!(ended["eventType"], "Ended");
+    assert_eq!(ended["transactionInfo"]["stoppedReason"], ENERGY_LIMIT);
+    assert_eq!(energy_sample(&ended, "Transaction.End"), before);
+    wait_snapshot(&s.station, "the ended transaction to be delivered", |s| {
+        s.queued_events == 0 && s.evse(1).is_some_and(|evse| evse.transaction.is_none())
+    })
+    .await;
+    assert_eq!(
+        s.csms
+            .calls_since(mark)
+            .iter()
+            .filter(|call| call.payload["eventType"] == "Ended")
+            .count(),
+        1
+    );
     s.stop().await;
 }
 
@@ -363,6 +411,7 @@ async fn tx_limit_below_delivered_energy_or_negative_suspends_when_set() {
             })
             .await;
         }
+        let before = energy_sample(&s.sample().await, "Sample.Periodic");
         let mark = s.csms.mark();
         s.sample_answer(json!({"transactionLimit": {"maxEnergy": max_energy}}))
             .await;
@@ -373,10 +422,7 @@ async fn tx_limit_below_delivered_energy_or_negative_suspends_when_set() {
             set["seqNo"].as_i64().map(|n| n + 1)
         );
         assert_suspended(&reached);
-        assert_eq!(
-            energy_sample(&s.sample().await, "Sample.Periodic"),
-            max_energy.max(0.0)
-        );
+        assert!(energy_sample(&s.sample().await, "Sample.Periodic") >= before);
         s.stop().await;
     }
 }

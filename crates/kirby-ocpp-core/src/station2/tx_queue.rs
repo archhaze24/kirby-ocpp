@@ -16,6 +16,7 @@
 //!   dropped (E12.FR.04/05); `Started` and `Ended` are never dropped. An `Updated` event that
 //!   carries a once-only field (`evse`, `idToken`, `transactionInfo.remoteStartId`, the
 //!   `Transaction.Begin` meter value) is kept too, since no later event repeats the field.
+//!   Limit changes, reached limits and reset/resume events are also kept.
 //! * Close to twice [`QUEUE_CAP`] entries the queue is full for good: no new transaction
 //!   starts (`RequestStartTransaction` is rejected, a local start fails) until the CSMS takes
 //!   events again. Events of the transactions that run keep being queued.
@@ -121,14 +122,26 @@ fn carries_once_only_field(payload: &Value) -> bool {
 }
 
 /// Drops every second `Updated` event after the first one, never the head (it may be in
-/// flight) and never an event that carries a once-only field. Returns how many were dropped.
+/// flight). Keeps once-only fields and limit or reset/resume events. Returns how many were dropped.
 fn thin_updated(events: &mut VecDeque<QueuedEvent>) -> usize {
     let updated: Vec<usize> = events
         .iter()
         .enumerate()
         .skip(1)
         .filter(|(_, event)| {
-            event.kind == TransactionEventKind::Updated && !carries_once_only_field(&event.payload)
+            event.kind == TransactionEventKind::Updated
+                && !carries_once_only_field(&event.payload)
+                && !matches!(
+                    event.payload.get("triggerReason").and_then(Value::as_str),
+                    Some(
+                        "LimitSet"
+                            | "EnergyLimitReached"
+                            | "TimeLimitReached"
+                            | "CostLimitReached"
+                            | "TxResumed"
+                            | "ResetCommand"
+                    )
+                )
         })
         .map(|(index, _)| index)
         .collect();
@@ -265,14 +278,14 @@ impl Station2Actor {
                     return;
                 };
                 self.sync_queue_count();
-                self.flush_now();
-                // The hook may end the transaction and queue more events; the delivered one is
-                // gone and nothing is in flight by now.
+                // The delivered event is gone. Apply the answer before flushing because the
+                // hooks can change or end the transaction and queue more events.
                 self.on_tx_event_limits(done.evse, &done.transaction_id, &answer);
                 if let Some(info) = answer.get("idTokenInfo") {
                     let token = event_token(&done.payload);
                     self.on_id_token_info(done.evse, &done.transaction_id, token, info);
                 }
+                self.flush_now();
                 self.queue_pump();
             }
             Err(
@@ -452,6 +465,27 @@ mod tests {
         // Plain candidates after the head: 1, 6, 7; the second, 6, goes.
         assert_eq!(thin_updated(&mut events), 1);
         assert_eq!(seqs(&events), [0, 1, 2, 3, 4, 5, 7, 8]);
+    }
+
+    #[test]
+    fn thinning_keeps_limit_and_resume_events() {
+        let reasons = [
+            "LimitSet",
+            "EnergyLimitReached",
+            "TimeLimitReached",
+            "CostLimitReached",
+            "TxResumed",
+            "ResetCommand",
+        ];
+        let mut events = VecDeque::from([event(TransactionEventKind::Started, 0)]);
+        for (seq, reason) in (1..).zip(reasons) {
+            let mut protected = event(TransactionEventKind::Updated, seq * 2);
+            protected.payload["triggerReason"] = json!(reason);
+            events.push_back(event(TransactionEventKind::Updated, seq * 2 - 1));
+            events.push_back(protected);
+        }
+        assert_eq!(thin_updated(&mut events), 3);
+        assert_eq!(seqs(&events), [0, 1, 2, 4, 5, 6, 8, 9, 10, 12]);
     }
 
     #[test]

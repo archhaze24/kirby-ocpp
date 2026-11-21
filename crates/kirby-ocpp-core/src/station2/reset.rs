@@ -37,8 +37,19 @@ pub struct ResetPlan {
     pub phase: ResetPhase,
     /// The reason the next `BootNotification` carries.
     pub reason: BootReason,
-    /// The pre-reset charging state and transaction identity for each affected EVSE.
+    /// The transaction identity and charging state to restore for each affected EVSE.
     pub(super) charging_before_reset: BTreeMap<u32, (TxId2, ChargingState)>,
+}
+
+impl ResetPlan {
+    pub(super) fn resumes_transaction(&self, evse: u32, id: &TxId2, prepared: bool) -> bool {
+        self.kind == ResetKind::ImmediateAndResume
+            && (!prepared
+                || self
+                    .charging_before_reset
+                    .get(&evse)
+                    .is_some_and(|(planned_id, _)| planned_id == id))
+    }
 }
 
 /// Where a reset stands.
@@ -201,7 +212,13 @@ impl Station2Actor {
                 continue;
             };
             let state = tx.charging_state;
-            previous.insert(evse, (tx.id.clone(), state));
+            let resume = self
+                .reset
+                .as_ref()
+                .and_then(|plan| plan.charging_before_reset.get(&evse))
+                .filter(|(id, _)| *id == tx.id)
+                .map_or(state, |(_, resume)| *resume);
+            previous.insert(evse, (tx.id.clone(), resume));
             let suspended = if state == ChargingState::Charging {
                 ChargingState::SuspendedEvse
             } else {
@@ -225,12 +242,9 @@ impl Station2Actor {
             return;
         };
         for (evse, (id, state)) in plan.charging_before_reset {
-            if self.active_tx(evse).is_some_and(|tx| tx.id == id) {
-                self.tx_reset_update(
-                    evse,
-                    self.resumed_charging_state(state),
-                    TriggerReason::TxResumed,
-                );
+            if let Some(tx) = self.active_tx(evse).filter(|tx| tx.id == id) {
+                let state = self.resumed_charging_state(tx, state);
+                self.tx_reset_update(evse, state, TriggerReason::TxResumed);
             }
         }
         self.raise_security_event("ResetOrReboot");

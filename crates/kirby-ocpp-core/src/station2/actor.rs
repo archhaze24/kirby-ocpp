@@ -224,7 +224,10 @@ impl Station2Actor {
                 key = self.timers.next() => Wake::Timer(key),
             };
             // Before anything changes the state: energy of the time that just passed.
-            self.settle_meters();
+            // The limit timer settles the meters itself so it can detect a cap crossing.
+            if !matches!(wake, Wake::Timer(TimerKey2::TxLimit(_))) {
+                self.settle_meters();
+            }
             match wake {
                 Wake::Command(Some(Envelope2 {
                     command: Command2::Shutdown,

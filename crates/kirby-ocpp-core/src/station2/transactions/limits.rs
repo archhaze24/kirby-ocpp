@@ -226,14 +226,25 @@ impl Station2Actor {
                 .is_none()
         {
             tx.limit_reached = None;
-            tx.charging_state = if tx.authorized && tx.ev_connected && ready {
+            let reset = self
+                .reset
+                .as_mut()
+                .filter(|plan| plan.resumes_transaction(evse, &tx.id, self.auth.reset_prepared));
+            let resumed = if tx.authorized && tx.ev_connected && (reset.is_some() || ready) {
                 ChargingState::Charging
             } else if tx.ev_connected {
                 ChargingState::EvConnected
             } else {
                 ChargingState::Idle
             };
-            Some(tx.charging_state)
+            if let Some(plan) = reset {
+                plan.charging_before_reset
+                    .insert(evse, (tx.id.clone(), resumed));
+                None
+            } else {
+                tx.charging_state = resumed;
+                Some(resumed)
+            }
         } else {
             None
         };
@@ -247,7 +258,7 @@ impl Station2Actor {
                 ..EventExtra::default()
             },
         );
-        self.check_tx_limits(evse);
+        self.evaluate_tx_limits(evse, changed);
     }
 
     pub(super) fn arm_tx_limit(&mut self, evse: u32) {
@@ -266,46 +277,58 @@ impl Station2Actor {
     }
 
     pub(in crate::station2) fn check_tx_limits(&mut self, evse: u32) {
+        self.evaluate_tx_limits(evse, false);
+    }
+
+    fn evaluate_tx_limits(&mut self, evse: u32, limit_changed: bool) {
+        let previous_energy = self.active_tx(evse).map(|tx| tx.energy_wh);
         self.settle_tx_meters();
         let now = self.clock.now_utc();
-        let Some(tx) = self
-            .tx
-            .active
-            .get_mut(&evse)
-            .filter(|tx| tx.limit_reached.is_none())
-        else {
+        let Some(tx) = self.tx.active.get_mut(&evse) else {
             return;
         };
+        let was_latched = tx.limit_reached.is_some();
+        if was_latched && !limit_changed {
+            return;
+        }
         let Some(reached) = tx.reached_limit((now - tx.started_at).num_seconds()) else {
             return;
         };
         let meter = self.tx.meters.entry(evse).or_default();
         if reached == LimitKind::Energy
             && let Some(max) = tx.limit.max_energy_wh
+            && previous_energy.is_some_and(|energy| energy < max)
+            && tx.energy_wh >= max
         {
-            let capped = max.max(0.0);
-            let start = self.tx.runtime.get(&evse).map_or_else(
-                || super::wh_from(tx.meter_start_wh),
-                |rt| rt.start_register_wh,
-            );
-            meter.register_wh = start + capped;
-            tx.energy_wh = capped;
+            let overshoot = tx.energy_wh - max;
+            meter.register_wh -= overshoot;
+            tx.energy_wh = max;
         }
         meter.charging = false;
         tx.limit_reached = Some(reached);
-        tx.charging_state = ChargingState::SuspendedEvse;
+        let reset_suspended = self.auth.reset_prepared
+            && self
+                .reset
+                .as_ref()
+                .is_some_and(|plan| plan.resumes_transaction(evse, &tx.id, true));
+        if !reset_suspended {
+            tx.charging_state = ChargingState::SuspendedEvse;
+        }
+        let charging_state = Some(tx.charging_state);
         if self
             .tx_stop_points()
             .contains(&StartStopPoint::EnergyTransfer)
         {
             self.finish(evse, reached.stop_reason(), reached.trigger(), None);
+        } else if was_latched {
+            self.mark_dirty();
         } else {
             self.tx_event(
                 evse,
                 TransactionEventKind::Updated,
                 reached.trigger(),
                 EventExtra {
-                    charging_state: Some(ChargingState::SuspendedEvse),
+                    charging_state,
                     ..EventExtra::default()
                 },
             );

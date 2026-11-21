@@ -115,10 +115,16 @@ pub struct ActiveTx {
     pub charging_state: ChargingState,
     pub token: Option<IdTokenRef>,
     pub remote_start_id: Option<i32>,
+    /// The `remoteStartId` was attached to an event already.
+    #[serde(default)]
+    pub remote_sent: bool,
     pub authorized: bool,
     pub ev_connected: bool,
     /// The `evse` field went out in an event already.
     pub evse_sent: bool,
+    /// The `Transaction.Begin` sample waiting for the first event that carries the EVSE.
+    #[serde(default)]
+    pub begin_sample: Option<MeterValue>,
     /// The `idToken` field went out in an event already.
     pub token_sent: bool,
     pub meter_start_wh: u64,
@@ -162,17 +168,8 @@ struct PendingAuth {
 /// Per-transaction state that is not persisted.
 #[derive(Debug, Default)]
 struct TxRuntime {
-    /// The register at the start, including its fractional Wh.
-    start_register_wh: f64,
-    /// `remoteStartId` went out in an event already.
-    remote_sent: bool,
-    /// The `Transaction.Begin` sample of the `TxStartedMeasurands`, kept for the first event
-    /// that carries the EVSE.
-    begin_sample: Option<MeterValue>,
     /// The `Transaction.Begin` sample of the `TxEndedMeasurands`, for the `Ended` event.
     ended_begin: Option<MeterValue>,
-    /// The begin sample waits for the first event that carries the EVSE (E01.FR.17).
-    begin_pending: bool,
     /// `TxEndedInterval` samples for the `Ended` event.
     ended: IntervalSamples,
     /// Clock-aligned `TxEndedInterval` samples for the `Ended` event.
@@ -827,17 +824,13 @@ impl Station2Actor {
         // H01.FR.15: the event after a reservation was used names it.
         let reservation_id = self.take_reservation_claim(evse);
         let tx = self.tx.active.get_mut(&evse)?;
-        let runtime = self.tx.runtime.entry(evse).or_default();
         let seq_no = tx.next_seq_no;
         tx.next_seq_no = tx.next_seq_no.saturating_add(1);
         let include_evse = !tx.evse_sent && tx.ev_connected;
         if include_evse {
             tx.evse_sent = true;
-            if runtime.begin_pending {
-                runtime.begin_pending = false;
-                if let Some(begin) = runtime.begin_sample.clone() {
-                    meter.insert(0, begin);
-                }
+            if let Some(begin) = tx.begin_sample.take() {
+                meter.insert(0, begin);
             }
         }
         let id_token = extra
@@ -848,9 +841,9 @@ impl Station2Actor {
         }
         let remote_start_id = extra
             .remote_start_id
-            .or_else(|| tx.remote_start_id.filter(|_| !runtime.remote_sent));
+            .or_else(|| tx.remote_start_id.filter(|_| !tx.remote_sent));
         if remote_start_id.is_some() {
-            runtime.remote_sent = true;
+            tx.remote_sent = true;
         }
         let charging_state = extra.charging_state.or_else(|| {
             (matches!(
@@ -996,9 +989,11 @@ impl Station2Actor {
                 charging_state: state,
                 token: spec.token,
                 remote_start_id: spec.remote_start_id,
+                remote_sent: false,
                 authorized: spec.authorized,
                 ev_connected: connected,
                 evse_sent: false,
+                begin_sample: None,
                 token_sent: false,
                 meter_start_wh: whole_wh(register),
                 energy_wh: 0.0,
@@ -1014,6 +1009,9 @@ impl Station2Actor {
             ReadingContext::TransactionBegin,
             now,
         );
+        if let Some(tx) = self.tx.active.get_mut(&evse) {
+            tx.begin_sample = begin;
+        }
         let ended_begin = self.sample_value(
             evse,
             &self.tx_ended_measurands(),
@@ -1023,11 +1021,7 @@ impl Station2Actor {
         self.tx.runtime.insert(
             evse,
             TxRuntime {
-                start_register_wh: register,
-                remote_sent: false,
-                begin_sample: begin.clone(),
                 ended_begin,
-                begin_pending: !connected && begin.is_some(),
                 ..TxRuntime::default()
             },
         );
@@ -1048,11 +1042,6 @@ impl Station2Actor {
             TransactionEventKind::Started,
             spec.trigger,
             EventExtra {
-                meter: if connected {
-                    begin.into_iter().collect()
-                } else {
-                    Vec::new()
-                },
                 charging_state: Some(state),
                 ..EventExtra::default()
             },
@@ -1113,8 +1102,8 @@ impl Station2Actor {
             }
             if remote_start_id.is_some() {
                 tx.remote_start_id = remote_start_id;
+                tx.remote_sent = false;
                 let tx_id = tx.id.0.clone();
-                self.tx.runtime.entry(evse).or_default().remote_sent = false;
                 self.sc_tx_started(evse, &tx_id, remote_start_id);
             }
             if !connected {
@@ -1822,7 +1811,6 @@ impl Station2Actor {
                     connector.ev_connected = true;
                 }
             }
-            tx.charging_state = self.resumed_charging_state(tx.charging_state);
         } else {
             tx.charging_state = ChargingState::Idle;
             if tx.authorized {
@@ -1832,14 +1820,9 @@ impl Station2Actor {
                 );
             }
         }
+        tx.charging_state = self.resumed_charging_state(&tx, tx.charging_state);
         let charging_state = Some(tx.charging_state);
-        self.tx.runtime.insert(
-            evse,
-            TxRuntime {
-                start_register_wh: wh_from(tx.meter_start_wh),
-                ..TxRuntime::default()
-            },
-        );
+        self.tx.runtime.insert(evse, TxRuntime::default());
         self.tx.active.insert(evse, tx);
         if let Some(event) = self.build_event(
             evse,
@@ -1854,9 +1837,16 @@ impl Station2Actor {
         }
     }
 
-    /// The charging state to report after resumption if the EV is still connected.
-    pub(super) fn resumed_charging_state(&self, previous: ChargingState) -> ChargingState {
-        if previous == ChargingState::Charging && !self.tx_allow_energy_transfer_resumption() {
+    /// Applies energy transfer restrictions to the state selected for resumption.
+    pub(super) fn resumed_charging_state(
+        &self,
+        tx: &ActiveTx,
+        previous: ChargingState,
+    ) -> ChargingState {
+        if tx.limit_reached.is_some()
+            || (previous == ChargingState::Charging
+                && (!self.tx_allow_energy_transfer_resumption() || !self.connector_ready(tx.evse)))
+        {
             ChargingState::SuspendedEvse
         } else {
             previous
@@ -2431,9 +2421,11 @@ mod tests {
             charging_state: ChargingState::Charging,
             token: Some(token("TAG")),
             remote_start_id: None,
+            remote_sent: false,
             authorized: true,
             ev_connected: true,
             evse_sent: true,
+            begin_sample: None,
             token_sent: true,
             meter_start_wh: 100,
             energy_wh: 50.0,
@@ -2458,13 +2450,22 @@ mod tests {
         };
         tx.limit_reached = Some(LimitKind::Cost);
         tx.total_cost = Some(5.5);
+        tx.remote_start_id = Some(42);
+        tx.remote_sent = true;
         let mut value = serde_json::to_value(&tx).unwrap();
         assert_eq!(
             serde_json::from_value::<ActiveTx>(value.clone()).unwrap(),
             tx
         );
         let object = value.as_object_mut().unwrap();
-        for key in ["limit", "csms_limit", "limit_reached", "total_cost"] {
+        for key in [
+            "limit",
+            "csms_limit",
+            "limit_reached",
+            "total_cost",
+            "remote_sent",
+            "begin_sample",
+        ] {
             object.remove(key);
         }
         let old: ActiveTx = serde_json::from_value(value).unwrap();
@@ -2472,6 +2473,8 @@ mod tests {
         assert_eq!(old.csms_limit, TransactionLimit2::default());
         assert_eq!(old.limit_reached, None);
         assert_eq!(old.total_cost, None);
+        assert!(!old.remote_sent);
+        assert!(old.begin_sample.is_none());
     }
 
     #[tokio::test]
