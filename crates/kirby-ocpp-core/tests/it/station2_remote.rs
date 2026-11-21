@@ -690,6 +690,64 @@ async fn an_idle_station_reboots_for_both_kinds_of_reset() {
 }
 
 #[tokio::test]
+async fn reset_waits_for_the_old_socket_close_before_reconnecting() {
+    use std::time::Duration;
+
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    use crate::ws_support::{Negotiate, RawServer};
+
+    let mut server = RawServer::start(Negotiate::Select(Protocol::V201.token().to_owned())).await;
+    let mut config = StationConfig::new(server.url("/ocpp")).without_persistence();
+    config.protocol = Protocol::V201;
+    Protocol::V201
+        .token()
+        .clone_into(&mut config.ws_subprotocol);
+    let (station, task) = Station2::spawn(config, Arc::new(ManualClock::new(Utc::now())));
+    station.connect().await.unwrap();
+    let mut old = server.next_peer().await;
+    let boot = old.recv_frame().await;
+    assert_eq!(boot[2], "BootNotification");
+    old.reply(
+        &boot,
+        json!({"status": "Accepted", "currentTime": "2026-03-01T12:00:00Z", "interval": 3600}),
+    )
+    .await;
+    wait_booted(&station).await;
+
+    old.send_json(&json!([2, "reset", "Reset", {"type": "OnIdle"}]))
+        .await;
+    loop {
+        let frame = old.recv_frame().await;
+        if frame[1] == "reset" {
+            assert_eq!(frame, json!([3, "reset", {"status": "Accepted"}]));
+            break;
+        }
+        assert_eq!(frame[0], 2, "unexpected frame: {frame}");
+        old.reply(&frame, json!({})).await;
+    }
+    while !matches!(
+        old.recv().await.expect("closing handshake"),
+        Message::Close(_)
+    ) {}
+    // Keep the Close reply queued on the server while watching for a premature upgrade.
+    assert!(
+        timeout(Duration::from_secs(1), server.next_peer())
+            .await
+            .is_err(),
+        "the station reconnected before the CSMS acknowledged the old socket's Close"
+    );
+    timeout(STEP, old.ws.flush()).await.unwrap().unwrap();
+
+    let boot = server.next_peer().await.recv_frame().await;
+    assert_eq!(boot[2], "BootNotification");
+    assert_eq!(boot[3]["reason"], "RemoteReset");
+    station.shutdown().await.unwrap();
+    timeout(STEP, task).await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn a_later_connect_boots_as_power_up_again() {
     let rig = Rig::new().await;
     let mut frames = Frames::new(&rig.station);

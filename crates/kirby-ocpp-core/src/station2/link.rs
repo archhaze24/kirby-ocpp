@@ -57,7 +57,7 @@ use crate::config::StationConfig;
 use crate::error::CallError;
 use crate::link_driver::{
     Drained, MIN_PERIOD, ReconnectPlan, close_in_background, describe_close, drain_buffered,
-    open_connection, period_of_secs, plan_reconnect, redact_url,
+    open_connection, period_of_secs, plan_reconnect, redact_url, wait_for_close,
 };
 use crate::ocpp::Protocol;
 use crate::ocpp::frame::ErrorCode;
@@ -242,7 +242,7 @@ impl Station2Actor {
         if self.link.conn.is_some() || self.link.connecting.is_some() {
             return;
         }
-        self.start_connect();
+        self.start_connect(None);
     }
 
     /// Closes the connection and stops all automatic behavior; the next connect boots.
@@ -265,14 +265,16 @@ impl Station2Actor {
         self.log(LogLevel::Info, "disconnected".to_owned());
     }
 
-    /// A simulated reboot: closes the connection and opens a new one right away (even with
+    /// A simulated reboot: closes the connection before opening a new one (even with
     /// automatic reconnect disabled). The registration is cleared, so the new link boots.
     pub(super) fn reconnect_for_reset(&mut self) {
         let connection = self.link.conn.clone();
         let mut events = self.link.events.take();
         self.drain_buffered_events(events.as_mut());
         self.link_down(&CallError::Closed { code: None });
-        close_in_background(connection, events);
+        if let Some(connection) = connection {
+            connection.close();
+        }
         self.state.registration = None;
         self.link.offline_since = None;
         self.link.wanted = true;
@@ -281,7 +283,9 @@ impl Station2Actor {
         if let Some(handle) = self.link.connecting.take() {
             handle.abort();
         }
-        self.start_connect();
+        // The CSMS can replace the old session at the new upgrade. Let it read the
+        // ResetResponse on the old socket before starting that upgrade.
+        self.start_connect(events);
     }
 
     /// `BasicAuthPassword` changed while the link is up and the URL carries no password (the
@@ -312,11 +316,11 @@ impl Station2Actor {
         close_in_background(connection, events);
         self.link.attempts = 0;
         if self.link.wanted && self.link.connecting.is_none() {
-            self.start_connect();
+            self.start_connect(None);
         }
     }
 
-    fn start_connect(&mut self) {
+    fn start_connect(&mut self, closing: Option<mpsc::Receiver<ConnectionEvent>>) {
         self.state.reconnect_stopped = None;
         self.link.generation += 1;
         let generation = self.link.generation;
@@ -339,6 +343,9 @@ impl Station2Actor {
         let internal = self.internal_tx.clone();
         let options = self.connect_options();
         self.link.connecting = Some(tokio::spawn(async move {
+            if let Some(events) = closing {
+                wait_for_close(events).await;
+            }
             let result = open_connection(&config, options).await;
             let _ = internal.send(Internal2::Connected { generation, result });
         }));
@@ -519,7 +526,7 @@ impl Station2Actor {
         if !self.link.wanted || self.link.conn.is_some() || self.link.connecting.is_some() {
             return;
         }
-        self.start_connect();
+        self.start_connect(None);
     }
 
     // ---- BootNotification ------------------------------------------------------

@@ -109,14 +109,17 @@ pub(crate) fn close_in_background(
         return;
     };
     connection.close();
-    if let Some(mut events) = events {
-        tokio::spawn(async move {
-            while let Some(event) = events.recv().await {
-                if matches!(event, ConnectionEvent::Closed { .. }) {
-                    break;
-                }
-            }
-        });
+    if let Some(events) = events {
+        tokio::spawn(wait_for_close(events));
+    }
+}
+
+/// Drains events until the connection task completes its bounded close handshake or exits.
+pub(crate) async fn wait_for_close(mut events: mpsc::Receiver<ConnectionEvent>) {
+    while let Some(event) = events.recv().await {
+        if matches!(event, ConnectionEvent::Closed { .. }) {
+            break;
+        }
     }
 }
 
