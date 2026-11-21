@@ -39,6 +39,8 @@
 //! length stays bounded. The begin and end samples are never dropped. Changing an interval
 //! re-arms the sample timer of a running transaction, as for `TxUpdatedInterval`.
 
+mod limits;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 
@@ -65,6 +67,8 @@ use crate::ocpp::v2::types::{
 use crate::station::LogLevel;
 use crate::station::metering::{PowerModel, clock_aligned_delay};
 
+pub use limits::{LimitKind, TransactionLimit2};
+
 /// Stopped transaction ids kept for `GetTransactionStatus`.
 const STOPPED_HISTORY: usize = 64;
 
@@ -89,6 +93,7 @@ pub struct EventExtra {
     pub stopped_reason: Option<StopReason>,
     pub charging_state: Option<ChargingState>,
     pub remote_start_id: Option<i32>,
+    pub transaction_limit: Option<TransactionLimit2>,
 }
 
 /// A transaction in progress on an EVSE.
@@ -117,6 +122,14 @@ pub struct ActiveTx {
     pub token_sent: bool,
     pub meter_start_wh: u64,
     pub energy_wh: f64,
+    #[serde(default)]
+    pub limit: TransactionLimit2,
+    #[serde(default)]
+    pub csms_limit: TransactionLimit2,
+    #[serde(default)]
+    pub limit_reached: Option<LimitKind>,
+    #[serde(default)]
+    pub total_cost: Option<f64>,
 }
 
 /// What `GetTransactionStatus` needs to know about a transaction id.
@@ -148,6 +161,8 @@ struct PendingAuth {
 /// Per-transaction state that is not persisted.
 #[derive(Debug, Default)]
 struct TxRuntime {
+    /// The register at the start, including its fractional Wh.
+    start_register_wh: f64,
     /// `remoteStartId` went out in an event already.
     remote_sent: bool,
     /// The `Transaction.Begin` sample of the `TxStartedMeasurands`, kept for the first event
@@ -466,6 +481,7 @@ impl Station2Actor {
             meter.charging = charging_now;
             if let Some(tx) = self.tx.active.get_mut(&id) {
                 tx.energy_wh += wh;
+                self.arm_tx_limit(id);
             }
         }
         if !self.tx.active.is_empty() && self.tx.seen_intervals != Some(self.meter_intervals()) {
@@ -845,7 +861,11 @@ impl Station2Actor {
         let request = TransactionEventRequest {
             event_type: kind,
             meter_value: (!meter.is_empty()).then_some(meter),
-            timestamp: now,
+            timestamp: if kind == TransactionEventKind::Started {
+                tx.started_at
+            } else {
+                now
+            },
             trigger_reason: trigger,
             seq_no,
             offline: offline.then_some(true),
@@ -873,7 +893,13 @@ impl Station2Actor {
             }),
             custom_data: None,
         };
-        let payload = serde_json::to_value(&request).ok()?;
+        let mut payload = serde_json::to_value(&request).ok()?;
+        if let Some(limit) = extra.transaction_limit {
+            payload
+                .get_mut("transactionInfo")?
+                .as_object_mut()?
+                .insert("transactionLimit".to_owned(), limit.to_wire());
+        }
         Some(QueuedEvent {
             payload,
             evse,
@@ -921,6 +947,10 @@ impl Station2Actor {
         self.begin_inner(evse, spec, None)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "transaction initialization and its Started event share the initial state"
+    )]
     fn begin_inner(
         &mut self,
         evse: u32,
@@ -971,6 +1001,10 @@ impl Station2Actor {
                 token_sent: false,
                 meter_start_wh: whole_wh(register),
                 energy_wh: 0.0,
+                limit: TransactionLimit2::default(),
+                csms_limit: TransactionLimit2::default(),
+                limit_reached: None,
+                total_cost: None,
             },
         );
         let begin = self.sample_value(
@@ -988,6 +1022,7 @@ impl Station2Actor {
         self.tx.runtime.insert(
             evse,
             TxRuntime {
+                start_register_wh: register,
                 remote_sent: false,
                 begin_sample: begin.clone(),
                 ended_begin,
@@ -1161,13 +1196,18 @@ impl Station2Actor {
                 tx.ready_at.get_or_insert_with(|| self.clock.now_utc());
             }
             tx.evse_sent = false;
-            tx.charging_state = ChargingState::EvConnected;
+            let state = if tx.limit_reached.is_some() {
+                ChargingState::SuspendedEvse
+            } else {
+                ChargingState::EvConnected
+            };
+            tx.charging_state = state;
             self.tx_event(
                 evse,
                 TransactionEventKind::Updated,
                 TriggerReason::CablePluggedIn,
                 EventExtra {
-                    charging_state: Some(ChargingState::EvConnected),
+                    charging_state: Some(state),
                     ..EventExtra::default()
                 },
             );
@@ -1291,7 +1331,9 @@ impl Station2Actor {
         let Some(tx) = self.tx.active.get_mut(&evse) else {
             return;
         };
-        if tx.charging_state == state {
+        if tx.charging_state == state
+            || (state == ChargingState::Charging && tx.limit_reached.is_some())
+        {
             return;
         }
         let was_charging = tx.charging_state == ChargingState::Charging;
@@ -1423,6 +1465,9 @@ impl Station2Actor {
         };
         tx.authorized = false;
         tx.charging_state = state;
+        tx.limit = TransactionLimit2::default();
+        tx.csms_limit = TransactionLimit2::default();
+        tx.limit_reached = None;
         self.tx.groups.remove(&evse);
         self.tx_event(
             evse,
@@ -1554,6 +1599,7 @@ impl Station2Actor {
                 stopped_reason: Some(reason),
                 charging_state: Some(state),
                 remote_start_id: None,
+                transaction_limit: None,
             },
         );
         // The transaction is gone before the queue is written, so a saved state never holds
@@ -1576,6 +1622,7 @@ impl Station2Actor {
         self.timers.cancel(&TimerKey2::TxEndedSample(evse));
         self.timers.cancel(&TimerKey2::TxEndedAligned(evse));
         self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
+        self.timers.cancel(&TimerKey2::TxLimit(evse));
         if self.tx.active.is_empty() {
             self.timers.cancel(&TimerKey2::MeterAligned);
             self.tx.seen_intervals = None;
@@ -2301,7 +2348,41 @@ mod tests {
             token_sent: true,
             meter_start_wh: 100,
             energy_wh: 50.0,
+            limit: TransactionLimit2::default(),
+            csms_limit: TransactionLimit2::default(),
+            limit_reached: None,
+            total_cost: None,
         }
+    }
+
+    #[test]
+    fn tx_limit_round_trips_and_old_active_transactions_get_defaults() {
+        let mut tx = restored(4);
+        tx.limit = TransactionLimit2 {
+            max_energy_wh: Some(120.5),
+            max_time_s: Some(300),
+            max_cost: Some(5.0),
+        };
+        tx.csms_limit = TransactionLimit2 {
+            max_cost: Some(10.0),
+            ..TransactionLimit2::default()
+        };
+        tx.limit_reached = Some(LimitKind::Cost);
+        tx.total_cost = Some(5.5);
+        let mut value = serde_json::to_value(&tx).unwrap();
+        assert_eq!(
+            serde_json::from_value::<ActiveTx>(value.clone()).unwrap(),
+            tx
+        );
+        let object = value.as_object_mut().unwrap();
+        for key in ["limit", "csms_limit", "limit_reached", "total_cost"] {
+            object.remove(key);
+        }
+        let old: ActiveTx = serde_json::from_value(value).unwrap();
+        assert_eq!(old.limit, TransactionLimit2::default());
+        assert_eq!(old.csms_limit, TransactionLimit2::default());
+        assert_eq!(old.limit_reached, None);
+        assert_eq!(old.total_cost, None);
     }
 
     #[tokio::test]

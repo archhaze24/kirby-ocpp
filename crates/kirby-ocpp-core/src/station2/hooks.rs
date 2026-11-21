@@ -4,6 +4,7 @@
 //! another module's file.
 
 use super::actor::{Station2Actor, TimerKey2};
+use crate::ocpp::v2::types::WireEnum;
 use crate::store::StoreError;
 
 impl Station2Actor {
@@ -18,6 +19,7 @@ impl Station2Actor {
             TimerKey2::TxEndedSample(evse) => self.on_tx_ended_sample(evse),
             TimerKey2::TxEndedAligned(evse) => self.on_tx_ended_aligned(evse),
             TimerKey2::TxRetry => self.on_tx_retry_timer(),
+            TimerKey2::TxLimit(evse) => self.check_tx_limits(evse),
             TimerKey2::EvConnectTimeout(evse) => self.on_ev_connect_timeout(evse),
             TimerKey2::ResetDelay => self.on_reset_timer(),
             TimerKey2::ReportChunk => self.on_report_chunk(),
@@ -46,15 +48,31 @@ impl Station2Actor {
             .iter()
             .map(|e| {
                 let (offered, external) = self.sc_view(e.id);
-                (e.id, self.reservation_view(e.id), offered, external)
+                let tx = self.active_tx(e.id);
+                let limit = tx.map(|tx| tx.limit).filter(|limit| !limit.is_empty());
+                let reached = tx
+                    .and_then(|tx| tx.limit_reached)
+                    .map(|kind| kind.trigger().as_str().to_owned());
+                let cost = tx.and_then(|tx| tx.total_cost);
+                (
+                    self.reservation_view(e.id),
+                    offered,
+                    external,
+                    limit,
+                    reached,
+                    cost,
+                )
             })
             .collect();
-        for (id, reservation, offered, external) in views {
-            if let Some(entry) = self.state.evses.iter_mut().find(|e| e.id == id) {
-                entry.reservation = reservation;
-                entry.offered_w = offered;
-                entry.external_limit = external;
-            }
+        for (entry, (reservation, offered, external, limit, reached, cost)) in
+            self.state.evses.iter_mut().zip(views)
+        {
+            entry.reservation = reservation;
+            entry.offered_w = offered;
+            entry.external_limit = external;
+            entry.transaction_limit = limit;
+            entry.limit_reached = reached;
+            entry.total_cost = cost;
         }
         self.state.local_list_version = self.local_list.version;
         self.state.local_list_entries = self.local_list_len();

@@ -70,6 +70,9 @@ impl Station2Actor {
             Command2::SetExternalLimit { evse, limit } => {
                 self.cmd_set_external_limit(evse, &limit, reply);
             }
+            Command2::SetTransactionLimit { evse, limit } => {
+                let _ = reply.send(Ok(self.set_transaction_limit(evse, limit)));
+            }
             Command2::ClearExternalLimit { evse } => self.cmd_clear_external_limit(evse, reply),
             Command2::ArmScriptedReply { reply: scripted } => {
                 self.cmd_arm_scripted_reply(scripted, reply);

@@ -116,6 +116,19 @@ payload! {
 }
 
 payload! {
+    /// `CostUpdated.req`.
+    CostUpdatedRequest {
+        pub total_cost: f64,
+        pub transaction_id: String,
+    }
+}
+
+payload! {
+    /// `CostUpdated.conf`: no fields besides `customData`.
+    CostUpdatedResponse {}
+}
+
+payload! {
     /// `GetTransactionStatus.req`.
     GetTransactionStatusRequest {
         /// Max 36 characters. Absent asks about queued messages overall.
@@ -144,6 +157,10 @@ action! {
 action! {
     /// `GetTransactionStatus` (CSMS -> station).
     GetTransactionStatus = "GetTransactionStatus", GetTransactionStatusRequest => GetTransactionStatusResponse, InboundAction
+}
+action! {
+    /// `CostUpdated` (CSMS -> station).
+    CostUpdated = "CostUpdated", CostUpdatedRequest => CostUpdatedResponse, InboundAction
 }
 
 #[cfg(test)]
@@ -241,6 +258,14 @@ mod tests {
                 "seqNo": 0,
                 "transactionInfo": {"transactionId": "t"}
             }),
+            &json!({}),
+        );
+    }
+
+    #[test]
+    fn cost_updated() {
+        check_action::<CostUpdated>(
+            &json!({"transactionId": "tx-1", "totalCost": 12.34, "customData": cd()}),
             &json!({}),
         );
     }

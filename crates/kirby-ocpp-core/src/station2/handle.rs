@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 
+use super::TransactionLimit2;
 use super::command::{Command2, Outcome2};
 use super::snapshot::Snapshot2;
 use super::types::Reply2;
@@ -103,6 +104,16 @@ impl Station2Handle {
         limit: serde_json::Value,
     ) -> Result<Outcome2, StationError> {
         self.send(Command2::SetExternalLimit { evse, limit }).await
+    }
+
+    /// Sets one or more limits of the ongoing OCPP 2.1 transaction on `evse`.
+    pub async fn set_transaction_limit(
+        &self,
+        evse: u32,
+        limit: TransactionLimit2,
+    ) -> Result<Outcome2, StationError> {
+        self.send(Command2::SetTransactionLimit { evse, limit })
+            .await
     }
 
     /// The external system releases its limits on `evse`; see [`Command2::ClearExternalLimit`].

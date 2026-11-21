@@ -63,6 +63,8 @@ pub(crate) enum TimerKey2 {
     TxEndedAligned(u32),
     /// A queued transaction event is tried again.
     TxRetry,
+    /// Check the energy and time limits of an ongoing transaction.
+    TxLimit(u32),
     /// The EV did not connect in time after a remote start.
     EvConnectTimeout(u32),
     /// A reset waits for the moment to reboot.

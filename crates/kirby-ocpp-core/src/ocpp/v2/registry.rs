@@ -77,7 +77,7 @@ const fn send(name: &'static str, direction: ActionDirection) -> ActionInfo {
 }
 
 /// All 64 actions in byte-wise alphabetical order: 24 sent by the station, 39 by the CSMS
-/// and `DataTransfer` by either. 33 of them are typed.
+/// and `DataTransfer` by either. 34 of them are typed.
 pub const ACTIONS: [ActionInfo; 64] = [
     info("Authorize", STATION, true),
     info("BootNotification", STATION, true),
@@ -89,7 +89,7 @@ pub const ACTIONS: [ActionInfo; 64] = [
     info("ClearDisplayMessage", CSMS, false),
     info("ClearVariableMonitoring", CSMS, false),
     info("ClearedChargingLimit", STATION, true),
-    info("CostUpdated", CSMS, false),
+    info("CostUpdated", CSMS, true),
     info("CustomerInformation", CSMS, false),
     info("DataTransfer", ActionDirection::Both, true),
     info("DeleteCertificate", CSMS, false),
@@ -168,7 +168,7 @@ pub const ACTIONS_V21: [ActionInfo; 91] = [
     info("ClearVariableMonitoring", CSMS, false),
     info("ClearedChargingLimit", STATION, true),
     info("ClosePeriodicEventStream", STATION, false),
-    info("CostUpdated", CSMS, false),
+    info("CostUpdated", CSMS, true),
     info("CustomerInformation", CSMS, false),
     info("DataTransfer", ActionDirection::Both, true),
     info("DeleteCertificate", CSMS, false),
@@ -362,6 +362,7 @@ mod tests {
             csms_sent::<m::GetReport>(),
             csms_sent::<m::ClearCache>(),
             csms_sent::<m::GetTransactionStatus>(),
+            csms_sent::<m::CostUpdated>(),
             csms_sent::<m::DataTransfer>(),
             csms_sent::<m::SendLocalList>(),
             csms_sent::<m::GetLocalListVersion>(),
@@ -401,7 +402,7 @@ mod tests {
             .filter(|entry| entry.typed)
             .map(|entry| entry.name)
             .collect();
-        assert_eq!(typed.len(), 33);
+        assert_eq!(typed.len(), 34);
         let markers: BTreeSet<&str> = outbound.iter().chain(&inbound).copied().collect();
         assert_eq!(markers, typed);
         for name in &typed {

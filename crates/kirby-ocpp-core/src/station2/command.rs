@@ -3,6 +3,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::TransactionLimit2;
 use crate::ocpp::v2::types::{ChargingState, Component, IdTokenType, StopReason, Variable};
 use crate::station::scripted_reply::ScriptedReply;
 
@@ -96,6 +97,8 @@ pub enum Command2 {
     /// `SmartChargingCtrlr.NotifyChargingLimitWithSchedules` is true) and the command
     /// completes with its answer.
     SetExternalLimit { evse: u32, limit: Value },
+    /// Set one or more limits of the ongoing OCPP 2.1 transaction.
+    SetTransactionLimit { evse: u32, limit: TransactionLimit2 },
     /// The external system releases its limits on `evse`; the CSMS is told with
     /// `ClearedChargingLimit`.
     ClearExternalLimit { evse: u32 },
@@ -136,6 +139,7 @@ impl Command2 {
             Self::SetVariable { .. } => "set_variable",
             Self::SampleMeter { .. } => "sample_meter",
             Self::SetExternalLimit { .. } => "set_external_limit",
+            Self::SetTransactionLimit { .. } => "set_transaction_limit",
             Self::ClearExternalLimit { .. } => "clear_external_limit",
             Self::ArmScriptedReply { .. } => "arm_scripted_reply",
             Self::ClearScriptedReplies => "clear_scripted_replies",
@@ -151,6 +155,8 @@ impl Command2 {
 pub enum Outcome2 {
     /// Done; nothing to report.
     Done,
+    /// The station declined the requested change.
+    Rejected { reason: String },
     /// A CALL was answered: its CALLRESULT payload.
     Response { payload: Value },
     /// A transaction started on `evse`.

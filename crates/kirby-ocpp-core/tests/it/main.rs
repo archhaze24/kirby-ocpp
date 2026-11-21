@@ -25,6 +25,7 @@ mod station2_status;
 mod station2_support;
 mod station2_transactions;
 mod station2_tx_ended;
+mod station2_tx_limits;
 mod station2_tx_queue;
 mod station_cancel_call;
 mod station_csms_calls;

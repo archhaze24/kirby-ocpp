@@ -17,9 +17,11 @@ use serde::{Deserialize, Serialize};
 use super::actor::{Station2Actor, TimerKey2};
 use super::smart_charging::MAX_PROFILES;
 use super::snapshot::VariableView;
+use super::snapshot::wire_protocol;
 use super::types::{ItemsPer, LiveVar, Reply2, StartStopPoint};
 use crate::config::StationConfig;
 use crate::error::StationError;
+use crate::ocpp::Protocol;
 use crate::ocpp::v2::messages::{
     ComponentCriterion, ComponentVariable, DataType, Mutability, NotifyReportRequest, ReportBase,
     ReportData, VariableAttribute, VariableCharacteristics,
@@ -91,6 +93,7 @@ pub(crate) struct VarSpec {
     pub live: Option<LiveVar>,
     /// A list value may be empty.
     pub empty_ok: bool,
+    v21_only: bool,
 }
 
 impl VarSpec {
@@ -128,6 +131,10 @@ impl VarSpec {
     }
     const fn empty(mut self) -> Self {
         self.empty_ok = true;
+        self
+    }
+    const fn v21_only(mut self) -> Self {
+        self.v21_only = true;
         self
     }
 
@@ -169,6 +176,7 @@ const fn row(
         supports_monitoring: false,
         live: None,
         empty_ok: false,
+        v21_only: false,
     }
 }
 
@@ -407,6 +415,13 @@ pub(crate) static TABLE: &[VarSpec] = &[
     // TxCtrlr
     members(TX, "TxStartPoint", "PowerPathClosed", POINTS).rw(),
     members(TX, "TxStopPoint", "EVConnected,Authorized", POINTS).rw(),
+    members(
+        TX,
+        "SupportedLimits",
+        "maxEnergy,maxTime,maxCost",
+        "maxEnergy,maxTime,maxCost,maxSoC",
+    )
+    .v21_only(),
     int(TX, "EVConnectionTimeOut", Fixed("60")).rw().u("s"),
     flag(TX, "StopTxOnEVSideDisconnect", "true").rw(),
     flag(TX, "StopTxOnInvalidId", "true").rw(),
@@ -650,6 +665,7 @@ pub(crate) type LiveFn<'a> = &'a dyn Fn(LiveVar) -> String;
 
 /// The values of the variables and the state of the report in progress.
 pub(crate) struct DeviceModel {
+    protocol: Protocol,
     /// Values that differ from the default, by [`VarSpec::key`].
     values: BTreeMap<String, String>,
     password: Option<String>,
@@ -711,6 +727,7 @@ impl DeviceModel {
     /// A model with the defaults of `config` and one connector per EVSE.
     pub(crate) fn new(config: &StationConfig) -> Self {
         Self {
+            protocol: wire_protocol(config),
             values: BTreeMap::new(),
             password: None,
             evse_count: config.connector_count.max(1),
@@ -721,6 +738,11 @@ impl DeviceModel {
             security_profile: 0,
             report: None,
         }
+    }
+
+    fn specs(&self) -> impl Iterator<Item = &'static VarSpec> + use<> {
+        let v21 = self.protocol == Protocol::V21;
+        TABLE.iter().filter(move |spec| v21 || !spec.v21_only)
     }
 
     fn default_value(&self, spec: &VarSpec) -> String {
@@ -770,8 +792,8 @@ impl DeviceModel {
         };
         let instance = non_empty(variable.instance.as_ref());
         let mut component_known = false;
-        for spec in TABLE
-            .iter()
+        for spec in self
+            .specs()
             .filter(|s| s.scope == scope && s.component == component.name)
         {
             component_known = true;
@@ -883,7 +905,7 @@ impl DeviceModel {
     /// values that no longer validate are ignored.
     pub(super) fn restore(&mut self, persisted: &DeviceModelPersist) {
         for (key, text) in &persisted.values {
-            let Some(spec) = TABLE.iter().find(|spec| {
+            let Some(spec) = self.specs().find(|spec| {
                 spec.scope == Scope::Station
                     && spec.mutability == Mutability::ReadWrite
                     && spec.live.is_none()
@@ -899,8 +921,7 @@ impl DeviceModel {
 
     /// The text of a station-level variable, empty for a name the table does not have.
     fn station_text(&self, component: &str, variable: &str, instance: Option<&str>) -> String {
-        TABLE
-            .iter()
+        self.specs()
             .find(|s| {
                 s.scope == Scope::Station
                     && s.component == component
@@ -951,8 +972,7 @@ impl DeviceModel {
     /// Station-level variables for the snapshot. `DateTime` is left out: it changes on every
     /// read and would make every snapshot differ from the last.
     pub(crate) fn views(&self, live: LiveFn<'_>) -> Vec<VariableView> {
-        TABLE
-            .iter()
+        self.specs()
             .filter(|spec| spec.scope == Scope::Station && spec.live != Some(LiveVar::DateTime))
             .take(MAX_VIEWS)
             .map(|spec| {
@@ -988,18 +1008,18 @@ impl DeviceModel {
             };
             items.push(self.report_item(&target, base != ReportBase::SummaryInventory, live));
         };
-        for spec in TABLE
-            .iter()
+        for spec in self
+            .specs()
             .filter(|s| s.scope == Scope::Station && wanted(s))
         {
             add(spec, None, None);
         }
         for evse in 1..=self.evse_count {
-            for spec in TABLE.iter().filter(|s| s.scope == Scope::Evse && wanted(s)) {
+            for spec in self.specs().filter(|s| s.scope == Scope::Evse && wanted(s)) {
                 add(spec, Some(evse), None);
             }
-            for spec in TABLE
-                .iter()
+            for spec in self
+                .specs()
                 .filter(|s| s.scope == Scope::Connector && wanted(s))
             {
                 add(spec, Some(evse), Some(1));
@@ -1018,7 +1038,7 @@ impl DeviceModel {
         live: LiveFn<'_>,
     ) -> Vec<ReportData> {
         let mut targets: Vec<Target> = Vec::new();
-        for spec in TABLE.iter().filter(|s| s.scope == Scope::Station) {
+        for spec in self.specs().filter(|s| s.scope == Scope::Station) {
             targets.push(Target {
                 spec,
                 evse: None,
@@ -1027,7 +1047,7 @@ impl DeviceModel {
         }
         for evse in 1..=self.evse_count {
             for (scope, connector) in [(Scope::Evse, None), (Scope::Connector, Some(1))] {
-                for spec in TABLE.iter().filter(|s| s.scope == scope) {
+                for spec in self.specs().filter(|s| s.scope == scope) {
                     targets.push(Target {
                         spec,
                         evse: Some(evse),
@@ -1047,7 +1067,7 @@ impl DeviceModel {
                     };
                     // A component without the variable meets `Active`, `Available` and
                     // `Enabled` (B08.FR.07 to FR.09), never `Problem` (B08.FR.10).
-                    let flag = TABLE.iter().find(|s| {
+                    let flag = self.specs().find(|s| {
                         s.scope == target.spec.scope
                             && s.component == target.spec.component
                             && s.variable == name
@@ -1129,7 +1149,7 @@ impl DeviceModel {
     /// Adopts a heartbeat interval the CSMS gave (a boot response).
     pub(super) fn set_heartbeat_interval(&mut self, secs: u32) {
         if secs > 0
-            && let Some(spec) = TABLE.iter().find(|s| s.variable == "HeartbeatInterval")
+            && let Some(spec) = self.specs().find(|s| s.variable == "HeartbeatInterval")
         {
             self.store(spec, secs.to_string());
         }
@@ -2131,6 +2151,48 @@ mod tests {
     }
 
     #[test]
+    fn supported_limits_is_a_21_only_read_only_member_list() {
+        let selector = ComponentVariable {
+            component: comp(TX),
+            variable: Some(var("SupportedLimits", None)),
+            custom_data: None,
+        };
+        let mut config = config(2);
+        config.protocol = Protocol::V21;
+        let with_limits = DeviceModel::new(&config);
+        let report = with_limits.report_items_for(&[], std::slice::from_ref(&selector), &live);
+        let [row] = report.as_slice() else {
+            panic!("expected one SupportedLimits row, got {report:?}");
+        };
+        let [attribute] = row.variable_attribute.as_slice() else {
+            panic!("expected one SupportedLimits attribute");
+        };
+        assert_eq!(attribute.mutability, Some(Mutability::ReadOnly));
+        assert_eq!(
+            attribute.value.as_deref(),
+            Some("maxEnergy,maxTime,maxCost")
+        );
+        let characteristics = row.variable_characteristics.as_ref().unwrap();
+        assert_eq!(characteristics.data_type, DataType::MemberList);
+        assert_eq!(
+            characteristics.values_list.as_deref(),
+            Some("maxEnergy,maxTime,maxCost,maxSoC")
+        );
+        assert!(report_text(&with_limits, ReportBase::FullInventory).contains(row));
+
+        let legacy = model();
+        assert_eq!(
+            legacy.report_items_for(&[], &[selector], &live),
+            Vec::<ReportData>::new()
+        );
+        assert!(
+            report_text(&legacy, ReportBase::FullInventory)
+                .iter()
+                .all(|row| row.variable.name != "SupportedLimits")
+        );
+    }
+
+    #[test]
     fn configuration_report_lists_the_settable_variables_with_characteristics() {
         let dm = model();
         let items = report_text(&dm, ReportBase::ConfigurationInventory);
@@ -2148,7 +2210,10 @@ mod tests {
     fn full_report_covers_every_component_and_attribute() {
         let dm = model();
         let items = report_text(&dm, ReportBase::FullInventory);
-        let station = TABLE.iter().filter(|s| s.scope == Scope::Station).count();
+        let station = TABLE
+            .iter()
+            .filter(|s| s.scope == Scope::Station && !s.v21_only)
+            .count();
         let evse = TABLE.iter().filter(|s| s.scope == Scope::Evse).count();
         let connector = TABLE.iter().filter(|s| s.scope == Scope::Connector).count();
         assert_eq!(items.len(), station + 2 * (evse + connector));

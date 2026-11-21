@@ -3,8 +3,8 @@
 //! (`kirby_ocpp_core::ocpp::v2::registry`). The OCPP 2.1 table ([`super::ocpp21`]) builds on
 //! this one.
 //!
-//! Twenty-one central-system actions have a typed payload and a form specification. The other
-//! 19 have no fields: their payload is sent raw. 2.0.1 integrates the security extensions
+//! Twenty-two central-system actions have a typed payload and a form specification. The other
+//! 18 have no fields: their payload is sent raw. 2.0.1 integrates the security extensions
 //! into the base specification, so every action is in the core group.
 
 use super::{ActionGroup, ActionSpec, FieldSpec, FieldType, ProtocolActions};
@@ -245,10 +245,14 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
         "Clear variable monitoring",
         "ClearVariableMonitoring (raw payload)",
     ),
-    raw(
+    action(
         "CostUpdated",
         "Cost updated",
-        "CostUpdated with the running cost of a transaction (raw payload)",
+        "CostUpdated with the running cost of a transaction",
+        &[
+            with_hint(json("totalCost", "totalCost", true), "a number, e.g. 12.34"),
+            text("transactionId", "transactionId", true),
+        ],
     ),
     raw(
         "CustomerInformation",
@@ -644,7 +648,7 @@ pub(in crate::registry) mod tests {
             .iter()
             .filter(|spec| core::is_typed(spec.name))
             .count();
-        assert_eq!(typed, 21);
+        assert_eq!(typed, 22);
     }
 
     fn request_schema(protocol: Protocol, action: &str) -> Value {

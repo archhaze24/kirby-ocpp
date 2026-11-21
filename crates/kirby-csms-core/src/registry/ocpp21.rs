@@ -248,7 +248,7 @@ mod tests {
                 core::lookup_for(Protocol::V21, spec.name).is_some_and(|entry| entry.typed)
             })
             .collect();
-        assert_eq!(typed.len(), 21);
+        assert_eq!(typed.len(), 22);
         assert_forms_match_schemas(Protocol::V21, &typed);
     }
 

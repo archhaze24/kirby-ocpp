@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use super::TransactionLimit2;
 use crate::config::StationConfig;
 use crate::ocpp::Protocol;
 use crate::ocpp::v2::messages::{BootReason, ConnectorStatus, Mutability, RegistrationStatus};
@@ -80,6 +81,15 @@ pub struct EvseSnapshot {
     /// whole station.
     #[serde(default)]
     pub external_limit: bool,
+    /// Limits of the ongoing transaction, when at least one is set.
+    #[serde(default)]
+    pub transaction_limit: Option<TransactionLimit2>,
+    /// Trigger reason of the limit that suspended energy transfer.
+    #[serde(default)]
+    pub limit_reached: Option<String>,
+    /// Last running cost reported by the CSMS for the ongoing transaction.
+    #[serde(default)]
+    pub total_cost: Option<f64>,
 }
 
 /// A reservation as the snapshot shows it.

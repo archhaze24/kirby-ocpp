@@ -1,0 +1,314 @@
+//! OCPP 2.1 transaction limits and CSMS cost updates.
+
+use std::time::Duration;
+
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
+
+use super::{ActiveTx, EventExtra};
+use crate::ocpp::Protocol;
+use crate::ocpp::v2::messages::{TransactionEventKind, TriggerReason};
+use crate::ocpp::v2::types::{ChargingState, StopReason};
+use crate::station2::actor::{Station2Actor, TimerKey2};
+use crate::station2::command::Outcome2;
+use crate::station2::types::StartStopPoint;
+
+/// Energy, duration and cost limits of an OCPP 2.1 transaction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct TransactionLimit2 {
+    pub max_energy_wh: Option<f64>,
+    pub max_time_s: Option<i64>,
+    pub max_cost: Option<f64>,
+}
+
+impl TransactionLimit2 {
+    pub(in crate::station2) fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+
+    fn from_wire(value: &Value) -> Self {
+        Self {
+            max_energy_wh: value.get("maxEnergy").and_then(Value::as_f64),
+            max_time_s: value.get("maxTime").and_then(time_seconds),
+            max_cost: value.get("maxCost").and_then(Value::as_f64),
+        }
+    }
+
+    pub(super) fn to_wire(self) -> Value {
+        Value::Object(Map::from_iter(
+            [
+                ("maxEnergy", self.max_energy_wh.map(Value::from)),
+                ("maxTime", self.max_time_s.map(Value::from)),
+                ("maxCost", self.max_cost.map(Value::from)),
+            ]
+            .into_iter()
+            .filter_map(|(key, value)| Some((key.to_owned(), value?))),
+        ))
+    }
+
+    fn with(self, update: Self) -> Self {
+        Self {
+            max_energy_wh: update.max_energy_wh.or(self.max_energy_wh),
+            max_time_s: update.max_time_s.or(self.max_time_s),
+            max_cost: update.max_cost.or(self.max_cost),
+        }
+    }
+
+    fn exceeds(self, cap: Self) -> bool {
+        fn exceeds<T: PartialOrd>(value: Option<T>, cap: Option<T>) -> bool {
+            value.zip(cap).is_some_and(|(value, cap)| value > cap)
+        }
+        exceeds(self.max_energy_wh, cap.max_energy_wh)
+            || exceeds(self.max_time_s, cap.max_time_s)
+            || exceeds(self.max_cost, cap.max_cost)
+    }
+}
+
+/// JSON Schema also accepts integral decimal values such as 60.0 as integers.
+fn time_seconds(value: &Value) -> Option<i64> {
+    value.as_i64().or_else(|| {
+        let seconds = value.as_f64()?;
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "the schema requires an integer; values outside i64 saturate"
+        )]
+        let seconds = seconds as i64;
+        Some(seconds)
+    })
+}
+
+/// The limit that suspended energy transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum LimitKind {
+    Energy,
+    Time,
+    Cost,
+}
+
+impl LimitKind {
+    pub(in crate::station2) fn trigger(self) -> TriggerReason {
+        match self {
+            Self::Energy => TriggerReason::EnergyLimitReached,
+            Self::Time => TriggerReason::TimeLimitReached,
+            Self::Cost => TriggerReason::CostLimitReached,
+        }
+    }
+
+    fn stop_reason(self) -> StopReason {
+        match self {
+            Self::Energy => StopReason::EnergyLimitReached,
+            Self::Time => StopReason::TimeLimitReached,
+            Self::Cost => StopReason::LocalOutOfCredit,
+        }
+    }
+}
+
+impl ActiveTx {
+    fn reached_limit(&self, elapsed_s: i64) -> Option<LimitKind> {
+        if self
+            .limit
+            .max_energy_wh
+            .is_some_and(|max| max <= 0.0 || self.energy_wh >= max)
+        {
+            Some(LimitKind::Energy)
+        } else if self
+            .limit
+            .max_time_s
+            .is_some_and(|max| max <= 0 || elapsed_s >= max)
+        {
+            Some(LimitKind::Time)
+        } else if self
+            .limit
+            .max_cost
+            .is_some_and(|max| max <= 0.0 || self.total_cost.is_some_and(|cost| cost >= max))
+        {
+            Some(LimitKind::Cost)
+        } else {
+            None
+        }
+    }
+}
+
+impl Station2Actor {
+    pub(in crate::station2) fn set_transaction_limit(
+        &mut self,
+        evse: u32,
+        limit: TransactionLimit2,
+    ) -> Outcome2 {
+        let reject = |reason: &str| Outcome2::Rejected {
+            reason: reason.to_owned(),
+        };
+        if self.protocol() != Protocol::V21 {
+            return reject("transaction limits require OCPP 2.1");
+        }
+        let Some(tx) = self.active_tx(evse) else {
+            return reject("no ongoing transaction");
+        };
+        if limit.is_empty() {
+            return reject("no limit fields supplied");
+        }
+        if [limit.max_energy_wh, limit.max_cost]
+            .into_iter()
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            return reject("transaction limits must be finite");
+        }
+        if limit.exceeds(tx.csms_limit) {
+            return reject("the limit exceeds the limit set by the CSMS");
+        }
+        self.tx_limit_set(evse, limit);
+        Outcome2::Done
+    }
+
+    /// Applies the cost and limits from the answer to an event of an ongoing transaction.
+    pub(in crate::station2) fn on_tx_event_limits(&mut self, evse: u32, id: &str, answer: &Value) {
+        let v21 = self.protocol() == Protocol::V21;
+        let Some(tx) = self.tx.active.get_mut(&evse).filter(|tx| tx.id.0 == id) else {
+            return;
+        };
+        let cost = answer.get("totalCost").and_then(Value::as_f64);
+        if let Some(cost) = cost {
+            tx.total_cost = Some(cost);
+        }
+        let incoming = v21
+            .then(|| {
+                answer
+                    .get("transactionLimit")
+                    .map(TransactionLimit2::from_wire)
+            })
+            .flatten()
+            .unwrap_or_default();
+        let limit = tx.limit.with(incoming);
+        let csms_limit = tx.csms_limit.with(incoming);
+        let changed = tx.limit != limit;
+        let dirty = cost.is_some() || tx.csms_limit != csms_limit;
+        tx.csms_limit = csms_limit;
+        if changed {
+            self.tx_limit_set(evse, incoming);
+        } else {
+            if dirty {
+                self.mark_dirty();
+            }
+            if v21 && (cost.is_some() || !incoming.is_empty()) {
+                self.check_tx_limits(evse);
+            }
+        }
+    }
+
+    /// Records the latest cost for an ongoing transaction, ignoring unknown and finished ids.
+    pub(in crate::station2) fn on_cost_updated(&mut self, id: &str, cost: f64) {
+        let Some(tx) = self.tx.active.values_mut().find(|tx| tx.id.0 == id) else {
+            return;
+        };
+        tx.total_cost = Some(cost);
+        let evse = tx.evse;
+        self.mark_dirty();
+        if self.protocol() == Protocol::V21 {
+            self.check_tx_limits(evse);
+        }
+    }
+
+    fn tx_limit_set(&mut self, evse: u32, fields: TransactionLimit2) {
+        self.settle_tx_meters();
+        let ready = self.connector_ready(evse);
+        let now = self.clock.now_utc();
+        let Some(tx) = self.tx.active.get_mut(&evse) else {
+            return;
+        };
+        let limit = tx.limit.with(fields);
+        let changed = tx.limit != limit;
+        tx.limit = limit;
+        let charging_state = if changed
+            && tx.limit_reached.is_some()
+            && tx
+                .reached_limit((now - tx.started_at).num_seconds())
+                .is_none()
+        {
+            tx.limit_reached = None;
+            tx.charging_state = if tx.authorized && tx.ev_connected && ready {
+                ChargingState::Charging
+            } else if tx.ev_connected {
+                ChargingState::EvConnected
+            } else {
+                ChargingState::Idle
+            };
+            Some(tx.charging_state)
+        } else {
+            None
+        };
+        self.tx_event(
+            evse,
+            TransactionEventKind::Updated,
+            TriggerReason::LimitSet,
+            EventExtra {
+                charging_state,
+                transaction_limit: Some(fields),
+                ..EventExtra::default()
+            },
+        );
+        self.check_tx_limits(evse);
+    }
+
+    pub(super) fn arm_tx_limit(&mut self, evse: u32) {
+        let timer = TimerKey2::TxLimit(evse);
+        if self.protocol() == Protocol::V21
+            && self.active_tx(evse).is_some_and(|tx| {
+                tx.charging_state == ChargingState::Charging
+                    && tx.limit_reached.is_none()
+                    && (tx.limit.max_energy_wh.is_some() || tx.limit.max_time_s.is_some())
+            })
+        {
+            self.timers.set_if_idle(timer, Duration::from_secs(1));
+        } else {
+            self.timers.cancel(&timer);
+        }
+    }
+
+    pub(in crate::station2) fn check_tx_limits(&mut self, evse: u32) {
+        self.settle_tx_meters();
+        let now = self.clock.now_utc();
+        let Some(tx) = self
+            .tx
+            .active
+            .get_mut(&evse)
+            .filter(|tx| tx.limit_reached.is_none())
+        else {
+            return;
+        };
+        let Some(reached) = tx.reached_limit((now - tx.started_at).num_seconds()) else {
+            return;
+        };
+        let meter = self.tx.meters.entry(evse).or_default();
+        if reached == LimitKind::Energy
+            && let Some(max) = tx.limit.max_energy_wh
+        {
+            let capped = max.max(0.0);
+            let start = self.tx.runtime.get(&evse).map_or_else(
+                || super::wh_from(tx.meter_start_wh),
+                |rt| rt.start_register_wh,
+            );
+            meter.register_wh = start + capped;
+            tx.energy_wh = capped;
+        }
+        meter.charging = false;
+        tx.limit_reached = Some(reached);
+        tx.charging_state = ChargingState::SuspendedEvse;
+        if self
+            .tx_stop_points()
+            .contains(&StartStopPoint::EnergyTransfer)
+        {
+            self.finish(evse, reached.stop_reason(), reached.trigger(), None);
+        } else {
+            self.tx_event(
+                evse,
+                TransactionEventKind::Updated,
+                reached.trigger(),
+                EventExtra {
+                    charging_state: Some(ChargingState::SuspendedEvse),
+                    ..EventExtra::default()
+                },
+            );
+        }
+    }
+}

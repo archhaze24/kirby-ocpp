@@ -1057,6 +1057,12 @@ impl Station2Actor {
 
     /// The power in watts an EVSE may draw now: the nominal power under the limit in force.
     pub(super) fn sc_offered_w(&self, evse: u32) -> f64 {
+        if self
+            .active_tx(evse)
+            .is_some_and(|tx| tx.limit_reached.is_some())
+        {
+            return 0.0;
+        }
         let eval = self.sc_eval();
         let now = self.clock.now_utc();
         eval.model.effective_w(eval.limit_w(

@@ -395,6 +395,9 @@ impl Station2Actor {
                     reservation: None,
                     offered_w: None,
                     external_limit: false,
+                    transaction_limit: None,
+                    limit_reached: None,
+                    total_cost: None,
                 });
             }
         }

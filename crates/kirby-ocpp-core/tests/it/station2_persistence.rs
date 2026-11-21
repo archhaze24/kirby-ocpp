@@ -15,7 +15,7 @@ use kirby_ocpp_core::ocpp::v2::messages::TransactionEventKind;
 use kirby_ocpp_core::ocpp::v2::types::{ChargingState, IdTokenType};
 use kirby_ocpp_core::station2::{
     ActiveTx, AuthCachePersist, CacheEntry, DeviceModelPersist, EvseAvail, IdTokenRef,
-    QueuePersist, QueuedEvent, TxId2, TxPersist,
+    QueuePersist, QueuedEvent, TransactionLimit2, TxId2, TxPersist,
 };
 use kirby_ocpp_core::store::{
     FileKind, Inspection2, LoadOutcome, LoadOutcome2, PersistedStation, PersistedStation2,
@@ -60,6 +60,10 @@ fn active_tx(evse: u32, id: &str, next_seq_no: i32) -> ActiveTx {
         token_sent: true,
         meter_start_wh: 100,
         energy_wh: 250.5,
+        limit: TransactionLimit2::default(),
+        csms_limit: TransactionLimit2::default(),
+        limit_reached: None,
+        total_cost: None,
     }
 }
 

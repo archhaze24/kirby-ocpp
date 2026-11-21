@@ -38,9 +38,9 @@ use crate::ocpp::action::{Action, InboundAction};
 use crate::ocpp::frame::ErrorCode;
 use crate::ocpp::responder::{ReplyHandle, Responder};
 use crate::ocpp::v2::messages::{
-    CancelReservation, ChangeAvailability, ClearCache, ClearChargingProfile, DataTransfer,
-    GetBaseReport, GetChargingProfiles, GetCompositeSchedule, GetLocalListVersion, GetReport,
-    GetTransactionStatus, GetVariables, RequestStartTransaction, RequestStopTransaction,
+    CancelReservation, ChangeAvailability, ClearCache, ClearChargingProfile, CostUpdated,
+    DataTransfer, GetBaseReport, GetChargingProfiles, GetCompositeSchedule, GetLocalListVersion,
+    GetReport, GetTransactionStatus, GetVariables, RequestStartTransaction, RequestStopTransaction,
     ReserveNow, Reset, SendLocalList, SetChargingProfile, SetVariables, TriggerMessage,
     UnlockConnector,
 };
@@ -95,6 +95,7 @@ impl Station2Actor {
             GetTransactionStatus::NAME => {
                 self.invoke::<GetTransactionStatus>(payload, reply, tx::get_transaction_status);
             }
+            CostUpdated::NAME => self.invoke::<CostUpdated>(payload, reply, tx::cost_updated),
             RequestStartTransaction::NAME => {
                 self.invoke::<RequestStartTransaction>(
                     payload,

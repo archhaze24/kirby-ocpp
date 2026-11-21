@@ -4,8 +4,8 @@
 //! generated (the `seqNo` order of each transaction depends on it). At most one entry is in
 //! flight and only the head is ever sent, so a stalled head blocks the events behind it.
 //!
-//! * A delivered event is removed; an `idTokenInfo` in the answer goes to the authorization
-//!   module.
+//! * A delivered event is removed. Limits and cost in its answer go to the transaction
+//!   engine, and `idTokenInfo` goes to the authorization module.
 //! * A failure while the link is up (CALLERROR, timeout, bad answer) counts as an attempt: the
 //!   head waits `attempts x MessageAttemptInterval` and is sent again unchanged, and it is
 //!   discarded after `MessageAttempts` failures (E13).
@@ -268,6 +268,7 @@ impl Station2Actor {
                 self.flush_now();
                 // The hook may end the transaction and queue more events; the delivered one is
                 // gone and nothing is in flight by now.
+                self.on_tx_event_limits(done.evse, &done.transaction_id, &answer);
                 if let Some(info) = answer.get("idTokenInfo") {
                     let token = event_token(&done.payload);
                     self.on_id_token_info(done.evse, &done.transaction_id, token, info);

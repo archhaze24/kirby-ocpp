@@ -60,7 +60,7 @@ pub use self::snapshot::{
     ConnectorSnapshot2, EvseSnapshot, ReservationView2, Snapshot2, TransactionSnapshot,
     VariableView,
 };
-pub use self::transactions::{ActiveTx, TxPersist};
+pub use self::transactions::{ActiveTx, LimitKind, TransactionLimit2, TxPersist};
 pub use self::tx_queue::{QueuePersist, QueuedEvent};
 pub use self::types::{IdTokenRef, StartStopPoint, TxId2};
 

@@ -8,7 +8,7 @@
 //! |---|---|
 //! | `boot_status` | `BootNotification`, `Heartbeat`, `StatusNotification` |
 //! | `authorization` | `Authorize`, `ClearCache` |
-//! | `transactions` | `TransactionEvent`, `MeterValues`, `GetTransactionStatus` |
+//! | `transactions` | `TransactionEvent`, `MeterValues`, `GetTransactionStatus`, `CostUpdated` |
 //! | `remote_control` | `Reset`, `ChangeAvailability`, `RequestStartTransaction`, `RequestStopTransaction`, `UnlockConnector`, `TriggerMessage` |
 //! | `device_model` | `GetVariables`, `SetVariables`, `GetBaseReport`, `GetReport`, `NotifyReport` |
 //! | `local_list` | `SendLocalList`, `GetLocalListVersion` |
@@ -106,7 +106,8 @@ pub use smart_charging::{
     SetChargingProfile, SetChargingProfileRequest, SetChargingProfileResponse,
 };
 pub use transactions::{
-    GetTransactionStatus, GetTransactionStatusRequest, GetTransactionStatusResponse, MeterValues,
-    MeterValuesRequest, MeterValuesResponse, TransactionEvent, TransactionEventKind,
-    TransactionEventRequest, TransactionEventResponse, TriggerReason,
+    CostUpdated, CostUpdatedRequest, CostUpdatedResponse, GetTransactionStatus,
+    GetTransactionStatusRequest, GetTransactionStatusResponse, MeterValues, MeterValuesRequest,
+    MeterValuesResponse, TransactionEvent, TransactionEventKind, TransactionEventRequest,
+    TransactionEventResponse, TriggerReason,
 };
