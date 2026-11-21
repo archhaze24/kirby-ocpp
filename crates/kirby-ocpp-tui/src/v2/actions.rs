@@ -85,6 +85,10 @@ pub enum ActionId2 {
     Meter120,
     MeterCustom,
     ChargingState,
+    /// A station-side transaction limit (2.1).
+    TransactionLimit,
+    /// Priority charging on or off (2.1).
+    PriorityCharging,
     // Data
     DataTransfer,
     VendorPing,
@@ -276,6 +280,20 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             "Pick the charging state of the transaction (ChargingStateEnumType).",
         ),
         def(
+            A::TransactionLimit,
+            T::Transaction,
+            'i',
+            "Transaction limit...",
+            "Set a station-side transaction limit (2.1): energy in kWh, time in seconds, cost; empty fields stay unset. A value above the CSMS limit is refused.",
+        ),
+        def(
+            A::PriorityCharging,
+            T::Transaction,
+            'P',
+            "Priority charging",
+            "Turn priority charging on or off for the selected EVSE (2.1); needs a PriorityCharging profile to turn on.",
+        ),
+        def(
             A::DataTransfer,
             T::Data,
             'd',
@@ -439,7 +457,7 @@ pub(super) fn disabled_reason2(id: ActionId2, cx: &Context2<'_>) -> Option<Strin
         A::PlugToggle | A::FaultToggle | A::Meter120 | A::MeterCustom | A::PresentToken => {
             need_evse()
         }
-        A::StopTransaction | A::ChargingState => need_evse().or_else(need_tx),
+        A::StopTransaction | A::ChargingState | A::PriorityCharging => need_evse().or_else(need_tx),
         A::LogCopySelected if !cx.log_has_selection => {
             Some("the log has no selected row".to_owned())
         }

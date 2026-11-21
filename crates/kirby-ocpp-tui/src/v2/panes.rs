@@ -255,6 +255,50 @@ fn transaction_lines(tx: &TransactionSnapshot) -> Vec<Line<'static>> {
     ]
 }
 
+/// The OCPP 2.1 limit, cost, tariff and priority rows of an EVSE; each only with content.
+fn evse_extra_lines(evse: &EvseSnapshot) -> Vec<Line<'static>> {
+    let mut v = Vec::new();
+    // One line per limit kind: the details pane is narrow and does not wrap.
+    if let Some(limit) = &evse.transaction_limit {
+        if let Some(wh) = limit.max_energy_wh {
+            v.push(kv("max energy", format!("{:.1} kWh", wh / 1000.0)));
+        }
+        if let Some(s) = limit.max_time_s {
+            let time = if s % 60 == 0 {
+                format!("{} min", s / 60)
+            } else {
+                format!("{s} s")
+            };
+            v.push(kv("max time", time));
+        }
+        if let Some(cost) = limit.max_cost {
+            v.push(kv("max cost", format!("{cost:.2}")));
+        }
+        if let Some(reached) = &evse.limit_reached {
+            v.push(Line::from(vec![
+                Span::styled(format!("{:<17}", "limit reached"), dim()),
+                Span::styled(sanitize(reached), Style::new().fg(Color::Yellow)),
+            ]));
+        }
+    }
+    let tariff = evse.tariff_id.as_deref().map(sanitize);
+    match (evse.total_cost, &tariff) {
+        (Some(cost), Some(id)) => v.push(kv("cost", format!("{cost:.2} \u{b7} tariff {id}"))),
+        (Some(cost), None) => v.push(kv("cost", format!("{cost:.2}"))),
+        (None, Some(id)) => v.push(kv("tariff", id.clone())),
+        (None, None) => {}
+    }
+    if evse.priority_charging {
+        v.push(Line::from(Span::raw("priority charging")));
+    }
+    if tariff.is_none()
+        && let Some(id) = &evse.default_tariff_id
+    {
+        v.push(kv("default tariff", sanitize(id)));
+    }
+    v
+}
+
 fn evse_lines(app: &App2, transaction_first: bool) -> Vec<Line<'static>> {
     let Some(evse) = app.selected_evse() else {
         return vec![Line::styled("The station has no EVSE.", dim())];
@@ -291,10 +335,11 @@ fn evse_lines(app: &App2, transaction_first: bool) -> Vec<Line<'static>> {
         };
         base.push(kv("limit", format!("{:.1} kW{external}", w / 1000.0)));
     }
-    let tx = evse
+    let mut tx = evse
         .transaction
         .as_ref()
         .map_or_else(|| vec![kv("transaction", "none")], transaction_lines);
+    tx.extend(evse_extra_lines(evse));
     if transaction_first {
         let mut v = tx;
         v.extend(base);

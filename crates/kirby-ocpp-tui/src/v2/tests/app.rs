@@ -57,6 +57,7 @@ fn evse(id: u32) -> EvseSnapshot {
         total_cost: None,
         tariff_id: None,
         default_tariff_id: None,
+        priority_charging: false,
     }
 }
 
@@ -703,6 +704,69 @@ fn the_external_limit_actions_are_in_the_palette() {
     let labels: Vec<&str> = app.catalog.iter().map(|a| a.label.as_str()).collect();
     assert!(labels.contains(&"Set external limit..."));
     assert!(labels.contains(&"Clear external limit..."));
+}
+
+#[test]
+fn transaction_limit_form_needs_a_limit_and_converts_kwh_to_wh() {
+    use kirby_ocpp_core::station2::TransactionLimit2;
+    let mut app = app();
+    with_transaction(&mut app, 1);
+    press(&mut app, "3i");
+    assert_eq!(form_of(&app).title, "Transaction limit");
+    // No field given: refused, the form stays open.
+    assert!(press_code(&mut app, KeyCode::Enter).is_empty());
+    assert!(matches!(app.mode, Mode2::Form(_)));
+    // 1.5 kWh and 600 s (the refusal moved the focus to the energy field).
+    press(&mut app, "1.5");
+    press_code(&mut app, KeyCode::Tab);
+    press(&mut app, "600");
+    let fx = press_code(&mut app, KeyCode::Enter);
+    assert_eq!(
+        commands(&fx),
+        vec![Command2::SetTransactionLimit {
+            evse: 1,
+            limit: TransactionLimit2 {
+                max_energy_wh: Some(1500.0),
+                max_time_s: Some(600),
+                max_cost: None,
+            },
+        }]
+    );
+}
+
+#[test]
+fn transaction_limit_form_refuses_bad_numbers() {
+    let mut app = app();
+    press(&mut app, "3i");
+    press_code(&mut app, KeyCode::Tab);
+    press_code(&mut app, KeyCode::Tab);
+    press(&mut app, "1.5");
+    assert!(press_code(&mut app, KeyCode::Enter).is_empty());
+    assert!(matches!(app.mode, Mode2::Form(_)));
+}
+
+#[test]
+fn priority_charging_key_toggles_by_the_snapshot() {
+    let mut app = app();
+    with_transaction(&mut app, 1);
+    press(&mut app, "3");
+    let fx = press(&mut app, "P");
+    assert_eq!(
+        commands(&fx),
+        vec![Command2::SetPriorityCharging {
+            evse: 1,
+            activate: true
+        }]
+    );
+    app.snapshot.evses[0].priority_charging = true;
+    let fx = press(&mut app, "P");
+    assert_eq!(
+        commands(&fx),
+        vec![Command2::SetPriorityCharging {
+            evse: 1,
+            activate: false
+        }]
+    );
 }
 
 #[test]

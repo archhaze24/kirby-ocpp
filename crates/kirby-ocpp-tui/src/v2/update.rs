@@ -16,7 +16,7 @@ use super::browser::DeviceBrowser;
 use super::forms::{
     authorize_form, charging_state_choice, clear_external_limit_form, data_transfer_form,
     external_limit_form, meter_custom_form, present_token_form, raw_call_form, security_event_form,
-    stop_reason_choice,
+    stop_reason_choice, transaction_limit_form,
 };
 use super::keys;
 use crate::app::{Detail, Notice, NoticeLevel, PendingCall, ScenarioView, StepState, event_line};
@@ -323,6 +323,13 @@ impl App2 {
             ActionId2::ExternalLimit => self.mode = Mode2::Form(external_limit_form(max_evse)),
             ActionId2::ClearExternalLimit => {
                 self.mode = Mode2::Form(clear_external_limit_form(max_evse));
+            }
+            ActionId2::TransactionLimit => {
+                self.mode = Mode2::Form(transaction_limit_form(evse, max_evse));
+            }
+            ActionId2::PriorityCharging => {
+                let activate = !self.selected_evse().is_some_and(|e| e.priority_charging);
+                plain(fx, Command2::SetPriorityCharging { evse, activate });
             }
             ActionId2::Authorize => self.mode = Mode2::Form(authorize_form(self.protocol)),
             ActionId2::PresentToken => {

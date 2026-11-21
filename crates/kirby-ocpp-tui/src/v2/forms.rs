@@ -8,7 +8,7 @@ use kirby_ocpp_core::ocpp::v2::registry::actions_for;
 use kirby_ocpp_core::ocpp::v2::types::{
     ChargingState, Component, IdTokenType, StopReason, Variable, WireEnum,
 };
-use kirby_ocpp_core::station2::{Command2, VariableView};
+use kirby_ocpp_core::station2::{Command2, TransactionLimit2, VariableView};
 use serde_json::{Value, json};
 
 use super::app::{App2, Effect2, Mode2};
@@ -28,6 +28,7 @@ const SECURITY_EVENT: &str = "security_event";
 const SET_VARIABLE: &str = "set_variable";
 const EXTERNAL_LIMIT: &str = "external_limit";
 const CLEAR_EXTERNAL_LIMIT: &str = "clear_external_limit";
+const TRANSACTION_LIMIT: &str = "transaction_limit";
 
 /// Names of the generic pick-lists (the name of a [`ChoiceKind::Generic`]).
 const STOP_REASON: &str = "stop_reason";
@@ -160,6 +161,21 @@ pub(super) fn external_limit_form(max_evse: u32) -> Form {
             Field::new("limit", FieldKind::Limit, "16"),
             Field::new("unit", FieldKind::Select, "")
                 .with_options(vec!["A".to_owned(), "W".to_owned()]),
+        ],
+        max_evse,
+    )
+}
+
+/// A station-side limit of the ongoing transaction (2.1); every limit is optional.
+pub(super) fn transaction_limit_form(evse: u32, max_evse: u32) -> Form {
+    Form::generic(
+        TRANSACTION_LIMIT,
+        "Transaction limit",
+        vec![
+            Field::new("EVSE", FieldKind::Evse, &evse.to_string()),
+            Field::new("max energy, kWh (optional)", FieldKind::OptionalText, ""),
+            Field::new("max time, s (optional)", FieldKind::OptionalText, ""),
+            Field::new("max cost (optional)", FieldKind::OptionalText, ""),
         ],
         max_evse,
     )
@@ -394,6 +410,38 @@ fn number<T: std::str::FromStr>(
         .map_err(|_| (i, format!("{what} is not a number")))
 }
 
+/// An optional finite number above 0: `None` for an empty field.
+fn optional_positive_f64(
+    values: &[FieldValue],
+    i: usize,
+    what: &str,
+) -> Result<Option<f64>, FieldProblem> {
+    let raw = text(values, i).trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    match raw.parse::<f64>() {
+        Ok(n) if n.is_finite() && n > 0.0 => Ok(Some(n)),
+        _ => Err((i, format!("{what} must be a number above 0"))),
+    }
+}
+
+/// An optional whole number above 0: `None` for an empty field.
+fn optional_positive_i64(
+    values: &[FieldValue],
+    i: usize,
+    what: &str,
+) -> Result<Option<i64>, FieldProblem> {
+    let raw = text(values, i).trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    match raw.parse::<i64>() {
+        Ok(n) if n > 0 => Ok(Some(n)),
+        _ => Err((i, format!("{what} must be a whole number above 0"))),
+    }
+}
+
 fn token_command(
     values: &[FieldValue],
     first: usize,
@@ -468,6 +516,26 @@ fn plan(
                     evse,
                     limit: schedule,
                 },
+                false,
+            ))
+        }
+        TRANSACTION_LIMIT => {
+            let evse: u32 = number(values, 0, "EVSE")?;
+            let max_energy_wh =
+                optional_positive_f64(values, 1, "max energy")?.map(|kwh| kwh * 1000.0);
+            let max_time_s = optional_positive_i64(values, 2, "max time")?;
+            let max_cost = optional_positive_f64(values, 3, "max cost")?;
+            let limit = TransactionLimit2 {
+                max_energy_wh,
+                max_time_s,
+                max_cost,
+            };
+            if limit == TransactionLimit2::default() {
+                return Err((1, "give at least one limit".to_owned()));
+            }
+            Ok(Planned::one(
+                "set transaction limit",
+                Command2::SetTransactionLimit { evse, limit },
                 false,
             ))
         }

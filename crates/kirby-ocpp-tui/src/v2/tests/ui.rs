@@ -85,6 +85,7 @@ fn evse(id: u32, status_name: &str, plugged: bool, tx: Option<&str>) -> EvseSnap
         total_cost: None,
         tariff_id: None,
         default_tariff_id: None,
+        priority_charging: false,
     }
 }
 
@@ -299,8 +300,69 @@ fn evse_details_show_the_reservation_and_the_limit() {
     assert_clean(&text);
     a.snapshot.evses[0].external_limit = true;
     a.snapshot.evses[0].offered_w = Some(3000.0);
-    let text = render(&a, 110, 40);
+    let text = render(&a, 200, 40);
     assert!(text.contains("3.0 kW (external)"), "{text}");
+}
+
+#[test]
+fn evse_details_show_the_transaction_limit_cost_tariff_and_priority() {
+    use kirby_ocpp_core::station2::TransactionLimit2;
+    let mut a = app();
+    a.set_tab(Tab2::Evse);
+    let text = render(&a, 200, 40);
+    for absent in [
+        "max energy",
+        "max time",
+        "max cost",
+        "tariff",
+        "priority charging",
+    ] {
+        assert!(!text.contains(absent), "{absent}: {text}");
+    }
+    let evse = &mut a.snapshot.evses[0];
+    evse.transaction_limit = Some(TransactionLimit2 {
+        max_energy_wh: Some(12_500.0),
+        max_time_s: Some(1800),
+        max_cost: Some(5.0),
+    });
+    // The rows fit the details pane at the usual 110 columns.
+    let text = render(&a, 110, 40);
+    assert!(text.contains("max energy       12.5 kWh"), "{text}");
+    assert!(text.contains("max time         30 min"), "{text}");
+    assert!(text.contains("max cost         5.00"), "{text}");
+    assert!(!text.contains("reached"), "{text}");
+    let evse = &mut a.snapshot.evses[0];
+    evse.transaction_limit = Some(TransactionLimit2 {
+        max_energy_wh: None,
+        max_time_s: Some(90),
+        max_cost: None,
+    });
+    evse.limit_reached = Some("EnergyLimitReached".to_owned());
+    evse.total_cost = Some(1.234);
+    evse.tariff_id = Some("T\u{1b}1".to_owned());
+    evse.priority_charging = true;
+    evse.default_tariff_id = Some("DEF".to_owned());
+    let text = render(&a, 200, 60);
+    assert!(text.contains("max time         90 s"), "{text}");
+    assert!(!text.contains("max energy"), "{text}");
+    assert!(
+        text.contains("limit reached    EnergyLimitReached"),
+        "{text}"
+    );
+    assert!(text.contains("1.23 \u{b7} tariff T"), "{text}");
+    assert!(text.contains("priority charging"), "{text}");
+    assert!(!text.contains("default tariff"), "{text}");
+    assert_clean(&text);
+    let evse = &mut a.snapshot.evses[0];
+    evse.total_cost = None;
+    let text = render(&a, 200, 60);
+    assert!(!text.contains("cost 1.23"), "{text}");
+    assert!(text.contains("tariff"), "{text}");
+    let evse = &mut a.snapshot.evses[0];
+    evse.tariff_id = None;
+    let text = render(&a, 200, 60);
+    assert!(text.contains("default tariff"), "{text}");
+    assert!(text.contains("DEF"), "{text}");
 }
 
 #[test]
