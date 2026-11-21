@@ -32,6 +32,7 @@ tag as the GitHub release notes.
 - The state file of OCPP 2.0.1 stations is format version 2; files of version 1 still load.
 - The default `kirby-csms --subprotocol` policy is `require:ocpp1.6,ocpp2.0.1,ocpp2.1`.
 - `kirby-ocpp-core`: `Snapshot2` and `EvseSnapshot` no longer implement `Eq` (the snapshot carries an `f64` limit).
+- OCPP 1.6 emulator: `GetCompositeSchedule` without a `chargingRateUnit` takes the unit of the profile that applies anywhere in the requested window, not only at the time of the request.
 - `kirby-ocpp-core`: the 2.x typed enums carry the OCPP 2.1 values; `IdTokenType` decodes any string (`Other` keeps the text), is no longer `Copy` and lists the 2.0.1 kinds in `KNOWN` instead of `ALL`; `SignedMeterValue.public_key` and `signing_method` are optional.
 
 ### Fixed
