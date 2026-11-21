@@ -174,17 +174,22 @@ impl Drop for Csms {
 
 /// A station connected to `addr` and booted.
 async fn station(addr: &str, id: &str, tls: bool) -> StationHandle {
+    let handle = connect_station(addr, id, tls).await;
+    let mut snapshots = handle.watch_snapshot();
+    tokio::time::timeout(WAIT, snapshots.wait_for(Snapshot::booted))
+        .await
+        .expect("station did not boot")
+        .unwrap();
+    handle
+}
+
+async fn connect_station(addr: &str, id: &str, tls: bool) -> StationHandle {
     let scheme = if tls { "wss" } else { "ws" };
     let mut config = StationConfig::new(format!("{scheme}://{addr}/ocpp")).with_charge_point_id(id);
     config.persist = false;
     config.tls.skip_verify = tls;
     let (handle, _join) = Station::spawn(config, Arc::new(SystemClock));
     handle.connect().await.unwrap();
-    let mut snapshots = handle.watch_snapshot();
-    tokio::time::timeout(WAIT, snapshots.wait_for(Snapshot::booted))
-        .await
-        .expect("station did not boot")
-        .unwrap();
     handle
 }
 
@@ -2124,11 +2129,16 @@ async fn replay_fails_when_the_answer_kind_differs() {
     let text = csms_recording(&frames);
     let path = write(dir.path(), "session.jsonl", &text);
     let mut csms = Csms::start(&["--replay", &path, "--timeout", "30"]);
-    let station = station(&csms.addr.clone(), "CP-1", false).await;
+    // The CSMS can close as soon as it receives the answer. The replay verdict
+    // proves boot completed on the wire even if the station snapshot missed it.
+    let station = connect_station(&csms.addr, "CP-1", false).await;
     let verdict = csms.wait(|v| v["type"] == "replay");
     assert_eq!(verdict["status"], "failed", "{verdict}");
     assert!(
-        verdict["error"].as_str().unwrap().contains("CALLERROR"),
+        verdict["error"]
+            .as_str()
+            .unwrap()
+            .contains("the recording has a CALLERROR, the station answered with a result"),
         "{verdict}"
     );
     let (code, _, _) = csms.finish();
