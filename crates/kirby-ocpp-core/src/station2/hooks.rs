@@ -62,6 +62,7 @@ impl Station2Actor {
                     .and_then(|tx| tx.tariff.as_ref())
                     .map(|state| state.current().id.clone());
                 let default = self.default_tariff(e.id).map(|tariff| tariff.id.clone());
+                let priority = tx.is_some_and(|tx| tx.priority_charging);
                 (
                     self.reservation_view(e.id),
                     offered,
@@ -71,11 +72,14 @@ impl Station2Actor {
                     cost,
                     tariff,
                     default,
+                    priority,
                 )
             })
             .collect();
-        for (entry, (reservation, offered, external, limit, reached, cost, tariff, default)) in
-            self.state.evses.iter_mut().zip(views)
+        for (
+            entry,
+            (reservation, offered, external, limit, reached, cost, tariff, default, priority),
+        ) in self.state.evses.iter_mut().zip(views)
         {
             entry.reservation = reservation;
             entry.offered_w = offered;
@@ -85,6 +89,7 @@ impl Station2Actor {
             entry.total_cost = cost;
             entry.tariff_id = tariff;
             entry.default_tariff_id = default;
+            entry.priority_charging = priority;
         }
         self.state.local_list_version = self.local_list.version;
         self.state.local_list_entries = self.local_list_len();

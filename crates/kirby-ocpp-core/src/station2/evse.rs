@@ -400,6 +400,7 @@ impl Station2Actor {
                     total_cost: None,
                     tariff_id: None,
                     default_tariff_id: None,
+                    priority_charging: false,
                 });
             }
         }

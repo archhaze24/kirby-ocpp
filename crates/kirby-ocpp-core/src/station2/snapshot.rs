@@ -94,6 +94,9 @@ pub struct EvseSnapshot {
     pub tariff_id: Option<String>,
     #[serde(default)]
     pub default_tariff_id: Option<String>,
+    /// Priority charging is active for the ongoing transaction.
+    #[serde(default)]
+    pub priority_charging: bool,
 }
 
 /// A reservation as the snapshot shows it.
