@@ -167,6 +167,58 @@ fn v2_station_shows_wire_names_short_ids_and_report_progress() {
 }
 
 #[test]
+fn suspended_charging_states_stay_apart_at_every_width() {
+    use kirby_ocpp_core::ocpp::v2::types::ChargingState;
+    for (w, full) in [(80, false), (120, false), (140, true), (160, true)] {
+        let mut app = app_v2();
+        let screen = render(&app, w, 40);
+        assert_eq!(screen.contains("SuspendedEVSE"), full, "w={w}:\n{screen}");
+        assert!(full || screen.contains("SuspEVSE"), "w={w}:\n{screen}");
+        // A second transaction in the other suspended state.
+        let mut other = app.state.as_ref().unwrap().clone();
+        let v2 = other.v2.as_mut().unwrap();
+        v2.transactions[1].charging_state = Some(ChargingState::SuspendedEv);
+        app.state = Some(other);
+        let screen = render(&app, w, 40);
+        let want = if full { "SuspendedEV " } else { "SuspEV " };
+        assert!(screen.lines().any(|l| l.contains(want)), "w={w}:\n{screen}");
+    }
+}
+
+#[test]
+fn the_2_x_help_has_one_actions_heading_three_panes_and_the_palette_line() {
+    let mut app = app_v2();
+    app.mode = crate::app::Mode::Help;
+    let screen = render(&app, 140, 70);
+    assert_eq!(
+        screen.matches("Actions on the selected station").count(),
+        1,
+        "{screen}"
+    );
+    assert!(
+        screen.contains("s searches when the log is focused"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("change focused pane (stations, details, log)"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("OCPP 2.x commands without a hotkey are in the palette (:)"),
+        "{screen}"
+    );
+    // The 1.6 help keeps its two panes.
+    let mut old = loaded();
+    old.mode = crate::app::Mode::Help;
+    let screen = render(&old, 140, 70);
+    assert!(
+        screen.contains("change focused pane (stations, log)"),
+        "{screen}"
+    );
+    assert!(!screen.contains("in the palette (:)"), "{screen}");
+}
+
+#[test]
 fn a_2_1_station_uses_the_v2_views_and_shows_its_protocol() {
     let app = app_v2_on("ocpp2.1");
     let screen = render(&app, 160, 40);

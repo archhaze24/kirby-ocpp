@@ -909,10 +909,7 @@ impl Form {
             FormKind::Raw,
             "Raw CALL",
             station,
-            vec![
-                action,
-                Field::new("payload (JSON)", FieldKind::RawJson, "{}"),
-            ],
+            vec![action, Field::new("payload (JSON)", FieldKind::RawJson, "")],
         )
         .in_protocol(Protocol::from_token(protocol).unwrap_or(Protocol::V16))
     }
@@ -942,7 +939,7 @@ impl Form {
                 station,
                 vec![
                     Field::select("action", vec![spec.name.to_owned()]),
-                    Field::new("payload (JSON)", FieldKind::RawJson, "{}"),
+                    Field::new("payload (JSON)", FieldKind::RawJson, ""),
                 ],
             )
             .in_protocol(ctx.protocol);
@@ -1323,7 +1320,7 @@ impl Form {
             FieldKind::Json => json_object(f.input.text()).err(),
             FieldKind::RawJson => validate_request(
                 protocol,
-                f.input.text(),
+                raw_payload_text(f.input.text()),
                 action.as_deref().unwrap_or_default(),
             ),
             FieldKind::ProfileJson => validate_profile(f.input.text(), &connector_text),
@@ -1566,7 +1563,8 @@ impl Form {
             }
             FormKind::Raw => Submitted::Send(Command::Raw {
                 action: chosen(0)?,
-                payload: serde_json::from_str(self.fields.get(1)?.input.text()).ok()?,
+                payload: serde_json::from_str(raw_payload_text(self.fields.get(1)?.input.text()))
+                    .ok()?,
             }),
             FormKind::Spec => {
                 let spec = self.spec?;
@@ -1745,6 +1743,11 @@ fn validate_keys(text: &str) -> Option<String> {
 
 fn truncate_key(k: &str) -> String {
     kirby_ocpp_tui::text::truncate(&kirby_ocpp_tui::text::sanitize(k), 20)
+}
+
+/// The payload of a raw call form: an empty field means `{}`.
+fn raw_payload_text(text: &str) -> &str {
+    if text.trim().is_empty() { "{}" } else { text }
 }
 
 fn json_object(text: &str) -> Result<Value, String> {

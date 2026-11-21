@@ -275,6 +275,35 @@ fn raw_form_reports_schema_errors_inline_and_sends_valid_payloads() {
     );
 }
 
+#[test]
+fn raw_form_payload_starts_empty_and_an_empty_payload_is_an_empty_object() {
+    let mut app = loaded();
+    press(&mut app, KeyCode::Char('w'));
+    for _ in 0..20 {
+        let Mode::Form(f) = &app.mode else {
+            panic!("form");
+        };
+        if f.fields[0].chosen() == Some("ClearCache") {
+            break;
+        }
+        press(&mut app, KeyCode::Right);
+    }
+    let Mode::Form(f) = &app.mode else {
+        panic!("form");
+    };
+    assert_eq!(f.fields[0].chosen(), Some("ClearCache"));
+    assert_eq!(f.fields[1].input.text(), "");
+    assert!(f.fields[1].error.is_none());
+    let (_, command) = only_send(press(&mut app, KeyCode::Enter));
+    assert_eq!(
+        command,
+        Command::Raw {
+            action: "ClearCache".into(),
+            payload: json!({})
+        }
+    );
+}
+
 // ---- server-side scripting ----------------------------------------------------------------
 
 #[test]

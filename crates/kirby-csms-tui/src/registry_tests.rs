@@ -572,7 +572,16 @@ fn a_1_6_only_hotkey_on_a_2_0_1_station_says_so() {
         assert!(fx.is_empty(), "{key}");
         assert!(matches!(app.mode, Mode::Normal), "{key}");
         assert!(
-            notice_text(&app).ends_with("not an OCPP 2.0.1 action"),
+            notice_text(&app).ends_with(": no hotkey for OCPP 2.0.1 stations; use the palette (:)"),
+            "{key}: {}",
+            notice_text(&app)
+        );
+        // It stays as long as any other status message (about 3 s of 33 ms ticks).
+        for _ in 0..90 {
+            update(&mut app, Msg::Tick(Utc::now()));
+        }
+        assert!(
+            notice_text(&app).ends_with("use the palette (:)"),
             "{key}: {}",
             notice_text(&app)
         );
@@ -1222,6 +1231,59 @@ fn rules_open_the_1_6_form_unless_the_station_has_a_table() {
     assert_eq!(form.fields[0].chosen(), Some(V201));
     let fx = press(&mut app, KeyCode::Enter);
     assert!(matches!(fx.first(), Some(Effect::RespondScoped { .. })));
+}
+
+#[test]
+fn a_refusal_shows_its_reason_code_and_additional_info() {
+    let mut app = station201();
+    let command = Command::Raw {
+        action: "SetChargingProfile".into(),
+        payload: json!({}),
+    };
+    let done = |app: &mut App, answer: Value| {
+        app.command_done("CP-1", &command, &CmdOutcome { result: Ok(answer) });
+    };
+    done(
+        &mut app,
+        json!({"status": "Rejected", "statusInfo": {"reasonCode": "InvalidSchedule"}}),
+    );
+    assert!(
+        notice_text(&app).ends_with("Rejected (InvalidSchedule)"),
+        "{}",
+        notice_text(&app)
+    );
+    done(
+        &mut app,
+        json!({"status": "Rejected", "statusInfo": {
+            "reasonCode": "InvalidSchedule",
+            "additionalInfo": format!("period 2\u{1b}[31m {}", "x".repeat(200)),
+        }}),
+    );
+    let text = notice_text(&app);
+    assert!(
+        text.contains("Rejected (InvalidSchedule) \u{2014} period 2"),
+        "{text}"
+    );
+    assert!(
+        !text.contains('\u{1b}') && text.ends_with('\u{2026}'),
+        "{text}"
+    );
+    // An accepted answer and an answer without a reason code stay plain.
+    done(
+        &mut app,
+        json!({"status": "Accepted", "statusInfo": {"reasonCode": "Ignored"}}),
+    );
+    assert!(
+        notice_text(&app).ends_with("Accepted"),
+        "{}",
+        notice_text(&app)
+    );
+    done(&mut app, json!({"status": "Rejected", "statusInfo": {}}));
+    assert!(
+        notice_text(&app).ends_with("Rejected"),
+        "{}",
+        notice_text(&app)
+    );
 }
 
 #[test]

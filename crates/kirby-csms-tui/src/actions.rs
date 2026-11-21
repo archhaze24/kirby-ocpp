@@ -547,6 +547,30 @@ fn security_events_detail(station: &str, state: &kirby_csms_core::StationState) 
     }
 }
 
+/// The OCPP 2.x `statusInfo` of an answer as ` (reasonCode)` and ` — additionalInfo`, empty
+/// when there is no reason code. The text is the station's: sanitized and cut to fit.
+fn status_info_text(answer: &Value) -> String {
+    const INFO_TEXT: usize = 60;
+    let Some(info) = answer.get("statusInfo") else {
+        return String::new();
+    };
+    let field = |name: &str| {
+        info.get(name)
+            .and_then(Value::as_str)
+            .map(|s| truncate(&sanitize(s), INFO_TEXT))
+            .filter(|s| !s.is_empty())
+    };
+    let Some(code) = field("reasonCode") else {
+        return String::new();
+    };
+    let mut text = format!(" ({code})");
+    if let Some(extra) = field("additionalInfo") {
+        text.push_str(" \u{2014} ");
+        text.push_str(&extra);
+    }
+    text
+}
+
 /// Statuses that mean the station refused.
 fn refused(status: &str) -> bool {
     matches!(
@@ -627,9 +651,12 @@ impl App {
         let v16_action = def_of(id).is_some_and(|d| d.ocpp.is_some());
         match self.offer() {
             Offer::V16 => None,
-            Offer::Table(table) => {
-                v16_action.then(|| format!("not an {} action", version_text(table.protocol)))
-            }
+            Offer::Table(table) => v16_action.then(|| {
+                format!(
+                    "no hotkey for {} stations; use the palette (:)",
+                    version_text(table.protocol)
+                )
+            }),
             Offer::NoTable(name) => (v16_action || matches!(id, ActionId::Call(_) | ActionId::Raw))
                 .then(|| format!("no action table for {}", sanitize(&name))),
         }
@@ -1149,7 +1176,10 @@ impl App {
         let (ok, summary, level, copy, content) = match &outcome.result {
             Ok(answer) => {
                 let status = answer.get("status").and_then(Value::as_str);
-                let text = status.map_or_else(|| "ok".to_owned(), sanitize);
+                let mut text = status.map_or_else(|| "ok".to_owned(), sanitize);
+                if status.is_some_and(|s| s != "Accepted") {
+                    text.push_str(&status_info_text(answer));
+                }
                 let level = if status.is_some_and(refused) {
                     NoticeLevel::Error
                 } else {

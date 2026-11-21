@@ -366,6 +366,9 @@ fn details_v2(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
         .header(Row::new(["EVSE/conn", "Status", "Upd"]).style(dim())),
         c,
     );
+    // The wire names of the charging state fit from this width; below it two of them would
+    // clip to the same text, so the short forms are used.
+    let short_states = t.width < 90;
     let rows = v2.transactions.iter().rev().enumerate().map(|(index, tx)| {
         let loc = format!(
             "{}/{}",
@@ -383,7 +386,9 @@ fn details_v2(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
             truncate(&sanitize(&tx.id), 8),
             loc,
             truncate(&sanitize(tx.id_token.as_deref().unwrap_or("-")), 10),
-            tx.charging_state.map_or("-", |s| s.as_str()).to_owned(),
+            tx.charging_state
+                .map_or("-", |s| charging_state_text(s.as_str(), short_states))
+                .to_owned(),
             tx.energy_wh
                 .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}")),
             tx.power_w
@@ -408,7 +413,7 @@ fn details_v2(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
                 Constraint::Length(8),
                 Constraint::Length(7),
                 Constraint::Length(10),
-                Constraint::Length(13),
+                Constraint::Length(if short_states { 11 } else { 13 }),
                 Constraint::Length(7),
                 Constraint::Length(6),
                 Constraint::Length(24),
@@ -423,6 +428,19 @@ fn details_v2(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
         ),
         t,
     );
+}
+
+/// A charging state as the transaction table shows it: the wire name, or in a narrow table a
+/// short form that keeps the suspended states apart.
+fn charging_state_text(wire: &str, short: bool) -> &str {
+    if !short {
+        return wire;
+    }
+    match wire {
+        "SuspendedEV" => "SuspEV",
+        "SuspendedEVSE" => "SuspEVSE",
+        other => other,
+    }
 }
 
 /// What the station reported under the Security Whitepaper: nothing when it reported nothing.

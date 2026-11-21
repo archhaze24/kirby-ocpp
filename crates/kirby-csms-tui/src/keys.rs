@@ -331,6 +331,14 @@ fn results_mode(app: &mut App, mut list: ResultsList, key: KeyEvent) {
     app.mode = Mode::Results(list);
 }
 
+/// The pane-focus line of the help of an OCPP 2.x station, which has a details pane between
+/// the stations and the log; it replaces the line of [`HELP`] that starts with the same keys.
+pub const PANES_2X_HELP: &str =
+    "Left Right Tab          change focused pane (stations, details, log)";
+
+/// Ends the action list of the help of an OCPP 2.x station.
+pub const PALETTE_2X_HELP: &str = "OCPP 2.x commands without a hotkey are in the palette (:)";
+
 /// The key reference shown by `?`.
 pub const HELP: &[&str] = &[
     "First steps: point a charge point at ws://<host>:<port>/<prefix>/<station id> (the prefix is optional, the last path segment is the station id; the header shows the listen address). Stations appear in the list on connect; select one and press : to act.",
@@ -346,7 +354,7 @@ pub const HELP: &[&str] = &[
     "?                       this help",
     "q or Ctrl-C             quit the UI and stop the server",
     "",
-    "Actions on the selected station (a form opens; Enter sends, Esc cancels, Tab next field, Left/Right or a letter picks an option); answers show up in the status line:",
+    "Actions on the selected station (a form opens; Enter sends, Esc cancels, Tab next field, Left/Right or a letter picks an option; s searches when the log is focused); answers show up in the status line:",
     "     t remote start   x remote stop   R reset (asks)   c change config   g get config   T trigger message   u unlock   A availability   C clear cache   P charging profile   D data transfer   w raw call (any action, JSON payload)   r last results (Enter opens)   F forget a disconnected station (asks)   n copy station id",
     "Security Whitepaper (selected station): l get log   I install certificate   d delete certificate   L installed certificates   E extended trigger   S signed firmware update   X certificate signed   e security events the station reported (certificates: paste the PEM; line breaks become spaces and are rebuilt on submit)",
     "More actions (selected station): K clear charging profile   H composite schedule   V reserve now   U update firmware   O get diagnostics   B send local list",

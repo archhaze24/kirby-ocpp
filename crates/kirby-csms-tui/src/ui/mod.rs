@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::actions::ScopedRule;
 use crate::app::{App, Focus, Mode};
-use crate::keys::HELP;
+use crate::keys::{HELP, PALETTE_2X_HELP, PANES_2X_HELP};
 
 /// Width from which the list sits left of details and log.
 pub const WIDE: u16 = 100;
@@ -318,14 +318,25 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
                 .iter()
                 .filter_map(|a| a.key.map(|key| format!("{key}  {}", a.label())))
                 .collect();
+            // The 2.x help ends its common part with the heading of the action list, which
+            // the table-driven action lines then follow.
             let mut lines: Vec<&str> = if dynamic {
-                HELP[..14].to_vec()
+                HELP[..14]
+                    .iter()
+                    .map(|l| {
+                        if l.starts_with("Left Right Tab") {
+                            PANES_2X_HELP
+                        } else {
+                            l
+                        }
+                    })
+                    .collect()
             } else {
                 HELP.to_vec()
             };
             if dynamic {
-                lines.push("Actions on the selected station (s searches when the log is focused):");
                 lines.extend(action_lines.iter().map(String::as_str));
+                lines.push(PALETTE_2X_HELP);
                 lines.push("Log pane: Enter detail, s search, y copy, f filter, p pause/follow");
                 lines.push("Details pane: Up/Down select transaction, Enter opens it");
             }
