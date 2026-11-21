@@ -26,8 +26,8 @@ pub use self::model::{
 };
 pub use self::model2::{Action2, ComponentRef, Condition2, VariableRef};
 pub use self::runner::{
-    RunStatus, ScenarioProgress, ScenarioReport, ScenarioRunner, StepDetail, StepReport,
-    StepStatus, run_scenario, run_scenario_subscribed, run_scenario_with_events,
+    RunStatus, ScenarioProgress, ScenarioReport, ScenarioRunner, ScenarioTarget, StepDetail,
+    StepReport, StepStatus, run_scenario, run_scenario_subscribed, run_scenario_with_events,
     run_scenario_with_vars,
 };
 pub use self::vars::Vars;

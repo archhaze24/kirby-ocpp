@@ -803,9 +803,9 @@ pub struct WaitFailure {
 /// The station side of a scenario run: what differs between OCPP versions.
 ///
 /// Sealed: [`StationHandle`] (OCPP 1.6) and [`Station2Handle`](crate::station2::Station2Handle)
-/// (OCPP 2.0.1) are the targets. The trait is not part of the public API; it appears only as
-/// the bound of [`run_scenario`] and its variants. Everything else the runner does (frame
-/// bookkeeping, `expect_call`, `sleep`, variables, reports) is the same for both.
+/// (OCPP 2.x) are the targets. Use this trait as a bound when calling [`run_scenario`] or
+/// its variants for either station type. Frame bookkeeping, `expect_call`, `sleep`,
+/// variables and reports are the same for both.
 pub trait ScenarioTarget: sealed::Sealed + Sync {
     /// The protocol the station speaks; the report's `ocpp_version` follows it.
     fn protocol(&self) -> Protocol;

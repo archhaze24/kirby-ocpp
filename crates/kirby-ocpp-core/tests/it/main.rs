@@ -2,6 +2,7 @@
 //! Add a test file as `tests/it/<name>.rs` and declare it here.
 
 mod fleet;
+mod fleet2;
 mod scenario21;
 mod scenario2_builtin;
 mod scenario2_grammar;

@@ -235,6 +235,17 @@ pub struct FleetEvents {
 }
 
 impl FleetEvents {
+    pub(crate) fn new(
+        stations: impl IntoIterator<Item = (String, broadcast::Receiver<Event>)>,
+    ) -> Self {
+        let (tx, rx) = mpsc::channel(EVENT_QUEUE);
+        let (stop, stop_rx) = watch::channel(false);
+        for (id, events) in stations {
+            tokio::spawn(forward(id, events, tx.clone(), stop_rx.clone()));
+        }
+        Self { rx, stop }
+    }
+
     /// The next item; `None` once [`FleetEvents::stop`] was called and everything queued
     /// has been delivered (or every station's event channel closed).
     pub async fn recv(&mut self) -> Option<FleetItem> {
@@ -248,7 +259,7 @@ impl FleetEvents {
     }
 }
 
-async fn forward(
+pub(crate) async fn forward(
     id: String,
     mut rx: broadcast::Receiver<Event>,
     tx: mpsc::Sender<FleetItem>,
@@ -300,9 +311,37 @@ pub struct FleetSummary {
     pub disconnected: usize,
     /// Stations whose BootNotification was accepted.
     pub registered: usize,
-    /// Connectors with a running transaction, over all stations.
+    /// Connectors (1.6) or EVSEs (2.x) with a running transaction, over all stations.
     pub active_transactions: usize,
     pub stations: Vec<StationSummary>,
+}
+
+impl FleetSummary {
+    pub(crate) fn from_stations(stations: impl ExactSizeIterator<Item = StationSummary>) -> Self {
+        let total = stations.len();
+        let mut summary = Self {
+            total,
+            connected: 0,
+            connecting: 0,
+            backoff: 0,
+            disconnected: 0,
+            registered: 0,
+            active_transactions: 0,
+            stations: Vec::with_capacity(total),
+        };
+        for station in stations {
+            match station.connection {
+                ConnectionState::Connected => summary.connected += 1,
+                ConnectionState::Connecting => summary.connecting += 1,
+                ConnectionState::Backoff { .. } => summary.backoff += 1,
+                ConnectionState::Disconnected => summary.disconnected += 1,
+            }
+            summary.registered += usize::from(station.registered);
+            summary.active_transactions += station.active_transactions;
+            summary.stations.push(station);
+        }
+        summary
+    }
 }
 
 /// One row of a [`FleetSummary`].
@@ -420,56 +459,30 @@ impl Fleet {
     /// Subscribes to all stations now (nothing after this call is missed) and merges
     /// their events, each tagged with its station id.
     pub fn subscribe(&self) -> FleetEvents {
-        let (tx, rx) = mpsc::channel(EVENT_QUEUE);
-        let (stop, stop_rx) = watch::channel(false);
-        for (id, handle) in &self.stations {
-            tokio::spawn(forward(
-                id.clone(),
-                handle.subscribe(),
-                tx.clone(),
-                stop_rx.clone(),
-            ));
-        }
-        FleetEvents { rx, stop }
+        FleetEvents::new(
+            self.stations
+                .iter()
+                .map(|(id, handle)| (id.clone(), handle.subscribe())),
+        )
     }
 
     /// Aggregate of the stations' latest snapshots.
     pub fn summary(&self) -> FleetSummary {
-        let mut summary = FleetSummary {
-            total: self.stations.len(),
-            connected: 0,
-            connecting: 0,
-            backoff: 0,
-            disconnected: 0,
-            registered: 0,
-            active_transactions: 0,
-            stations: Vec::with_capacity(self.stations.len()),
-        };
-        for (id, handle) in &self.stations {
+        FleetSummary::from_stations(self.stations.iter().map(|(id, handle)| {
             let snapshot = handle.snapshot();
-            match snapshot.connection {
-                ConnectionState::Connected => summary.connected += 1,
-                ConnectionState::Connecting => summary.connecting += 1,
-                ConnectionState::Backoff { .. } => summary.backoff += 1,
-                ConnectionState::Disconnected => summary.disconnected += 1,
-            }
-            let registered = snapshot.booted();
-            summary.registered += usize::from(registered);
-            let active = snapshot
+            let active_transactions = snapshot
                 .connectors
                 .iter()
                 .filter(|c| matches!(c.transaction, TransactionState::Active(_)))
                 .count();
-            summary.active_transactions += active;
-            summary.stations.push(StationSummary {
+            StationSummary {
                 id: id.clone(),
                 connection: snapshot.connection,
-                registered,
-                active_transactions: active,
+                registered: snapshot.booted(),
+                active_transactions,
                 pending_offline_messages: snapshot.pending_offline_messages,
-            });
-        }
-        summary
+            }
+        }))
     }
 
     /// Closes every connection (WebSocket Close) and waits for all stations to end.

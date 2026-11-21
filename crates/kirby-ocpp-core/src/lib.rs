@@ -11,6 +11,7 @@ pub mod config;
 pub mod config_file;
 pub mod error;
 pub mod fleet;
+pub mod fleet2;
 pub mod fs_util;
 pub mod ids;
 mod link_driver;
