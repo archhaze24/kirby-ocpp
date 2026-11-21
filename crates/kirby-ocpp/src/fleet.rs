@@ -4,6 +4,7 @@
 //! line, a `"station"` field in every JSON line (stdout and `--log-file` alike).
 
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -109,6 +110,21 @@ fn watch_stations<H: StationLike>(
     }
 }
 
+/// The terminal UI of the fleet: the 1.6 UI or the 2.x one, by the protocol of the stations.
+fn run_ui(fleet: &AnyFleet) -> Pin<Box<dyn Future<Output = Result<(), TuiError>>>> {
+    let options = headless::tui_options();
+    match fleet.stations() {
+        Either::Left(stations) => {
+            let handles: Vec<_> = stations.iter().map(|(_, h)| h.clone()).collect();
+            Box::pin(async move { kirby_ocpp_tui::run_fleet(&handles, options).await })
+        }
+        Either::Right(stations) => {
+            let handles: Vec<_> = stations.iter().map(|(_, h)| h.clone()).collect();
+            Box::pin(async move { kirby_ocpp_tui::v2::run_fleet2(&handles, options).await })
+        }
+    }
+}
+
 /// Connects every station and shows them in the terminal UI, or logs tagged events until
 /// interrupted.
 #[allow(clippy::too_many_lines)]
@@ -131,7 +147,7 @@ pub async fn interactive(
         Either::Right(stations) => Either::Right(watch_stations(stations)),
     };
     let mut sink = None;
-    if tui && let AnyFleet::V16(fleet) = &mut fleet {
+    if tui {
         if log_file.is_some() {
             match Sink::spawn_fleet(fleet.subscribe(), json, log_file, false) {
                 Ok(started) => sink = Some(started),
@@ -142,8 +158,7 @@ pub async fn interactive(
                 }
             }
         }
-        let handles: Vec<_> = fleet.stations().iter().map(|(_, h)| h.clone()).collect();
-        let mut ui = std::pin::pin!(kirby_ocpp_tui::run_fleet(&handles, headless::tui_options()));
+        let mut ui = run_ui(&fleet);
         // Like the single station: connect at startup (staggered), while the UI is up.
         // Connect failures are printed after the UI ends (stderr would garble the screen).
         let mut connect_failures = Vec::new();

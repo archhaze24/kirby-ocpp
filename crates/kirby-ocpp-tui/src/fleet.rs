@@ -117,14 +117,13 @@ impl FleetApp {
     }
 
     fn select_relative(&mut self, delta: isize) {
-        let n = self.apps.len();
-        self.select((self.selected + n).wrapping_add_signed(delta) % n);
+        self.select(step_selection(self.selected, self.apps.len(), delta));
     }
 }
 
 /// The selector keys, active in normal mode only: `<` `>` previous/next station,
 /// Alt-1..9 jump to station 1..9, Alt-c / Alt-d connect / disconnect all stations.
-fn selector_key(key: KeyEvent) -> Option<SelectorKey> {
+pub(crate) fn selector_key(key: KeyEvent) -> Option<SelectorKey> {
     if key.kind == KeyEventKind::Release {
         return None;
     }
@@ -142,11 +141,17 @@ fn selector_key(key: KeyEvent) -> Option<SelectorKey> {
     }
 }
 
-enum SelectorKey {
+pub(crate) enum SelectorKey {
     Step(isize),
     Jump(usize),
     ConnectAll,
     DisconnectAll,
+}
+
+/// The station after moving `delta` places from `selected` in a fleet of `count`, wrapping
+/// around.
+pub(crate) fn step_selection(selected: usize, count: usize, delta: isize) -> usize {
+    (selected + count).wrapping_add_signed(delta) % count.max(1)
 }
 
 /// Folds one message into the fleet model.
@@ -228,13 +233,17 @@ fn to_selected(fleet: &mut FleetApp, msg: Msg, out: &mut Vec<FleetEffect>) {
 
 /// How the selector shows one station: connection glyph and whether a transaction runs.
 pub fn station_marks(snapshot: &Snapshot) -> (char, bool) {
-    let glyph = match snapshot.connection {
+    let tx = snapshot.connectors.iter().any(|c| c.tx_id().is_some());
+    (connection_glyph(&snapshot.connection), tx)
+}
+
+/// The selector glyph of a connection: `+` connected, `~` connecting or retrying, `-` offline.
+pub fn connection_glyph(connection: &ConnectionState) -> char {
+    match connection {
         ConnectionState::Connected => '+',
         ConnectionState::Connecting | ConnectionState::Backoff { .. } => '~',
         ConnectionState::Disconnected => '-',
-    };
-    let tx = snapshot.connectors.iter().any(|c| c.tx_id().is_some());
-    (glyph, tx)
+    }
 }
 
 /// The slice `start..end` of items (with the given widths, one separator column

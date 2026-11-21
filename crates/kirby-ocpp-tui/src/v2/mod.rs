@@ -12,6 +12,7 @@
 mod actions;
 mod app;
 mod browser;
+mod fleet;
 mod forms;
 mod keys;
 mod panes;
@@ -24,6 +25,9 @@ mod update;
 pub use actions::{ActionDef2, ActionId2, Tab2, catalog2};
 pub use app::{App2, Confirm2, ConfirmAction2, Effect2, Mode2, Msg2};
 pub use browser::{BrowserEvent, DeviceBrowser};
+pub use fleet::{
+    FleetApp2, FleetEffect2, FleetMsg2, draw_fleet2, run_fleet2, station_marks2, update_fleet2,
+};
 pub use run::run2;
 pub use ui::draw2;
 pub use update::update2;

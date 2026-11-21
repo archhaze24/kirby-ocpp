@@ -333,7 +333,7 @@ const HELP: &[&str] = &[
     "     bold, and log lines start with a marker: i info, + success, ! warning, x error.",
 ];
 
-const FLEET_HELP: &[&str] = &[
+pub(crate) const FLEET_HELP: &[&str] = &[
     "",
     "Fleet (several stations; everything else acts on the SELECTED station):",
     "< >                     previous / next station",

@@ -17,30 +17,36 @@ use crate::app::NoticeLevel;
 use crate::terminal::TerminalGuard;
 use crate::{EVENT_QUEUE, Inbound, TuiError, TuiOptions, clipboard, text};
 
-/// Sends messages for the station into the loop.
+/// Sends messages for one station into the loop; `station` is its index (0 for a single
+/// station).
 #[derive(Clone)]
-struct Out {
-    tx: mpsc::UnboundedSender<Inbound<Msg2>>,
+pub(super) struct Out {
+    pub(super) tx: mpsc::UnboundedSender<Inbound<Msg2>>,
+    pub(super) station: usize,
 }
 
 impl Out {
-    fn send(&self, msg: Msg2) {
-        let _ = self.tx.send(Inbound::Msg(0, msg));
+    pub(super) fn send(&self, msg: Msg2) {
+        let _ = self.tx.send(Inbound::Msg(self.station, msg));
     }
 }
 
-/// What the loop needs besides the model.
-struct Ctx {
-    handle: Station2Handle,
-    out: Out,
-    /// `true` while a scenario runs; at most one runs at a time.
-    scenario_running: Arc<AtomicBool>,
-    cancel: CancelToken,
+/// What the loop needs per station besides the model.
+pub(super) struct Ctx {
+    pub(super) handle: Station2Handle,
+    pub(super) out: Out,
+    /// `true` while a scenario runs on this station; at most one runs at a time.
+    pub(super) scenario_running: Arc<AtomicBool>,
+    pub(super) cancel: CancelToken,
 }
 
-/// Forwards the station's events and snapshots into the loop through a bounded queue, so a
+/// Forwards one station's events and snapshots into the loop through a bounded queue, so a
 /// stalled draw cannot make memory grow.
-fn forward_station(handle: &Station2Handle, tx: &mpsc::Sender<Inbound<Msg2>>) {
+pub(super) fn forward_station(
+    handle: &Station2Handle,
+    station: usize,
+    tx: &mpsc::Sender<Inbound<Msg2>>,
+) {
     let mut events = handle.subscribe();
     let mut snapshots = handle.watch_snapshot();
     let (handle, tx) = (handle.clone(), tx.clone());
@@ -49,7 +55,7 @@ fn forward_station(handle: &Station2Handle, tx: &mpsc::Sender<Inbound<Msg2>>) {
         loop {
             tokio::select! {
                 ev = events.recv() => match ev {
-                    Ok(e) => crate::deliver(&tx, 0, Msg2::Event(e), &mut dropped),
+                    Ok(e) => crate::deliver(&tx, station, Msg2::Event(e), &mut dropped),
                     Err(broadcast::error::RecvError::Lagged(n)) => dropped += n,
                     Err(broadcast::error::RecvError::Closed) => {
                         let _ = tx.send(Inbound::Gone).await;
@@ -62,14 +68,14 @@ fn forward_station(handle: &Station2Handle, tx: &mpsc::Sender<Inbound<Msg2>>) {
                         return;
                     }
                     let snapshot = Msg2::Snapshot(Box::new(snapshots.borrow_and_update().clone()));
-                    crate::deliver(&tx, 0, snapshot, &mut dropped);
+                    crate::deliver(&tx, station, snapshot, &mut dropped);
                 }
                 // Retries the resync while nothing else happens.
                 () = tokio::time::sleep(Duration::from_millis(100)), if dropped > 0 => {}
             }
             crate::resync_with(
                 &tx,
-                0,
+                station,
                 &mut dropped,
                 || Msg2::Snapshot(Box::new(handle.snapshot())),
                 |text| Msg2::Notice(NoticeLevel::Error, text),
@@ -101,10 +107,13 @@ pub async fn run2(handle: Station2Handle, options: TuiOptions) -> Result<(), Tui
     // User-action results (few, never dropped) and forwarded station events (bounded).
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<Inbound<Msg2>>();
     let (event_tx, mut event_rx) = mpsc::channel::<Inbound<Msg2>>(EVENT_QUEUE);
-    forward_station(&handle, &event_tx);
+    forward_station(&handle, 0, &event_tx);
     let mut ctx = Ctx {
         handle,
-        out: Out { tx: user_tx },
+        out: Out {
+            tx: user_tx,
+            station: 0,
+        },
         scenario_running: Arc::new(AtomicBool::new(false)),
         cancel: CancelToken::new(),
     };
@@ -149,7 +158,8 @@ pub async fn run2(handle: Station2Handle, options: TuiOptions) -> Result<(), Tui
     Ok(())
 }
 
-async fn execute(effect: Effect2, ctx: &mut Ctx, guard: &mut TerminalGuard) {
+/// Carries out one effect of a station's model.
+pub(super) async fn execute(effect: Effect2, ctx: &mut Ctx, guard: &mut TerminalGuard) {
     match effect {
         Effect2::CancelCall { action } => {
             let (handle, out) = (ctx.handle.clone(), ctx.out.clone());

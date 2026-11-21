@@ -48,44 +48,58 @@ fn draw_fleet_colored(f: &mut Frame<'_>, fleet: &FleetApp) {
         draw_in(f, fleet.current(), f.area());
         return;
     }
+    let Some([strip, rest]) = split_selector(f) else {
+        return;
+    };
+    let stations = fleet.apps.iter().map(|app| {
+        let (glyph, tx) = station_marks(&app.snapshot);
+        (app.snapshot.charge_point_id.as_str(), glyph, tx)
+    });
+    draw_selector(f, stations, fleet.selected, strip);
+    draw_in(f, fleet.current(), rest);
+}
+
+/// Splits the screen of a fleet into the selector row and the station below it. Draws the
+/// "too small" notice and returns `None` when the terminal cannot hold both.
+pub(crate) fn split_selector(f: &mut Frame<'_>) -> Option<[Rect; 2]> {
     // The selector row takes one line: a fleet needs one more row than a single station.
     let need = (MIN_SIZE.0, MIN_SIZE.1 + 1);
     if f.area().width < need.0 || f.area().height < need.1 {
         too_small(f, f.area(), need);
-        return;
+        return None;
     }
-    let [strip, rest] =
-        Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(f.area());
-    draw_selector(f, fleet, strip);
-    draw_in(f, fleet.current(), rest);
+    Some(Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(f.area()))
 }
 
-/// `n:id<glyph>[*]` per station, windowed around the selected one, count on the right.
-fn draw_selector(f: &mut Frame<'_>, fleet: &FleetApp, area: Rect) {
-    let total = fleet.apps.len();
-    let count = format!(" {}/{total}", fleet.selected + 1);
+/// `n:id<glyph>[*]` per station (id, glyph, transaction running), windowed around the selected
+/// one, count on the right. The ids are sanitized here.
+pub(crate) fn draw_selector<'a>(
+    f: &mut Frame<'_>,
+    stations: impl ExactSizeIterator<Item = (&'a str, char, bool)>,
+    selected: usize,
+    area: Rect,
+) {
+    let total = stations.len();
+    let count = format!(" {}/{total}", selected + 1);
     let avail = usize::from(area.width).saturating_sub(width(&count) + 4);
-    let labels: Vec<(String, Color)> = fleet
-        .apps
-        .iter()
+    let labels: Vec<(String, Color)> = stations
         .enumerate()
-        .map(|(i, app)| {
-            let (glyph, tx) = station_marks(&app.snapshot);
+        .map(|(i, (id, glyph, tx))| {
             let color = match glyph {
                 '+' => Color::Green,
                 '~' => Color::Yellow,
                 _ => Color::Red,
             };
             let tx = if tx { "*" } else { "" };
-            let id = crate::text::sanitize(&app.snapshot.charge_point_id);
+            let id = crate::text::sanitize(id);
             (format!(" {} {id}{glyph}{tx} ", i + 1), color)
         })
         .collect();
     let widths: Vec<usize> = labels.iter().map(|(l, _)| width(l)).collect();
-    let (start, end) = visible_range(&widths, fleet.selected, avail);
+    let (start, end) = visible_range(&widths, selected, avail);
     let mut spans = vec![Span::styled(if start > 0 { "< " } else { "  " }, dim())];
     for (i, (label, color)) in labels.iter().enumerate().take(end).skip(start) {
-        let style = if i == fleet.selected {
+        let style = if i == selected {
             Style::new().fg(Color::Black).bg(*color)
         } else {
             Style::new().fg(*color)

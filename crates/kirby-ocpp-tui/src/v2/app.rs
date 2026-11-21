@@ -155,6 +155,9 @@ pub struct App2 {
     pub now: Instant,
     /// Draw without color; states then also carry text markers.
     pub mono: bool,
+    /// The station is one of several in a fleet: quitting asks first and the help lists the
+    /// selector keys.
+    pub in_fleet: bool,
     /// Clock of the log rows.
     pub time: TimeMode,
     /// Outbound `SecurityEventNotification` frames since the UI started (the snapshot has no
@@ -197,6 +200,7 @@ impl App2 {
             pending: Vec::new(),
             now: Instant::now(),
             mono: false,
+            in_fleet: false,
             time: TimeMode::Utc,
             security_events_sent: 0,
         }
@@ -208,6 +212,8 @@ impl App2 {
             Some("a scenario is running")
         } else if self.snapshot.evses.iter().any(|e| e.transaction.is_some()) {
             Some("a transaction is active")
+        } else if self.in_fleet {
+            Some("several stations are running")
         } else {
             None
         }

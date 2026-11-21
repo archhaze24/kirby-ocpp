@@ -26,7 +26,9 @@ pub fn draw2(f: &mut Frame<'_>, app: &App2) {
     }
 }
 
-fn draw_in(f: &mut Frame<'_>, app: &App2, area: Rect) {
+/// Draws the UI of one station into `area` of a larger screen (the fleet view puts a selector
+/// row above it).
+pub(crate) fn draw_in(f: &mut Frame<'_>, app: &App2, area: Rect) {
     if area.width < MIN_SIZE.0 || area.height < MIN_SIZE.1 {
         too_small(f, area, MIN_SIZE);
         return;
@@ -327,7 +329,11 @@ fn draw_overlay(f: &mut Frame<'_>, app: &App2, area: Rect) {
         Mode2::Form(form) => overlays::form(f, form, area),
         Mode2::Choice(c) => overlays::choice(f, c, area),
         Mode2::Help => {
-            let lines = help_lines2(app.protocol);
+            let lines = if app.in_fleet {
+                help_lines2_for(app.protocol, true)
+            } else {
+                help_lines2(app.protocol)
+            };
             let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
             overlays::help(f, &lines, area);
         }
@@ -377,7 +383,8 @@ const HELP2: &[&str] = &[
     "EVSE tab: p plug / unplug, f fault / clear fault, n StatusNotification. The connector",
     "     status is derived from the EVSE state and cannot be set by hand.",
     "Transaction tab: a Authorize, t present token (what it starts depends on TxStartPoint),",
-    "     e stop transaction with a reason, m meter +120 Wh, c meter custom, g charging state",
+    "     e stop transaction with a reason, m meter +120 Wh, c meter custom, g charging state,",
+    "     i transaction limit (2.1), P priority charging on / off (2.1)",
     "Data tab: d DataTransfer, v vendor ping, r raw CALL (checked against the schema)",
     "",
     "Log pane: Enter opens the detail of the selected row on every tab. On the Logs tab (5):",
@@ -395,14 +402,28 @@ const HELP2: &[&str] = &[
 
 /// The lines of the help popup.
 pub fn help_lines2(protocol: Protocol) -> Vec<String> {
-    HELP2
+    help_lines2_for(protocol, false)
+}
+
+/// The lines of the help popup; `fleet` adds the selector keys of a fleet.
+pub fn help_lines2_for(protocol: Protocol, fleet: bool) -> Vec<String> {
+    let mut lines: Vec<String> = HELP2
         .iter()
         .map(|line| {
+            let line = if fleet && line.starts_with("q or Ctrl-C ") {
+                "q or Ctrl-C             quit (asks while a scenario or transaction runs, or in a fleet)"
+            } else {
+                line
+            };
             if protocol == Protocol::V21 {
                 line.replace("OCPP 2.0.1", "OCPP 2.1")
             } else {
-                (*line).to_owned()
+                line.to_owned()
             }
         })
-        .collect()
+        .collect();
+    if fleet {
+        lines.extend(overlays::FLEET_HELP.iter().map(|l| (*l).to_owned()));
+    }
+    lines
 }

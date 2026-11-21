@@ -252,7 +252,7 @@ async fn real_main() -> ExitCode {
 
     // `--json` is for machines: it never opens the terminal UI.
     let tui = !no_tui && !json && std::io::stdout().is_terminal();
-    if let Some(reason) = mode_gate(command.as_ref(), is_fleet && tui, config.protocol) {
+    if let Some(reason) = mode_gate(command.as_ref(), config.protocol) {
         return usage_error(&reason);
     }
     match command {
@@ -306,15 +306,14 @@ pub(crate) fn usage_error(error: &str) -> ExitCode {
 }
 
 /// The reason a mode cannot run with `protocol`, or `None` when it is available.
-fn mode_gate(command: Option<&Cmd>, fleet_tui: bool, protocol: Protocol) -> Option<String> {
+fn mode_gate(command: Option<&Cmd>, protocol: Protocol) -> Option<String> {
     if protocol == Protocol::V16 {
         return None;
     }
-    let token = protocol.token();
     match command {
-        Some(Cmd::Replay(_)) => Some(format!("`replay` is not available for {token} yet")),
-        None if fleet_tui => Some(format!(
-            "the terminal UI does not show a fleet for {token} yet; add --no-tui"
+        Some(Cmd::Replay(_)) => Some(format!(
+            "`replay` is not available for {} yet",
+            protocol.token()
         )),
         _ => None,
     }
@@ -1423,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn mode_gate_allows_2_x_fleets_except_in_the_terminal_ui() {
+    fn mode_gate_allows_2_x_fleets_in_every_mode_but_replay() {
         let suite = Some(Cmd::Suite(SuiteArgs::for_sources(Vec::new())));
         let run = Cmd::Run(RunArgs {
             scenario: "smoke".to_owned(),
@@ -1434,20 +1433,19 @@ mod tests {
             id_tag: None,
             vars: Vec::new(),
         });
-        assert_eq!(mode_gate(None, true, Protocol::V16), None);
+        let replay = <Cli as clap::Parser>::try_parse_from(["kirby-ocpp", "replay", "rec.jsonl"])
+            .unwrap()
+            .command;
+        assert!(matches!(replay, Some(Cmd::Replay(_))));
+        assert_eq!(mode_gate(None, Protocol::V16), None);
+        assert_eq!(mode_gate(replay.as_ref(), Protocol::V16), None);
         for protocol in [Protocol::V201, Protocol::V21] {
-            assert_eq!(mode_gate(suite.as_ref(), false, protocol), None);
-            assert_eq!(mode_gate(None, false, protocol), None);
-            assert_eq!(mode_gate(Some(&run), true, protocol), None);
+            assert_eq!(mode_gate(suite.as_ref(), protocol), None);
+            assert_eq!(mode_gate(None, protocol), None);
+            assert_eq!(mode_gate(Some(&run), protocol), None);
             assert_eq!(
-                mode_gate(None, true, protocol).as_deref(),
-                Some(
-                    format!(
-                        "the terminal UI does not show a fleet for {} yet; add --no-tui",
-                        protocol.token()
-                    )
-                    .as_str()
-                )
+                mode_gate(replay.as_ref(), protocol).as_deref(),
+                Some(format!("`replay` is not available for {} yet", protocol.token()).as_str())
             );
         }
     }
