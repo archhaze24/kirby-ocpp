@@ -1452,7 +1452,8 @@ impl Station2Actor {
         let now = self.clock.now_utc();
         let mut entries: Vec<Entry> = Vec::new();
         for stored in persisted.profiles {
-            if stored.evse > evse_count || entries.len() >= max {
+            // Only the object form is ever written; anything else is a damaged file.
+            if stored.evse > evse_count || entries.len() >= max || !stored.profile.is_object() {
                 continue;
             }
             let Ok(entry) = Entry::new(stored) else {
@@ -1600,12 +1601,18 @@ impl Station2Actor {
                 let period = stored
                     .profile
                     .pointer_mut("/chargingSchedule/0/chargingSchedulePeriod/0")
+                    .and_then(Value::as_object_mut)
                     .ok_or_else(|| reject("InvalidProfile", "the Dynamic profile has no period"))?;
-                period["limit"] = limit.clone();
+                period.insert("limit".to_owned(), limit.clone());
             }
         }
+        let now = json!(self.clock.now_utc());
+        stored
+            .profile
+            .as_object_mut()
+            .ok_or_else(|| reject("InvalidProfile", "the Dynamic profile is not an object"))?
+            .insert("dynUpdateTime".to_owned(), now);
         self.settle_meters();
-        stored.profile["dynUpdateTime"] = json!(self.clock.now_utc());
         let entry = Entry::new(stored).map_err(|reason| reject("InvalidProfile", reason))?;
         self.charging.entries[index] = entry;
         self.mark_dirty();
