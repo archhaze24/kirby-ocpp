@@ -35,7 +35,7 @@ use super::transaction::{
     ActiveTransaction, PendingStart, StoppingTransaction, TransactionState, state_after_stop,
 };
 use crate::error::{CallError, StationError};
-use crate::ids::{ConnectorId, IdTag, TxId};
+use crate::ids::{ConnectorId, IdTag, ReservationId, TxId};
 use crate::ocpp::messages::{
     Authorize, AuthorizeRequest, MeterValue, StartTransaction, StartTransactionRequest,
     StartTransactionResponse, StopTransaction, StopTransactionRequest,
@@ -298,11 +298,26 @@ impl StationActor {
 
         let key = self.next_key();
         let local = TxId::Local(key);
-        // A connector-0 reservation is consumed by its idTag on any connector.
-        let reservation_id = match connector.reservation.as_ref() {
-            Some(reservation) => Some(reservation.id),
-            None => self.zero_reservation_for(&id_tag, parent.as_ref()),
+        let station_reservation = self.state.charge_point.reservation.as_ref().map(|r| r.id);
+        let own_reservation = connector
+            .reservation
+            .as_ref()
+            .map(|r| r.id)
+            .filter(|id| Some(*id) != station_reservation);
+        // A pending online start that carries the connector-0 reservation claims it.
+        let zero = if own_reservation.is_none() {
+            self.zero_reservation_for(&id_tag, parent.as_ref())
+                .filter(|&id| {
+                    !self.state.connectors.iter().any(|c| {
+                        matches!(&c.transaction, TransactionState::PendingStart(pending)
+                            if pending.reservation_id == Some(id)
+                                && self.queue.find_by_tx(pending.tx_id).is_none())
+                    })
+                })
+        } else {
+            None
         };
+        let reservation_id = own_reservation.or(zero);
         let meter_start_wh = connector.meter_wh;
         let pending = PendingStart {
             tx_id: local,
@@ -323,7 +338,7 @@ impl StationActor {
         self.delivery_blocked.remove(&id);
 
         if !online {
-            self.begin_charging(id, &id_tag);
+            self.begin_charging(id, &id_tag, zero);
             self.push_queue(OfflineTx {
                 key,
                 connector: id,
@@ -358,21 +373,21 @@ impl StationActor {
             timestamp: now,
         };
         self.call::<StartTransaction>(Origin::Station, &request, move |actor, result| {
-            actor.on_start_result(id, local, pending, result, done);
+            actor.on_start_result(id, pending, zero, result, done);
         });
     }
 
     fn on_start_result(
         &mut self,
         id: ConnectorId,
-        local: TxId,
         pending: PendingStart,
+        zero: Option<ReservationId>,
         result: Result<StartTransactionResponse, CallError>,
         done: Done,
     ) {
         let still_ours = self
             .find_connector(id)
-            .is_some_and(|c| c.transaction.tx_id() == Some(local));
+            .is_some_and(|c| c.transaction.tx_id() == Some(pending.tx_id));
         let response = match result {
             Ok(response) => response,
             Err(error) => {
@@ -391,6 +406,7 @@ impl StationActor {
             &self.registry,
         );
         self.mark_dirty();
+        self.consume_zero_reservation(zero.filter(|_| decision.accepted));
         // `StopTransactionOnInvalidId=false`: a refused idTag does not end the transaction
         // (OCPP 1.6 configuration keys); `MaxEnergyOnInvalidId` caps the energy instead.
         let lenient =
@@ -468,7 +484,7 @@ impl StationActor {
             // reports `Charging`.
             self.limit_energy_on_invalid_id(id, &pending.id_tag, decision.id_tag_info.status);
         }
-        self.begin_charging(id, &pending.id_tag);
+        self.begin_charging(id, &pending.id_tag, None);
         done(
             self,
             Ok(Outcome::TransactionStarted {
@@ -479,20 +495,9 @@ impl StationActor {
     }
 
     /// Connector goes `Charging`; reservation consumed; meters armed.
-    fn begin_charging(&mut self, id: ConnectorId, id_tag: &IdTag) {
+    fn begin_charging(&mut self, id: ConnectorId, id_tag: &IdTag, zero: Option<ReservationId>) {
         let blocked = self.delivery_blocked.contains(&id);
-        let now = self.clock.now_utc();
-        let parent = known_parent(id_tag, now, &self.local_list, &self.auth_cache);
-        let zero = self.zero_reservation_for(id_tag, parent.as_ref());
-        let mut consumed_zero = false;
         if let Some(connector) = self.find_connector_mut(id) {
-            // Holding the connector-0 reservation, or without a reservation of its own.
-            consumed_zero = zero.is_some_and(|zero| {
-                connector
-                    .reservation
-                    .as_ref()
-                    .is_none_or(|own| own.id == zero)
-            });
             clear_reservation(connector);
             connector.status = if blocked {
                 ConnectorStatus::SuspendedEVSE
@@ -502,19 +507,26 @@ impl StationActor {
             connector.last_id_tag = Some(id_tag.clone());
         }
         self.timers.cancel(&TimerKey::ReservationExpiry(id));
-        if let (true, Some(zero)) = (consumed_zero, zero) {
-            for released in cancel_all(
-                &mut self.state.connectors,
-                &mut self.state.charge_point,
-                zero,
-            ) {
-                self.timers.cancel(&TimerKey::ReservationExpiry(released));
-                self.status_changed(released);
-            }
-        }
+        self.consume_zero_reservation(zero);
         self.flush_now();
         self.reschedule_metering();
         self.status_changed(id);
+    }
+
+    fn consume_zero_reservation(&mut self, id: Option<ReservationId>) {
+        let Some(id) = id.filter(|&id| {
+            self.state
+                .charge_point
+                .reservation
+                .as_ref()
+                .is_some_and(|r| r.id == id)
+        }) else {
+            return;
+        };
+        for released in cancel_all(&mut self.state.connectors, &mut self.state.charge_point, id) {
+            self.timers.cancel(&TimerKey::ReservationExpiry(released));
+            self.status_changed(released);
+        }
     }
 
     /// A start that did not happen: no transaction, EV still connected.

@@ -59,7 +59,7 @@ use thiserror::Error;
 use crate::ids::{ConnectorId, IdTag, ReservationId};
 use crate::ocpp::messages::{ReservationStatus, ReserveNowRequest};
 use crate::ocpp::types::{AvailabilityType, ConnectorStatus};
-use crate::station::ConnectorSnapshot;
+use crate::station::{ConnectorSnapshot, TransactionState};
 
 /// Longest single expiry timer. Later expiries are re-armed when it fires.
 pub const MAX_EXPIRY_TIMER: Duration = Duration::from_secs(24 * 60 * 60);
@@ -458,7 +458,10 @@ fn status_without_reservation(connector: &ConnectorSnapshot) -> ConnectorStatus 
     if connector.status == ConnectorStatus::Faulted {
         return ConnectorStatus::Faulted;
     }
-    if !connector.transaction.is_idle() {
+    if matches!(
+        connector.transaction,
+        TransactionState::Active(_) | TransactionState::Stopping(_)
+    ) {
         return ConnectorStatus::Charging;
     }
     if connector.ev_connected {
@@ -473,7 +476,6 @@ mod tests {
 
     use super::*;
     use crate::ids::TxId;
-    use crate::station::TransactionState;
     use crate::station::transaction::{ActiveTransaction, PendingStart};
 
     fn now() -> DateTime<Utc> {
