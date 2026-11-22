@@ -1290,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-csms"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "axum",
  "chrono",
@@ -1320,7 +1320,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-csms-core"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1341,7 +1341,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-csms-tui"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "crossterm",
@@ -1361,7 +1361,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-ocpp"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "clap",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-ocpp-core"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -1408,7 +1408,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-ocpp-testkit"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "chrono",
  "futures-util",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "kirby-ocpp-tui"
-version = "0.8.0-dev"
+version = "0.8.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",

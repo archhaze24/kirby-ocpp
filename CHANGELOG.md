@@ -7,7 +7,24 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
-### Added
+## [0.8.0] - 2026-11-22
+
+**The OCPP 2.1 release: both tools speak OCPP 2.1 next to 2.0.1 and 1.6J. The 2.x emulator gains the Local Authorization List, reservations, master pass, smart charging with priority and dynamic profiles, transaction limits, resumable transactions, local cost calculation with tariffs and fleets, plus a round of fixes from the release reviews.**
+
+### 0.8.0 in numbers
+
+| Metric | Since 0.7.0 |
+| --- | --- |
+| 🧾 Commits | **80** in four days (19 to 22 November 2026) |
+| ✏️ Lines of code | **+56.5k / −2.2k** across 396 files; Rust grew from 165.8k to **194.4k** lines |
+| 🧪 Tests | **+447** tests in the `nextest` gate: 2,463 → **2,910** |
+| 📦 Crates | 7 → **7** (no new dependencies) |
+| 🔎 Reviews | A whole-branch review in three areas, focused reviews of every milestone, a product review of both tools with the real binaries |
+| ✨ New features | **20** |
+| 🔧 Changes | **8** |
+| 🐛 Fixes and hardening | **13** |
+
+### ✨ Added
 
 - OCPP 2.1 in the emulator: `--protocol ocpp2.1` runs the 2.x station on the `ocpp2.1` subprotocol with the official 2.1 schemas. State files, flags, `run`, `suite`, `scenarios`, `check` and `state` work as for 2.0.1, and the terminal UI shows `OCPP 2.1`. Requests only 2.1 defines and the station does not handle get refusals: `TriggerMessage` `CustomTrigger` and `SignV2G20Certificate` are `NotImplemented`, the new CSMS actions without a handler get `NotSupported`. Coverage: [docs/OCPP_2.1_CONFORMANCE.md](docs/OCPP_2.1_CONFORMANCE.md).
 - OCPP 2.1 message types 5 (CALLRESULTERROR) and 6 (SEND) on the station's connection: a received SEND is validated and never answered, a received CALLRESULTERROR is logged, and a schema-invalid CALLRESULT to a station CALL is answered with a CALLRESULTERROR. On 1.6 and 2.0.1 connections both stay unknown message types.
@@ -17,7 +34,6 @@ tag as the GitHub release notes.
 - OCPP 2.0.1 and 2.1 emulator: Local Authorization List (`SendLocalList`, `GetLocalListVersion`, `LocalAuthListCtrlr`). Listed tokens authorize offline (`LocalAuthorizeOffline`) and online without `Authorize` (`LocalPreAuthorize`), take precedence over the authorization cache, and the list survives a restart. The `groupIdToken` of an entry counts for stopping a transaction with another token of the group and for the master pass. `kirby-csms` has forms for both commands on 2.x stations.
 - OCPP 2.0.1 and 2.1 emulator: reservations. `ReserveNow` holds an EVSE, or any EVSE, for an `idToken` or its group, the connectors report `Reserved`, `CancelReservation` frees it, `ReservationStatusUpdate` reports `Expired` and `Removed`, and reservations survive a restart.
 - OCPP 2.0.1 and 2.1 emulator: `GetReport` limits a report by component criteria and by component and variable (an omitted instance, EVSE or connector matches all), and sends it in `NotifyReport` chunks. `kirby-csms` has forms for `GetReport`, `ReserveNow` and `CancelReservation` on 2.x stations.
-- OCPP 2.0.1 conformance family: `local-list` covers `TC_D_01_CS` to `TC_D_06_CS`, `TC_D_08_CS`, `TC_D_10_CS` and `TC_C_31_CS`.
 - OCPP 2.0.1 and 2.1 emulator: master pass (C16). A token in the group set by `AuthCtrlr.MasterPassGroupId` starts no transaction and ends all running ones with stop reason `MasterPass`.
 - OCPP 2.0.1 and 2.1 emulator: smart charging (K01, K05, K08 to K13). `SetChargingProfile`, `ClearChargingProfile`, `GetChargingProfiles` with `ReportChargingProfiles`, `GetCompositeSchedule` and the profile of `RequestStartTransaction`; `SmartChargingCtrlr` in the device model; the meter follows the limit in force; profiles except `TxProfile`s survive a restart. The library API can set and clear an external limit, which sends `NotifyChargingLimit` and `ClearedChargingLimit`. `kirby-csms` has forms for the four commands on 2.x stations.
 - OCPP 2.1 emulator: transaction limits (E16, F07). `maxEnergy`, `maxTime` and `maxCost` from the CSMS or from the library command `set_transaction_limit` are confirmed with `LimitSet`; a reached limit suspends charging or ends the transaction by `TxStopPoint`, a higher limit resumes it. `TxCtrlr.SupportedLimits` lists them.
@@ -26,7 +42,7 @@ tag as the GitHub release notes.
 - OCPP 2.1 emulator: priority charging (K21, K22) and dynamic charging profiles from the CSMS (K28). `PriorityCharging` profiles take the place of the transaction profiles while `UsePriorityCharging` or the library command `set_priority_charging` has it on, reported with `NotifyPriorityCharging`; `Dynamic` profiles follow `UpdateDynamicSchedule` and pull `PullDynamicScheduleUpdate` every `dynUpdateInterval`. `SmartChargingCtrlr.SupportedAdditionalPurposes` and `SupportsFeature[DynamicProfiles]` report them.
 - OCPP 2.0.1 and 2.1 emulator: fleet mode (`--count` above 1) headless and with `run --scenario`, with the same tagged output, per-station reports, aggregate line and JUnit file as 1.6. `kirby-ocpp-core` has `Fleet2`. On a terminal the fleet UI shows 2.x stations with the same layout and keys as 1.6.
 - OCPP 2.0.1 and 2.1 emulator: `CostUpdated` is answered and the running cost is kept with the transaction; `kirby-csms` has a form for it.
-- OCPP 2.0.1 conformance family: `reservation` covers `TC_H_01_CS` to `TC_H_04_CS`, `TC_H_06_CS`, `TC_H_08_CS` to `TC_H_10_CS`, `TC_H_12_CS`, `TC_H_14_CS` to `TC_H_19_CS` and `TC_H_21_CS` to `TC_H_24_CS`; `get-report` covers `TC_B_16_CS` to `TC_B_18_CS` and `TC_B_54_CS` to `TC_B_56_CS`; `master-pass` covers `TC_C_14_CS`, `TC_C_45_CS` and `TC_C_49_CS`; `local-list-auth` covers `TC_D_07_CS`, `TC_C_29_CS`, `TC_C_30_CS`, `TC_C_40_CS` and `TC_C_43_CS`.
+- OCPP 2.0.1 conformance family: `local-list` covers `TC_D_01_CS` to `TC_D_06_CS`, `TC_D_08_CS`, `TC_D_10_CS` and `TC_C_31_CS`; `reservation` covers `TC_H_01_CS` to `TC_H_04_CS`, `TC_H_06_CS`, `TC_H_08_CS` to `TC_H_10_CS`, `TC_H_12_CS`, `TC_H_14_CS` to `TC_H_19_CS` and `TC_H_21_CS` to `TC_H_24_CS`; `get-report` covers `TC_B_16_CS` to `TC_B_18_CS` and `TC_B_54_CS` to `TC_B_56_CS`; `master-pass` covers `TC_C_14_CS`, `TC_C_45_CS` and `TC_C_49_CS`; `local-list-auth` covers `TC_D_07_CS`, `TC_C_29_CS`, `TC_C_30_CS`, `TC_C_40_CS` and `TC_C_43_CS`.
 - OCPP 2.x terminal UI: the EVSE details show the reservation and the limit in force, the Station tab shows the local list and the installed charging profiles, and the actions `set external limit` (`l`) and `clear external limit` (`L`) on the EVSE tab drive the external limits. The 2.x snapshot gains `reservation`, `offered_w` and `external_limit` per EVSE and `local_list_version`, `local_list_entries` and `charging_profiles`.
 - OCPP 2.1 terminal UI: the EVSE details show transaction limits, the reached limit, cost and tariff, priority charging and the default tariff; the Transaction tab has `Transaction limit...` (`i`) and `Priority charging` (`P`). The 2.x snapshot gains `priority_charging` per EVSE.
 - Release archives carry a build provenance attestation; check one with `gh attestation verify <archive> --repo archhaze24/kirby-ocpp`.
@@ -505,7 +521,8 @@ New binary `kirby-csms` (default listen `0.0.0.0:9000`) and the new crates `kirb
 - SIGTERM during `kirby-csms --script` still writes the JUnit report.
 - A scenario `lagged` failure no longer sticks for the rest of the run.
 
-[Unreleased]: https://github.com/archhaze24/kirby-ocpp/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/archhaze24/kirby-ocpp/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/archhaze24/kirby-ocpp/compare/v0.4.0...v0.5.0
