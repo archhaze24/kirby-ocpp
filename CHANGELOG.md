@@ -15,7 +15,7 @@ tag as the GitHub release notes.
 
 | Metric | Since 0.7.0 |
 | --- | --- |
-| 🧾 Commits | **80** in four days (19 to 22 November 2026) |
+| 🧾 Commits | **82** in four days (19 to 22 November 2026) |
 | ✏️ Lines of code | **+56.5k / −2.2k** across 396 files; Rust grew from 165.8k to **194.4k** lines |
 | 🧪 Tests | **+447** tests in the `nextest` gate: 2,463 → **2,910** |
 | 📦 Crates | 7 → **7** (no new dependencies) |
