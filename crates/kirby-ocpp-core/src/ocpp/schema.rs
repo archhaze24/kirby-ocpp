@@ -560,25 +560,29 @@ impl SchemaRegistry {
         action_secret: bool,
     ) -> Result<(), SchemaViolation> {
         // The validator's messages quote the offending value; that must never be a secret.
-        let secret = action_secret || super::frame::carries_device_model_secret(payload);
-        let issues: Vec<SchemaIssue> = validator
-            .iter_errors(payload)
-            .map(|error| SchemaIssue {
+        let mut issues: Vec<SchemaIssue> = Vec::new();
+        let mut keywords: Vec<String> = Vec::new();
+        for error in validator.iter_errors(payload) {
+            keywords.push(error.kind().keyword().to_owned());
+            issues.push(SchemaIssue {
                 instance_path: error.instance_path().to_string(),
                 keyword: SchemaKeyword::from_name(error.kind().keyword()),
-                message: if secret {
-                    format!(
-                        "violates `{}` (details hidden: the value is a secret)",
-                        error.kind().keyword()
-                    )
-                } else {
-                    error.to_string()
-                },
-            })
-            .collect();
+                message: error.to_string(),
+            });
+        }
         if issues.is_empty() {
             Ok(())
         } else {
+            // A message quotes the offending value, which must never be a secret.
+            if action_secret
+                || super::frame::carries_device_model_secret(payload)
+                || holds_redactable_value(payload)
+            {
+                for (issue, keyword) in issues.iter_mut().zip(keywords) {
+                    issue.message =
+                        format!("violates `{keyword}` (details hidden: the value is a secret)");
+                }
+            }
             Err(SchemaViolation::from_issues(
                 self.protocol,
                 action,
@@ -597,6 +601,14 @@ fn carries_authorization_key(action: &str, payload: &Value) -> bool {
             .get("key")
             .and_then(Value::as_str)
             .is_some_and(|key| key.eq_ignore_ascii_case("AuthorizationKey"))
+}
+
+/// `true` when the redaction of recordings would change the payload, so it holds a secret
+/// (an `AuthorizationKey` value) that a diagnostic must not quote.
+fn holds_redactable_value(payload: &Value) -> bool {
+    let mut redacted = payload.clone();
+    super::frame::redact_payload(&mut redacted);
+    redacted != *payload
 }
 
 #[cfg(test)]

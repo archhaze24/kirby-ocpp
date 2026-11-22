@@ -296,6 +296,45 @@ async fn an_invalid_callresult_on_21_is_answered_with_a_callresulterror_and_fail
 }
 
 #[tokio::test]
+async fn an_invalid_callresult_on_21_never_quotes_an_authorization_key() {
+    const SECRET: &str = "SYNTHETIC-KEY-0123456789";
+    let csms = start(|_| {}).await;
+    let mut station = Client::connect(&csms, "CP-1", V21).await;
+    let csms_call = csms.clone();
+    let call = tokio::spawn(async move {
+        csms_call
+            .call("CP-1", "DataTransfer", json!({"vendorId": "acme"}))
+            .await
+    });
+    let id = next_call_id(&mut station).await;
+    // The status is not an enum member, so the validator quotes it.
+    let payload = json!({
+        "status": SECRET,
+        "data": {"key": "AuthorizationKey", "value": SECRET},
+    });
+    station
+        .send_text(Frame::call_result(id.as_str(), payload).to_json_string())
+        .await;
+    let Frame::CallResultError { description, .. } = station.recv_for(Protocol::V21).await else {
+        panic!("expected a CALLRESULTERROR");
+    };
+    assert!(!description.contains(SECRET), "{description}");
+    let error = call.await.unwrap().expect_err("the call fails");
+    assert!(!format!("{error} {error:?}").contains(SECRET), "{error:?}");
+    // The station's own status is recorded as sent; the CSMS frame and the key are not.
+    let recorded = csms.history("CP-1").unwrap().into_iter().any(|entry| {
+        matches!(&entry.frame, Frame::CallResultError { description, .. } if !description.contains(SECRET))
+    });
+    assert!(recorded);
+    let data_value = |entry: &kirby_csms_core::FrameEntry| match &entry.frame {
+        Frame::CallResult { payload, .. } => payload["data"]["value"] == SECRET,
+        _ => false,
+    };
+    assert!(!csms.history("CP-1").unwrap().iter().any(data_value));
+    csms.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_valid_callresult_on_21_gets_no_callresulterror() {
     let csms = start(|_| {}).await;
     let mut station = Client::connect(&csms, "CP-1", V21).await;
