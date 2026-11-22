@@ -1,4 +1,4 @@
-//! `kirby-ocpp`: terminal OCPP 1.6J and 2.0.1 charge point emulator.
+//! `kirby-ocpp`: terminal OCPP 1.6J, 2.0.1 and 2.1 charge point emulator.
 
 /// Stderr lines are written whole and in one piece. The std macro issues several small
 /// writes per line, which interleave with the stdout lines when both streams share a pipe

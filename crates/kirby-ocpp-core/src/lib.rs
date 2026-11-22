@@ -1,4 +1,4 @@
-//! Core of the kirby-ocpp OCPP 1.6J and 2.0.1 charge point emulator.
+//! Core of the kirby-ocpp OCPP 1.6J, 2.0.1 and 2.1 charge point emulator.
 //!
 //! This crate has **no UI dependencies**. A UI (the `kirby-ocpp-tui` crate, a
 //! headless runner, a test) talks to the emulator exclusively through

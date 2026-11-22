@@ -1,5 +1,5 @@
-//! Dev-only scripted mock OCPP 1.6J and 2.0.1 central system (CSMS) for integration tests of the
-//! charge point emulator.
+//! Dev-only scripted mock OCPP 1.6J, 2.0.1 and 2.1 central system (CSMS) for integration tests
+//! of the charge point emulator.
 //!
 //! [`MockCsms`] is a WebSocket server on `127.0.0.1` (ephemeral port, `ws://` or `wss://`).
 //! It answers the charge point's CALLs with the same canned responses as the TypeScript

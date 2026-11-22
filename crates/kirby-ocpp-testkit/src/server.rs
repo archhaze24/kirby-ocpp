@@ -27,7 +27,7 @@ use crate::tls::{self, TlsMaterial, TlsOpts};
 
 const SEC_WEBSOCKET_PROTOCOL: HeaderName = HeaderName::from_static("sec-websocket-protocol");
 
-/// A scripted OCPP 1.6J and 2.0.1 central system listening on `127.0.0.1`.
+/// A scripted OCPP 1.6J, 2.0.1 and 2.1 central system listening on `127.0.0.1`.
 ///
 /// Start one with [`MockCsms::start`] (or [`MockCsms::start_tls`]). It answers the
 /// charge point's CALLs with defaults ported from the TS smoke harness, lets a test
