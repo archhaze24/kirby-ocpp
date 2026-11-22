@@ -237,8 +237,8 @@ All of these are read-only and need the same token as every other route.
 | --- | --- |
 | `limit` | Number of frames: ASCII decimal digits (`+5`, `-1` and an empty value are `400`). Default: every held frame. Without `since` the newest `limit` frames, with `since` the first `limit` frames after the cursor. `0` gives none |
 | `since` | A `cursor` from an earlier answer (`c` and decimal digits): only frames recorded after that frame |
-| `action` | Only frames of CALLs of this action (1 to 128 bytes without control characters) and the replies to them |
-| `kind` | `call`, `result` or `error` |
+| `action` | Only frames of CALLs and SENDs of this action (1 to 128 bytes without control characters) and the replies to the CALLs |
+| `kind` | `call`, `result`, `error`, `send` or `result_error` |
 | `direction` | `in` (from the station) or `out` (to the station) |
 | `format` | `json` (default), `ndjson` or `csv` |
 
@@ -250,7 +250,8 @@ $ curl -s 'http://127.0.0.1:9100/v1/stations/CP-1/history?since=c0&limit=2&kind=
 ```
 
 - Each frame has a `cursor` besides the keys of an event frame. A cursor is an opaque string that stays valid while the server runs: it names a position, not a count, so it survives the eviction of older frames. Cursors increase with recording order across all stations, and a cursor from an earlier run of the server is simply older than every frame of this run. Do not parse it.
-- `action` filters by the action of the CALL: a `result` or `error` frame has no action of its own, so it is matched with the CALL of the same message id that went the other way. A reply whose CALL was already evicted is not matched.
+- `action` filters by the action of the CALL or SEND: a `result` or `error` frame has no action of its own, so it is matched with the CALL of the same message id that went the other way. A reply whose CALL was already evicted is not matched. A `result_error` frame is never matched.
+- OCPP 2.1 frames have their own kinds, in the history, the CSV and the event stream: `send` carries `id`, `action` and `payload` (the CSV fills `action` and `payload`), `result_error` carries `id`, `code`, `description` and `details` (the CSV fills `code`, `description` and `details`).
 - `next_cursor` is where to continue: pass it as `since` to get the frames after this answer, never one twice. It is the cursor of the last frame returned when `limit` cut the answer short, otherwise the cursor of the newest frame held (every frame up to it was looked at, whether it passed the filters or not), otherwise the `since` of the request. It is `null` only when the station holds no frames and no `since` was sent. An empty answer keeps `since` as `next_cursor`, so a polling client always keeps a valid position.
 - `gap` is `true` when `since` was sent and frames after it were already evicted from the station's history (or were too big to be kept): the answer then starts with the oldest frame still held. Without `since` it is `false`.
 - Walk a long history with `since` and `limit`: start with `since=c0`, then repeat with `next_cursor` until `frames` is empty. Poll for new traffic the same way.

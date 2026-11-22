@@ -95,7 +95,7 @@ With `--protocol ocpp2.0.1` (or `ocpp2.1`, which shows `OCPP 2.1` where this pag
 
 `t` presents a token at the selected EVSE; whether that starts a transaction depends on `TxCtrlr.TxStartPoint`, so the token may come before the cable. `m` advances the meter and sends a sample right away. `K` opens the station-level variables of the device model (`/` filters, `Enter` edits a `ReadWrite` variable like `SetVariables` would; write-only values show as `(hidden)`); EVSE and connector variables are read with `GetVariables` from the CSMS. `W` lists pending commands; `x` or `Delete` cancels the selected call. `TransactionEvent` cannot be cancelled.
 
-Not available for 2.0.1, so not shown: add connector, cycle or set status (the status follows the plug, fault and availability state), response rules, configuration keys (the device model replaces them), local auth list, charging profiles, certificates, diagnostics and firmware outcomes.
+Not available for 2.0.1, so not shown: add connector, cycle or set status (the status follows the plug, fault and availability state), response rules, configuration keys (the device model replaces them), certificates, diagnostics and firmware outcomes. The local authorization list and the charging profiles have no browser in the terminal UI; the Station tab shows their counts.
 
 ### Data browser
 
@@ -143,7 +143,7 @@ Without a TTY, or with `--no-tui` or `--json`, the emulator connects and prints 
 
 If the station gives up reconnecting (`--no-reconnect`, or `--reconnect-max-attempts` used up), the headless process no longer idles: it closes cleanly, prints `error: reconnect stopped (REASON); last error: ...` to stderr and exits 1. The give-up is read from the station snapshot field `reconnect_stopped` (the reason text, `null` otherwise; cleared by the next connect), so a lost event stream cannot hide it. A fleet exits 1 when every station has given up. The terminal UI keeps running (it shows the state itself).
 
-`kirby-ocpp run --scenario NAME_OR_FILE` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`). Frame and log lines are not printed unless you pass `-v` (see [Output levels and color](#output-levels-and-color)). A `run` does not read or write a state file, so it is repeatable; `--persist` keeps state like a plain station. A connection that cannot be established (or is lost for good) ends the run at once with exit 1 and the same message as in headless mode; with reconnect enabled the run waits until `--timeout` and the timeout message names the last connection error. The run options (`--report`, `--junit`, `--timeout`, `--id-tag`), the report shapes and CI use are in [scenarios.md](scenarios.md#running-scenarios).
+`kirby-ocpp run --scenario NAME_OR_FILE` connects, waits for an accepted BootNotification, runs the scenario and prints a PASS/FAIL/SKIP report (a JSON object with `"type": "report"` under `--json`). Frame and log lines are not printed unless you pass `-v` (see [Output levels and color](#output-levels-and-color)). On a 2.x station the run waits after the last step until the queued `TransactionEvent` messages are delivered (within `--timeout`; events still queued then are named in a `warning:` line and do not change the result). A `run` does not read or write a state file, so it is repeatable; `--persist` keeps state like a plain station. A connection that cannot be established (or is lost for good) ends the run at once with exit 1 and the same message as in headless mode; with reconnect enabled the run waits until `--timeout` and the timeout message names the last connection error. The run options (`--report`, `--junit`, `--timeout`, `--id-tag`), the report shapes and CI use are in [scenarios.md](scenarios.md#running-scenarios).
 
 | Code | Meaning |
 | --- | --- |
@@ -390,7 +390,7 @@ What the 2.0.1 station does:
 Differences from the 1.6 station:
 
 * `--vendor` may have 50 characters (`vendorName`); `--connectors` is the number of EVSEs, at most 64.
-* The station boots at start and after a reset, not after every reconnect.
+* The station boots at start, after a reset and after a manual reconnect or connect; an automatic reconnect with an accepted registration does not boot.
 * A station id that is longer than 48 characters, contains a colon or has characters outside `identifierString` prints a `note:` and is used as given.
 * The terminal UI shows the 2.0.1 tabs and actions; see [For OCPP 2.0.1](#for-ocpp-201).
 * `replay` and `scenarios from-recording` exit 2. `--count` above 1 runs a [fleet](#fleet-mode) in the terminal UI, headless (with `--no-tui` or `--json`, or without a terminal) and with `run`. `run` and `suite` work: a scenario written for the other OCPP version exits 2 with `scenario NAME is for OCPP 1.6; this station speaks ocpp2.0.1` (or the reverse). Built-in names resolve for the station's version, `--connector` is the EVSE and `--id-tag` the `id_token` of a built-in; see [scenarios.md](scenarios.md#running-scenarios).
