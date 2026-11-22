@@ -68,7 +68,7 @@ fn command(args: &[String]) -> Command {
 }
 
 /// The binary with `args`, on a blocking thread with a deadline.
-async fn kirby(args: Vec<String>) -> Output {
+async fn run_emulator(args: Vec<String>) -> Output {
     tokio::task::spawn_blocking(move || crate::support::output(command(&args)))
         .await
         .unwrap()
@@ -120,7 +120,7 @@ fn path_str(path: &Path) -> &str {
 async fn config(extra: &[&str]) -> Value {
     let mut args = strings(&["--url", URL, "--print-config"]);
     args.extend(extra.iter().map(|s| (*s).to_owned()));
-    let output = kirby(args).await;
+    let output = run_emulator(args).await;
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     serde_json::from_slice(&output.stdout).unwrap()
 }
@@ -159,13 +159,13 @@ async fn the_environment_and_the_file_select_2_1() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn version_lists_2_1() {
-    let output = kirby(strings(&["version"])).await;
+    let output = run_emulator(strings(&["version"])).await;
     assert!(
         stdout(&output).contains("protocols: OCPP 1.6J, OCPP 2.0.1, OCPP 2.1"),
         "{}",
         stdout(&output)
     );
-    let output = kirby(strings(&["version", "--json"])).await;
+    let output = run_emulator(strings(&["version", "--json"])).await;
     let value: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(
         value["protocols"],
@@ -180,7 +180,7 @@ async fn version_lists_2_1() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_2_1_headless_fleet_exits_when_both_stations_give_up() {
     let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
-    let output = kirby(strings(&[
+    let output = run_emulator(strings(&[
         "--url",
         csms.url(),
         "--protocol",
@@ -207,7 +207,7 @@ async fn a_2_1_headless_fleet_exits_when_both_stations_give_up() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_1_6_only_flags_are_refused_with_2_1() {
-    let output = kirby(station(URL, &["--print-config", "--rule", "Reset=reject"])).await;
+    let output = run_emulator(station(URL, &["--print-config", "--rule", "Reset=reject"])).await;
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
         stderr(&output).contains("--rule")
@@ -220,7 +220,7 @@ async fn the_1_6_only_flags_are_refused_with_2_1() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_station_id_note_names_2_1() {
-    let output = kirby(strings(&[
+    let output = run_emulator(strings(&[
         "--url",
         URL,
         "--protocol",
@@ -240,14 +240,14 @@ async fn the_station_id_note_names_2_1() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn scenarios_list_and_show_follow_the_station_protocol() {
-    let output = kirby(strings(&["scenarios", "list", "--protocol", "ocpp2.1"])).await;
+    let output = run_emulator(strings(&["scenarios", "list", "--protocol", "ocpp2.1"])).await;
     assert!(output.status.success(), "{}", stderr(&output));
     let listing = stdout(&output);
     assert_eq!(listing.lines().count(), 8, "{listing}");
     assert!(listing.contains("charge-session"), "{listing}");
     assert!(!listing.contains("finish-session"), "{listing}");
 
-    let output = kirby(strings(&[
+    let output = run_emulator(strings(&[
         "scenarios",
         "show",
         "charge-session",
@@ -260,7 +260,7 @@ async fn scenarios_list_and_show_follow_the_station_protocol() {
     assert!(shown.contains("ocpp_version = \"2.1\""), "{shown}");
     assert!(!shown.contains("2.0.1"), "{shown}");
 
-    let output = kirby(strings(&[
+    let output = run_emulator(strings(&[
         "scenarios",
         "show",
         "finish-session",
@@ -276,7 +276,7 @@ async fn scenarios_list_and_show_follow_the_station_protocol() {
     );
 
     // The 2.0.1 listing is unchanged.
-    let output = kirby(strings(&[
+    let output = run_emulator(strings(&[
         "scenarios",
         "show",
         "charge-session",
@@ -300,10 +300,10 @@ async fn scenarios_validate_rejects_a_token_type_beyond_20_characters() {
         )
     };
     let ok = file("ok.toml", &"k".repeat(20));
-    let output = kirby(strings(&["scenarios", "validate", &ok])).await;
+    let output = run_emulator(strings(&["scenarios", "validate", &ok])).await;
     assert!(output.status.success(), "{}", stderr(&output));
     let bad = file("bad.toml", &"k".repeat(21));
-    let output = kirby(strings(&["scenarios", "validate", &bad])).await;
+    let output = run_emulator(strings(&["scenarios", "validate", &bad])).await;
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
         stderr(&output).contains("`type` must be at most 20 characters"),
@@ -316,7 +316,7 @@ async fn scenarios_validate_rejects_a_token_type_beyond_20_characters() {
 async fn scenarios_validate_accepts_a_2_1_file() {
     let dir = tempfile::tempdir().unwrap();
     let file = write(dir.path(), "v21.toml", V21_FILE);
-    let output = kirby(strings(&["scenarios", "validate", &file])).await;
+    let output = run_emulator(strings(&["scenarios", "validate", &file])).await;
     assert!(output.status.success(), "{}", stderr(&output));
     let text = format!("{}{}", stdout(&output), stderr(&output));
     assert!(text.contains("2.1"), "{text}");
@@ -339,8 +339,9 @@ async fn state_paths_are_the_2_x_files() {
             "--json",
         ])
     };
-    let newer: Value = serde_json::from_slice(&kirby(args("ocpp2.1")).await.stdout).unwrap();
-    let older: Value = serde_json::from_slice(&kirby(args("ocpp2.0.1")).await.stdout).unwrap();
+    let newer: Value = serde_json::from_slice(&run_emulator(args("ocpp2.1")).await.stdout).unwrap();
+    let older: Value =
+        serde_json::from_slice(&run_emulator(args("ocpp2.0.1")).await.stdout).unwrap();
     assert_eq!(newer["protocol"], "ocpp2.1");
     assert_eq!(newer["file"], older["file"]);
     assert_eq!(newer["secrets_file"], older["secrets_file"]);
@@ -357,7 +358,7 @@ async fn state_paths_are_the_2_x_files() {
             .ends_with("CP-9.station2.secrets.json")
     );
 
-    let output = kirby(strings(&[
+    let output = run_emulator(strings(&[
         "state",
         "show",
         "--state-dir",
@@ -379,7 +380,7 @@ async fn state_paths_are_the_2_x_files() {
 #[tokio::test(flavor = "multi_thread")]
 async fn check_boots_with_the_2_1_subprotocol() {
     let csms = v21_csms().await;
-    let output = kirby(strings(&[
+    let output = run_emulator(strings(&[
         "check",
         "--url",
         csms.url(),
@@ -458,7 +459,7 @@ async fn a_2_1_station_against_a_2_0_1_only_csms_gives_up_with_the_reason() {
     })
     .await
     .unwrap();
-    let output = kirby(station(csms.url(), &["--no-reconnect"])).await;
+    let output = run_emulator(station(csms.url(), &["--no-reconnect"])).await;
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     assert!(
         stderr(&output).contains("reconnect stopped"),
@@ -474,7 +475,7 @@ async fn run_passes_a_2_1_file_and_the_reports_carry_2_1() {
     let dir = tempfile::tempdir().unwrap();
     let file = write(dir.path(), "plain.toml", PLAIN);
     let (report, junit) = (dir.path().join("r.json"), dir.path().join("j.xml"));
-    let output = kirby(station(
+    let output = run_emulator(station(
         csms.url(),
         &[
             "run",
@@ -505,7 +506,7 @@ async fn run_resolves_a_built_in_for_2_1_and_accepts_a_long_token() {
     let long = "T".repeat(100);
     let dir = tempfile::tempdir().unwrap();
     let report = dir.path().join("r.json");
-    let output = kirby(station(
+    let output = run_emulator(station(
         csms.url(),
         &[
             "run",
@@ -531,7 +532,7 @@ async fn run_resolves_a_built_in_for_2_1_and_accepts_a_long_token() {
 async fn run_rejects_a_token_beyond_255_characters_for_2_1() {
     let url = unused_url();
     let long = "T".repeat(256);
-    let output = kirby(station(
+    let output = run_emulator(station(
         &url,
         &["run", "--scenario", "charge-session", "--id-tag", &long],
     ))
@@ -550,14 +551,14 @@ async fn a_scenario_for_another_version_is_a_symmetric_usage_error() {
     let dir = tempfile::tempdir().unwrap();
     let older_file = write(dir.path(), "v201.toml", V201_FILE);
     let newer_file = write(dir.path(), "v21.toml", V21_FILE);
-    let output = kirby(station(&url, &["run", "--scenario", &older_file])).await;
+    let output = run_emulator(station(&url, &["run", "--scenario", &older_file])).await;
     assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
     assert!(
         stderr(&output).contains("scenario plain is for OCPP 2.0.1; this station speaks ocpp2.1"),
         "{}",
         stderr(&output)
     );
-    let output = kirby(strings(&[
+    let output = run_emulator(strings(&[
         "--url",
         &url,
         "--protocol",
@@ -581,7 +582,7 @@ async fn suite_runs_the_built_ins_as_2_1() {
     let csms = v21_csms().await;
     let dir = tempfile::tempdir().unwrap();
     let (report, junit) = (dir.path().join("r.json"), dir.path().join("j.xml"));
-    let output = kirby(station(
+    let output = run_emulator(station(
         csms.url(),
         &[
             "suite",

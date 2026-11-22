@@ -608,7 +608,7 @@ fn the_fleet_footer_hints_the_station_keys() {
 fn a_2_1_station_shows_the_2_1_version_where_2_0_1_shows_its_own() {
     let mut snapshot = app().snapshot;
     snapshot.protocol = "ocpp2.1".to_owned();
-    let mut a = App2::new(snapshot, "ws://csms.example/ocpp", "Kirby");
+    let mut a = App2::new(snapshot, "ws://csms.example/ocpp", "Acme");
     assert_eq!(a.protocol, Protocol::V21);
     let text = render(&a, 110, 30);
     assert!(text.contains("ocpp2.1"), "{text}");
