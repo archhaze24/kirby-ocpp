@@ -47,7 +47,7 @@ const fn protocol_label(protocol: Protocol) -> &'static str {
 const ABNORMAL_CLOSE: u16 = 1006;
 /// Close code of a normal, client-initiated close.
 const NORMAL_CLOSE: u16 = 1000;
-/// Longest `errorDescription` of a CALLRESULTERROR, in characters (OCPP 2.1 Part 4, table 7).
+/// Longest `errorDescription` of a 2.x error frame, in characters.
 const MAX_ERROR_DESCRIPTION: usize = 255;
 /// How long a close handshake may take before the socket is dropped.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -293,10 +293,20 @@ impl Task {
     }
 
     /// Writes one frame and reports it as [`ConnectionEvent::Frame`].
-    async fn write<W>(&self, frame: Frame, action: Option<String>, sink: &mut W) -> Flow
+    async fn write<W>(&self, mut frame: Frame, action: Option<String>, sink: &mut W) -> Flow
     where
         W: Sink<Message, Error = WsError> + Unpin,
     {
+        match &mut frame {
+            Frame::CallError { description, .. } | Frame::CallResultError { description, .. }
+                if self.schemas.registry().protocol() != Protocol::V16 =>
+            {
+                if let Some((end, _)) = description.char_indices().nth(MAX_ERROR_DESCRIPTION) {
+                    description.truncate(end);
+                }
+            }
+            _ => {}
+        }
         self.send_message(sink, Message::Text(frame.to_json_string().into()))
             .await?;
         let record = FrameRecord {
@@ -504,6 +514,11 @@ impl Task {
                         violation.errors.join("; "),
                     )
                 })
+        } else if schemas.knows_send(&action) {
+            Some((
+                ErrorCode::NotSupported,
+                format!("{action} is a SEND-only action"),
+            ))
         } else {
             Some((
                 ErrorCode::NotImplemented,
@@ -561,12 +576,7 @@ impl Task {
                     rejection = Some(Frame::call_result_error(
                         id,
                         violation.error_code_for(protocol),
-                        violation
-                            .errors
-                            .join("; ")
-                            .chars()
-                            .take(MAX_ERROR_DESCRIPTION)
-                            .collect::<String>(),
+                        violation.errors.join("; "),
                     ));
                 }
                 Err(CallError::Schema(violation))

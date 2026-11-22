@@ -115,6 +115,36 @@ async fn a_valid_send_is_delivered_recorded_and_never_answered() {
 }
 
 #[tokio::test]
+async fn a_send_only_action_as_call_is_not_supported() {
+    let (_connection, _events, mut peer, _server) = rig(Protocol::V21).await;
+    peer.send_json(&json!([2, "c-1", STREAM, stream_payload()]))
+        .await;
+    let reply = peer.recv_frame().await;
+    assert_eq!(reply[0], 4);
+    assert_eq!(reply[1], "c-1");
+    assert_eq!(reply[2], "NotSupported");
+}
+
+#[tokio::test]
+async fn call_error_description_is_capped_for_2x() {
+    let action = "é".repeat(300);
+    for protocol in [Protocol::V201, Protocol::V21, Protocol::V16] {
+        let (_connection, _events, mut peer, _server) = rig(protocol).await;
+        peer.send_json(&json!([2, "c-1", action, {}])).await;
+        let reply = peer.recv_frame().await;
+        assert_eq!(reply[0], 4);
+        assert_eq!(reply[1], "c-1");
+        assert_eq!(reply[2], "NotImplemented");
+        let description = reply[3].as_str().expect("error description");
+        if protocol == Protocol::V16 {
+            assert!(description.starts_with(&action));
+        } else {
+            assert_eq!(description, "é".repeat(255), "{protocol:?}");
+        }
+    }
+}
+
+#[tokio::test]
 async fn invalid_and_unknown_sends_are_dropped_with_a_warning_and_no_reply() {
     let (_connection, mut events, mut peer, _server) = rig(Protocol::V21).await;
 
