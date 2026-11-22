@@ -432,6 +432,72 @@ async fn an_ocpp_2_1_station_shows_up_in_stdin_the_api_and_calls() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_and_callresulterror_frames_show_in_history_and_the_json_lines() {
+    let mut csms = Csms::start();
+    let mut cp = Raw::connect(&csms, "CP-21", "ocpp2.1").await;
+    cp.boot().await;
+
+    // An inbound SEND.
+    let stream = json!({
+        "id": 1, "pending": 0, "basetime": NOW, "data": [{"t": 0.5, "v": "12.5"}]
+    });
+    cp.send(&json!([6, "s-1", "NotifyPeriodicEventStream", stream]))
+        .await;
+    let line = csms.wait(|v| v["type"] == "frame" && v["kind"] == "send");
+    assert_eq!(line["id"], "s-1", "{line}");
+    assert_eq!(line["action"], "NotifyPeriodicEventStream", "{line}");
+    assert_eq!(line["payload"]["id"], 1, "{line}");
+    assert_eq!(line["direction"], "in", "{line}");
+
+    // An invalid CALLRESULT is answered with a CALLRESULTERROR (outbound).
+    csms.send(
+        &json!({"station": "CP-21", "action": "Reset", "id": "r", "payload": {"type": "OnIdle"}})
+            .to_string(),
+    );
+    let call = cp.recv().await;
+    assert_eq!(call[0], 2, "{call}");
+    cp.send(&json!([3, call[1], {"status": "Bogus"}])).await;
+    let error = cp.recv().await;
+    assert_eq!(error[0], 5, "{error}");
+    let line = csms.wait(|v| v["type"] == "frame" && v["kind"] == "result_error");
+    assert_eq!(line["id"], call[1], "{line}");
+    assert_eq!(line["direction"], "out", "{line}");
+    assert_eq!(line["code"], error[2], "{line}");
+    assert_eq!(line["description"], error[3], "{line}");
+    assert_eq!(line["details"], json!({}), "{line}");
+
+    // An inbound CALLRESULTERROR.
+    cp.send(&json!([5, "x-1", "FormatViolation", "bad", {}]))
+        .await;
+    csms.wait(|v| v["type"] == "frame" && v["kind"] == "result_error" && v["id"] == "x-1");
+
+    // History: the same shapes, and the `kind` and `action` filters.
+    let (status, all) = csms.get("/v1/stations/CP-21/history").await;
+    assert_eq!(status, 200, "{all}");
+    let rows = all["frames"].as_array().unwrap();
+    assert!(rows.iter().all(|row| row["kind"] != "unknown"), "{all}");
+    let (_, sends) = csms.get("/v1/stations/CP-21/history?kind=send").await;
+    let sends = sends["frames"].as_array().unwrap();
+    assert_eq!(sends.len(), 1, "{sends:?}");
+    assert_eq!(sends[0]["action"], "NotifyPeriodicEventStream");
+    assert_eq!(sends[0]["payload"]["id"], 1);
+    let (_, errors) = csms
+        .get("/v1/stations/CP-21/history?kind=result_error")
+        .await;
+    let errors = errors["frames"].as_array().unwrap();
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    let inbound = errors.iter().find(|row| row["id"] == "x-1").unwrap();
+    assert_eq!(inbound["code"], "FormatViolation");
+    assert_eq!(inbound["description"], "bad");
+    let (_, by_action) = csms
+        .get("/v1/stations/CP-21/history?action=NotifyPeriodicEventStream")
+        .await;
+    let by_action = by_action["frames"].as_array().unwrap();
+    assert_eq!(by_action.len(), 1, "{by_action:?}");
+    assert_eq!(by_action[0]["kind"], "send");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_script_declaring_ocpp_2_1_runs_and_reports_the_version() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("v21.toml");

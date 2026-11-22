@@ -50,6 +50,8 @@ pub const MAX_SEQ_RANGES: usize = 32;
 /// Schema limits of the strings the fold stores (characters).
 const MAX_TRANSACTION_ID_LEN: usize = 36;
 const MAX_ID_TOKEN_LEN: usize = 36;
+/// OCPP 2.1 widened `idToken` to 255 characters.
+const MAX_ID_TOKEN_LEN_V21: usize = 255;
 const MAX_VENDOR_NAME_LEN: usize = 50;
 const MAX_MODEL_LEN: usize = 20;
 const MAX_SERIAL_NUMBER_LEN: usize = 25;
@@ -164,6 +166,7 @@ impl StationState2 {
         req: TransactionEventRequest,
         id_token_status: Option<AuthorizationStatus>,
         history_cap: usize,
+        max_token_len: usize,
     ) -> bool {
         let id = req.transaction_info.transaction_id.clone();
         let known = self.transactions.iter().position(|tx| tx.id == id);
@@ -185,7 +188,7 @@ impl StationState2 {
         let latest = tx.status == TransactionStatus::Active
             && highest.is_none_or(|highest| req.seq_no >= highest);
         let was_active = tx.status == TransactionStatus::Active;
-        tx.fold_event(req, id_token_status, latest);
+        tx.fold_event(req, id_token_status, latest, max_token_len);
         let stopped = was_active && tx.status == TransactionStatus::Stopped;
         self.counters.transaction_events += 1;
         if created || stopped {
@@ -279,7 +282,7 @@ pub struct Tx2Record {
     pub id: String,
     pub evse: Option<u32>,
     pub connector: Option<u32>,
-    /// At most 36 characters.
+    /// At most 36 characters (255 on OCPP 2.1).
     pub id_token: Option<String>,
     pub id_token_type: Option<IdTokenType>,
     /// The `idTokenInfo.status` we answered for the token.
@@ -365,6 +368,7 @@ impl Tx2Record {
         req: TransactionEventRequest,
         id_token_status: Option<AuthorizationStatus>,
         latest: bool,
+        max_token_len: usize,
     ) {
         self.started_at = self.started_at.min(req.timestamp);
         if latest {
@@ -392,7 +396,7 @@ impl Tx2Record {
         if let Some(token) = req.id_token
             && (latest || self.id_token.is_none())
         {
-            let token_id = truncate(token.id_token, MAX_ID_TOKEN_LEN);
+            let token_id = truncate(token.id_token, max_token_len);
             if self.id_token.as_ref() != Some(&token_id) {
                 self.id_token_status = None;
             }
@@ -746,7 +750,7 @@ impl StationState {
         now: DateTime<Utc>,
         history_cap: usize,
     ) -> bool {
-        let changed = self.fold_v2(call, now, history_cap);
+        let changed = self.fold_v2(protocol, call, now, history_cap);
         // The section is created lazily under 2.0.1's name; a session never changes protocol
         // under a kept state (the state is reset first), so naming it here is enough.
         if let Some(v2) = self.v2.as_deref_mut()
@@ -757,7 +761,13 @@ impl StationState {
         changed
     }
 
-    fn fold_v2(&mut self, call: DecodedCall201, now: DateTime<Utc>, history_cap: usize) -> bool {
+    fn fold_v2(
+        &mut self,
+        protocol: Protocol,
+        call: DecodedCall201,
+        now: DateTime<Utc>,
+        history_cap: usize,
+    ) -> bool {
         match call {
             DecodedCall201::Boot(req, res) => self.v2_boot(*req, res, now),
             DecodedCall201::Heartbeat => {
@@ -768,7 +778,7 @@ impl StationState {
             DecodedCall201::Status(req) => self.v2_status(&req, now),
             DecodedCall201::NotifyEvent(events) => self.v2_notify_event(events, now),
             DecodedCall201::Transaction(req, id_token_status) => {
-                self.v2_transaction_event(*req, id_token_status, history_cap)
+                self.v2_transaction_event(protocol, *req, id_token_status, history_cap)
             }
             DecodedCall201::Meter(req) => self.v2_meter_values(&req),
             DecodedCall201::SecurityEvent(req) => self.v2_security_event(req, now),
@@ -838,6 +848,7 @@ impl StationState {
 
     fn v2_transaction_event(
         &mut self,
+        protocol: Protocol,
         req: TransactionEventRequest,
         id_token_status: Option<AuthorizationStatus>,
         history_cap: usize,
@@ -847,8 +858,13 @@ impl StationState {
             self.v2_mut().counters.rejected_events += 1;
             return false;
         }
+        let max_token_len = if protocol == Protocol::V21 {
+            MAX_ID_TOKEN_LEN_V21
+        } else {
+            MAX_ID_TOKEN_LEN
+        };
         self.v2_mut()
-            .fold_transaction_event(req, id_token_status, history_cap)
+            .fold_transaction_event(req, id_token_status, history_cap, max_token_len)
     }
 
     /// `MeterValues` outside a transaction: latest energy and power per EVSE.
@@ -1777,6 +1793,28 @@ mod tests {
         ));
         assert_eq!(v2(&state).transactions.len(), 2);
         assert_eq!(v2(&state).counters.rejected_events, 2);
+    }
+
+    #[test]
+    fn a_2_1_id_token_is_kept_up_to_255_characters() {
+        let fold_21 = |token: &str| {
+            let mut state = StationState::default();
+            let patch = json!({"idToken": {"idToken": token, "type": "Central"}});
+            assert!(state.apply_v2(
+                Protocol::V21,
+                "TransactionEvent",
+                &event("Started", 0, 10, &patch),
+                &json!({}),
+                now(),
+                5
+            ));
+            first_tx(&state).id_token.clone().unwrap()
+        };
+        let token = "T".repeat(37);
+        assert_eq!(fold_21(&token), token);
+        let widest = "W".repeat(255);
+        assert_eq!(fold_21(&widest), widest);
+        assert_eq!(fold_21(&"X".repeat(300)).len(), 255);
     }
 
     #[test]

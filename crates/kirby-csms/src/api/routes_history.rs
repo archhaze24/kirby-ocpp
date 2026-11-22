@@ -145,7 +145,10 @@ fn pick(held: &[(u64, Value)], dropped_through: u64, query: &HistoryQuery) -> Pi
             return false;
         }
         if let Some(action) = &query.action {
-            let found = if row.get("kind").and_then(Value::as_str) == Some("call") {
+            let found = if matches!(
+                row.get("kind").and_then(Value::as_str),
+                Some("call" | "send")
+            ) {
                 text(row, "action")
             } else {
                 let opposite = if row.get("direction").and_then(Value::as_str) == Some("in") {
@@ -229,8 +232,12 @@ fn light_row(entry: &FrameEntry) -> Value {
         Frame::Call { id, action, .. } => {
             json!({"kind": "call", "id": id.clone(), "action": action})
         }
+        Frame::Send { id, action, .. } => {
+            json!({"kind": "send", "id": id.clone(), "action": action})
+        }
         Frame::CallResult { id, .. } => json!({"kind": "result", "id": id.clone()}),
         Frame::CallError { id, .. } => json!({"kind": "error", "id": id.clone()}),
+        Frame::CallResultError { id, .. } => json!({"kind": "result_error", "id": id.clone()}),
         other => json!({"kind": "unknown", "id": other.id()}),
     };
     if let Some(object) = row.as_object_mut() {
@@ -317,8 +324,11 @@ pub(super) async fn history(
         query.action = Some(action);
     }
     if let Some(kind) = kind {
-        if !matches!(kind.as_str(), "call" | "result" | "error") {
-            return bad_request("`kind` must be one of: call, result, error");
+        if !matches!(
+            kind.as_str(),
+            "call" | "result" | "error" | "send" | "result_error"
+        ) {
+            return bad_request("`kind` must be one of: call, result, error, send, result_error");
         }
         query.kind = Some(kind);
     }

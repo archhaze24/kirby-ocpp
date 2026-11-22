@@ -451,6 +451,20 @@ pub fn frame_json(frame: &Frame) -> Value {
             "kind": "error", "id": id.clone(), "code": code.as_str(),
             "description": description, "details": details
         }),
+        Frame::Send {
+            id,
+            action,
+            payload,
+        } => json!({"kind": "send", "id": id.clone(), "action": action, "payload": payload}),
+        Frame::CallResultError {
+            id,
+            code,
+            description,
+            details,
+        } => json!({
+            "kind": "result_error", "id": id.clone(), "code": code.as_str(),
+            "description": description, "details": details
+        }),
         other => json!({"kind": "unknown", "id": other.id()}),
     }
 }

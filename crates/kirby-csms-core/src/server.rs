@@ -32,7 +32,7 @@ use crate::event::{CsmsEvent, Direction, DisconnectReason, FrameEntry, StationIn
 use crate::fault::{Fault, Reply, Responder};
 use crate::ids;
 use crate::observe::{self, MAX_OBSERVED_ID_TAG, Observation, ObserveSender, Observer, SessionId};
-use crate::policy::TransactionIdAllocator;
+use crate::policy::{SubprotocolPolicy, TransactionIdAllocator};
 use crate::rules::{FaultInfo, RuleInfo, Scope, Scripted};
 use crate::schemas::{EngineSchemas, session_protocol};
 use crate::state::{DecodedCall, StationState};
@@ -1653,7 +1653,7 @@ async fn run_session<S>(
             });
             return Err(denied.response());
         }
-        let chosen = selection.map_err(refusal)?;
+        let chosen = chosen_subprotocol(&inner, peer, request, selection)?;
         if inner.station_limit_reached(&id) {
             return Err(unavailable("too many stations"));
         }
@@ -2306,6 +2306,54 @@ fn offered_protocols(request: &Request) -> Vec<String> {
         .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+/// Longest list of offered subprotocol names in a refusal event, in characters.
+const MAX_OFFERED_TEXT: usize = 200;
+
+/// The negotiated subprotocol, or the HTTP 400 for a refused negotiation (after an
+/// `AuthFailed` event).
+#[allow(clippy::result_large_err)] // `ErrorResponse` is fixed by tungstenite's `Callback`.
+fn chosen_subprotocol(
+    inner: &Inner,
+    peer: SocketAddr,
+    request: &Request,
+    selection: Result<Option<String>, &str>,
+) -> Result<Option<String>, ErrorResponse> {
+    selection.map_err(|reason| {
+        inner.emit(CsmsEvent::AuthFailed {
+            station: None,
+            remote_addr: peer,
+            reason: subprotocol_refusal(&offered_protocols(request), &inner.config.subprotocol),
+        });
+        refusal(reason)
+    })
+}
+
+/// The `AuthFailed` reason of a refused subprotocol negotiation. The offered names are attacker
+/// controlled: unsafe characters are dropped and the list is capped.
+fn subprotocol_refusal(offered: &[String], policy: &SubprotocolPolicy) -> String {
+    let names: Vec<String> = offered
+        .iter()
+        .map(|name| {
+            name.chars()
+                .filter(|c| !kirby_ocpp_core::text::is_unsafe_char(*c))
+                .collect()
+        })
+        .collect();
+    let list = if names.is_empty() {
+        "none".to_owned()
+    } else {
+        truncate_chars(&names.join(", "), MAX_OFFERED_TEXT)
+    };
+    let policy = match policy {
+        SubprotocolPolicy::Require(name) => format!("require:{name}"),
+        SubprotocolPolicy::RequireAny(names) => format!("require:{}", names.join(",")),
+        SubprotocolPolicy::Select(name) => format!("select:{name}"),
+        SubprotocolPolicy::Omit => "omit".to_owned(),
+        _ => "reject".to_owned(),
+    };
+    format!("refused: no acceptable subprotocol (offered: {list}; policy: {policy})")
 }
 
 /// The CALLERROR code for an action a charge point may not send: OCPP-J says

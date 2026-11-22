@@ -201,3 +201,59 @@ async fn requiring_ocpp_201_refuses_a_client_that_offers_only_1_6() {
     }
     csms.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_refused_subprotocol_emits_an_auth_failed_event_with_a_capped_offer() {
+    let csms = start(SubprotocolPolicy::Require("ocpp1.6".to_owned())).await;
+    let mut events = csms.subscribe();
+    assert_eq!(
+        connect(&csms, "CP-1", "ocpp2.1").await.err(),
+        Some(400),
+        "refused"
+    );
+    let refusal = |event| match event {
+        CsmsEvent::AuthFailed {
+            station, reason, ..
+        } => Some((station, reason)),
+        _ => None,
+    };
+    let event = loop {
+        match timeout(STEP, events.recv()).await.expect("event in time") {
+            Ok(event) => {
+                if let Some(found) = refusal(event) {
+                    break found;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => panic!("events closed"),
+        }
+    };
+    assert_eq!(event.0, None);
+    assert_eq!(
+        event.1,
+        "refused: no acceptable subprotocol (offered: ocpp2.1; policy: require:ocpp1.6)"
+    );
+
+    // A long offer is capped; the policy text stays.
+    let long = "x".repeat(300);
+    assert_eq!(connect(&csms, "CP-1", &long).await.err(), Some(400));
+    let event = loop {
+        match timeout(STEP, events.recv()).await.expect("event in time") {
+            Ok(event) => {
+                if let Some(found) = refusal(event) {
+                    break found;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {}
+            Err(broadcast::error::RecvError::Closed) => panic!("events closed"),
+        }
+    };
+    assert_eq!(
+        event.1,
+        format!(
+            "refused: no acceptable subprotocol (offered: {}; policy: require:ocpp1.6)",
+            "x".repeat(200)
+        )
+    );
+    csms.shutdown().await;
+}
