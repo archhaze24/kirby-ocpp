@@ -1322,7 +1322,7 @@ dependencies = [
 name = "kirby-csms-core"
 version = "0.8.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "futures-util",
  "kirby-ocpp-core",
@@ -1380,7 +1380,7 @@ dependencies = [
 name = "kirby-ocpp-core"
 version = "0.8.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "futures-util",
  "jsonschema",
@@ -1428,7 +1428,7 @@ dependencies = [
 name = "kirby-ocpp-tui"
 version = "0.8.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "crossterm",
  "futures-util",
