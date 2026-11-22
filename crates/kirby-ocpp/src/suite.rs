@@ -747,10 +747,15 @@ fn human_line(row: &Row) -> String {
         Outcome::Skipped => format!("SKIP {name}"),
         outcome => {
             let reason = failure_reason(outcome).unwrap_or_default();
-            if attempts > 1 {
-                format!("FAIL {name}: {reason} (after {attempts} attempts)")
+            let label = if row.status() == "error" {
+                "ERROR"
             } else {
-                format!("FAIL {name}: {reason}")
+                "FAIL"
+            };
+            if attempts > 1 {
+                format!("{label} {name}: {reason} (after {attempts} attempts)")
+            } else {
+                format!("{label} {name}: {reason}")
             }
         }
     }
@@ -1022,6 +1027,20 @@ mod tests {
             "PASS w (1 ms, flaky: passed on attempt 3)"
         );
         assert_eq!(human_line(&rows[1]), "FAIL s: failed (after 2 attempts)");
+    }
+
+    #[test]
+    fn an_error_row_prints_error_and_a_failed_row_prints_fail() {
+        let error = row("e", Outcome::Error("interrupted".to_owned()));
+        assert_eq!(human_line(&error), "ERROR e: interrupted");
+        let mut retried = row("e", Outcome::Error("no boot".to_owned()));
+        retried.earlier = vec![Earlier {
+            outcome: Outcome::Error("no boot".to_owned()),
+            duration_ms: 1,
+        }];
+        assert_eq!(human_line(&retried), "ERROR e: no boot (after 2 attempts)");
+        let failed = row("f", done("f", false));
+        assert!(human_line(&failed).starts_with("FAIL f: "));
     }
 
     #[test]

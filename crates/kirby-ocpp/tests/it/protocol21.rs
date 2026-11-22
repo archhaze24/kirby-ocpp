@@ -288,6 +288,31 @@ async fn scenarios_list_and_show_follow_the_station_protocol() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn scenarios_validate_rejects_a_token_type_beyond_20_characters() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = |name: &str, kind: &str| {
+        write(
+            dir.path(),
+            name,
+            &format!(
+                "name = \"t\"\nocpp_version = \"2.1\"\n\n[[steps]]\naction = \"authorize\"\nid_token = \"T\"\ntype = \"{kind}\"\n"
+            ),
+        )
+    };
+    let ok = file("ok.toml", &"k".repeat(20));
+    let output = kirby(strings(&["scenarios", "validate", &ok])).await;
+    assert!(output.status.success(), "{}", stderr(&output));
+    let bad = file("bad.toml", &"k".repeat(21));
+    let output = kirby(strings(&["scenarios", "validate", &bad])).await;
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("`type` must be at most 20 characters"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn scenarios_validate_accepts_a_2_1_file() {
     let dir = tempfile::tempdir().unwrap();
     let file = write(dir.path(), "v21.toml", V21_FILE);

@@ -478,6 +478,24 @@ impl Action2 {
         self.validate_texts(protocol)
     }
 
+    /// A token `type` outside the 2.0.1 list (OCPP 2.1 allows other kinds) has at most 20
+    /// characters. Text with a `${name}` placeholder passes here; the runner calls this again
+    /// on the substituted step.
+    ///
+    /// # Errors
+    /// A message naming the `type` key.
+    pub fn validate_token_type(&self) -> Result<(), String> {
+        match self {
+            Self::Authorize { token_type, .. }
+            | Self::StartTx { token_type, .. }
+            | Self::PresentToken { token_type, .. } => match token_type {
+                IdTokenType::Other(text) => check_len("type", text, 0, 20),
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    }
+
     fn validate_texts(&self, protocol: Protocol) -> Result<(), String> {
         let max_token = if protocol == Protocol::V21 { 255 } else { 36 };
         let token = |id_token: &str, token_type: &IdTokenType| {
@@ -499,7 +517,10 @@ impl Action2 {
                 id_token,
                 token_type,
                 ..
-            } => token(id_token, token_type),
+            } => {
+                token(id_token, token_type)?;
+                self.validate_token_type()
+            }
             Self::SecurityEvent {
                 event_type,
                 tech_info,

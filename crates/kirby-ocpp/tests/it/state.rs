@@ -574,6 +574,47 @@ fn v201_show_reads_the_2_x_file_and_never_prints_secrets() {
 }
 
 #[test]
+fn v201_show_prints_the_energy_of_an_active_transaction_in_whole_wh() {
+    use kirby_ocpp_core::store::{FileKind, PersistedStation2, StationStore};
+    let dir = tempfile::tempdir().unwrap();
+    let store = StationStore::new_for(FileKind::V2, dir.path(), "CP-9");
+    let mut state = PersistedStation2::new("CP-9");
+    state.tx.active.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "tx-1",
+            "evse": 1,
+            "next_seq_no": 2,
+            "started_at": "2026-01-01T00:00:00Z",
+            "charging_state": "Charging",
+            "token": null,
+            "remote_start_id": null,
+            "authorized": true,
+            "ev_connected": true,
+            "evse_sent": true,
+            "token_sent": true,
+            "meter_start_wh": 0,
+            "energy_wh": 744.796_641_529_166_7
+        }))
+        .unwrap(),
+    );
+    store.save2(&state).unwrap();
+    let output = run(&[
+        "state",
+        "show",
+        "--state-dir",
+        dir.path().to_str().unwrap(),
+        "--id",
+        "CP-9",
+        "--protocol",
+        "ocpp2.0.1",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let printed = text(&output.stdout);
+    assert!(printed.contains(", 744 Wh"), "{printed}");
+    assert!(!printed.contains("744."), "{printed}");
+}
+
+#[test]
 fn v201_show_and_reset_never_touch_the_1_6_file() {
     let dir = tempfile::tempdir().unwrap();
     let state = dir.path().to_str().unwrap();

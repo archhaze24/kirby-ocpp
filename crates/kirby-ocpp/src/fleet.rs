@@ -3,6 +3,7 @@
 //! Output of a fleet is tagged with the station id: `[id] ` in front of every human
 //! line, a `"station"` field in every JSON line (stdout and `--log-file` alike).
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitCode;
@@ -29,7 +30,7 @@ use crate::cli::RunArgs;
 use crate::headless::{self, LinkWatch, Sink, stdout_line};
 use crate::{
     EXIT_INTERRUPTED, EXIT_USAGE, check_output_paths, connect_and_run, load_scenario,
-    override_vars, print_report, usage_error, write_junit, write_report,
+    override_vars, print_report, same_file, usage_error, write_junit, write_report,
 };
 
 enum AnyFleet {
@@ -272,6 +273,22 @@ pub async fn run(
         scenario.source.as_deref().as_slice(),
     ) {
         return usage_error(&error);
+    }
+    if let Some(report) = args.report.as_deref() {
+        let tls = [
+            &config.tls.ca_file,
+            &config.tls.cert_file,
+            &config.tls.key_file,
+        ];
+        let sources: Vec<&str> = scenario
+            .source
+            .as_deref()
+            .into_iter()
+            .chain(tls.into_iter().filter_map(|file| file.as_deref()?.to_str()))
+            .collect();
+        if let Err(error) = check_station_reports(report, args.junit.as_deref(), &spec, &sources) {
+            return usage_error(&error);
+        }
     }
     let mut fleet = match AnyFleet::spawn(&config, &spec) {
         Ok(fleet) => fleet,
@@ -563,6 +580,54 @@ fn print_aggregate(
             false,
         );
     }
+}
+
+/// Refuses a run whose per-station report file (see [`station_report_path`]) is an input
+/// file of the run, the JUnit file, or the report of another station.
+fn check_station_reports(
+    report: &Path,
+    junit: Option<&Path>,
+    spec: &FleetSpec,
+    sources: &[&str],
+) -> Result<(), String> {
+    let Ok(ids) = spec.ids() else {
+        // The fleet spawn reports a bad spec.
+        return Ok(());
+    };
+    // The derived files share one directory, so file names tell them apart (compared without
+    // case, for case-insensitive file systems).
+    let mut seen: HashMap<String, &str> = HashMap::with_capacity(ids.len());
+    for (index, id) in ids.iter().enumerate() {
+        let derived = station_report_path(report, id);
+        if index == 0 {
+            // Checks the directory once, then each file against the inputs.
+            check_output_paths(Some(&derived), junit, sources)?;
+        } else if let Some(input) = sources
+            .iter()
+            .map(Path::new)
+            .chain(junit)
+            .find(|input| same_file(input, &derived))
+        {
+            return Err(format!(
+                "--report {}: the report of station {id} ({}) would overwrite {}",
+                report.display(),
+                derived.display(),
+                input.display()
+            ));
+        }
+        let name = derived
+            .file_name()
+            .map(|name| name.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if let Some(other) = seen.insert(name, id) {
+            return Err(format!(
+                "--report {}: the reports of stations {other} and {id} name the same file ({})",
+                report.display(),
+                derived.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `--report out.json` for station `CP-1` becomes `out.CP-1.json` (id sanitised for file names).

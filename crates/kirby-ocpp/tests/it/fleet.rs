@@ -413,6 +413,70 @@ async fn a_2_1_fleet_runs_the_scenario_on_each_station() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_derived_report_path_that_names_an_input_or_the_junit_file_is_refused() {
+    let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let scenario_21 = write(&dir, "out.CP-1.toml", SCENARIO_V21);
+    let scenario_16 = write(
+        &dir,
+        "out16.CP-1.toml",
+        "name = \"plain\"\n\n[[steps]]\naction = \"heartbeat\"\n",
+    );
+    let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
+    // (protocol flags, scenario, --report, --junit)
+    let cases: [(&[&str], &str, String, Option<String>); 3] = [
+        // The derived name of CP-1 is the scenario file: 2.x and 1.6.
+        (
+            &["--protocol", "ocpp2.1"],
+            &scenario_21,
+            path("out.toml"),
+            None,
+        ),
+        (&[], &scenario_16, path("out16.toml"), None),
+        // The derived name of CP-1 is the JUnit file.
+        (
+            &[],
+            &scenario_16,
+            path("report.xml"),
+            Some(path("report.CP-1.xml")),
+        ),
+    ];
+    for (index, (protocol, scenario, report, junit)) in cases.into_iter().enumerate() {
+        let mut extra: Vec<&str> = protocol.to_vec();
+        extra.extend(["run", "--scenario", scenario, "--report", &report]);
+        if let Some(junit) = &junit {
+            extra.extend(["--junit", junit]);
+        }
+        let before = std::fs::read(scenario).unwrap();
+        let output = run(fleet_args(&csms, "2", &extra)).await;
+        let text = stderr(&output);
+        assert_eq!(output.status.code(), Some(2), "case {index}: {text}");
+        assert!(text.contains("CP-1"), "case {index}: {text}");
+        assert_eq!(std::fs::read(scenario).unwrap(), before, "case {index}");
+    }
+    // The derived name of the second station is the scenario file.
+    let scenario_cp2 = write(&dir, "two.CP-2.toml", SCENARIO_V21);
+    let before = std::fs::read(&scenario_cp2).unwrap();
+    let report = path("two.toml");
+    let extra = [
+        "--protocol",
+        "ocpp2.1",
+        "run",
+        "--scenario",
+        &scenario_cp2,
+        "--report",
+        &report,
+    ];
+    let output = run(fleet_args(&csms, "2", &extra)).await;
+    let text = stderr(&output);
+    assert_eq!(output.status.code(), Some(2), "{text}");
+    assert!(text.contains("station CP-2"), "{text}");
+    assert_eq!(std::fs::read(&scenario_cp2).unwrap(), before);
+    assert_eq!(csms.connections(), 0, "refused before connecting");
+    csms.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn fleet_json_reports_the_2_1_version_when_all_stations_fail_to_boot() {
     let csms = MockCsms::start(CsmsOptions::default()).await.unwrap();
     let dir = tempfile::tempdir().unwrap();

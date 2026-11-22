@@ -182,7 +182,7 @@ fn colorize(line: &str) -> String {
     };
     let color = match level {
         "PASS" | "PASSED" | "[Success]" => GREEN,
-        "FAIL" | "FAILED" | "[Error]" => RED,
+        "FAIL" | "FAILED" | "ERROR" | "[Error]" => RED,
         "WARN" | "SKIP" | "[Warn]" => YELLOW,
         _ => return line.to_owned(),
     };

@@ -110,7 +110,7 @@ async fn run_and_suite_fail_fast_on_a_dead_connection() {
     .await;
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let out = stdout(&output);
-    assert_eq!(out.matches("FAIL ").count(), 2, "{out}");
+    assert_eq!(out.matches("ERROR ").count(), 2, "{out}");
     assert!(out.contains("reconnect stopped"), "{out}");
 }
 

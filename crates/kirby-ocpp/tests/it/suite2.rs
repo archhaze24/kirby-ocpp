@@ -184,6 +184,29 @@ async fn a_setup_error_names_2_0_1_in_the_junit_file() {
     assert!(xml.contains("<error"), "{xml}");
 }
 
+const SESSION: &str = "name = \"session\"\nocpp_version = \"2.0.1\"\ndescription = \"x\"\n\n[[steps]]\naction = \"plug\"\nevse = 1\n\n[[steps]]\naction = \"start_tx\"\nevse = 1\nid_token = \"TAG-1\"\n\n[[steps]]\naction = \"meter\"\nevse = 1\nwh_delta = 1000\n\n[[steps]]\naction = \"stop_tx\"\nevse = 1\n\n[[steps]]\naction = \"unplug\"\nevse = 1\n";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn run_waits_for_queued_transaction_events_before_it_ends() {
+    let csms = v201_csms().await;
+    // Every TransactionEvent answer is slow, so the queue is still full when the last step ends.
+    csms.respond("TransactionEvent", |_| {
+        std::thread::sleep(Duration::from_millis(150));
+        kirby_ocpp_testkit::Reply::Result(serde_json::json!({}))
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let file = write(dir.path(), "session.toml", SESSION);
+    let output = kirby(station(csms.url(), &["run", "--scenario", &file])).await;
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let ended = csms
+        .received()
+        .into_iter()
+        .any(|call| call.action == "TransactionEvent" && call.payload["eventType"] == "Ended");
+    assert!(ended, "the run ended before the Ended event was delivered");
+    assert!(!stderr(&output).contains("warning"), "{}", stderr(&output));
+    csms.shutdown().await;
+}
+
 // suite
 
 #[tokio::test(flavor = "multi_thread")]

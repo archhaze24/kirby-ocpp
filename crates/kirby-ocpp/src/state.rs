@@ -278,6 +278,15 @@ fn state2_json(state: &PersistedStation2) -> Value {
     })
 }
 
+/// Whole Wh of a register value, as the station's snapshot rounds it (the fraction is dropped).
+fn whole_wh(wh: f64) -> f64 {
+    if wh.is_finite() && wh > 0.0 {
+        wh.floor()
+    } else {
+        0.0
+    }
+}
+
 fn state2_text(id: &str, file: &str, secrets: bool, state: &PersistedStation2) -> String {
     let operative = |flag: bool| if flag { "Operative" } else { "Inoperative" };
     let mut out = String::new();
@@ -341,7 +350,7 @@ fn state2_text(id: &str, file: &str, secrets: bool, state: &PersistedStation2) -
                 || "-".to_owned(),
                 |token| kirby_ocpp_tui::text::sanitize(&token.id_token)
             ),
-            t.energy_wh
+            whole_wh(t.energy_wh)
         );
     }
     let _ = writeln!(

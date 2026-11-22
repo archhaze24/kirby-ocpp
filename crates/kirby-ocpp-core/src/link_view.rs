@@ -26,6 +26,11 @@ pub trait LinkSnapshot {
     fn reconnect_stopped(&self) -> Option<&str>;
 
     fn connection(&self) -> ConnectionState;
+
+    /// Transaction events queued for delivery (always 0 in 1.6, which has no such queue).
+    fn queued_events(&self) -> u32 {
+        0
+    }
 }
 
 impl LinkSnapshot for Snapshot {
@@ -53,6 +58,10 @@ impl LinkSnapshot for Snapshot2 {
 
     fn booted(&self) -> bool {
         Snapshot2::booted(self)
+    }
+
+    fn queued_events(&self) -> u32 {
+        self.queued_events
     }
 
     fn reconnect_stopped(&self) -> Option<&str> {

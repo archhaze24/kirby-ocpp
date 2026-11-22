@@ -1208,6 +1208,11 @@ fn substitute_step(step: &Step, vars: &Vars) -> Result<Step, String> {
         }
         out.action = Action::from_json(action, step.action.grammar())
             .map_err(|e| format!("{} after substituting variables: {e}", step.action.name()))?;
+        if let Action::V201(resolved) = &out.action {
+            resolved
+                .validate_token_type()
+                .map_err(|e| format!("{} after substituting variables: {e}", step.action.name()))?;
+        }
     }
     if let Some(expect) = &mut out.expect {
         if let Some(status) = &mut expect.status {
@@ -1446,6 +1451,26 @@ mod tests {
             step_params(&resolved),
             Some(json!({"evse": 1, "id_token": "KIRBY-1", "type": "ISO14443"}))
         );
+    }
+
+    #[test]
+    fn a_token_type_that_resolves_beyond_20_characters_fails_the_step() {
+        use crate::ocpp::v2::types::IdTokenType;
+        use crate::scenario::Action2;
+
+        let step = v201_step(Action2::Authorize {
+            id_token: "T".to_owned(),
+            token_type: IdTokenType::Other("${kind}".to_owned()),
+        });
+        let mut vars = Vars::new();
+        vars.insert("kind", json!("k".repeat(21))).unwrap();
+        let error = substitute_step(&step, &vars).unwrap_err();
+        assert!(
+            error.contains("`type` must be at most 20 characters"),
+            "{error}"
+        );
+        vars.insert("kind", json!("k".repeat(20))).unwrap();
+        assert!(substitute_step(&step, &vars).is_ok());
     }
 
     #[test]

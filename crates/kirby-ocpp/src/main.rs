@@ -1162,10 +1162,27 @@ pub(crate) async fn connect_and_run<H: StationLike + ScenarioTarget>(
     overrides: &Vars,
     index: u64,
 ) -> Result<ScenarioReport, String> {
-    connect_and_run_with(handle, cancel, |events| {
+    let report = connect_and_run_with(handle, cancel, |events| {
         run_scenario_subscribed(handle, scenario, cancel, None, overrides, index, events)
     })
-    .await
+    .await?;
+    drain_transaction_events(handle, cancel).await;
+    Ok(report)
+}
+
+/// After a 2.x scenario: waits until the station delivered its queued transaction events, so
+/// the CSMS sees the end of the session before the station disconnects. Bounded by `cancel`
+/// (the `--timeout` limit); a queue that did not drain only prints a warning.
+async fn drain_transaction_events<H: StationLike>(handle: &H, cancel: &CancelToken) {
+    let mut snapshots = handle.watch_snapshot();
+    tokio::select! {
+        _ = snapshots.wait_for(|s| s.queued_events() == 0 || s.reconnect_stopped().is_some()) => {}
+        () = cancel.cancelled() => {}
+    }
+    let left = snapshots.borrow().queued_events();
+    if left > 0 {
+        eprintln!("warning: {left} queued transaction event(s) were not delivered");
+    }
 }
 
 /// Connects any station, waits for the boot and runs the scenario that `run` starts on the
