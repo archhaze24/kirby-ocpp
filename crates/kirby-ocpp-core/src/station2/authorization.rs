@@ -23,7 +23,7 @@ use super::command::Outcome2;
 use super::device_model::Lookup;
 use super::link::sanitize;
 use super::local_list::{ListEntry, LocalListPersist};
-use super::tariff::tariff_size_ok;
+use super::tariff::{AuthorizationTariff, tariff_size_ok};
 use super::types::{IdTokenRef, Origin2, Reply2};
 use crate::error::{CallError, StationError};
 use crate::ocpp::v2::messages::{Authorize, AuthorizeRequest, AuthorizeResponse, TriggerReason};
@@ -41,13 +41,16 @@ const ACCEPTED: &str = "Accepted";
 
 /// How a token was decided.
 #[derive(Debug, Clone, PartialEq)]
-pub enum AuthDecision {
+pub(super) enum AuthDecision {
     /// Accepted; carries the `idTokenInfo` when the CSMS sent one.
-    Accepted(Option<Value>),
+    Accepted(Option<Value>, AuthorizationTariff),
     /// Not accepted, with the status and the `idTokenInfo` as received.
     Rejected { status: String, info: Option<Value> },
     /// Decided locally because the CSMS could not be asked.
-    Offline { accepted: bool },
+    Offline {
+        accepted: bool,
+        tariff: AuthorizationTariff,
+    },
 }
 
 /// One entry of the authorization cache.
@@ -289,7 +292,10 @@ impl Station2Actor {
         cont: impl FnOnce(&mut Self, AuthDecision) + Send + 'static,
     ) {
         if !self.auth_enabled() || needs_no_check(&token.kind) {
-            cont(self, AuthDecision::Accepted(None));
+            cont(
+                self,
+                AuthDecision::Accepted(None, AuthorizationTariff::Default),
+            );
             return;
         }
         let key = token_key(&token);
@@ -314,7 +320,10 @@ impl Station2Actor {
             // `DisablePostAuthorize` any other entry is refused locally, without asking
             // (C14.FR.03 otherwise sends `Authorize`).
             if entry.is_accepted() {
-                cont(self, AuthDecision::Accepted(None));
+                cont(
+                    self,
+                    AuthDecision::Accepted(None, AuthorizationTariff::Default),
+                );
                 return;
             }
             if self.local_list_disable_post_authorize() {
@@ -334,7 +343,7 @@ impl Station2Actor {
             && let Some(entry) = cached.filter(|e| e.status == ACCEPTED)
         {
             let decision = self.tariff_authorization(&token, None, entry.tariff);
-            if self.local_pre_authorize() && matches!(decision, AuthDecision::Accepted(_)) {
+            if self.local_pre_authorize() && matches!(decision, AuthDecision::Accepted(..)) {
                 self.refresh_cached(token, evse);
             }
             cont(self, decision);
@@ -393,8 +402,8 @@ impl Station2Actor {
         mut info: Option<Value>,
         tariff: Option<Value>,
     ) -> AuthDecision {
-        if self.apply_driver_tariff(token, tariff) {
-            return AuthDecision::Accepted(info);
+        if let Some(tariff) = self.authorization_tariff(token, tariff) {
+            return AuthDecision::Accepted(info, tariff);
         }
         if let Some(info) = &mut info {
             info["status"] = Value::String("Invalid".to_owned());
@@ -421,17 +430,19 @@ impl Station2Actor {
             (None, Some(entry)) => entry.status == ACCEPTED && self.local_authorize_offline(),
             (None, None) => self.offline_tx_for_unknown_id(),
         };
-        if accepted
-            && listed.is_none()
-            && let Some(tariff) = cached.and_then(|entry| entry.tariff.clone())
-            && !self.apply_driver_tariff(token, Some(tariff))
-        {
-            return AuthDecision::Rejected {
-                status: "Invalid".to_owned(),
-                info: None,
+        let tariff = if accepted && listed.is_none() {
+            let raw = cached.and_then(|entry| entry.tariff.clone());
+            let Some(tariff) = self.authorization_tariff(token, raw) else {
+                return AuthDecision::Rejected {
+                    status: "Invalid".to_owned(),
+                    info: None,
+                };
             };
-        }
-        AuthDecision::Offline { accepted }
+            tariff
+        } else {
+            AuthorizationTariff::Default
+        };
+        AuthDecision::Offline { accepted, tariff }
     }
 
     /// `LocalPreAuthorize`: the transaction starts from the cache, and the CSMS is asked all
@@ -450,12 +461,19 @@ impl Station2Actor {
             };
             let tariff = response.tariff.filter(|_| actor.local_tariffs_enabled());
             actor.cache_store(&token, &response.id_token_info, tariff.as_ref());
-            let accepted = response.id_token_info.status == AuthorizationStatus::Accepted
-                && actor.apply_driver_tariff(&token, tariff);
-            if !accepted
+            let accepted = response.id_token_info.status == AuthorizationStatus::Accepted;
+            let tariff_failed = accepted && !actor.apply_driver_tariff(&token, tariff);
+            if (!accepted || tariff_failed)
                 && let Some(evse) = evse
                 && actor.authorized_token(evse) == Some(&token)
             {
+                if tariff_failed
+                    && !actor.stop_tx_on_invalid_id()
+                    && let Some(tx) = actor.active_tx_mut(evse)
+                {
+                    tx.authorized = false;
+                    actor.mark_dirty();
+                }
                 actor.apply_invalid_id(evse);
             }
         });
@@ -559,8 +577,8 @@ impl Station2Actor {
             self.present_with_master_pass(evse, token, reply);
             return;
         }
-        let evse = match self.pick_evse(evse, &token) {
-            Ok(evse) => evse,
+        let picked = match self.pick_evse(evse, &token, None, true) {
+            Ok(picked) => picked,
             Err(error) => {
                 // The requester may have gone away; nothing to do about that.
                 let _ = reply.send(Err(error));
@@ -568,14 +586,14 @@ impl Station2Actor {
             }
         };
         // C01.FR.03: the token that started the authorization ends it, without `Authorize`.
-        if self.token_ends_authorization(evse, &token, None) {
-            self.on_stopped_by_token(evse, token);
+        if self.token_ends_authorization(picked.0, &token, None) {
+            self.on_stopped_by_token(picked.0, token);
             let _ = reply.send(Ok(Outcome2::Done));
             return;
         }
         let presented = token.clone();
-        self.authorize(token, Some(evse), move |actor, decision| {
-            actor.finish_presentation(evse, presented, decision, reply);
+        self.authorize(token, Some(picked.0), move |actor, decision| {
+            actor.finish_presentation(picked, presented, decision, reply);
         });
     }
 
@@ -583,8 +601,8 @@ impl Station2Actor {
     /// a master pass is accepted on a station whose EVSEs are all busy. A master pass starts no
     /// transaction (C16.FR.03) and ends all running ones (C16.FR.02: the station has no UI).
     fn present_with_master_pass(&mut self, evse: Option<u32>, token: IdTokenRef, reply: Reply2) {
-        let picked = self.pick_evse(evse, &token);
-        if let Ok(evse) = picked
+        let picked = self.pick_evse(evse, &token, None, true);
+        if let Ok((evse, _)) = picked
             && self.token_ends_authorization(evse, &token, None)
         {
             self.on_stopped_by_token(evse, token);
@@ -594,7 +612,7 @@ impl Station2Actor {
         let presented = token.clone();
         self.authorize(
             token,
-            picked.as_ref().ok().copied(),
+            picked.as_ref().ok().map(|(evse, _)| *evse),
             move |actor, decision| {
                 if actor.is_master_pass(&presented, &decision) {
                     actor.stop_all_by_master_pass(&presented);
@@ -603,7 +621,7 @@ impl Station2Actor {
                     return;
                 }
                 match picked {
-                    Ok(evse) => actor.finish_presentation(evse, presented, decision, reply),
+                    Ok(picked) => actor.finish_presentation(picked, presented, decision, reply),
                     Err(error) => {
                         let _ = reply.send(Err(error));
                     }
@@ -619,8 +637,8 @@ impl Station2Actor {
             return false;
         };
         let (accepted, info) = match decision {
-            AuthDecision::Accepted(info) => (true, info.as_ref()),
-            AuthDecision::Offline { accepted } => (*accepted, None),
+            AuthDecision::Accepted(info, _) => (true, info.as_ref()),
+            AuthDecision::Offline { accepted, .. } => (*accepted, None),
             AuthDecision::Rejected { .. } => (false, None),
         };
         accepted && self.group_of_token(token, group_in(info)).as_deref() == Some(master.as_str())
@@ -641,10 +659,17 @@ impl Station2Actor {
 
     /// The EVSE a token is presented to: the given one; else the one this token authorized,
     /// the first with an EV connected and no authorization, or the first free operative one.
-    fn pick_evse(&self, evse: Option<u32>, token: &IdTokenRef) -> Result<u32, StationError> {
+    /// The flag marks a provisional choice that needs a reservation group check after authorization.
+    fn pick_evse(
+        &self,
+        evse: Option<u32>,
+        token: &IdTokenRef,
+        fresh_group: Option<&str>,
+        allow_defer: bool,
+    ) -> Result<(u32, bool), StationError> {
         if let Some(id) = evse {
             return if self.evse(id).is_some() {
-                Ok(id)
+                Ok((id, false))
             } else {
                 Err(StationError::InvalidArgument(format!(
                     "EVSE {id} does not exist"
@@ -652,24 +677,40 @@ impl Station2Actor {
             };
         }
         let ids: Vec<u32> = self.evses.iter().map(|e| e.id).collect();
-        let group = self.group_of_token(token, None);
-        let free = |id: &u32| {
-            self.authorized_token(*id).is_none()
-                && self.active_tx(*id).is_none()
-                && !self.reservation_blocks(*id, token, group.as_deref())
-        };
+        let group = self.group_of_token(token, fresh_group);
         let connected = |id: &u32| {
             self.evse(*id)
                 .is_some_and(|e| e.connectors.iter().any(|c| c.ev_connected))
         };
+        let find_free = |defer| {
+            let free = |id: &u32| {
+                self.authorized_token(*id).is_none()
+                    && self.active_tx(*id).is_none()
+                    && if defer {
+                        self.reservation_group_may_allow(*id, token)
+                    } else {
+                        !self.reservation_blocks(*id, token, group.as_deref())
+                    }
+            };
+            ids.iter()
+                .copied()
+                .find(|id| free(id) && connected(id))
+                .or_else(|| {
+                    ids.iter()
+                        .copied()
+                        .find(|id| free(id) && self.evse_operative(*id))
+                })
+        };
         ids.iter()
             .copied()
-            .find(|id| self.token_ends_authorization(*id, token, None))
-            .or_else(|| ids.iter().copied().find(|id| free(id) && connected(id)))
+            .find(|id| self.token_ends_authorization(*id, token, fresh_group))
+            .or_else(|| find_free(false))
+            .map(|id| (id, false))
             .or_else(|| {
-                ids.iter()
-                    .copied()
-                    .find(|id| free(id) && self.evse_operative(*id))
+                (allow_defer && self.reservation_group_needs_authorize(token))
+                    .then(|| find_free(true))
+                    .flatten()
+                    .map(|id| (id, true))
             })
             .ok_or_else(|| StationError::InvalidState {
                 connector: None,
@@ -677,20 +718,31 @@ impl Station2Actor {
             })
     }
 
+    /// Whether this token needs an online `Authorize` to learn its group.
+    pub(super) fn reservation_group_needs_authorize(&self, token: &IdTokenRef) -> bool {
+        self.auth_enabled()
+            && !needs_no_check(&token.kind)
+            && self.local_list_entry(token).is_none()
+            && self.cache_peek(&token_key(token)).is_none()
+            && self.link.conn.is_some()
+            && self.may_send("Authorize", Origin2::Station).is_ok()
+    }
+
     /// The group of an accepted `token` from the fresh answer, then the local list, then the cache.
     pub(super) fn group_of_token(&self, token: &IdTokenRef, fresh: Option<&str>) -> Option<String> {
-        fresh
-            .map(str::to_owned)
-            .or_else(|| {
-                self.local_list_entry(token)
-                    .filter(ListEntry::is_accepted)
-                    .and_then(|entry| entry.group_id)
-            })
-            .or_else(|| {
-                self.cache_peek(&token_key(token))
-                    .filter(|entry| entry.status == ACCEPTED)
-                    .and_then(|entry| entry.group_id.clone())
-            })
+        if let Some(fresh) = fresh {
+            return Some(fresh.to_owned());
+        }
+        if let Some(entry) = self.local_list_entry(token) {
+            return if entry.is_accepted() {
+                entry.group_id
+            } else {
+                None
+            };
+        }
+        self.cache_peek(&token_key(token))
+            .filter(|entry| entry.status == ACCEPTED)
+            .and_then(|entry| entry.group_id.clone())
     }
 
     /// Keeps the group of `token` with the authorization it just started on `evse`.
@@ -728,20 +780,34 @@ impl Station2Actor {
     /// Answers `PresentToken` once the token has been decided.
     fn finish_presentation(
         &mut self,
-        evse: u32,
+        picked: (u32, bool),
         token: IdTokenRef,
         decision: AuthDecision,
         reply: Reply2,
     ) {
-        let (accepted, status, info) = match decision {
-            AuthDecision::Accepted(info) => (true, ACCEPTED.to_owned(), info),
-            AuthDecision::Rejected { status, info } => (false, status, info),
-            AuthDecision::Offline { accepted } => (
+        let (accepted, status, info, tariff) = match decision {
+            AuthDecision::Accepted(info, tariff) => (true, ACCEPTED.to_owned(), info, tariff),
+            AuthDecision::Rejected { status, info } => {
+                (false, status, info, AuthorizationTariff::Default)
+            }
+            AuthDecision::Offline { accepted, tariff } => (
                 accepted,
                 if accepted { ACCEPTED } else { "Unknown" }.to_owned(),
                 None,
+                tariff,
             ),
         };
+        let (mut evse, deferred) = picked;
+        if accepted && deferred {
+            match self.pick_evse(None, &token, group_in(info.as_ref()), false) {
+                Ok((selected, _)) => evse = selected,
+                Err(error) => {
+                    self.forget_driver_tariff(&token);
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            }
+        }
         let outcome = if !accepted {
             self.log(
                 LogLevel::Warn,
@@ -783,7 +849,13 @@ impl Station2Actor {
             let had_transaction = self.active_tx(evse).is_some();
             let group = self.group_of_token(&token, group_in(info.as_ref()));
             self.reservation_claim(evse, &token, group.as_deref());
-            let started = self.on_authorized(evse, token.clone(), None, TriggerReason::Authorized);
+            let started = self.on_authorized_with_tariff(
+                evse,
+                token.clone(),
+                None,
+                TriggerReason::Authorized,
+                tariff,
+            );
             if started.is_err() {
                 self.reservation_release_claim(evse);
                 self.forget_driver_tariff(&token);

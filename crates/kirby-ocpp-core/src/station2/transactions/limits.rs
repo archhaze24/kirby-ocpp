@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -105,19 +106,21 @@ impl LimitKind {
 }
 
 impl ActiveTx {
-    fn reached_limit(&self, elapsed_s: i64) -> Option<LimitKind> {
-        if self
+    pub(in crate::station2) fn time_limit_reached(&self, now: DateTime<Utc>) -> bool {
+        self.limit
+            .max_time_s
+            .is_some_and(|max| max <= 0 || (now - self.started_at).num_seconds() >= max)
+    }
+
+    fn reached_limit(&self, now: DateTime<Utc>) -> Option<LimitKind> {
+        if self.time_limit_reached(now) {
+            Some(LimitKind::Time)
+        } else if self
             .limit
             .max_energy_wh
             .is_some_and(|max| max <= 0.0 || self.energy_wh >= max)
         {
             Some(LimitKind::Energy)
-        } else if self
-            .limit
-            .max_time_s
-            .is_some_and(|max| max <= 0 || elapsed_s >= max)
-        {
-            Some(LimitKind::Time)
         } else if self
             .limit
             .max_cost
@@ -236,13 +239,12 @@ impl Station2Actor {
         };
         let limit = tx.limit.with(fields);
         let changed = tx.limit != limit;
+        if tx.limit.max_time_s != limit.max_time_s {
+            self.timers.cancel(&TimerKey2::TxLimit(evse));
+        }
         tx.limit = limit;
-        let charging_state = if changed
-            && tx.limit_reached.is_some()
-            && tx
-                .reached_limit((now - tx.started_at).num_seconds())
-                .is_none()
-        {
+        let may_resume = changed && tx.limit_reached.is_some() && tx.reached_limit(now).is_none();
+        let charging_state = if may_resume {
             tx.limit_reached = None;
             let reset = self
                 .reset
@@ -276,43 +278,58 @@ impl Station2Actor {
                 ..EventExtra::default()
             },
         );
-        self.evaluate_tx_limits(evse, changed);
+        self.evaluate_tx_limits(evse, changed, false);
     }
 
     pub(super) fn arm_tx_limit(&mut self, evse: u32) {
         let timer = TimerKey2::TxLimit(evse);
         if self.protocol() == Protocol::V21
-            && self.active_tx(evse).is_some_and(|tx| {
-                tx.limit_reached.is_none()
-                    && ((tx.charging_state == ChargingState::Charging
-                        && (tx.limit.max_energy_wh.is_some() || tx.limit.max_time_s.is_some()))
-                        || (tx.has_local_cost() && tx.limit.max_cost.is_some()))
-            })
+            && let Some(tx) = self.active_tx(evse)
         {
-            self.timers.set_if_idle(timer, Duration::from_secs(1));
-        } else {
-            self.timers.cancel(&timer);
+            let time = tx
+                .limit
+                .max_time_s
+                .filter(|_| tx.limit_reached != Some(LimitKind::Time));
+            let check_meter = tx.limit_reached.is_none()
+                && ((tx.charging_state == ChargingState::Charging
+                    && tx.limit.max_energy_wh.is_some())
+                    || (tx.has_local_cost() && tx.limit.max_cost.is_some()));
+            if time.is_some() || check_meter {
+                let tick = Duration::from_secs(1);
+                let delay = time.map_or(tick, |max| {
+                    let elapsed = (self.clock.now_utc() - tx.started_at)
+                        .to_std()
+                        .unwrap_or_default();
+                    let duration = Duration::from_secs(u64::try_from(max).unwrap_or_default());
+                    tick.min(duration.saturating_sub(elapsed))
+                });
+                self.timers.set_if_idle(timer, delay);
+                return;
+            }
         }
+        self.timers.cancel(&timer);
     }
 
     pub(in crate::station2) fn check_tx_limits(&mut self, evse: u32) {
-        self.evaluate_tx_limits(evse, false);
+        self.evaluate_tx_limits(evse, false, false);
     }
 
-    fn evaluate_tx_limits(&mut self, evse: u32, limit_changed: bool) {
-        self.settle_tx_meters();
+    pub(super) fn evaluate_tx_limits(&mut self, evse: u32, limit_changed: bool, quiet: bool) {
+        if !quiet {
+            self.settle_tx_meters();
+        }
         let now = self.clock.now_utc();
         let Some(tx) = self.tx.active.get_mut(&evse) else {
             return;
         };
-        let was_latched = tx.limit_reached.is_some();
-        if was_latched && !limit_changed {
-            return;
-        }
-        let elapsed = (now - tx.started_at).num_seconds();
-        let Some(reached) = tx.reached_limit(elapsed) else {
+        let previous = tx.limit_reached;
+        let Some(reached) = tx.reached_limit(now) else {
             return;
         };
+        let new_time_limit = reached == LimitKind::Time && previous != Some(LimitKind::Time);
+        if previous.is_some() && !limit_changed && !new_time_limit {
+            return;
+        }
         self.tx.meters.entry(evse).or_default().charging = false;
         tx.limit_reached = Some(reached);
         let reset_suspended = self.auth.reset_prepared
@@ -328,19 +345,34 @@ impl Station2Actor {
             .tx_stop_points()
             .contains(&StartStopPoint::EnergyTransfer)
         {
-            self.finish(evse, reached.stop_reason(), reached.trigger(), None);
-        } else if was_latched {
+            if quiet {
+                if let Err(error) =
+                    self.end_core(evse, reached.stop_reason(), reached.trigger(), None, true)
+                {
+                    self.log(
+                        LogLevel::Warn,
+                        format!("restored transaction not ended: {error}"),
+                    );
+                }
+            } else {
+                self.finish(evse, reached.stop_reason(), reached.trigger(), None);
+            }
+        } else if previous.is_some() && !new_time_limit {
             self.mark_dirty();
         } else {
-            self.tx_event(
-                evse,
-                TransactionEventKind::Updated,
-                reached.trigger(),
-                EventExtra {
-                    charging_state,
-                    ..EventExtra::default()
-                },
-            );
+            let kind = TransactionEventKind::Updated;
+            let trigger = reached.trigger();
+            let extra = EventExtra {
+                charging_state,
+                ..EventExtra::default()
+            };
+            if quiet {
+                if let Some(event) = self.build_event(evse, kind, trigger, extra) {
+                    self.queue_enqueue(event);
+                }
+            } else {
+                self.tx_event(evse, kind, trigger, extra);
+            }
         }
     }
 }

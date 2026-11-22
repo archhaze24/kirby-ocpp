@@ -9,6 +9,7 @@ use serde_json::Value;
 use super::actor::Station2Actor;
 use super::authorization::{AuthDecision, group_in};
 use super::link::sanitize;
+use super::tariff::AuthorizationTariff;
 use super::types::IdTokenRef;
 use crate::ocpp::responder::Responder;
 use crate::ocpp::v2::messages::{
@@ -70,9 +71,17 @@ impl Station2Actor {
         // H03: an EVSE held for another token is not offered; the group is the one the
         // station knows for the token.
         let group = self.group_of_token(token, None);
-        let refusal = |id: u32| {
+        if group.is_some() && group == self.master_pass_group_id() {
+            return Err("MasterPass");
+        }
+        let refusal = |id: u32, defer_group: bool| {
             self.remote_start_refusal(id)?;
-            if self.reservation_blocks(id, token, group.as_deref()) {
+            if self.reservation_blocks(id, token, group.as_deref())
+                && !(defer_group
+                    && self.authorize_remote_start()
+                    && self.reservation_group_needs_authorize(token)
+                    && self.reservation_group_may_allow(id, token))
+            {
                 return Err("Reserved");
             }
             Ok(())
@@ -83,13 +92,13 @@ impl Station2Actor {
                     .ok()
                     .filter(|id| *id > 0)
                     .ok_or("UnknownEvse")?;
-                refusal(evse).map(|()| evse)
+                refusal(evse, true).map(|()| evse)
             }
             None => self
                 .evses
                 .iter()
                 .map(|e| e.id)
-                .find(|id| refusal(*id).is_ok())
+                .find(|id| refusal(*id, false).is_ok())
                 .ok_or("NoFreeEvse"),
         }
     }
@@ -97,10 +106,16 @@ impl Station2Actor {
     /// Authorizes the token of a remote start (unless the CSMS checks it in the event) and
     /// hands it to the transaction engine.
     fn begin_remote_start(&mut self, evse: u32, token: IdTokenRef, remote_start_id: i32) {
-        let trigger = TriggerReason::RemoteStart;
         // F01.FR.02/03, C05.FR.01: the CSMS checks the token in the `TransactionEvent`.
         if token.kind == IdTokenType::Central || !self.authorize_remote_start() {
-            self.start_with_reservation(evse, &token, None, false, remote_start_id, trigger);
+            self.start_with_reservation(
+                evse,
+                &token,
+                None,
+                false,
+                remote_start_id,
+                AuthorizationTariff::Default,
+            );
             return;
         }
         let presented = token.clone();
@@ -114,7 +129,7 @@ impl Station2Actor {
             }
             let accepted = matches!(
                 decision,
-                AuthDecision::Accepted(_) | AuthDecision::Offline { accepted: true }
+                AuthDecision::Accepted(..) | AuthDecision::Offline { accepted: true, .. }
             );
             if !accepted {
                 actor.sc_forget_pending(evse, remote_start_id);
@@ -143,9 +158,10 @@ impl Station2Actor {
                 );
                 return;
             }
-            let info = match decision {
-                AuthDecision::Accepted(info) => info,
-                _ => None,
+            let (info, tariff) = match decision {
+                AuthDecision::Accepted(info, tariff) => (info, tariff),
+                AuthDecision::Offline { tariff, .. } => (None, tariff),
+                AuthDecision::Rejected { .. } => return,
             };
             actor.start_with_reservation(
                 evse,
@@ -153,7 +169,7 @@ impl Station2Actor {
                 info.as_ref(),
                 true,
                 remote_start_id,
-                trigger,
+                tariff,
             );
         });
     }
@@ -180,7 +196,7 @@ impl Station2Actor {
         info: Option<&Value>,
         note_group: bool,
         remote_start_id: i32,
-        trigger: TriggerReason,
+        tariff: AuthorizationTariff,
     ) {
         let group = self.group_of_token(token, group_in(info));
         if self.reservation_blocks(evse, token, group.as_deref()) {
@@ -193,7 +209,13 @@ impl Station2Actor {
             return;
         }
         self.reservation_claim(evse, token, group.as_deref());
-        match self.on_authorized(evse, token.clone(), Some(remote_start_id), trigger) {
+        match self.on_authorized_with_tariff(
+            evse,
+            token.clone(),
+            Some(remote_start_id),
+            TriggerReason::RemoteStart,
+            tariff,
+        ) {
             Ok(()) => {
                 if note_group {
                     self.note_authorization_group(evse, token, info);

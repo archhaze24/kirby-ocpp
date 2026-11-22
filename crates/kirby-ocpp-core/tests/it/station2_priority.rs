@@ -195,6 +195,83 @@ async fn priority_charging_replaces_transaction_profiles_and_keeps_station_caps(
 }
 
 #[tokio::test]
+async fn priority_charging_replaces_tx_profile_only_during_its_schedule() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().expect("state directory");
+    let clock = ManualClock::new(Utc::now());
+    let (station, task) = boot(&csms, Protocol::V21, dir.path(), Arc::new(clock.clone())).await;
+    let tx = start_tx(&station).await;
+    let mut regular = absolute(&clock, 1, "TxProfile", 500.0);
+    regular["transactionId"] = json!(tx);
+    set_profile(&csms, 1, &regular).await;
+    expect_offered(&station, 500.0).await;
+
+    let mut priority = absolute(&clock, 2, "PriorityCharging", 2000.0);
+    priority["chargingSchedule"][0]["startSchedule"] =
+        json!(clock.now_utc() + Duration::seconds(60));
+    priority["chargingSchedule"][0]["duration"] = json!(30);
+    set_profile(&csms, 0, &priority).await;
+    let mark = csms.mark();
+    assert_eq!(use_priority(&csms, &tx, true).await["status"], "Accepted");
+    notice(&csms, mark, &tx, true).await;
+
+    let composite = call(
+        &csms,
+        "GetCompositeSchedule",
+        json!({"evseId": 1, "duration": 120, "chargingRateUnit": "W"}),
+    )
+    .await;
+    assert_eq!(
+        composite["schedule"]["chargingSchedulePeriod"],
+        json!([
+            {"startPeriod": 0, "limit": 500.0},
+            {"startPeriod": 60, "limit": 2000.0},
+            {"startPeriod": 90, "limit": 500.0}
+        ])
+    );
+    expect_offered(&station, 500.0).await;
+    for (seconds, watts) in [(60, 2000.0), (30, 500.0)] {
+        clock.advance(Duration::seconds(seconds));
+        let composite = call(
+            &csms,
+            "GetCompositeSchedule",
+            json!({"evseId": 1, "duration": 1, "chargingRateUnit": "W"}),
+        )
+        .await;
+        assert_eq!(
+            composite["schedule"]["chargingSchedulePeriod"][0]["limit"],
+            watts
+        );
+        expect_offered(&station, watts).await;
+    }
+
+    let now = clock.now_utc();
+    priority["chargingProfileKind"] = json!("Recurring");
+    priority["recurrencyKind"] = json!("Daily");
+    priority["validFrom"] = json!(now + Duration::seconds(5));
+    priority["validTo"] = json!(now + Duration::days(1) + Duration::seconds(10));
+    priority["chargingSchedule"][0]["startSchedule"] = json!(now);
+    set_profile(&csms, 0, &priority).await;
+    let composite = call(
+        &csms,
+        "GetCompositeSchedule",
+        json!({"evseId": 1, "duration": 86460, "chargingRateUnit": "W"}),
+    )
+    .await;
+    assert_eq!(
+        composite["schedule"]["chargingSchedulePeriod"],
+        json!([
+            {"startPeriod": 0, "limit": 500.0},
+            {"startPeriod": 5, "limit": 2000.0},
+            {"startPeriod": 30, "limit": 500.0},
+            {"startPeriod": 86_400, "limit": 2000.0},
+            {"startPeriod": 86_410, "limit": 500.0}
+        ])
+    );
+    stop(&station, task).await;
+}
+
+#[tokio::test]
 async fn priority_charging_command_queues_offline_and_survives_transaction_resume() {
     let csms = v21_csms().await;
     csms.respond("NotifyPriorityCharging", |_| Reply::Result(json!({})));

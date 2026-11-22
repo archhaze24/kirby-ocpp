@@ -304,6 +304,134 @@ async fn tx_limit_time_is_relative_to_started() {
 }
 
 #[tokio::test]
+async fn tx_limit_time_is_reported_while_already_suspended() {
+    let s = Session::new(Protocol::V21).await;
+    s.started_answer(json!({"transactionLimit": {"maxTime": 3}}));
+    let started = s.start().await;
+    s.trigger(0, "LimitSet").await;
+    let mark = s.csms.mark();
+    s.send(Command2::SetChargingState {
+        evse: 1,
+        state: ChargingState::SuspendedEv,
+    })
+    .await;
+    let suspended = s.trigger(mark, "ChargingStateChanged").await;
+    assert_eq!(suspended["transactionInfo"]["chargingState"], "SuspendedEV");
+    let reached = s
+        .csms
+        .wait_for_call_after(
+            mark,
+            "TransactionEvent",
+            |event| event["triggerReason"] == "TimeLimitReached",
+            STEP,
+        )
+        .await
+        .expect("time limit reported while suspended");
+    assert_suspended(&reached);
+    let timestamp =
+        |event: &Value| DateTime::parse_from_rfc3339(event["timestamp"].as_str().unwrap()).unwrap();
+    let deadline = timestamp(&started) + chrono::Duration::seconds(3);
+    assert!(timestamp(&suspended) < deadline);
+    assert!(timestamp(&reached) >= deadline);
+    s.stop().await;
+}
+
+#[tokio::test]
+async fn tx_limit_raise_keeps_energy_off_after_tariff_deauthorization() {
+    let s = Session::new(Protocol::V21).await;
+    s.set_variable("AuthCacheCtrlr", "Enabled", "true").await;
+    s.set_variable("AuthCtrlr", "LocalPreAuthorize", "true")
+        .await;
+    s.set_variable("TxCtrlr", "StopTxOnInvalidId", "false")
+        .await;
+    super::station2_tariff::enable(&s.csms, false).await;
+    super::station2_priority::set_profile(
+        &s.csms,
+        0,
+        &super::station2_priority::absolute(&SystemClock, 1, "PriorityCharging", 7000.0),
+    )
+    .await;
+    let valid = json!({
+        "idTokenInfo": {"status": "Accepted"},
+        "tariff": {
+            "tariffId": "driver", "currency": "USD",
+            "energy": {"prices": [{"priceKwh": 1.0}]}
+        }
+    });
+    let mut invalid = valid.clone();
+    invalid["tariff"]["energy"]["prices"][0]["conditions"] = json!({});
+    s.csms
+        .respond("Authorize", move |_| Reply::Result(valid.clone()));
+    s.send(Command2::Authorize {
+        id_token: "TAG".to_owned(),
+        token_type: IdTokenType::Local,
+    })
+    .await;
+    s.csms.respond("Authorize", |_| Reply::Silence);
+    let mark = s.csms.mark();
+    s.send(Command2::PlugIn { evse: 1 }).await;
+    s.send(Command2::PresentToken {
+        evse: Some(1),
+        id_token: "TAG".to_owned(),
+        token_type: IdTokenType::Local,
+    })
+    .await;
+    wait_snapshot(&s.station, "charging with the cached tariff", |snapshot| {
+        snapshot.evse(1).is_some_and(|evse| {
+            evse.tariff_id.as_deref() == Some("driver")
+                && evse
+                    .transaction
+                    .as_ref()
+                    .is_some_and(|tx| tx.charging_state == ChargingState::Charging)
+        })
+    })
+    .await;
+    assert_eq!(
+        s.send(Command2::SetPriorityCharging {
+            evse: 1,
+            activate: true
+        })
+        .await,
+        Outcome2::Done
+    );
+    s.csms
+        .wait_for_call_after(mark, "Authorize", |_| true, STEP)
+        .await
+        .unwrap();
+    let refresh = s
+        .csms
+        .calls_since(mark)
+        .into_iter()
+        .find(|call| call.action == "Authorize")
+        .expect("cached authorization refresh");
+    let mark = s.csms.mark();
+    s.csms
+        .send_raw(json!([3, refresh.message_id, invalid]).to_string())
+        .unwrap();
+    s.event(mark, |event| {
+        event["triggerReason"] == "ChargingStateChanged"
+            && event["transactionInfo"]["chargingState"] == "SuspendedEVSE"
+    })
+    .await;
+    s.sample_answer(json!({"transactionLimit": {"maxEnergy": 0.0}}))
+        .await;
+    s.trigger(mark, ENERGY_LIMIT).await;
+    let mark = s.csms.mark();
+    let baseline = s.station.snapshot().evse(1).unwrap().meter_wh;
+    s.sample_answer(json!({"transactionLimit": {"maxEnergy": 1000.0}}))
+        .await;
+    let raised = s.trigger(mark, "LimitSet").await;
+    assert_eq!(raised["transactionInfo"]["chargingState"], "EVConnected");
+    s.set_variable("SampledDataCtrlr", "TxUpdatedInterval", "1")
+        .await;
+    s.trigger(mark, "MeterValuePeriodic").await;
+    let snapshot = s.station.snapshot();
+    let evse = snapshot.evse(1).unwrap();
+    assert_eq!(evse.meter_wh, baseline);
+    s.stop().await;
+}
+
+#[tokio::test]
 async fn tx_limit_cost_from_a_later_transaction_event_response() {
     let s = Session::new(Protocol::V21).await;
     s.started_answer(json!({"transactionLimit": {"maxCost": 2.5}}));

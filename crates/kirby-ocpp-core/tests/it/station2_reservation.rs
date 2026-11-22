@@ -11,7 +11,7 @@ use chrono::{Duration, SecondsFormat, Utc};
 use kirby_ocpp_core::config::ReconnectConfig;
 use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::frame::Frame;
-use kirby_ocpp_core::ocpp::v2::types::{IdTokenType, StopReason};
+use kirby_ocpp_core::ocpp::v2::types::{ChargingState, IdTokenType, StopReason};
 use kirby_ocpp_core::station2::{IdTokenRef, Reservation, ReservationPersist};
 use kirby_ocpp_core::store::{FileKind, LoadOutcome2, PersistedStation2, StationStore};
 use kirby_ocpp_core::{Command2, ManualClock, Outcome2, Station2, Station2Handle, StationConfig};
@@ -357,6 +357,223 @@ async fn cancelling_frees_the_evse_and_an_unknown_id_is_rejected() {
 // ---- H03: use a reserved EVSE ------------------------------------------------------------
 
 #[tokio::test]
+async fn any_evse_reservation_blocks_an_unrelated_token_after_plug_in() {
+    tokio::time::timeout(STEP * 4, async {
+        let csms = v201_csms().await;
+        let clock = ManualClock::new(Utc::now());
+        let mut config = StationConfig::new(csms.url())
+            .with_connectors(1)
+            .without_persistence();
+        config.protocol = Protocol::V201;
+        Protocol::V201
+            .token()
+            .clone_into(&mut config.ws_subprotocol);
+        let (station, task) = Station2::spawn(config, Arc::new(clock.clone()));
+        timeout(STEP, station.connect()).await.unwrap().unwrap();
+        wait_booted(&station).await;
+        let expiry = stamp(clock_now(&clock) + Duration::hours(1));
+        assert_eq!(
+            call_status(&csms, "ReserveNow", reserve_body(53, None, "A", &expiry)).await,
+            "Accepted"
+        );
+        let present = |id: &str| {
+            timeout(
+                STEP,
+                station.send(Command2::PresentToken {
+                    evse: Some(1),
+                    id_token: id.to_owned(),
+                    token_type: IdTokenType::Central,
+                }),
+            )
+        };
+        assert_eq!(
+            authorized_status(&present("B").await.unwrap().unwrap()),
+            "NotAtThisLocation"
+        );
+        timeout(STEP, station.send(Command2::PlugIn { evse: 1 }))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            authorized_status(&present("B").await.unwrap().unwrap()),
+            "NotAtThisLocation"
+        );
+        let outcome = present("A").await.unwrap().unwrap();
+        assert!(matches!(outcome, Outcome2::TransactionStarted { .. }));
+        csms.wait_for_call_count_after(
+            0,
+            "TransactionEvent",
+            1,
+            |p| p["eventType"] == "Started" && p["reservationId"] == 53,
+            STEP,
+        )
+        .await
+        .expect("Started carries the reservation");
+        assert_eq!(
+            call_status(&csms, "CancelReservation", json!({"reservationId": 53})).await,
+            "Rejected"
+        );
+        wait_snapshot(&station, "EVSE 1 charging", |s| {
+            s.evses
+                .first()
+                .and_then(|e| e.transaction.as_ref())
+                .is_some_and(|tx| tx.charging_state == ChargingState::Charging)
+        })
+        .await;
+        super::station2_transactions::stop(&station, task).await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn canceling_pending_authorization_returns_the_reservation() {
+    tokio::time::timeout(STEP * 4, async {
+        let rig = Rig::new().await;
+        rig.set_variable("TxCtrlr", "TxStartPoint", "PowerPathClosed")
+            .await;
+        assert_eq!(rig.reserve(54, Some(1), "A").await, "Accepted");
+        assert_eq!(
+            authorized_status(&rig.present_central(Some(1), "A").await),
+            "Accepted"
+        );
+        assert!(matches!(
+            rig.present_central(Some(1), "A").await,
+            Outcome2::Done
+        ));
+        rig.send(Command2::PlugIn { evse: 1 }).await;
+        let refused = rig.present_central(Some(1), "B").await;
+        assert_eq!(authorized_status(&refused), "NotAtThisLocation");
+        rig.settle().await;
+        assert_eq!(rig.calls("TransactionEvent"), Vec::<Value>::new());
+        assert_eq!(rig.cancel(54).await, "Accepted");
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn offline_fault_removes_reservation_even_after_fault_clears() {
+    tokio::time::timeout(STEP * 4, async {
+        let rig = Rig::new().await;
+        assert_eq!(rig.reserve(55, Some(1), "A").await, "Accepted");
+        rig.send(Command2::Disconnect).await;
+        rig.send(Command2::Fault {
+            evse: 1,
+            connector: None,
+        })
+        .await;
+        rig.send(Command2::ClearFault {
+            evse: 1,
+            connector: None,
+        })
+        .await;
+        assert!(
+            rig.station
+                .snapshot()
+                .evses
+                .iter()
+                .any(|e| { e.id == 1 && e.reservation.is_none() })
+        );
+        rig.send(Command2::Connect).await;
+        rig.wait_update(55, "Removed").await;
+        assert_eq!(rig.cancel(55).await, "Rejected");
+        assert_eq!(rig.reserve(56, Some(1), "B").await, "Accepted");
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn authorize_resolves_uncached_reservation_group_for_local_start() {
+    tokio::time::timeout(STEP * 4, async {
+        let rig = Rig::new().await;
+        rig.csms.respond("Authorize", |_| {
+            Reply::Result(
+                json!({"idTokenInfo": {"status": "Accepted", "groupIdToken": central("G")}}),
+            )
+        });
+        let expiry = rig.in_future(Duration::hours(1));
+        for evse in 1..=2 {
+            let mut body = reserve_body(i64::from(evse), Some(evse), "A", &expiry);
+            body["groupIdToken"] = central("G");
+            assert_eq!(rig.status_of("ReserveNow", body).await, "Accepted");
+        }
+        rig.send(Command2::PlugIn { evse: 1 }).await;
+        let outcome = rig
+            .send(Command2::PresentToken {
+                evse: None,
+                id_token: "MEMBER".to_owned(),
+                token_type: IdTokenType::Iso14443,
+            })
+            .await;
+        assert!(matches!(
+            outcome,
+            Outcome2::TransactionStarted { evse: 1, .. }
+        ));
+        assert_eq!(rig.calls("Authorize").len(), 1);
+        assert_eq!(rig.wait_event("Started").await["reservationId"], 1);
+        wait_snapshot(&rig.station, "EVSE 1 charging", |s| {
+            s.evses
+                .first()
+                .and_then(|e| e.transaction.as_ref())
+                .is_some_and(|tx| tx.charging_state == ChargingState::Charging)
+        })
+        .await;
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn authorize_resolves_uncached_reservation_group_for_remote_start() {
+    tokio::time::timeout(STEP * 4, async {
+        let rig = Rig::new().await;
+        rig.csms.respond("Authorize", |_| {
+            Reply::Result(
+                json!({"idTokenInfo": {"status": "Accepted", "groupIdToken": central("G")}}),
+            )
+        });
+        let expiry = rig.in_future(Duration::hours(1));
+        let mut body = reserve_body(57, Some(1), "A", &expiry);
+        body["groupIdToken"] = central("G");
+        assert_eq!(rig.status_of("ReserveNow", body).await, "Accepted");
+        rig.send(Command2::PlugIn { evse: 1 }).await;
+        let request = json!({
+            "remoteStartId": 1,
+            "idToken": {"idToken": "MEMBER", "type": "ISO14443"},
+            "evseId": 1,
+        });
+        rig.set_variable("AuthCtrlr", "AuthorizeRemoteStart", "false")
+            .await;
+        let refused = rig.call("RequestStartTransaction", request.clone()).await;
+        assert_eq!(refused["statusInfo"]["reasonCode"], "Reserved");
+        assert_eq!(rig.calls("Authorize"), Vec::<Value>::new());
+        rig.set_variable("AuthCtrlr", "AuthorizeRemoteStart", "true")
+            .await;
+        assert_eq!(
+            rig.status_of("RequestStartTransaction", request).await,
+            "Accepted"
+        );
+        assert_eq!(rig.wait_event("Started").await["reservationId"], 57);
+        assert_eq!(rig.calls("Authorize").len(), 1);
+        wait_snapshot(&rig.station, "EVSE 1 charging", |s| {
+            s.evses
+                .first()
+                .and_then(|e| e.transaction.as_ref())
+                .is_some_and(|tx| tx.charging_state == ChargingState::Charging)
+        })
+        .await;
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
 async fn only_the_reserving_token_starts_on_a_reserved_evse() {
     let rig = Rig::new().await;
     assert_eq!(rig.reserve(5, Some(1), "A").await, "Accepted");
@@ -675,6 +892,7 @@ async fn a_restored_list_stays_within_the_evses() {
             kind: IdTokenType::Central,
         },
         group_id_token: None,
+        lost: false,
     };
     let mut state = PersistedStation2::new(ID);
     state.reservations = ReservationPersist {

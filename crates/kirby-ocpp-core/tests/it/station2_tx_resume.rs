@@ -13,6 +13,7 @@ use kirby_ocpp_core::{Clock, Command2, ManualClock, Station2, Station2Handle};
 use kirby_ocpp_testkit::{MockCsms, Reply};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 use crate::station2_persistence::{config, loaded2, store};
 use crate::station2_support::{STEP, v201_csms, wait_booted, wait_snapshot};
@@ -172,6 +173,100 @@ async fn resume_after_restart_keeps_sequence_connector_and_metering() {
         &tx_event(&csms, mark, "TimeLimitReached").await,
         "SuspendedEVSE",
     );
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn resume_after_restart_reports_a_time_limit_expired_during_downtime() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().expect("state directory");
+    let clock = ManualClock::new(Utc::now());
+    let (station, task) = boot(&csms, Protocol::V21, dir.path(), &clock).await;
+    settings(&csms, true, true).await;
+    start_tx(&csms, &station, true).await;
+    timeout(
+        STEP,
+        station.set_transaction_limit(
+            1,
+            TransactionLimit2 {
+                max_time_s: Some(10),
+                ..TransactionLimit2::default()
+            },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    tx_event(&csms, 0, "LimitSet").await;
+    stop(&station, task).await;
+
+    clock.advance(Duration::seconds(11));
+    let mark = csms.mark();
+    let (station, task) = boot(&csms, Protocol::V21, dir.path(), &clock).await;
+    assert_updated(&tx_event(&csms, mark, "TxResumed").await, "SuspendedEVSE");
+    assert_updated(
+        &tx_event(&csms, mark, "TimeLimitReached").await,
+        "SuspendedEVSE",
+    );
+    assert_eq!(station.snapshot().evse(1).unwrap().offered_w, Some(0.0));
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn resume_after_restart_keeps_begin_and_periodic_samples_for_ended() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().expect("state directory");
+    let clock = ManualClock::new(Utc::now());
+    let (station, task) = boot(&csms, Protocol::V21, dir.path(), &clock).await;
+    settings(&csms, true, true).await;
+    set_variables(
+        &csms,
+        &[
+            ("SampledDataCtrlr", "TxUpdatedInterval", None, "1"),
+            ("SampledDataCtrlr", "TxEndedInterval", None, "1"),
+            ("SampledDataCtrlr", "TxEndedMeasurands", None, "Voltage"),
+        ],
+    )
+    .await;
+    start_tx(&csms, &station, true).await;
+    csms.wait_for_call_count_after(
+        0,
+        "TransactionEvent",
+        2,
+        |event| event["triggerReason"] == "MeterValuePeriodic",
+        STEP,
+    )
+    .await
+    .expect("two periodic updates");
+    stop(&station, task).await;
+
+    let mark = csms.mark();
+    clock.advance(Duration::seconds(10));
+    let (station, task) = boot(&csms, Protocol::V21, dir.path(), &clock).await;
+    let resumed = tx_event(&csms, mark, "TxResumed").await;
+    timeout(STEP, station.send(Command2::Unplug { evse: 1 }))
+        .await
+        .unwrap()
+        .unwrap();
+    let ended = csms
+        .wait_for_call_after(
+            mark,
+            "TransactionEvent",
+            |p| p["eventType"] == "Ended",
+            STEP,
+        )
+        .await
+        .expect("the Ended event");
+    let samples = ended["meterValue"].as_array().expect("Ended samples");
+    assert_eq!(
+        samples[0]["sampledValue"][0]["context"],
+        "Transaction.Begin"
+    );
+    assert!(samples.iter().any(|sample| {
+        sample["sampledValue"][0]["context"] == "Sample.Periodic"
+            && sample["sampledValue"][0]["measurand"] == "Voltage"
+            && sample["timestamp"].as_str() < resumed["timestamp"].as_str()
+    }));
     stop(&station, task).await;
 }
 
@@ -637,6 +732,59 @@ async fn reset_resume_keeps_energy_suspended_after_cost_limit_is_reached() {
     assert_eq!(evse.limit_reached.as_deref(), Some("CostLimitReached"));
     assert_eq!(evse.offered_w, Some(0.0));
     assert_eq!(evse.meter_wh, baseline);
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn reset_resume_keeps_energy_off_after_deauthorization_during_boot() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().expect("state directory");
+    let clock = ManualClock::new(Utc::now());
+    let (station, task) = boot(&csms, Protocol::V21, dir.path(), &clock).await;
+    settings(&csms, true, true).await;
+    set_variables(
+        &csms,
+        &[
+            ("TxCtrlr", "TxStopPoint", None, "EVConnected"),
+            ("SampledDataCtrlr", "TxUpdatedInterval", None, "1"),
+        ],
+    )
+    .await;
+    start_tx(&csms, &station, true).await;
+    let accept_boot = hold_reset_boot(&csms, &clock);
+    let mark = csms.mark();
+    reset(&csms).await;
+    wait_snapshot(&station, "the reset boot to be pending", |snapshot| {
+        snapshot.registration == Some(RegistrationStatus::Pending)
+    })
+    .await;
+    timeout(
+        STEP,
+        station.send(Command2::PresentToken {
+            evse: Some(1),
+            id_token: "TAG-1".to_owned(),
+            token_type: IdTokenType::Local,
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stopped = wait_snapshot(&station, "energy transfer to stop", |snapshot| {
+        snapshot
+            .evse(1)
+            .and_then(|evse| evse.transaction.as_ref())
+            .is_some_and(|tx| tx.charging_state == ChargingState::EvConnected)
+    })
+    .await;
+    let baseline = stopped.evse(1).unwrap().meter_wh;
+
+    accept_boot.store(true, Ordering::Relaxed);
+    assert_updated(&tx_event(&csms, mark, "TxResumed").await, "EVConnected");
+    tx_event(&csms, csms.mark(), "MeterValuePeriodic").await;
+    let snapshot = station.snapshot();
+    let evse = snapshot.evse(1).unwrap();
+    assert_eq!(evse.meter_wh, baseline);
+    assert_no_ended(&csms);
     stop(&station, task).await;
 }
 

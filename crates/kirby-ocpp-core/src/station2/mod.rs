@@ -62,7 +62,7 @@ pub use self::snapshot::{
     VariableView,
 };
 pub use self::transactions::{
-    ActiveTx, LimitKind, TransactionLimit2, TransactionTariff, TxPersist,
+    ActiveTx, LimitKind, TransactionLimit2, TransactionTariff, TxPersist, TxRuntime,
 };
 pub use self::tx_queue::{QueuePersist, QueuedEvent};
 pub use self::types::{IdTokenRef, StartStopPoint, TxId2};

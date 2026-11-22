@@ -8,7 +8,7 @@ use serde_json::{Map, Value, json};
 
 use super::{ActiveTx, EventExtra, Station2Actor, TimerKey2, TransactionEventKind, TriggerReason};
 use crate::station2::device_model::TARIFF;
-use crate::station2::tariff::{PRICE_FIELDS, Tariff};
+use crate::station2::tariff::{AuthorizationTariff, PRICE_FIELDS, Tariff};
 use crate::station2::types::IdTokenRef;
 
 const PERIOD_LIMIT: usize = 100;
@@ -52,6 +52,14 @@ impl Money {
             excl: round(self.excl, 10_000.0),
             incl: round(self.incl, 10_000.0),
         }
+    }
+
+    fn scaled(self, ratio: f64) -> Self {
+        Self {
+            excl: self.excl * ratio,
+            incl: self.incl * ratio,
+        }
+        .round()
     }
 
     fn wire(self) -> Value {
@@ -201,12 +209,28 @@ impl TransactionTariff {
         if let Some(frozen) = &self.frozen {
             return frozen.total.incl;
         }
-        let totals = self.totals();
+        let mut totals = self.totals();
         let max = self.current().max_cost;
-        if max.excl_tax.is_some_and(|limit| totals.total.excl >= limit)
-            || max.incl_tax.is_some_and(|limit| totals.total.incl >= limit)
-        {
-            self.frozen = Some(totals.clone());
+        let cap_ratio = |limit: Option<f64>, total: f64| {
+            let limit = limit.filter(|limit| total >= *limit)?;
+            Some(if total > 0.0 { limit / total } else { 1.0 })
+        };
+        let excl = cap_ratio(max.excl_tax, totals.total.excl);
+        let incl = cap_ratio(max.incl_tax, totals.total.incl);
+        if let Some(ratio) = excl.into_iter().chain(incl).reduce(f64::min) {
+            for amount in totals.components.iter_mut().flatten() {
+                *amount = amount.scaled(ratio);
+            }
+            totals.total = totals.total.scaled(ratio);
+            if excl.is_some_and(|excl| excl <= ratio) {
+                totals.total.excl = max.excl_tax.unwrap_or(totals.total.excl);
+            }
+            if incl.is_some_and(|incl| incl <= ratio) {
+                totals.total.incl = max.incl_tax.unwrap_or(totals.total.incl);
+            }
+            let total = totals.total.incl;
+            self.frozen = Some(totals);
+            return total;
         }
         totals.total.incl
     }
@@ -356,7 +380,7 @@ impl ActiveTx {
 }
 
 impl Station2Actor {
-    pub(super) fn associate_tariff(&mut self, evse: u32, offered: Option<Tariff>) {
+    pub(super) fn associate_tariff(&mut self, evse: u32, offered: AuthorizationTariff) {
         let Some(tx) = self.active_tx(evse).filter(|tx| tx.tariff.is_none()) else {
             return;
         };
@@ -512,7 +536,7 @@ mod tests {
             .usage
             .add(500.0, Duration::ZERO, Duration::ZERO);
         assert_eq!(state.details(false)["totalCost"]["typeOfCost"], "MaxCost");
-        assert_eq!(state.details(false)["totalCost"]["total"]["inclTax"], 0.55);
+        assert_eq!(state.details(false)["totalCost"]["total"]["inclTax"], 0.5);
         assert_eq!(state.details(true)["totalUsage"]["energy"], 1050.0);
         assert_eq!(
             state.details(true)["totalCost"],

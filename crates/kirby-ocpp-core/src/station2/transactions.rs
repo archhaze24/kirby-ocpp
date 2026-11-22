@@ -54,7 +54,7 @@ use uuid::Uuid;
 use super::actor::{Station2Actor, TimerKey2};
 use super::command::Outcome2;
 use super::snapshot::TransactionSnapshot;
-use super::tariff::Tariff;
+use super::tariff::AuthorizationTariff;
 use super::tx_queue::QueuedEvent;
 use super::types::{IdTokenRef, Origin2, Reply2, StartStopPoint, TxId2};
 use crate::error::StationError;
@@ -128,6 +128,9 @@ pub struct ActiveTx {
     /// The `Transaction.Begin` sample waiting for the first event that carries the EVSE.
     #[serde(default)]
     pub begin_sample: Option<MeterValue>,
+    /// Buffered meter values for the final `Ended` event.
+    #[serde(default)]
+    pub ended_samples: TxRuntime,
     /// The `idToken` field went out in an event already.
     pub token_sent: bool,
     pub meter_start_wh: u64,
@@ -168,14 +171,15 @@ pub struct TxPersist {
 struct PendingAuth {
     token: IdTokenRef,
     remote_start_id: Option<i32>,
-    offered_tariff: Option<Tariff>,
+    offered_tariff: AuthorizationTariff,
     /// The `groupIdToken` the CSMS named for the token.
     group: Option<String>,
 }
 
-/// Per-transaction state that is not persisted.
-#[derive(Debug, Default)]
-struct TxRuntime {
+/// Per-transaction meter samples kept for the final `Ended` event.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TxRuntime {
     /// The `Transaction.Begin` sample of the `TxEndedMeasurands`, for the `Ended` event.
     ended_begin: Option<MeterValue>,
     /// `TxEndedInterval` samples for the `Ended` event.
@@ -186,7 +190,8 @@ struct TxRuntime {
 
 /// The intermediate samples of one kind for the `Ended` event, at most
 /// [`MAX_ENDED_SAMPLES`].
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 struct IntervalSamples {
     values: Vec<MeterValue>,
     /// Ticks seen, kept or not.
@@ -980,7 +985,7 @@ impl Station2Actor {
         evse: u32,
         spec: StartSpec,
     ) -> Result<TxId2, StationError> {
-        self.begin_inner(evse, spec, None, None)
+        self.begin_inner(evse, spec, None, AuthorizationTariff::Default)
     }
 
     #[allow(
@@ -992,7 +997,7 @@ impl Station2Actor {
         evse: u32,
         spec: StartSpec,
         initial: Option<ChargingState>,
-        offered_tariff: Option<Tariff>,
+        offered_tariff: AuthorizationTariff,
     ) -> Result<TxId2, StationError> {
         if self.evse(evse).is_none() {
             return Err(StationError::InvalidArgument(format!(
@@ -1036,6 +1041,7 @@ impl Station2Actor {
                 ev_connected: connected,
                 evse_sent: false,
                 begin_sample: None,
+                ended_samples: TxRuntime::default(),
                 token_sent: false,
                 meter_start_wh: whole_wh(register),
                 energy_wh: 0.0,
@@ -1121,12 +1127,13 @@ impl Station2Actor {
     /// The event carries `trigger`; when the start point is reached by this authorization the
     /// `Started` event carries it too. An energy offer that starts as a result follows in a
     /// separate `ChargingStateChanged` event.
-    pub(super) fn on_authorized(
+    pub(super) fn on_authorized_with_tariff(
         &mut self,
         evse: u32,
         token: IdTokenRef,
         remote_start_id: Option<i32>,
         trigger: TriggerReason,
+        offered_tariff: AuthorizationTariff,
     ) -> Result<(), StationError> {
         if self.evse(evse).is_none() {
             return Err(StationError::InvalidArgument(format!(
@@ -1136,7 +1143,6 @@ impl Station2Actor {
         if !self.tx.active.contains_key(&evse) && self.queue_full() {
             return Err(queue_full_error());
         }
-        let offered_tariff = self.take_unplaced_driver(&token);
         self.settle_tx_meters();
         if let Some(tx) = self.tx.active.get_mut(&evse) {
             if tx.authorized {
@@ -1229,6 +1235,23 @@ impl Station2Actor {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(super) fn on_authorized(
+        &mut self,
+        evse: u32,
+        token: IdTokenRef,
+        remote_start_id: Option<i32>,
+        trigger: TriggerReason,
+    ) -> Result<(), StationError> {
+        self.on_authorized_with_tariff(
+            evse,
+            token,
+            remote_start_id,
+            trigger,
+            AuthorizationTariff::Default,
+        )
+    }
+
     /// An EV was plugged in on `evse`.
     ///
     /// Without a transaction this starts one when `EVConnected` is a start point, or when the
@@ -1293,7 +1316,7 @@ impl Station2Actor {
                 pending.group,
                 pending.offered_tariff,
             ),
-            None => (None, None, None, None),
+            None => (None, None, None, AuthorizationTariff::Default),
         };
         let spec = StartSpec {
             token,
@@ -1309,7 +1332,9 @@ impl Station2Actor {
             }
             Err(error) => {
                 // The connect timeout is cancelled, so a kept authorization would never expire.
-                self.drop_pending_authorization(evse);
+                if self.drop_pending_authorization(evse) {
+                    self.reservation_release_claim(evse);
+                }
                 self.log(LogLevel::Warn, format!("transaction not started: {error}"));
             }
         }
@@ -1360,7 +1385,7 @@ impl Station2Actor {
                 None,
             );
         } else if self.drop_pending_authorization(evse) {
-            self.reservation_forget_claim(evse);
+            self.reservation_release_claim(evse);
             self.log(
                 LogLevel::Info,
                 format!("EV did not connect to EVSE {evse} in time: authorization dropped"),
@@ -1380,11 +1405,19 @@ impl Station2Actor {
         trigger: TriggerReason,
     ) {
         self.settle_tx_meters();
+        if state == ChargingState::Charging
+            && self
+                .active_tx(evse)
+                .is_some_and(|tx| tx.time_limit_reached(self.clock.now_utc()))
+        {
+            self.check_tx_limits(evse);
+            return;
+        }
         let Some(tx) = self.tx.active.get_mut(&evse) else {
             return;
         };
         if tx.charging_state == state
-            || (state == ChargingState::Charging && tx.limit_reached.is_some())
+            || (state == ChargingState::Charging && (!tx.authorized || tx.limit_reached.is_some()))
         {
             return;
         }
@@ -1470,7 +1503,9 @@ impl Station2Actor {
         self.settle_tx_meters();
         self.cancel_remote_authorization(evse);
         let Some(tx) = self.tx.active.get(&evse) else {
-            self.drop_pending_authorization(evse);
+            if self.drop_pending_authorization(evse) {
+                self.reservation_release_claim(evse);
+            }
             self.timers.cancel(&TimerKey2::EvConnectTimeout(evse));
             return;
         };
@@ -1538,7 +1573,9 @@ impl Station2Actor {
     pub(super) fn on_fault(&mut self, evse: u32) {
         self.settle_tx_meters();
         self.cancel_remote_authorization(evse);
-        self.drop_pending_authorization(evse);
+        if self.drop_pending_authorization(evse) {
+            self.reservation_release_claim(evse);
+        }
         if self.tx.active.contains_key(&evse) {
             self.finish(
                 evse,
@@ -1810,7 +1847,18 @@ impl Station2Actor {
     /// Active transactions and the ids of the last stopped ones, for the state file.
     pub(super) fn tx_persist(&self) -> TxPersist {
         TxPersist {
-            active: self.tx.active.values().cloned().collect(),
+            active: self
+                .tx
+                .active
+                .values()
+                .cloned()
+                .map(|mut tx| {
+                    if let Some(runtime) = self.tx.runtime.get(&tx.evse) {
+                        tx.ended_samples = runtime.clone();
+                    }
+                    tx
+                })
+                .collect(),
             stopped_ids: self.tx.stopped.iter().cloned().collect(),
             meters: self
                 .tx
@@ -1876,7 +1924,7 @@ impl Station2Actor {
             }
         }
         self.release_restored_requests();
-        if resume && !self.tx.active.is_empty() {
+        if resume {
             self.account_all_statuses();
             self.sync_evse_snapshot();
             self.settle_tx_meters();
@@ -1901,9 +1949,13 @@ impl Station2Actor {
                 );
             }
         }
+        let time_limit_reached = tx.time_limit_reached(self.clock.now_utc());
         tx.charging_state = self.resumed_charging_state(&tx, tx.charging_state);
         let charging_state = Some(tx.charging_state);
-        self.tx.runtime.insert(evse, TxRuntime::default());
+        let mut runtime = std::mem::take(&mut tx.ended_samples);
+        runtime.ended.values.truncate(MAX_ENDED_SAMPLES);
+        runtime.ended_aligned.values.truncate(MAX_ENDED_SAMPLES);
+        self.tx.runtime.insert(evse, runtime);
         self.tx.active.insert(evse, tx);
         self.arm_running_cost(evse);
         if let Some(event) = self.build_event(
@@ -1917,6 +1969,9 @@ impl Station2Actor {
         ) {
             self.queue_enqueue(event);
         }
+        if time_limit_reached {
+            self.evaluate_tx_limits(evse, false, true);
+        }
     }
 
     /// Applies energy transfer restrictions to the state selected for resumption.
@@ -1925,7 +1980,14 @@ impl Station2Actor {
         tx: &ActiveTx,
         previous: ChargingState,
     ) -> ChargingState {
-        if tx.limit_reached.is_some()
+        if !tx.authorized && previous == ChargingState::Charging {
+            if tx.ev_connected {
+                ChargingState::EvConnected
+            } else {
+                ChargingState::Idle
+            }
+        } else if tx.limit_reached.is_some()
+            || tx.time_limit_reached(self.clock.now_utc())
             || (previous == ChargingState::Charging
                 && (!self.tx_allow_energy_transfer_resumption() || !self.connector_ready(tx.evse)))
         {
@@ -2508,6 +2570,7 @@ mod tests {
             ev_connected: true,
             evse_sent: true,
             begin_sample: None,
+            ended_samples: TxRuntime::default(),
             token_sent: true,
             meter_start_wh: 100,
             energy_wh: 50.0,
@@ -2551,6 +2614,7 @@ mod tests {
             "remote_sent",
             "priority_charging",
             "begin_sample",
+            "ended_samples",
         ] {
             object.remove(key);
         }
@@ -2562,6 +2626,7 @@ mod tests {
         assert!(!old.remote_sent);
         assert!(!old.priority_charging);
         assert!(old.begin_sample.is_none());
+        assert_eq!(old.ended_samples, TxRuntime::default());
     }
 
     #[tokio::test]

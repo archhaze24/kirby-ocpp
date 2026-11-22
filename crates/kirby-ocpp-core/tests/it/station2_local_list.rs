@@ -453,6 +453,119 @@ async fn disable_post_authorize_refuses_a_listed_entry_without_asking() {
 // ---- the list beats the cache ------------------------------------------------------------
 
 #[tokio::test]
+async fn blocked_listed_token_cannot_stop_charging_with_its_cached_group() {
+    tokio::time::timeout(STEP * 4, async {
+        let rig = rig_with_list(&[grouped_entry("A", "G")]).await;
+        rig.csms.respond("Authorize", |_| {
+            Reply::Result(json!({"idTokenInfo": {
+                "status": "Accepted", "groupIdToken": {"idToken": "G", "type": "Central"},
+            }}))
+        });
+        assert_eq!(status_of(&rig.send(bare("B")).await), "Accepted");
+        assert_eq!(
+            rig.send_list(2, "Differential", &[entry("B", "Blocked")])
+                .await,
+            "Accepted"
+        );
+        rig.set_variable("AuthCtrlr", "LocalPreAuthorize", "true")
+            .await;
+        rig.set_variable("LocalAuthListCtrlr", "DisablePostAuthorize", "true")
+            .await;
+        assert!(started(&rig.present("A").await));
+        assert_eq!(status_of(&rig.present("B").await), "Blocked");
+        assert!(rig.station.snapshot().evses.iter().any(|evse| {
+            evse.id == 1
+                && evse.transaction.as_ref().is_some_and(|tx| {
+                    tx.charging_state == kirby_ocpp_core::ocpp::v2::types::ChargingState::Charging
+                })
+        }));
+        assert_eq!(rig.calls("Authorize").len(), 1);
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn list_admission_uses_default_tariff_instead_of_a_prior_driver_tariff() {
+    tokio::time::timeout(STEP * 4, async {
+    use super::station2_transactions::{call, set_variables, stop};
+    let csms = super::station21::v21_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut config = super::station2_persistence::config(&csms, dir.path());
+    config.protocol = Protocol::V21;
+    Protocol::V21.token().clone_into(&mut config.ws_subprotocol);
+    let (station, task) = Station2::spawn(config, Arc::new(kirby_ocpp_core::SystemClock));
+    timeout(STEP, station.connect()).await.unwrap().unwrap();
+    wait_booted(&station).await;
+    set_variables(
+        &csms,
+        &[
+            ("TariffCostCtrlr", "Enabled", Some("Tariff"), "true"),
+            ("TariffCostCtrlr", "Enabled", Some("Cost"), "true"),
+            ("AuthCtrlr", "LocalPreAuthorize", None, "true"),
+        ],
+    )
+    .await;
+    let tariff = |id: &str| json!({"tariffId": id, "currency": "USD", "energy": {"prices": [{"priceKwh": 1.0}]}});
+    assert_eq!(
+        call(
+            &csms,
+            "SetDefaultTariff",
+            json!({"evseId": 1, "tariff": tariff("default")})
+        )
+        .await["status"],
+        "Accepted"
+    );
+    let driver = tariff("driver");
+    csms.respond("Authorize", move |_| {
+        Reply::Result(json!({"idTokenInfo": {"status": "Accepted"}, "tariff": driver}))
+    });
+    let send = async |command| timeout(STEP, station.send(command)).await.unwrap().unwrap();
+    assert_eq!(status_of(&send(bare("CARD")).await), "Accepted");
+    assert_eq!(
+        call(
+            &csms,
+            "SendLocalList",
+            send_list(1, "Full", &[entry("CARD", "Accepted")])
+        )
+        .await["status"],
+        "Accepted"
+    );
+    send(Command2::PlugIn { evse: 1 }).await;
+    assert!(started(
+        &send(Command2::PresentToken {
+            evse: Some(1),
+            id_token: "CARD".to_owned(),
+            token_type: IdTokenType::Iso14443,
+        })
+        .await
+    ));
+    let events = csms
+        .wait_for_call_count_after(
+            0,
+            "TransactionEvent",
+            1,
+            |p| p["eventType"] == "Started",
+            STEP,
+        )
+        .await
+        .unwrap();
+    assert_eq!(events[0]["transactionInfo"]["tariffId"], "default");
+    assert_eq!(
+        csms.received()
+            .iter()
+            .filter(|c| c.action == "Authorize")
+            .count(),
+        1
+    );
+    stop(&station, task).await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
 async fn offline_the_list_beats_the_cache() {
     let rig = Rig::new().await;
     // The CSMS accepted CARD once, so the cache holds it as `Accepted`.

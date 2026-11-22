@@ -94,7 +94,8 @@ use crate::station::metering::{PowerModel, energy_wh_for};
 use crate::station::smart_charging::{
     CompositeError, CompositeRequest, CompositeSchedule as LegacyComposite,
     MAX_COMPOSITE_DURATION_S, MAX_COMPOSITE_PERIODS, PowerRequest, change_instants,
-    composite_schedule_full, limit_w_at, schedule_base, shape_error, truncate_to_second,
+    composite_schedule_full, limit_w_at, recurrence_period_ms, schedule_base, shape_error,
+    truncate_to_second,
 };
 
 /// The most profiles the station holds (`SmartChargingCtrlr.Entries` maximum).
@@ -346,43 +347,82 @@ fn round_tenth(value: f64) -> f64 {
 }
 
 impl Eval<'_> {
-    /// The gaps between the validity windows of the EVSE's priority profiles. Regular
-    /// transaction profiles can apply only in these gaps while priority charging is enabled.
-    fn non_priority_windows(&self, evse: u32) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
-        let mut windows: Vec<_> = self
-            .entries
-            .iter()
-            .filter(|entry| entry.priority_on(evse))
-            .map(|entry| {
-                (
-                    entry.typed.valid_from.unwrap_or(DateTime::<Utc>::MIN_UTC),
-                    entry.valid_until().unwrap_or(DateTime::<Utc>::MAX_UTC),
-                )
-            })
-            .filter(|(from, to)| from <= to)
-            .collect();
+    /// Gaps in priority schedule coverage over the requested evaluation range (inclusive).
+    fn non_priority_windows(
+        priority: &[LegacyStored],
+        (from, to): (DateTime<Utc>, DateTime<Utc>),
+    ) -> Vec<(DateTime<Utc>, DateTime<Utc>)> {
+        let mut windows = Vec::new();
+        for entry in priority {
+            let profile = &entry.profile;
+            let base = schedule_base(profile, None, entry.installed_at, from);
+            let from = from.max(base).max(profile.valid_from.unwrap_or(from));
+            let to = to.min(profile.valid_to.unwrap_or(to));
+            if from > to {
+                continue;
+            }
+            // Validated schedules have a period starting at zero in every cycle.
+            let recurrence = recurrence_period_ms(profile);
+            let Some(duration) = profile
+                .charging_schedule
+                .duration
+                .map(|seconds| i64::from(seconds) * 1000)
+                .filter(|duration| recurrence.is_none_or(|cycle| *duration < cycle))
+            else {
+                windows.push((from, to));
+                continue;
+            };
+            let mut start = recurrence.map_or(base, |cycle| {
+                let elapsed = (from - base).num_milliseconds();
+                base + TimeDelta::milliseconds(elapsed / cycle * cycle)
+            });
+            while start <= to {
+                let end = start
+                    .checked_add_signed(TimeDelta::milliseconds(duration) - NS)
+                    .unwrap_or(to)
+                    .min(to);
+                if from <= end {
+                    windows.push((from.max(start), end));
+                }
+                let Some(next) = recurrence
+                    .and_then(|cycle| start.checked_add_signed(TimeDelta::milliseconds(cycle)))
+                else {
+                    break;
+                };
+                start = next;
+            }
+        }
         windows.sort_unstable();
         let mut gaps = Vec::new();
-        let mut next = DateTime::<Utc>::MIN_UTC;
-        for (from, to) in windows {
-            if next < from {
-                gaps.push((next, from - NS));
+        let mut next = from;
+        for (start, end) in windows {
+            if next < start {
+                gaps.push((next, start - NS));
             }
-            let Some(after) = to.checked_add_signed(NS) else {
+            let Some(after) = end.checked_add_signed(NS) else {
                 return gaps;
             };
             next = next.max(after);
         }
-        gaps.push((next, DateTime::<Utc>::MAX_UTC));
+        if next <= to {
+            gaps.push((next, to));
+        }
         gaps
     }
 
     /// The 1.6 form of the profiles that can apply: the regular ones, or the external
     /// constraints. A `TxProfile` stays only when it belongs to the running transaction.
-    fn legacy(&self, evse: u32, tx: Option<TxView<'_>>, external: bool) -> Vec<LegacyStored> {
+    fn legacy(
+        &self,
+        evse: u32,
+        tx: Option<TxView<'_>>,
+        external: bool,
+        window: (DateTime<Utc>, DateTime<Utc>),
+    ) -> Vec<LegacyStored> {
         let priority = !external && tx.is_some_and(|tx| tx.priority_charging);
-        let gaps = priority.then(|| self.non_priority_windows(evse));
         let mut profiles = Vec::new();
+        let mut priority_profiles = Vec::new();
+        let mut transaction_profiles = Vec::new();
         for entry in self
             .entries
             .iter()
@@ -414,24 +454,42 @@ impl Eval<'_> {
                 legacy.profile.charging_schedule.start_schedule = Some(start);
                 legacy.profile.charging_profile_kind = ChargingProfileKindType::Absolute;
             }
-            if let Some(gaps) = &gaps
+            if purpose == ChargingProfilePurpose::PriorityCharging {
+                priority_profiles.push(legacy);
+            } else if priority
                 && matches!(
                     purpose,
                     ChargingProfilePurpose::TxDefaultProfile | ChargingProfilePurpose::TxProfile
                 )
             {
-                for &(from, to) in gaps {
-                    let from = from.max(legacy.profile.valid_from.unwrap_or(from));
-                    let to = to.min(legacy.profile.valid_to.unwrap_or(to));
-                    if from <= to {
-                        let mut slice = legacy.clone();
-                        slice.profile.valid_from = Some(from);
-                        slice.profile.valid_to = Some(to);
-                        profiles.push(slice);
-                    }
-                }
+                transaction_profiles.push(legacy);
             } else {
                 profiles.push(legacy);
+            }
+        }
+        let gaps = if transaction_profiles.is_empty() {
+            Vec::new()
+        } else {
+            Self::non_priority_windows(&priority_profiles, window)
+        };
+        profiles.extend(priority_profiles);
+        for mut legacy in transaction_profiles {
+            // Preserve the original anchor when a gap overrides validFrom.
+            legacy.profile.charging_schedule.start_schedule = Some(schedule_base(
+                &legacy.profile,
+                tx.map(|tx| tx.started_at),
+                legacy.installed_at,
+                window.0,
+            ));
+            for &(from, to) in &gaps {
+                let from = from.max(legacy.profile.valid_from.unwrap_or(from));
+                let to = to.min(legacy.profile.valid_to.unwrap_or(to));
+                if from <= to {
+                    let mut slice = legacy.clone();
+                    slice.profile.valid_from = Some(from);
+                    slice.profile.valid_to = Some(to);
+                    profiles.push(slice);
+                }
             }
         }
         profiles
@@ -458,8 +516,8 @@ impl Eval<'_> {
     ) -> Option<f64> {
         let request = self.power_request(evse, tx, charging);
         min_f64(
-            limit_w_at(&self.legacy(evse, tx, false), &request, at),
-            limit_w_at(&self.legacy(evse, tx, true), &request, at),
+            limit_w_at(&self.legacy(evse, tx, false, (at, at)), &request, at),
+            limit_w_at(&self.legacy(evse, tx, true, (at, at)), &request, at),
         )
     }
 
@@ -477,8 +535,8 @@ impl Eval<'_> {
             return 0.0;
         }
         let request = self.power_request(evse, tx, charging);
-        let regular = self.legacy(evse, tx, false);
-        let external = self.legacy(evse, tx, true);
+        let regular = self.legacy(evse, tx, false, (from, to));
+        let external = self.legacy(evse, tx, true, (from, to));
         let mut cuts = vec![from, to];
         for entry in regular.iter().chain(&external) {
             let base = schedule_base(
@@ -534,15 +592,24 @@ impl Eval<'_> {
             tx_started_at: tx.map(|tx| tx.started_at),
             model: self.model,
         };
-        let regular = composite_schedule_full(&self.legacy(evse, tx, false), &request(unit), start);
+        let end =
+            start + TimeDelta::seconds(i64::from(duration_s.clamp(0, MAX_COMPOSITE_DURATION_S)));
+        let regular = composite_schedule_full(
+            &self.legacy(evse, tx, false, (start, end)),
+            &request(unit),
+            start,
+        );
         let external_unit = unit.or_else(|| {
             regular
                 .as_ref()
                 .ok()
                 .map(|schedule| schedule.charging_schedule.charging_rate_unit)
         });
-        let external =
-            composite_schedule_full(&self.legacy(evse, tx, true), &request(external_unit), start);
+        let external = composite_schedule_full(
+            &self.legacy(evse, tx, true, (start, end)),
+            &request(external_unit),
+            start,
+        );
         match (regular, external) {
             (
                 Err(

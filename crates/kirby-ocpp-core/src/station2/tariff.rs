@@ -68,6 +68,14 @@ pub(super) struct Tariff {
     pub max_cost: CostBound,
 }
 
+/// The tariff choice made by the authorization that admitted the token.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum AuthorizationTariff {
+    Default,
+    Driver(Box<Tariff>),
+    CentralCost,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum InvalidTariff {
     InvalidValue,
@@ -402,7 +410,7 @@ impl Station2Actor {
         }
     }
 
-    pub(super) fn take_unplaced_driver(&mut self, token: &IdTokenRef) -> Option<Tariff> {
+    fn take_unplaced_driver(&mut self, token: &IdTokenRef) -> Option<Tariff> {
         if self
             .tariffs
             .unplaced_driver
@@ -485,36 +493,54 @@ impl Station2Actor {
         }
     }
 
+    /// Validates and captures the tariff while the admitting authorization is decided.
+    pub(super) fn authorization_tariff(
+        &mut self,
+        token: &IdTokenRef,
+        raw: Option<Value>,
+    ) -> Option<AuthorizationTariff> {
+        let offered = raw.is_some() && self.local_tariffs_enabled();
+        if !self.apply_driver_tariff(token, raw) {
+            return None;
+        }
+        let central_cost = self
+            .tariffs
+            .central_cost
+            .iter()
+            .position(|entry| entry == token)
+            .and_then(|index| self.tariffs.central_cost.remove(index))
+            .is_some();
+        if !offered {
+            return Some(AuthorizationTariff::Default);
+        }
+        if central_cost {
+            return Some(AuthorizationTariff::CentralCost);
+        }
+        let driver = self.take_unplaced_driver(token).or_else(|| {
+            self.tariffs
+                .drivers
+                .iter()
+                .find(|(entry, _)| entry == token)
+                .map(|(_, tariff)| tariff.clone())
+        });
+        Some(driver.map_or(AuthorizationTariff::Default, |tariff| {
+            AuthorizationTariff::Driver(Box::new(tariff))
+        }))
+    }
+
     pub(super) fn select_transaction_tariff(
         &mut self,
         evse: u32,
         token: Option<&IdTokenRef>,
-        offered: Option<Tariff>,
+        offered: AuthorizationTariff,
     ) -> Option<(Tariff, Option<IdTokenRef>)> {
-        let central_cost = token
-            .and_then(|token| {
-                self.tariffs
-                    .central_cost
-                    .iter()
-                    .position(|entry| entry == token)
-            })
-            .and_then(|index| self.tariffs.central_cost.remove(index))
-            .is_some();
-        if central_cost || !self.local_tariffs_enabled() {
+        if !self.local_tariffs_enabled() {
             return None;
         }
-        if let Some(token) = token {
-            if let Some(tariff) = offered {
-                return Some((tariff, Some(token.clone())));
-            }
-            if let Some((_, tariff)) = self
-                .tariffs
-                .drivers
-                .iter()
-                .find(|(entry, _)| entry == token)
-            {
-                return Some((tariff.clone(), Some(token.clone())));
-            }
+        match offered {
+            AuthorizationTariff::CentralCost => return None,
+            AuthorizationTariff::Driver(tariff) => return Some((*tariff, token.cloned())),
+            AuthorizationTariff::Default => {}
         }
         self.prune_default_tariffs();
         self.default_tariff(evse)
@@ -691,11 +717,15 @@ fn assignments(actor: &Station2Actor, evse: u32) -> Vec<TariffAssignment> {
                 .or_insert_with(|| (entry.valid_from, Vec::new()));
             ids.push(id);
         }
-        if let Some(state) = actor.active_tx(id).and_then(|tx| tx.tariff.as_ref())
+        if let Some(tx) = actor.active_tx(id)
+            && let Some(state) = &tx.tariff
             && state.is_driver()
         {
             let driver = drivers.entry(&state.current().id).or_default();
             driver.evses.push(id);
+            if let Some(token) = &tx.token {
+                driver.tokens.insert(token.id_token.clone());
+            }
         }
     }
     for (token, tariff) in &actor.tariffs.drivers {

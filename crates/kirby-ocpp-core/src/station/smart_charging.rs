@@ -137,7 +137,7 @@ pub fn is_expired(profile: &ChargingProfile, at: DateTime<Utc>) -> bool {
 /// Length of one recurrence cycle in milliseconds; `None` for non-recurring profiles.
 ///
 /// A recurring profile without `recurrencyKind` repeats daily (TS behaviour).
-fn recurrence_period_ms(profile: &ChargingProfile) -> Option<i64> {
+pub(crate) fn recurrence_period_ms(profile: &ChargingProfile) -> Option<i64> {
     if profile.charging_profile_kind != ChargingProfileKindType::Recurring {
         return None;
     }

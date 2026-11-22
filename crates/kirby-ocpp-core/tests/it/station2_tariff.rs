@@ -45,7 +45,7 @@ async fn send(station: &Station2Handle, command: Command2) -> Outcome2 {
     timeout(STEP, station.send(command)).await.unwrap().unwrap()
 }
 
-async fn enable(csms: &MockCsms, running: bool) {
+pub(super) async fn enable(csms: &MockCsms, running: bool) {
     let settings = [
         (COMPONENT, "Enabled", Some("Tariff"), "true"),
         (COMPONENT, "Enabled", Some("Cost"), "true"),
@@ -746,6 +746,56 @@ async fn tariff_charging_idle_and_reservation_costs() {
 }
 
 #[tokio::test]
+async fn tariff_caps_idle_cost_after_a_long_settlement_interval() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    enable(&csms, false).await;
+    set_variables(
+        &csms,
+        &[("SampledDataCtrlr", "TxUpdatedInterval", None, "2")],
+    )
+    .await;
+    assert_eq!(
+        install(
+            &csms,
+            1,
+            json!({
+                "tariffId": "idle",
+                "currency": "USD",
+                "maxCost": {"exclTax": 1.0, "inclTax": 0.625},
+                "idleTime": {
+                    "prices": [{"priceMinute": 60.0}],
+                    "taxRates": [{"type": "state", "tax": 25}]
+                }
+            }),
+        )
+        .await["status"],
+        "Accepted"
+    );
+    start(&csms, &station).await;
+    let mark = csms.mark();
+    send(
+        &station,
+        Command2::SetChargingState {
+            evse: 1,
+            state: ChargingState::SuspendedEv,
+        },
+    )
+    .await;
+    event(&csms, mark, "triggerReason", "MeterValuePeriodic").await;
+    let ended = end(&csms, &station).await;
+    let details = &ended["costDetails"];
+    assert!(details["totalUsage"]["idleTime"].as_u64().unwrap() >= 1);
+    let cost = &details["totalCost"];
+    assert_eq!(cost["typeOfCost"], "MaxCost");
+    assert_eq!(cost["total"], json!({"exclTax": 0.5, "inclTax": 0.625}));
+    assert_eq!(cost["idleTime"]["exclTax"], 0.5);
+    assert_eq!(cost["idleTime"]["inclTax"], 0.625);
+    stop(&station, task).await;
+}
+
+#[tokio::test]
 async fn tariff_cost_limit_uses_local_cost_and_ignores_csms_updates() {
     let csms = v21_csms().await;
     csms.respond("TransactionEvent", |p| {
@@ -880,7 +930,7 @@ async fn tariff_change_sets_a_new_period_and_rejects_bad_targets() {
     let assignments = get(&csms, 1).await;
     assert_eq!(
         assignments["tariffAssignments"][1],
-        json!({"tariffId":"second","tariffKind":"DriverTariff","evseIds":[1]})
+        json!({"tariffId":"second","tariffKind":"DriverTariff","evseIds":[1],"idTokens":["TAG"]})
     );
     advance(&station, 1000).await;
     let ended = end(&csms, &station).await;
@@ -902,6 +952,38 @@ async fn tariff_change_sets_a_new_period_and_rejects_bad_targets() {
             .unwrap()
             .len(),
         1
+    );
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn tariff_changes_keep_the_transaction_token_in_get_tariffs_after_e17_resume() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    enable(&csms, false).await;
+    set_variables(&csms, &[("TxCtrlr", "TxResumptionTimeout", None, "60")]).await;
+    let started = start(&csms, &station).await;
+    assert_eq!(
+        call(
+            &csms,
+            "ChangeTransactionTariff",
+            json!({
+                "transactionId": started["transactionInfo"]["transactionId"],
+                "tariff": energy("changed", 2.0)
+            }),
+        )
+        .await["status"],
+        "Accepted"
+    );
+    stop(&station, task).await;
+
+    let mark = csms.mark();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    event(&csms, mark, "triggerReason", "TxResumed").await;
+    assert_eq!(
+        get(&csms, 1).await["tariffAssignments"],
+        json!([{"tariffId":"changed","tariffKind":"DriverTariff","evseIds":[1],"idTokens":["TAG"]}])
     );
     stop(&station, task).await;
 }

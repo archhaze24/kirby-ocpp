@@ -242,6 +242,12 @@ impl Station2Actor {
             return;
         };
         for (evse, (id, state)) in plan.charging_before_reset {
+            if self
+                .active_tx(evse)
+                .is_some_and(|tx| tx.id == id && tx.time_limit_reached(self.clock.now_utc()))
+            {
+                self.check_tx_limits(evse);
+            }
             if let Some(tx) = self.active_tx(evse).filter(|tx| tx.id == id) {
                 let state = self.resumed_charging_state(tx, state);
                 self.tx_reset_update(evse, state, TriggerReason::TxResumed);

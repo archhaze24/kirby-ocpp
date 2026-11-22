@@ -401,3 +401,90 @@ async fn a_remote_start_with_a_master_pass_token_starts_nothing() {
         rig.stop().await;
     }
 }
+
+#[tokio::test]
+async fn remote_start_rejects_known_master_pass_with_or_without_authorize() {
+    tokio::time::timeout(STEP * 4, async {
+        for protocol in VERSIONS {
+            let rig = Rig::new(protocol).await;
+            rig.set_master_group(MASTER_GROUP).await;
+            rig.send(Command2::Authorize {
+                id_token: "MASTER1".to_owned(),
+                token_type: IdTokenType::Iso14443,
+            })
+            .await;
+            let list_reply = rig
+                .csms
+                .send_call(
+                    "SendLocalList",
+                    json!({
+                        "versionNumber": 1,
+                        "updateType": "Full",
+                        "localAuthorizationList": [{
+                            "idToken": {"idToken": "MASTER2", "type": "ISO14443"},
+                            "idTokenInfo": {
+                                "status": "Accepted",
+                                "groupIdToken": {"idToken": MASTER_GROUP, "type": "Central"},
+                            },
+                        }],
+                    }),
+                )
+                .await
+                .expect("answered");
+            let Frame::CallResult { payload, .. } = list_reply else {
+                panic!("not a CALLRESULT: {list_reply:?}");
+            };
+            assert_eq!(payload["status"], "Accepted");
+            rig.send(Command2::PlugIn { evse: 1 }).await;
+            let mark = rig.csms.mark();
+            for setting in ["false", "true"] {
+                rig.send(Command2::SetVariable {
+                    component: Component {
+                        name: "AuthCtrlr".to_owned(),
+                        instance: None,
+                        evse: None,
+                        custom_data: None,
+                    },
+                    variable: Variable {
+                        name: "AuthorizeRemoteStart".to_owned(),
+                        instance: None,
+                        custom_data: None,
+                    },
+                    value: setting.to_owned(),
+                })
+                .await;
+                for token in ["MASTER1", "MASTER2"] {
+                    let reply = rig
+                        .csms
+                        .send_call(
+                            "RequestStartTransaction",
+                            json!({
+                                "idToken": {"idToken": token, "type": "ISO14443"},
+                                "remoteStartId": 7,
+                                "evseId": 1,
+                            }),
+                        )
+                        .await
+                        .expect("answered");
+                    let Frame::CallResult { payload, .. } = reply else {
+                        panic!("not a CALLRESULT: {reply:?}");
+                    };
+                    assert_eq!(
+                        payload["status"], "Rejected",
+                        "{protocol:?} {setting} {token}"
+                    );
+                }
+            }
+            rig.start_on(2, "CARD1").await;
+            let started = rig.wait_events("Started", 1).await;
+            assert_eq!(started.len(), 1);
+            assert_eq!(started[0]["idToken"]["idToken"], "CARD1");
+            assert!(rig.csms.calls_since(mark).iter().all(|c| {
+                c.action != "Authorize" || c.payload["idToken"]["idToken"] == "CARD1"
+            }));
+            rig.stop().await;
+        }
+    })
+    .await
+    .expect("scenario completes");
+}

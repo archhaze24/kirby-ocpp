@@ -66,6 +66,8 @@ pub struct Reservation {
     pub id_token: IdTokenRef,
     /// The text of the `groupIdToken`.
     pub group_id_token: Option<String>,
+    #[serde(default)]
+    pub lost: bool,
 }
 
 impl Reservation {
@@ -127,7 +129,7 @@ impl Station2Actor {
         self.dm_enabled(COMPONENT)
     }
 
-    /// The reservations in force: none while disabled, none past their expiry. A reservation
+    /// The reservations in force: none while disabled, lost, or past their expiry. A reservation
     /// with the id `except` is left out (it is being replaced).
     fn situation(&self, except: Option<i32>) -> Situation {
         let mut situation = Situation {
@@ -139,7 +141,7 @@ impl Station2Actor {
         }
         let now = self.clock.now_utc();
         for reservation in &self.reservations.list {
-            if reservation.expires_at <= now || Some(reservation.id) == except {
+            if reservation.lost || reservation.expires_at <= now || Some(reservation.id) == except {
                 continue;
             }
             match reservation.evse {
@@ -161,7 +163,7 @@ impl Station2Actor {
         self.reservations
             .list
             .iter()
-            .filter(|r| r.evse == Some(evse) && r.expires_at > now)
+            .filter(|r| !r.lost && r.evse == Some(evse) && r.expires_at > now)
             .min_by_key(|r| r.expires_at)
             .map(|r| ReservationView2 {
                 id: r.id,
@@ -215,7 +217,7 @@ impl Station2Actor {
             .reservations
             .list
             .iter()
-            .filter(|reservation| reservation.expires_at > now)
+            .filter(|reservation| !reservation.lost && reservation.expires_at > now)
             .collect();
         if let Some(held) = live
             .iter()
@@ -232,8 +234,27 @@ impl Station2Actor {
         if others == 0 {
             return false;
         }
-        let free = self.free_evses(&self.situation(None));
-        free.contains(&evse) && free.len() <= others
+        // The target may already have a cable or a transaction waiting for authorization.
+        let free_elsewhere = self
+            .free_evses(&self.situation(None))
+            .into_iter()
+            .filter(|id| *id != evse)
+            .count();
+        free_elsewhere < others
+    }
+
+    /// Whether learning a reservation group could admit this token to the EVSE.
+    pub(super) fn reservation_group_may_allow(&self, evse: u32, token: &IdTokenRef) -> bool {
+        let now = self.clock.now_utc();
+        self.reservations.list.iter().any(|reservation| {
+            !reservation.lost
+                && reservation.expires_at > now
+                && reservation.evse.is_none_or(|held| held == evse)
+                && reservation
+                    .group_id_token
+                    .as_deref()
+                    .is_some_and(|group| !self.reservation_blocks(evse, token, Some(group)))
+        })
     }
 
     /// Consumes the reservation `token` holds for `evse`, if there is one, ahead of the
@@ -244,7 +265,8 @@ impl Station2Actor {
         }
         let now = self.clock.now_utc();
         let usable = |reservation: &&Reservation| {
-            reservation.expires_at > now
+            !reservation.lost
+                && reservation.expires_at > now
                 && reservation.matches(token, group)
                 && reservation.evse.is_none_or(|held| held == evse)
         };
@@ -276,16 +298,17 @@ impl Station2Actor {
 
     /// The authorization that claimed a reservation on `evse` failed: the reservation stands.
     pub(super) fn reservation_release_claim(&mut self, evse: u32) {
-        if let Some(reservation) = self.reservations.claims.remove(&evse) {
+        if let Some(reservation) = self.reservations.claims.remove(&evse)
+            && !self
+                .reservations
+                .list
+                .iter()
+                .any(|r| r.id == reservation.id)
+        {
             self.reservations.list.push(reservation);
             self.mark_dirty();
             self.notify_status_changes();
         }
-    }
-
-    /// The authorization on `evse` ended without a transaction event: the claim is void.
-    pub(super) fn reservation_forget_claim(&mut self, evse: u32) {
-        self.reservations.claims.remove(&evse);
     }
 
     /// The id for the next transaction event on `evse`, once.
@@ -310,24 +333,51 @@ impl Station2Actor {
             && self
                 .may_send("ReservationStatusUpdate", Origin2::Station)
                 .is_ok();
+        let mut newly_lost = false;
+        if self.reservations_enabled()
+            && self
+                .reservations
+                .list
+                .iter()
+                .any(|r| !r.lost && r.evse.is_some())
+        {
+            let none = BTreeSet::new();
+            let lost_evses: BTreeSet<_> = self
+                .evses
+                .iter()
+                .filter(|evse| {
+                    matches!(
+                        self.evse_state(evse, &none),
+                        EvseState::Faulted | EvseState::Unavailable
+                    )
+                })
+                .map(|evse| evse.id)
+                .collect();
+            for reservation in &mut self.reservations.list {
+                if !reservation.lost
+                    && reservation.expires_at > now
+                    && reservation
+                        .evse
+                        .is_some_and(|evse| lost_evses.contains(&evse))
+                {
+                    reservation.lost = true;
+                    newly_lost = true;
+                }
+            }
+        }
         let mut ended: Vec<(i32, ReservationUpdateStatus)> = Vec::new();
         if reportable {
-            let enabled = self.reservations_enabled();
-            let none = BTreeSet::new();
             ended = self
                 .reservations
                 .list
                 .iter()
                 .filter_map(|reservation| {
-                    if reservation.expires_at <= now {
-                        return Some((reservation.id, ReservationUpdateStatus::Expired));
+                    if reservation.lost {
+                        Some((reservation.id, ReservationUpdateStatus::Removed))
+                    } else {
+                        (reservation.expires_at <= now)
+                            .then_some((reservation.id, ReservationUpdateStatus::Expired))
                     }
-                    let evse = self.evse(reservation.evse?)?;
-                    let lost = matches!(
-                        self.evse_state(evse, &none),
-                        EvseState::Faulted | EvseState::Unavailable
-                    );
-                    (enabled && lost).then_some((reservation.id, ReservationUpdateStatus::Removed))
                 })
                 .collect();
             self.reservations
@@ -338,10 +388,10 @@ impl Station2Actor {
             self.report_reservation_end(*id, *status);
         }
         let flags_changed = self.reservation_sync_flags();
-        if !ended.is_empty() {
+        if newly_lost || !ended.is_empty() {
             self.mark_dirty();
         }
-        if flags_changed || !ended.is_empty() {
+        if flags_changed || newly_lost || !ended.is_empty() {
             self.sync_evse_snapshot();
         }
         self.reservation_arm();
@@ -374,6 +424,7 @@ impl Station2Actor {
             .reservations
             .list
             .iter()
+            .filter(|reservation| !reservation.lost)
             .map(|reservation| reservation.expires_at)
             .filter(|at| *at > now)
             .min();
@@ -570,6 +621,7 @@ pub(super) fn reserve_now(
             kind: id_token.kind,
         },
         group_id_token: group_id_token.map(|group| group.id_token),
+        lost: false,
     });
     actor.flush_now();
     actor.notify_status_changes();
@@ -647,6 +699,7 @@ mod tests {
             connector_type: None,
             id_token: token("A"),
             group_id_token: group.map(str::to_owned),
+            lost: false,
         }
     }
 
