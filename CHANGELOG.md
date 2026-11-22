@@ -9,17 +9,13 @@ tag as the GitHub release notes.
 
 ## [0.8.0] - 2026-11-22
 
-**The OCPP 2.1 release: both tools speak OCPP 2.1 next to 2.0.1 and 1.6J. The 2.x emulator gains the Local Authorization List, reservations, master pass, smart charging with priority and dynamic profiles, transaction limits, resumable transactions, local cost calculation with tariffs and fleets, plus a round of fixes from the release reviews.**
+**The OCPP 2.1 release: both tools speak OCPP 2.1 next to 2.0.1 and 1.6J. The 2.x emulator gains the Local Authorization List, reservations, master pass, smart charging with priority and dynamic profiles, transaction limits, resumable transactions, local cost calculation with tariffs and fleets, plus fixes.**
 
 ### 0.8.0 in numbers
 
 | Metric | Since 0.7.0 |
 | --- | --- |
-| 🧾 Commits | **82** in four days (19 to 22 November 2026) |
-| ✏️ Lines of code | **+56.5k / −2.2k** across 396 files; Rust grew from 165.8k to **194.4k** lines |
-| 🧪 Tests | **+447** tests in the `nextest` gate: 2,463 → **2,910** |
-| 📦 Crates | 7 → **7** (no new dependencies) |
-| 🔎 Reviews | A whole-branch review in three areas, focused reviews of every milestone, a product review of both tools with the real binaries |
+| 🔌 OCPP versions | 1.6J, 2.0.1 and **2.1** in both tools |
 | ✨ New features | **20** |
 | 🔧 Changes | **8** |
 | 🐛 Fixes and hardening | **13** |
