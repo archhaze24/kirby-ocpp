@@ -167,6 +167,31 @@ fn v2_station_shows_wire_names_short_ids_and_report_progress() {
 }
 
 #[test]
+fn every_charging_state_fits_the_table_at_every_width() {
+    use kirby_ocpp_core::ocpp::v2::types::ChargingState;
+    for (w, full) in [(80, false), (120, false), (140, true), (160, true)] {
+        for (state, wire, short) in [
+            (ChargingState::EvConnected, "EVConnected", "EVConn"),
+            (ChargingState::SuspendedEv, "SuspendedEV", "SuspEV"),
+            (ChargingState::SuspendedEvse, "SuspendedEVSE", "SuspEVSE"),
+            (ChargingState::Charging, "Charging", "Charging"),
+            (ChargingState::Idle, "Idle", "Idle"),
+        ] {
+            let mut app = app_v2();
+            let mut other = app.state.as_ref().unwrap().clone();
+            other.v2.as_mut().unwrap().transactions[1].charging_state = Some(state);
+            app.state = Some(other);
+            let screen = render(&app, w, 40);
+            let want = if full { wire } else { short };
+            assert!(
+                screen.lines().any(|l| l.contains(&format!("{want} "))),
+                "w={w} {wire}:\n{screen}"
+            );
+        }
+    }
+}
+
+#[test]
 fn suspended_charging_states_stay_apart_at_every_width() {
     use kirby_ocpp_core::ocpp::v2::types::ChargingState;
     for (w, full) in [(80, false), (120, false), (140, true), (160, true)] {
@@ -579,6 +604,14 @@ mod commands {
     fn schema_errors_wrap_onto_more_lines_in_the_raw_form() {
         let mut app = loaded();
         open(&mut app, 'w');
+        update(
+            &mut app,
+            Msg::Key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)),
+        );
+        let untouched = render(&app, 100, 30);
+        assert!(!untouched.contains("violates"), "{untouched}");
+        assert!(untouched.contains("empty sends {}"), "{untouched}");
+        type_text(&mut app, r#"{"x":1}"#);
         for (w, h) in [(60, 30), (80, 30), (120, 40)] {
             let screen = render(&app, w, h);
             assert!(screen.contains("violates"), "{w}x{h}\n{screen}");

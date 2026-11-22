@@ -232,6 +232,12 @@ fn draw_fleet_colored(f: &mut Frame<'_>, fleet: &FleetApp2) {
 ///
 /// Fails when the terminal cannot be set up or drawn to.
 pub async fn run_fleet2(stations: &[Station2Handle], options: TuiOptions) -> Result<(), TuiError> {
+    // Subscribe before anything slow (the terminal setup): the first station may already be
+    // booting, and an event sent before the subscription is lost to the log and the counters.
+    let (event_tx, mut event_rx) = mpsc::channel::<Inbound<Msg2>>(EVENT_QUEUE);
+    for (station, handle) in stations.iter().enumerate() {
+        forward_station(handle, station, &event_tx);
+    }
     let mut guard = TerminalGuard::enter()?;
     let apps: Vec<App2> = stations
         .iter()
@@ -257,10 +263,8 @@ pub async fn run_fleet2(stations: &[Station2Handle], options: TuiOptions) -> Res
 
     // User-action results (few, never dropped) and forwarded station events (bounded).
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<Inbound<Msg2>>();
-    let (event_tx, mut event_rx) = mpsc::channel::<Inbound<Msg2>>(EVENT_QUEUE);
     let mut ctxs: Vec<Ctx> = Vec::with_capacity(stations.len());
     for (station, handle) in stations.iter().enumerate() {
-        forward_station(handle, station, &event_tx);
         ctxs.push(Ctx {
             handle: handle.clone(),
             out: Out {

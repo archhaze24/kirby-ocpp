@@ -142,7 +142,13 @@ const fn merge_specs() -> [ActionSpec; CSMS_COUNT] {
             || (from_old < old.len()
                 && name_before(old[from_old].name, NEW_CSMS_ACTIONS[from_new].name));
         if take_old {
-            merged[next] = old[from_old];
+            merged[next] = if name_before(old[from_old].name, "Reset")
+                || name_before("Reset", old[from_old].name)
+            {
+                old[from_old]
+            } else {
+                ocpp201::RESET_21
+            };
             from_old += 1;
         } else {
             merged[next] = NEW_CSMS_ACTIONS[from_new];
@@ -223,9 +229,19 @@ mod tests {
 
     #[test]
     fn the_2_0_1_entries_are_reused_unchanged() {
-        for spec in ocpp201::CSMS_ACTIONS {
+        for spec in ocpp201::CSMS_ACTIONS.iter().filter(|s| s.name != "Reset") {
             assert_eq!(registry::csms_action("ocpp2.1", spec.name), Some(spec));
         }
+        let reset = registry::csms_action("ocpp2.1", "Reset").expect("Reset");
+        assert_eq!(
+            reset.field("type").map(|f| f.choices),
+            Some(&["Immediate", "OnIdle", "ImmediateAndResume"][..])
+        );
+        let old = registry::csms_action("ocpp2.0.1", "Reset").expect("Reset");
+        assert_eq!(
+            old.field("type").map(|f| f.choices),
+            Some(&["Immediate", "OnIdle"][..])
+        );
         for spec in &NEW_CSMS_ACTIONS {
             assert!(spec.fields.is_empty(), "{}", spec.name);
             assert!(spec.summary.contains("raw payload"), "{}", spec.name);

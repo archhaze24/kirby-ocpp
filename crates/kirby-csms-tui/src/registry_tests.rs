@@ -1319,3 +1319,49 @@ fn a_secret_variable_value_stays_out_of_results_and_notices() {
         assert!(!format!("{d:?}").contains(SECRET));
     }
 }
+
+#[test]
+fn reset_offers_resume_only_on_2_1() {
+    for (mut app, want) in [
+        (station201(), vec!["Immediate", "OnIdle"]),
+        (
+            station21(),
+            vec!["Immediate", "OnIdle", "ImmediateAndResume"],
+        ),
+    ] {
+        press(&mut app, KeyCode::Char('R'));
+        let Mode::Form(form) = &app.mode else {
+            panic!("Reset opened no form");
+        };
+        let field = form
+            .fields
+            .iter()
+            .find(|f| f.spec.is_some_and(|s| s.name == "type"))
+            .expect("type field");
+        assert_eq!(field.options, want);
+    }
+}
+
+#[test]
+fn an_untouched_raw_form_shows_its_hint_and_the_error_comes_with_the_edit_or_submit() {
+    let mut app = station21();
+    let index = table21()
+        .csms_actions
+        .iter()
+        .position(|spec| spec.name == "SetDefaultTariff")
+        .expect("SetDefaultTariff");
+    let mut fx = Vec::new();
+    app.run_action(ActionId::Call(index), &mut fx);
+    let Mode::Form(form) = &mut app.mode else {
+        panic!("SetDefaultTariff opened no form");
+    };
+    assert_eq!(form.fields[1].error, None);
+    assert_eq!(form.fields[1].hint, "empty sends {}");
+    assert!(form.submit().is_none(), "{{}} violates the schema");
+    assert!(form.fields[1].error.is_some());
+    // an edit shows the violation at once
+    form.fields[1].input = TextInput::new("");
+    form.focus = 1;
+    form.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
+    assert!(form.fields[1].error.is_some());
+}

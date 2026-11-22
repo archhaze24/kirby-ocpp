@@ -95,6 +95,32 @@ const EVSE_CONNECTOR: FieldSpec = with_hint(
 );
 const OPERATIONAL_STATUSES: &[&str] = &["Inoperative", "Operative"];
 const RESET_TYPES: &[&str] = &["Immediate", "OnIdle"];
+/// OCPP 2.1 added `ImmediateAndResume` to the reset types.
+const RESET_TYPES_21: &[&str] = &["Immediate", "OnIdle", "ImmediateAndResume"];
+
+const RESET_EVSE: FieldSpec = with_hint(
+    number("evseId", "evse (optional)", false),
+    "1 or higher; omit for the whole station",
+);
+const RESET: ActionSpec = action(
+    "Reset",
+    "Reset",
+    "immediate reset or reset when idle, of the station or an EVSE",
+    &[
+        with_default(choice("type", "type", RESET_TYPES, true), "OnIdle"),
+        RESET_EVSE,
+    ],
+);
+/// The 2.1 form of `Reset`: the 2.0.1 one with the extra reset type.
+pub(super) const RESET_21: ActionSpec = action(
+    "Reset",
+    "Reset",
+    "immediate reset, reset when idle or reset and resume, of the station or an EVSE",
+    &[
+        with_default(choice("type", "type", RESET_TYPES_21, true), "OnIdle"),
+        RESET_EVSE,
+    ],
+);
 const UPDATE_TYPES: &[&str] = &["Differential", "Full"];
 const ID_TOKEN_TYPES: &[&str] = &[
     "Central",
@@ -465,18 +491,7 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
             with_hint(number("evseId", "evse (optional)", false), "1 or higher"),
         ],
     ),
-    action(
-        "Reset",
-        "Reset",
-        "immediate reset or reset when idle, of the station or an EVSE",
-        &[
-            with_default(choice("type", "type", RESET_TYPES, true), "OnIdle"),
-            with_hint(
-                number("evseId", "evse (optional)", false),
-                "1 or higher; omit for the whole station",
-            ),
-        ],
-    ),
+    RESET,
     action(
         "SendLocalList",
         "Send local list",

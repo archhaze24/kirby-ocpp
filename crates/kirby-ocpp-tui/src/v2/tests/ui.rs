@@ -615,6 +615,11 @@ fn a_2_1_station_shows_the_2_1_version_where_2_0_1_shows_its_own() {
     a.mode = Mode2::Help;
     let text = render(&a, 110, 60);
     assert!(text.contains("Not available for OCPP 2.1"), "{text}");
+    assert!(
+        text.contains("browsers for the local authorization list"),
+        "{text}"
+    );
+    assert!(!text.contains("replaces them), local"), "{text}");
     assert!(!text.contains("2.0.1"), "{text}");
     for def in &a.catalog {
         assert!(!def.desc.contains("2.0.1"), "{}: {}", def.label, def.desc);
@@ -640,6 +645,11 @@ fn overlays_draw_for_each_mode() {
     a.mode = Mode2::Help;
     let text = render(&a, 110, 60);
     assert!(text.contains("Not available for OCPP 2.0.1"), "{text}");
+    assert!(
+        text.contains("browsers for the local authorization list"),
+        "{text}"
+    );
+    assert!(text.contains("their counts)"), "{text}");
     assert!(text.contains("d DataTransfer"), "{text}");
     assert!(text.contains("r raw CALL"), "{text}");
     assert!(text.contains("K device"), "{text}");
@@ -838,4 +848,20 @@ fn browser_selection_follows_the_filtered_rows() {
         b.handle_key(press(KeyCode::Enter), &vars),
         BrowserEvent::Edit(2)
     );
+}
+
+#[test]
+fn an_empty_transaction_limit_form_shows_why_it_stays_open() {
+    use super::super::{Msg2, update2};
+    let mut snapshot = app().snapshot;
+    snapshot.protocol = "ocpp2.1".to_owned();
+    let mut a = App2::new(snapshot, "ws://csms.example/ocpp", "Acme");
+    for code in [KeyCode::Char('3'), KeyCode::Char('i'), KeyCode::Enter] {
+        let fx = update2(&mut a, Msg2::Key(press(code)));
+        assert!(fx.is_empty(), "nothing is sent: {fx:?}");
+    }
+    assert!(matches!(a.mode, Mode2::Form(_)));
+    let text = render(&a, 110, 40);
+    assert!(text.contains("Transaction limit"), "{text}");
+    assert!(text.contains("enter at least one limit"), "{text}");
 }

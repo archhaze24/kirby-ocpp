@@ -531,7 +531,7 @@ fn plan(
                 max_cost,
             };
             if limit == TransactionLimit2::default() {
-                return Err((1, "give at least one limit".to_owned()));
+                return Err((1, "enter at least one limit".to_owned()));
             }
             Ok(Planned::one(
                 "set transaction limit",

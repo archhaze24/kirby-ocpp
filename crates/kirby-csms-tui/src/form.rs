@@ -116,6 +116,14 @@ pub struct Field {
 }
 
 impl Field {
+    /// The payload of a raw call; empty means `{}`.
+    fn raw_payload() -> Self {
+        Self {
+            hint: "empty sends {}",
+            ..Self::new("payload (JSON)", FieldKind::RawJson, "")
+        }
+    }
+
     fn new(label: &'static str, kind: FieldKind, value: &str) -> Self {
         Self {
             label,
@@ -909,7 +917,7 @@ impl Form {
             FormKind::Raw,
             "Raw CALL",
             station,
-            vec![action, Field::new("payload (JSON)", FieldKind::RawJson, "")],
+            vec![action, Field::raw_payload()],
         )
         .in_protocol(Protocol::from_token(protocol).unwrap_or(Protocol::V16))
     }
@@ -919,7 +927,20 @@ impl Form {
         self.protocol = protocol;
         self.validate_all();
         self.error = None;
+        self.quiet_blank_payload();
         self
+    }
+
+    /// An untouched empty payload shows its hint, not the schema violation of `{}`; the error
+    /// comes back once the payload is edited or the form is submitted.
+    fn quiet_blank_payload(&mut self) {
+        if self.kind == FormKind::Raw
+            && let Some(f) = self.fields.get_mut(1)
+            && f.kind == FieldKind::RawJson
+            && f.input.text().trim().is_empty()
+        {
+            f.error = None;
+        }
     }
 
     /// The generic form of a registry action of the station's protocol: one field per
@@ -939,7 +960,7 @@ impl Form {
                 station,
                 vec![
                     Field::select("action", vec![spec.name.to_owned()]),
-                    Field::new("payload (JSON)", FieldKind::RawJson, ""),
+                    Field::raw_payload(),
                 ],
             )
             .in_protocol(ctx.protocol);
@@ -1228,6 +1249,10 @@ impl Form {
         }
         if self.lead == 1 && self.focus == 0 {
             self.refresh_actions();
+        }
+        if self.focus == 0 {
+            // Changing the action does not edit the payload.
+            self.quiet_blank_payload();
         }
         self.check_request();
     }
@@ -2119,7 +2144,12 @@ mod tests {
     fn raw_payload_is_checked_against_the_chosen_action() {
         let mut f = Form::raw("CP-1", Some("Reset"));
         assert_eq!(f.fields[0].options.len(), 26);
-        assert!(f.fields[1].error.is_some(), "{{}} lacks the type");
+        assert_eq!(
+            f.fields[1].error, None,
+            "an untouched payload shows its hint"
+        );
+        assert!(f.submit().is_none(), "{{}} lacks the type");
+        assert!(f.fields[1].error.is_some());
         f.focus = 1;
         clear(&mut f);
         type_text(&mut f, r#"{"type":"Soft"}"#);
