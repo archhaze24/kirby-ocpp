@@ -375,6 +375,7 @@ impl ActiveTx {
     pub(super) fn refresh_local_cost(&mut self) {
         if let Some(tariff) = self.tariff.as_mut().filter(|tariff| tariff.local_cost) {
             self.total_cost = Some(tariff.evaluate());
+            self.cost_currency = Some(tariff.current().currency.clone());
         }
     }
 }

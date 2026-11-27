@@ -106,6 +106,14 @@ impl LimitKind {
 }
 
 impl ActiveTx {
+    fn record_csms_cost(&mut self, cost: f64) {
+        self.total_cost = Some(cost);
+        self.cost_currency = self
+            .tariff
+            .as_ref()
+            .map(|tariff| tariff.current().currency.clone());
+    }
+
     pub(in crate::station2) fn time_limit_reached(&self, now: DateTime<Utc>) -> bool {
         self.limit
             .max_time_s
@@ -177,7 +185,7 @@ impl Station2Actor {
             cost = None;
         }
         if let Some(cost) = cost {
-            tx.total_cost = Some(cost);
+            tx.record_csms_cost(cost);
         }
         let incoming = v21
             .then(|| {
@@ -222,7 +230,7 @@ impl Station2Actor {
             );
             return;
         }
-        tx.total_cost = Some(cost);
+        tx.record_csms_cost(cost);
         let evse = tx.evse;
         self.mark_dirty();
         if self.protocol() == Protocol::V21 {

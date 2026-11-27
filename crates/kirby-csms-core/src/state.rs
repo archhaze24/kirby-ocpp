@@ -32,7 +32,7 @@ use kirby_ocpp_core::ocpp::types::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::state201::{DecodedCall201, StationState2};
+use crate::state201::{DecodedCall201, StationState2, TxCost, TxLimit};
 
 /// Most connector ids (including 0) tracked per station; reports for further ids are ignored.
 pub const MAX_CONNECTORS: usize = 1024;
@@ -252,8 +252,7 @@ pub struct ActiveTransaction {
     pub evse: Option<u32>,
 }
 
-/// One transaction as listed to clients, protocol-neutral. For OCPP 1.6 the JSON is the
-/// [`TransactionRecord`] object plus `"evse": null`, with a numeric `id`.
+/// One transaction as listed to clients, protocol-neutral.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TransactionRow {
     pub id: TransactionId,
@@ -276,6 +275,10 @@ pub struct TransactionRow {
     pub last_meter_at: Option<DateTime<Utc>>,
     /// OCPP 2.0.1 only.
     pub evse: Option<u32>,
+    pub tariff_id: Option<String>,
+    pub transaction_limit: Option<TxLimit>,
+    pub cost: Option<TxCost>,
+    pub priority_charging: bool,
 }
 
 impl From<&TransactionRecord> for TransactionRow {
@@ -295,6 +298,10 @@ impl From<&TransactionRecord> for TransactionRow {
             power_w: tx.power_w,
             last_meter_at: tx.last_meter_at,
             evse: None,
+            tariff_id: None,
+            transaction_limit: None,
+            cost: None,
+            priority_charging: false,
         }
     }
 }
@@ -401,7 +408,7 @@ impl DecodedCall {
         match protocol {
             Protocol::V16 => {}
             Protocol::V201 | Protocol::V21 => {
-                return DecodedCall201::decode(action, request, response)
+                return DecodedCall201::decode(protocol, action, request, response)
                     .map(|call| Self::V2(protocol, call));
             }
             _ => return None,
@@ -657,6 +664,7 @@ impl StationState {
         tx.meter_stop = Some(req.meter_stop);
         tx.stopped_at = Some(req.timestamp);
         tx.stop_reason = req.reason;
+        tx.power_w = None;
         let mut stopped = self
             .transactions
             .iter()
@@ -813,6 +821,12 @@ mod tests {
         let other = json!({"connectorId": 1, "transactionId": 4, "meterValue": [{
             "timestamp": "2026-01-01T00:10:00.000Z", "sampledValue": [{"value": "1"}]}]});
         assert!(!state.apply("MeterValues", &other, &json!({}), now(), 2));
+        stop(&mut state, 3);
+        let tx = &state.transactions[0];
+        assert_eq!(tx.power_w, None);
+        assert_eq!(tx.energy_wh, Some(1500.0));
+        assert_eq!(tx.meter_start, 10);
+        assert_eq!(tx.meter_stop, Some(99));
     }
 
     #[test]

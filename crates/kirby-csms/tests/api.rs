@@ -2811,10 +2811,15 @@ async fn the_transaction_list_filters_and_exports() {
     assert_eq!(tx["connector"], 1);
     assert_eq!(tx["id_tag"], "TAG");
     assert_eq!(tx["evse"], Value::Null);
+    assert_eq!(tx["tariff_id"], Value::Null);
+    assert_eq!(tx["transaction_limit"], Value::Null);
+    assert_eq!(tx["cost"], Value::Null);
+    assert_eq!(tx["priority_charging"], false);
     assert_eq!(
         keys(tx),
         [
             "connector",
+            "cost",
             "energy_wh",
             "evse",
             "id",
@@ -2824,11 +2829,14 @@ async fn the_transaction_list_filters_and_exports() {
             "meter_start",
             "meter_stop",
             "power_w",
+            "priority_charging",
             "started_at",
             "station",
             "status",
             "stop_reason",
             "stopped_at",
+            "tariff_id",
+            "transaction_limit",
         ]
     );
 
@@ -2862,6 +2870,73 @@ async fn the_transaction_list_filters_and_exports() {
         ),
         0
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transaction_21_metadata_is_exposed_in_state_and_transaction_rows() {
+    use kirby_ocpp_core::config::TlsConfig;
+    use kirby_ocpp_core::ocpp::Protocol;
+    use kirby_ocpp_core::ws::{ConnectOptions, Connection, SchemaSet};
+
+    let csms = Csms::start(&[]);
+    let url = format!("ws://{}/ocpp", csms.station_addr);
+    let options =
+        ConnectOptions::default().with_schemas(SchemaSet::for_protocol(Protocol::V21).unwrap());
+    let (station, _events) =
+        Connection::connect(&url, "CP-21", &TlsConfig::default(), "ocpp2.1", options)
+            .await
+            .unwrap();
+    station
+        .call(
+            "TransactionEvent",
+            json!({
+                "eventType": "Started",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "triggerReason": "Authorized",
+                "seqNo": 0,
+                "transactionInfo": {
+                    "transactionId": "tx-1",
+                    "tariffId": "tariff-1",
+                    "transactionLimit": {"maxEnergy": 1500.5, "maxSoC": 80}
+                },
+                "costDetails": {
+                    "totalCost": {"typeOfCost": "NormalCost", "currency": "EUR", "total": {"inclTax": 1.25}},
+                    "totalUsage": {"energy": 0, "chargingTime": 0, "idleTime": 0}
+                }
+            }),
+            Some(WAIT),
+        )
+        .await
+        .unwrap();
+    station
+        .call(
+            "NotifyPriorityCharging",
+            json!({"transactionId": "tx-1", "activated": true}),
+            Some(WAIT),
+        )
+        .await
+        .unwrap();
+
+    let (status, detail) = csms.get("/v1/stations/CP-21").await;
+    assert_eq!(status, 200);
+    let (status, listed) = csms.get("/v1/transactions?station=CP-21").await;
+    assert_eq!(status, 200);
+    for tx in [
+        &detail["state"]["v2"]["transactions"][0],
+        &listed["transactions"][0],
+    ] {
+        assert_eq!(tx["id"], "tx-1");
+        assert_eq!(tx["tariff_id"], "tariff-1");
+        assert_eq!(
+            tx["transaction_limit"],
+            json!({"max_cost": null, "max_energy": 1500.5, "max_time": null, "max_soc": 80})
+        );
+        assert_eq!(
+            tx["cost"],
+            json!({"currency": "EUR", "total_excl_tax": null, "total_incl_tax": 1.25})
+        );
+        assert_eq!(tx["priority_charging"], true);
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -139,7 +139,7 @@ impl Default for PersistedStation {
 }
 
 /// Current on-disk format version of the OCPP 2.0.1 station state and its secrets file.
-pub const STORE2_VERSION: u32 = 2;
+pub const STORE2_VERSION: u32 = 3;
 
 /// Everything an OCPP 2.0.1 station keeps across a restart. It has its own file kind and
 /// version, independent of [`PersistedStation`].

@@ -10,6 +10,8 @@ tag as the GitHub release notes.
 ### ✨ Added
 
 - OCPP 2.1 emulator: a used reservation whose EV does not connect within `EVConnectionTimeOut` ends with `ReservationStatusUpdate` `NoTransaction` (H03.FR.11) instead of returning to the EVSE.
+- `kirby-csms`: transactions of OCPP 2.1 stations carry `tariff_id`, `transaction_limit`, `cost` (currency and totals from `costDetails`) and `priority_charging` in `GET /v1/transactions` and the station state (`null`/`false` for 1.6 and 2.0.1).
+- OCPP 2.x emulator: the EVSE snapshot carries `cost_currency` next to `total_cost`. The 2.x state file is format version 3; files of version 1 and 2 still load.
 - Terminal UIs: `Home` and `End` jump to the first and last row in every pane of the emulator (connectors/EVSEs, actions, log; `End` follows the newest log row), as they already did in `kirby-csms`.
 - Emulator terminal UI: the OCPP 1.6 header shows the protocol (`OCPP 1.6`), like the 2.x header (`OCPP 2.0.1`, `OCPP 2.1`).
 
@@ -24,6 +26,7 @@ tag as the GitHub release notes.
 
 ### 🐛 Fixed
 
+- `kirby-csms`: `power_w` of a transaction is cleared when it stops instead of keeping the last sample.
 - Refusals shown in the emulator status line no longer start with `invalid argument:`; the message stands alone (`EVSE 1 does not exist`).
 - Fleet terminal UI: the first station's boot events could be missing from the log when the stations connected before the UI subscribed to them.
 

@@ -146,6 +146,8 @@ pub struct ActiveTx {
     #[serde(default)]
     pub total_cost: Option<f64>,
     #[serde(default)]
+    pub cost_currency: Option<String>,
+    #[serde(default)]
     pub tariff: Option<TransactionTariff>,
 }
 
@@ -1049,6 +1051,7 @@ impl Station2Actor {
                 csms_limit: TransactionLimit2::default(),
                 limit_reached: None,
                 total_cost: None,
+                cost_currency: None,
                 tariff: None,
                 priority_charging: false,
             },
@@ -1895,6 +1898,9 @@ impl Station2Actor {
             if self.protocol() != Protocol::V21 && active.tariff.take().is_some() {
                 active.total_cost = None;
             }
+            if active.total_cost.is_none() {
+                active.cost_currency = None;
+            }
             if self.tx.active.contains_key(&evse) {
                 continue;
             }
@@ -2578,6 +2584,7 @@ mod tests {
             csms_limit: TransactionLimit2::default(),
             limit_reached: None,
             total_cost: None,
+            cost_currency: None,
             tariff: None,
             priority_charging: false,
         }
@@ -2597,6 +2604,7 @@ mod tests {
         };
         tx.limit_reached = Some(LimitKind::Cost);
         tx.total_cost = Some(5.5);
+        tx.cost_currency = Some("USD".to_owned());
         tx.remote_start_id = Some(42);
         tx.remote_sent = true;
         tx.priority_charging = true;
@@ -2605,6 +2613,12 @@ mod tests {
             serde_json::from_value::<ActiveTx>(value.clone()).unwrap(),
             tx
         );
+        let object = value.as_object_mut().unwrap();
+        object.remove("cost_currency");
+        let old_cost: ActiveTx = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(old_cost.total_cost, Some(5.5));
+        assert_eq!(old_cost.cost_currency, None);
+
         let object = value.as_object_mut().unwrap();
         for key in [
             "limit",
@@ -2623,6 +2637,7 @@ mod tests {
         assert_eq!(old.csms_limit, TransactionLimit2::default());
         assert_eq!(old.limit_reached, None);
         assert_eq!(old.total_cost, None);
+        assert_eq!(old.cost_currency, None);
         assert!(!old.remote_sent);
         assert!(!old.priority_charging);
         assert!(old.begin_sample.is_none());

@@ -827,7 +827,87 @@ async fn tariff_cost_limit_uses_local_cost_and_ignores_csms_updates() {
     advance(&station, 100).await;
     let reached = event(&csms, mark, "triggerReason", "CostLimitReached").await;
     assert_eq!(reached["transactionInfo"]["chargingState"], "SuspendedEVSE");
-    assert!(station.snapshot().evse(1).unwrap().total_cost.unwrap() >= 0.01);
+    let snapshot = station.snapshot();
+    let evse = snapshot.evse(1).unwrap();
+    assert!(evse.total_cost.unwrap() >= 0.01);
+    assert_eq!(evse.cost_currency.as_deref(), Some("USD"));
+    end(&csms, &station).await;
+    let snapshot = wait_snapshot(&station, "cost cleared", |s| {
+        s.evse(1).unwrap().total_cost.is_none()
+    })
+    .await;
+    assert_eq!(snapshot.evse(1).unwrap().cost_currency, None);
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn csms_cost_without_a_tariff_has_no_currency() {
+    let csms = v21_csms().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    let started = start(&csms, &station).await;
+    assert_eq!(
+        call(
+            &csms,
+            "CostUpdated",
+            json!({"transactionId":started["transactionInfo"]["transactionId"],"totalCost":12.5})
+        )
+        .await,
+        json!({})
+    );
+    let snapshot = wait_snapshot(&station, "CSMS cost", |s| {
+        s.evse(1).unwrap().total_cost == Some(12.5)
+    })
+    .await;
+    assert_eq!(snapshot.evse(1).unwrap().cost_currency, None);
+    stop(&station, task).await;
+}
+
+#[tokio::test]
+async fn csms_cost_with_a_tariff_uses_its_currency() {
+    let csms = v21_csms().await;
+    csms.respond("TransactionEvent", |p| {
+        Reply::Result(if p["triggerReason"] == "MeterValuePeriodic" {
+            json!({"totalCost": 10.0})
+        } else {
+            json!({})
+        })
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
+    set_variables(&csms, &[(COMPONENT, "Enabled", Some("Tariff"), "true")]).await;
+    assert_eq!(
+        install(&csms, 1, energy("energy", 1.0)).await["status"],
+        "Accepted"
+    );
+    let started = start(&csms, &station).await;
+    send(&station, Command2::SampleMeter { evse: 1 }).await;
+    let snapshot = wait_snapshot(&station, "TransactionEvent response cost", |s| {
+        s.evse(1).unwrap().total_cost == Some(10.0)
+    })
+    .await;
+    assert_eq!(
+        snapshot.evse(1).unwrap().cost_currency.as_deref(),
+        Some("USD")
+    );
+
+    assert_eq!(
+        call(
+            &csms,
+            "CostUpdated",
+            json!({"transactionId":started["transactionInfo"]["transactionId"],"totalCost":12.5})
+        )
+        .await,
+        json!({})
+    );
+    let snapshot = wait_snapshot(&station, "CostUpdated cost", |s| {
+        s.evse(1).unwrap().total_cost == Some(12.5)
+    })
+    .await;
+    assert_eq!(
+        snapshot.evse(1).unwrap().cost_currency.as_deref(),
+        Some("USD")
+    );
     stop(&station, task).await;
 }
 
@@ -846,10 +926,11 @@ async fn tariff_cost_state_survives_e17_resume() {
     let (station, task) = boot(&csms, dir.path(), Protocol::V21).await;
     let resumed = event(&csms, mark, "triggerReason", "TxResumed").await;
     assert!(resumed["transactionInfo"].get("tariffId").is_none());
-    assert_eq!(
-        station.snapshot().evse(1).unwrap().tariff_id.as_deref(),
-        Some("energy")
-    );
+    let snapshot = station.snapshot();
+    let evse = snapshot.evse(1).unwrap();
+    assert_eq!(evse.tariff_id.as_deref(), Some("energy"));
+    assert!(evse.total_cost.is_some());
+    assert_eq!(evse.cost_currency.as_deref(), Some("USD"));
     advance(&station, 1000).await;
     let ended = end(&csms, &station).await;
     assert!(

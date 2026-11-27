@@ -58,6 +58,7 @@ impl Station2Actor {
                     .and_then(|tx| tx.limit_reached)
                     .map(|kind| kind.trigger().as_str().to_owned());
                 let cost = tx.and_then(|tx| tx.total_cost);
+                let cost_currency = tx.and_then(|tx| tx.cost_currency.clone());
                 let tariff = tx
                     .and_then(|tx| tx.tariff.as_ref())
                     .map(|state| state.current().id.clone());
@@ -70,6 +71,7 @@ impl Station2Actor {
                     limit,
                     reached,
                     cost,
+                    cost_currency,
                     tariff,
                     default,
                     priority,
@@ -78,7 +80,18 @@ impl Station2Actor {
             .collect();
         for (
             entry,
-            (reservation, offered, external, limit, reached, cost, tariff, default, priority),
+            (
+                reservation,
+                offered,
+                external,
+                limit,
+                reached,
+                cost,
+                currency,
+                tariff,
+                default,
+                priority,
+            ),
         ) in self.state.evses.iter_mut().zip(views)
         {
             entry.reservation = reservation;
@@ -87,6 +100,7 @@ impl Station2Actor {
             entry.transaction_limit = limit;
             entry.limit_reached = reached;
             entry.total_cost = cost;
+            entry.cost_currency = currency;
             entry.tariff_id = tariff;
             entry.default_tariff_id = default;
             entry.priority_charging = priority;

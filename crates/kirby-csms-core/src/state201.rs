@@ -59,6 +59,8 @@ const MAX_FIRMWARE_VERSION_LEN: usize = 50;
 const MAX_MODEM_ID_LEN: usize = 20;
 const MAX_EVENT_TYPE_LEN: usize = 50;
 const MAX_TECH_INFO_LEN: usize = 255;
+const MAX_TARIFF_ID_LEN: usize = 60;
+const MAX_CURRENCY_LEN: usize = 3;
 
 /// The OCPP 2.0.1 part of a station's state. See the module docs.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -163,16 +165,16 @@ impl StationState2 {
     /// Folds one `TransactionEvent` with the authorization status from its response.
     fn fold_transaction_event(
         &mut self,
-        req: TransactionEventRequest,
-        id_token_status: Option<AuthorizationStatus>,
+        call: TransactionCall,
         history_cap: usize,
         max_token_len: usize,
     ) -> bool {
+        let req = &call.request;
         let id = req.transaction_info.transaction_id.clone();
         let known = self.transactions.iter().position(|tx| tx.id == id);
         let created = known.is_none();
         let index = known.unwrap_or_else(|| {
-            self.transactions.push(Tx2Record::new(id, &req));
+            self.transactions.push(Tx2Record::new(id, req));
             self.transactions.len() - 1
         });
         let Some(tx) = self.transactions.get_mut(index) else {
@@ -188,7 +190,7 @@ impl StationState2 {
         let latest = tx.status == TransactionStatus::Active
             && highest.is_none_or(|highest| req.seq_no >= highest);
         let was_active = tx.status == TransactionStatus::Active;
-        tx.fold_event(req, id_token_status, latest, max_token_len);
+        tx.fold_event(call, latest, max_token_len);
         let stopped = was_active && tx.status == TransactionStatus::Stopped;
         self.counters.transaction_events += 1;
         if created || stopped {
@@ -310,7 +312,32 @@ pub struct Tx2Record {
     pub meter_stop_wh: Option<i64>,
     /// The station's timestamp of the newest reading folded.
     pub last_meter_at: Option<DateTime<Utc>>,
+    pub tariff_id: Option<String>,
+    pub transaction_limit: Option<TxLimit>,
+    pub cost: Option<TxCost>,
+    pub priority_charging: bool,
     pub seq: SeqTracker,
+}
+
+/// OCPP 2.1 limits reported for a transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct TxLimit {
+    /// In the tariff currency.
+    pub max_cost: Option<f64>,
+    /// Energy in Wh.
+    pub max_energy: Option<f64>,
+    /// Duration in seconds.
+    pub max_time: Option<i64>,
+    /// State of charge in percent.
+    pub max_soc: Option<i64>,
+}
+
+/// OCPP 2.1 running or final cost reported by the station.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct TxCost {
+    pub currency: String,
+    pub total_excl_tax: Option<f64>,
+    pub total_incl_tax: Option<f64>,
 }
 
 impl Tx2Record {
@@ -336,6 +363,10 @@ impl Tx2Record {
             meter_start_wh: None,
             meter_stop_wh: None,
             last_meter_at: None,
+            tariff_id: None,
+            transaction_limit: None,
+            cost: None,
+            priority_charging: false,
             seq: SeqTracker::default(),
         }
     }
@@ -358,18 +389,23 @@ impl Tx2Record {
             power_w: self.power_w,
             last_meter_at: self.last_meter_at,
             evse: self.evse,
+            tariff_id: self.tariff_id.clone(),
+            transaction_limit: self.transaction_limit,
+            cost: self.cost.clone(),
+            priority_charging: self.priority_charging,
         }
     }
 
     /// Merges one event into the record. `latest` tells whether the event may replace
     /// stored values (see the caller).
-    fn fold_event(
-        &mut self,
-        req: TransactionEventRequest,
-        id_token_status: Option<AuthorizationStatus>,
-        latest: bool,
-        max_token_len: usize,
-    ) {
+    fn fold_event(&mut self, call: TransactionCall, latest: bool, max_token_len: usize) {
+        let TransactionCall {
+            request: req,
+            id_token_status,
+            tariff_id,
+            transaction_limit,
+            cost,
+        } = call;
         self.started_at = self.started_at.min(req.timestamp);
         if latest {
             self.trigger_reason = req.trigger_reason;
@@ -383,6 +419,19 @@ impl Tx2Record {
             latest,
         );
         merge(&mut self.reservation_id, req.reservation_id, latest);
+        merge_by_seq(
+            &mut self.tariff_id,
+            tariff_id,
+            &mut self.seq.tariff_id_at,
+            req.seq_no,
+        );
+        merge_by_seq(
+            &mut self.transaction_limit,
+            transaction_limit,
+            &mut self.seq.transaction_limit_at,
+            req.seq_no,
+        );
+        merge_by_seq(&mut self.cost, cost, &mut self.seq.cost_at, req.seq_no);
         if let Some(evse) = req.evse
             && let Some(evse_id) = positive(evse.id)
         {
@@ -413,6 +462,9 @@ impl Tx2Record {
                 self.stopped_at = Some(req.timestamp);
             }
             merge(&mut self.stopped_reason, info.stopped_reason, false);
+        }
+        if self.status == TransactionStatus::Stopped {
+            self.power_w = None;
         }
     }
 
@@ -451,6 +503,13 @@ pub struct SeqTracker {
     pub duplicates: u32,
     /// Events folded with a `seqNo` below the highest one seen before.
     pub out_of_order: u32,
+    // These fields can be reported independently, with gaps in their event sequences.
+    #[serde(skip)]
+    tariff_id_at: Option<i32>,
+    #[serde(skip)]
+    transaction_limit_at: Option<i32>,
+    #[serde(skip)]
+    cost_at: Option<i32>,
 }
 
 impl SeqTracker {
@@ -617,6 +676,16 @@ fn merge<T>(slot: &mut Option<T>, value: Option<T>, latest: bool) {
     }
 }
 
+/// Keeps the newest event that actually supplied this field.
+fn merge_by_seq<T>(slot: &mut Option<T>, value: Option<T>, seq: &mut Option<i32>, incoming: i32) {
+    if let Some(value) = value
+        && seq.is_none_or(|current| incoming > current)
+    {
+        *slot = Some(value);
+        *seq = Some(incoming);
+    }
+}
+
 /// An id of 1 or more; `0` and negative ids are not addressable EVSEs or connectors.
 fn positive(id: i32) -> Option<u32> {
     u32::try_from(id).ok().filter(|&id| id >= 1)
@@ -665,6 +734,35 @@ fn connector_event(event: &Value) -> Option<ConnectorEvent> {
     Some((evse, connector, status, timestamp))
 }
 
+pub(crate) struct TransactionCall {
+    request: TransactionEventRequest,
+    id_token_status: Option<AuthorizationStatus>,
+    tariff_id: Option<String>,
+    transaction_limit: Option<TxLimit>,
+    cost: Option<TxCost>,
+}
+
+fn transaction_limit(value: &Value) -> Option<TxLimit> {
+    let limit = value.as_object()?;
+    Some(TxLimit {
+        max_cost: limit.get("maxCost").and_then(Value::as_f64),
+        max_energy: limit.get("maxEnergy").and_then(Value::as_f64),
+        max_time: limit.get("maxTime").and_then(Value::as_i64),
+        max_soc: limit.get("maxSoC").and_then(Value::as_i64),
+    })
+}
+
+fn transaction_cost(value: &Value) -> Option<TxCost> {
+    let cost = value.get("totalCost")?;
+    let currency = cost.get("currency")?.as_str()?;
+    let total = cost.get("total")?.as_object()?;
+    Some(TxCost {
+        currency: truncate(currency.to_owned(), MAX_CURRENCY_LEN),
+        total_excl_tax: total.get("exclTax").and_then(Value::as_f64),
+        total_incl_tax: total.get("inclTax").and_then(Value::as_f64),
+    })
+}
+
 pub(crate) enum DecodedCall201 {
     Boot(
         Box<BootNotificationRequest>,
@@ -673,7 +771,11 @@ pub(crate) enum DecodedCall201 {
     Heartbeat,
     Status(StatusNotificationRequest),
     NotifyEvent(Vec<ConnectorEvent>),
-    Transaction(Box<TransactionEventRequest>, Option<AuthorizationStatus>),
+    Transaction(Box<TransactionCall>),
+    PriorityCharging {
+        id: String,
+        activated: bool,
+    },
     Meter(MeterValuesRequest),
     SecurityEvent(SecurityEventNotificationRequest),
     NotifyReport {
@@ -684,7 +786,12 @@ pub(crate) enum DecodedCall201 {
 }
 
 impl DecodedCall201 {
-    pub(crate) fn decode(action: &str, request: &Value, response: &Value) -> Option<Self> {
+    pub(crate) fn decode(
+        protocol: Protocol,
+        action: &str,
+        request: &Value,
+        response: &Value,
+    ) -> Option<Self> {
         Some(match action {
             "BootNotification" => {
                 let req = decode_payload(request)?;
@@ -705,7 +812,37 @@ impl DecodedCall201 {
                 let id_token_status = decode_payload::<TransactionEventResponse>(response)
                     .and_then(|res| res.id_token_info)
                     .map(|info| info.status);
-                Self::Transaction(Box::new(req), id_token_status)
+                let mut call = TransactionCall {
+                    request: req,
+                    id_token_status,
+                    tariff_id: None,
+                    transaction_limit: None,
+                    cost: None,
+                };
+                if protocol == Protocol::V21 {
+                    if let Some(info) = request.get("transactionInfo") {
+                        call.tariff_id = info
+                            .get("tariffId")
+                            .and_then(Value::as_str)
+                            .map(|id| truncate(id.to_owned(), MAX_TARIFF_ID_LEN));
+                        call.transaction_limit =
+                            info.get("transactionLimit").and_then(transaction_limit);
+                    }
+                    call.cost = request.get("costDetails").and_then(transaction_cost);
+                }
+                Self::Transaction(Box::new(call))
+            }
+            "NotifyPriorityCharging" if protocol == Protocol::V21 => {
+                let id = request.get("transactionId")?.as_str()?;
+                if id.is_empty()
+                    || id.chars().take(MAX_TRANSACTION_ID_LEN + 1).count() > MAX_TRANSACTION_ID_LEN
+                {
+                    return None;
+                }
+                Self::PriorityCharging {
+                    id: id.to_owned(),
+                    activated: request.get("activated")?.as_bool()?,
+                }
             }
             "MeterValues" => Self::Meter(decode_payload(request)?),
             "SecurityEventNotification" => Self::SecurityEvent(decode_payload(request)?),
@@ -736,13 +873,12 @@ impl StationState {
         if !matches!(protocol, Protocol::V201 | Protocol::V21) {
             return false;
         }
-        DecodedCall201::decode(action, request, response)
+        DecodedCall201::decode(protocol, action, request, response)
             .is_some_and(|call| self.apply_decoded_v2(protocol, call, now, history_cap))
     }
 
-    /// Folds an answered 2.0.1 or 2.1 CALL into the state. The messages the fold reads have
-    /// the same shape in both. Heartbeats and updates that only bump counters do not count
-    /// as changes.
+    /// Folds an answered 2.0.1 or 2.1 CALL into the state. Heartbeats and updates that
+    /// only bump counters do not count as changes.
     pub(crate) fn apply_decoded_v2(
         &mut self,
         protocol: Protocol,
@@ -777,8 +913,20 @@ impl StationState {
             }
             DecodedCall201::Status(req) => self.v2_status(&req, now),
             DecodedCall201::NotifyEvent(events) => self.v2_notify_event(events, now),
-            DecodedCall201::Transaction(req, id_token_status) => {
-                self.v2_transaction_event(protocol, *req, id_token_status, history_cap)
+            DecodedCall201::Transaction(call) => {
+                self.v2_transaction_event(protocol, *call, history_cap)
+            }
+            DecodedCall201::PriorityCharging { id, activated } => {
+                let Some(tx) = self
+                    .v2
+                    .as_deref_mut()
+                    .and_then(|v2| v2.transactions.iter_mut().find(|tx| tx.id == id))
+                else {
+                    return false;
+                };
+                let changed = tx.priority_charging != activated;
+                tx.priority_charging = activated;
+                changed
             }
             DecodedCall201::Meter(req) => self.v2_meter_values(&req),
             DecodedCall201::SecurityEvent(req) => self.v2_security_event(req, now),
@@ -849,11 +997,10 @@ impl StationState {
     fn v2_transaction_event(
         &mut self,
         protocol: Protocol,
-        req: TransactionEventRequest,
-        id_token_status: Option<AuthorizationStatus>,
+        call: TransactionCall,
         history_cap: usize,
     ) -> bool {
-        let id_len = req.transaction_info.transaction_id.chars().count();
+        let id_len = call.request.transaction_info.transaction_id.chars().count();
         if id_len == 0 || id_len > MAX_TRANSACTION_ID_LEN {
             self.v2_mut().counters.rejected_events += 1;
             return false;
@@ -864,7 +1011,7 @@ impl StationState {
             MAX_ID_TOKEN_LEN
         };
         self.v2_mut()
-            .fold_transaction_event(req, id_token_status, history_cap, max_token_len)
+            .fold_transaction_event(call, history_cap, max_token_len)
     }
 
     /// `MeterValues` outside a transaction: latest energy and power per EVSE.
@@ -1084,14 +1231,17 @@ mod tests {
     }
 
     #[test]
-    fn legacy_row_json_is_the_old_record_json_plus_evse() {
+    fn legacy_row_json_adds_defaults_to_the_old_record() {
         const OLD_ACTIVE: &str = r#"{"id":7,"connector":1,"id_tag":"TAG-A","id_tag_status":"Accepted","meter_start":10,"started_at":"2026-01-01T00:00:02Z","status":"active","meter_stop":null,"stopped_at":null,"stop_reason":null,"energy_wh":1500.0,"power_w":7000.0,"last_meter_at":"2026-01-01T00:10:00Z"}"#;
         const OLD_STOPPED: &str = r#"{"id":8,"connector":1,"id_tag":"TAG-B","id_tag_status":"Accepted","meter_start":10,"started_at":"2026-01-01T00:00:02Z","status":"stopped","meter_stop":99,"stopped_at":"2026-01-01T01:00:00Z","stop_reason":"Remote","energy_wh":null,"power_w":null,"last_meter_at":null}"#;
         let state = legacy_state();
         for (record, old) in state.transactions.iter().zip([OLD_ACTIVE, OLD_STOPPED]) {
             assert_eq!(serde_json::to_string(record).unwrap(), old);
             let row = serde_json::to_string(&TransactionRow::from(record)).unwrap();
-            let expected = format!("{},\"evse\":null}}", old.strip_suffix('}').unwrap());
+            let expected = format!(
+                "{},\"evse\":null,\"tariff_id\":null,\"transaction_limit\":null,\"cost\":null,\"priority_charging\":false}}",
+                old.strip_suffix('}').unwrap()
+            );
             assert_eq!(row, expected);
         }
         let rows = state.transaction_rows();
@@ -1953,6 +2103,168 @@ mod tests {
     }
 
     // ---- meters ----
+
+    #[test]
+    fn ended_transactions_clear_power_but_keep_energy_and_boundary_readings() {
+        let mut state = StationState::default();
+        let sample = |kind, seq, sec, wh, context| {
+            event(
+                kind,
+                seq,
+                sec,
+                &json!({"meterValue": [{
+                    "timestamp": at(sec),
+                    "sampledValue": [
+                        {"value": wh, "context": context},
+                        {"value": 7000, "measurand": "Power.Active.Import"}
+                    ]
+                }]}),
+            )
+        };
+        assert!(send(
+            &mut state,
+            &sample("Started", 0, 10, 100, "Transaction.Begin")
+        ));
+        assert_close(first_tx(&state).power_w, 7000.0);
+        assert!(send(
+            &mut state,
+            &sample("Ended", 2, 20, 150, "Transaction.End")
+        ));
+        assert_eq!(first_tx(&state).power_w, None);
+        assert!(send(
+            &mut state,
+            &sample("Updated", 1, 25, 150, "Sample.Periodic")
+        ));
+        let tx = first_tx(&state);
+        assert_eq!(tx.status, TransactionStatus::Stopped);
+        assert_eq!(tx.power_w, None);
+        assert_close(tx.energy_wh, 150.0);
+        assert_eq!(tx.meter_start_wh, Some(100));
+        assert_eq!(tx.meter_stop_wh, Some(150));
+    }
+
+    #[test]
+    fn transaction_event_21_fields_are_bounded_and_replace_previous_values() {
+        let fields = json!({
+            "transactionInfo": {
+                "tariffId": "É".repeat(65),
+                "transactionLimit": {"maxCost": 9.5, "maxEnergy": 123.5, "maxTime": 900, "maxSoC": 80}
+            },
+            "costDetails": {"totalCost": {"currency": "EUR-extra", "total": {"exclTax": 3.5, "inclTax": 4.2}}}
+        });
+        for protocol in [Protocol::V201, Protocol::V21] {
+            let mut state = StationState::default();
+            let fold = |state: &mut StationState, kind, seq, patch: &Value| {
+                state.apply_v2(
+                    protocol,
+                    "TransactionEvent",
+                    &event(kind, seq, 10, patch),
+                    &json!({}),
+                    now(),
+                    100,
+                )
+            };
+            assert!(fold(&mut state, "Started", 0, &fields));
+            let tx = first_tx(&state);
+            if protocol == Protocol::V201 {
+                for json in [
+                    serde_json::to_value(tx).unwrap(),
+                    serde_json::to_value(tx.row()).unwrap(),
+                ] {
+                    assert_eq!(json.get("tariff_id"), Some(&Value::Null));
+                    assert_eq!(json.get("transaction_limit"), Some(&Value::Null));
+                    assert_eq!(json.get("cost"), Some(&Value::Null));
+                    assert_eq!(json["priority_charging"], false);
+                }
+                continue;
+            }
+
+            let json = serde_json::to_value(tx).unwrap();
+            assert_eq!(json["tariff_id"], "É".repeat(60));
+            assert_eq!(
+                json["transaction_limit"],
+                json!({"max_cost": 9.5, "max_energy": 123.5, "max_time": 900, "max_soc": 80})
+            );
+            assert_eq!(
+                json["cost"],
+                json!({"currency": "EUR", "total_excl_tax": 3.5, "total_incl_tax": 4.2})
+            );
+            assert!(fold(&mut state, "Ended", 3, &json!({})));
+            assert!(fold(
+                &mut state,
+                "Updated",
+                2,
+                &json!({
+                    "transactionInfo": {"tariffId": "new", "transactionLimit": {"maxTime": 500, "maxSoC": 20.5}},
+                    "costDetails": {"totalCost": {"currency": "USD", "total": {"inclTax": 6.25}}}
+                })
+            ));
+            assert!(fold(&mut state, "Updated", 1, &fields));
+            assert!(!fold(&mut state, "Updated", 2, &fields));
+            let tx = first_tx(&state);
+            for json in [
+                serde_json::to_value(tx).unwrap(),
+                serde_json::to_value(tx.row()).unwrap(),
+            ] {
+                assert_eq!(json["tariff_id"], "new");
+                assert_eq!(
+                    json["transaction_limit"],
+                    json!({"max_cost": null, "max_energy": null, "max_time": 500, "max_soc": null})
+                );
+                assert_eq!(
+                    json["cost"],
+                    json!({"currency": "USD", "total_excl_tax": null, "total_incl_tax": 6.25})
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn priority_charging_updates_only_the_named_21_transaction() {
+        let mut state = StationState::default();
+        for id in ["tx-1", "tx-2"] {
+            assert!(state.apply_v2(
+                Protocol::V21,
+                "TransactionEvent",
+                &event_for(id, "Started", 0, 10, &json!({})),
+                &json!({}),
+                now(),
+                100
+            ));
+        }
+        let notify = |state: &mut StationState, protocol, id: &str, activated: Value| {
+            state.apply_v2(
+                protocol,
+                "NotifyPriorityCharging",
+                &json!({"transactionId": id, "activated": activated}),
+                &json!({}),
+                now(),
+                100,
+            )
+        };
+        assert!(!first_tx(&state).priority_charging);
+        for (protocol, id, activated) in [
+            (Protocol::V201, "tx-1", json!(true)),
+            (Protocol::V21, "missing", json!(true)),
+            (Protocol::V21, "tx-1", json!("true")),
+            (Protocol::V21, "", json!(true)),
+        ] {
+            assert!(!notify(&mut state, protocol, id, activated));
+        }
+        assert!(!notify(
+            &mut state,
+            Protocol::V21,
+            &"X".repeat(37),
+            json!(true)
+        ));
+        assert!(notify(&mut state, Protocol::V21, "tx-1", json!(true)));
+        let rows = state.transaction_rows();
+        assert!(rows[0].priority_charging);
+        assert!(!rows[1].priority_charging);
+        assert!(!notify(&mut state, Protocol::V21, "tx-1", json!(true)));
+        assert!(notify(&mut state, Protocol::V21, "tx-1", json!(false)));
+        assert!(!first_tx(&state).priority_charging);
+    }
 
     /// One sample of `value` in a `MeterValue` at second 10 of the day.
     fn sample_event(sample: &Value) -> Value {

@@ -78,6 +78,10 @@ fn tx2(id: &str, connector: Option<u32>, token: &str) -> kirby_csms_core::Tx2Rec
         meter_start_wh: None,
         meter_stop_wh: None,
         last_meter_at: None,
+        tariff_id: None,
+        transaction_limit: None,
+        cost: None,
+        priority_charging: false,
         seq: kirby_csms_core::SeqTracker::default(),
     }
 }

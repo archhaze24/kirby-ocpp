@@ -90,6 +90,9 @@ pub struct EvseSnapshot {
     /// Local cost including tax, or the last cost reported by the CSMS.
     #[serde(default)]
     pub total_cost: Option<f64>,
+    /// Currency of total_cost (ISO 4217), when known.
+    #[serde(default)]
+    pub cost_currency: Option<String>,
     #[serde(default)]
     pub tariff_id: Option<String>,
     #[serde(default)]

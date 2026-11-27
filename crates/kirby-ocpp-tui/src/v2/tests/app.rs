@@ -55,6 +55,7 @@ fn evse(id: u32) -> EvseSnapshot {
         transaction_limit: None,
         limit_reached: None,
         total_cost: None,
+        cost_currency: None,
         tariff_id: None,
         default_tariff_id: None,
         priority_charging: false,

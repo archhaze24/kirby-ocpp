@@ -293,6 +293,10 @@ fn running_tx(id: &str, token: &str) -> Tx2Record {
         meter_start_wh: None,
         meter_stop_wh: None,
         last_meter_at: None,
+        tariff_id: None,
+        transaction_limit: None,
+        cost: None,
+        priority_charging: false,
         seq: SeqTracker::default(),
     }
 }

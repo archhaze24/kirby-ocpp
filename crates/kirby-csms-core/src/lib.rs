@@ -87,6 +87,6 @@ pub use state::{
 };
 pub use state201::{
     Connector2State, Counters2, EvseState, MAX_METER_EVSES, MAX_SEQ_RANGES, MeterReading,
-    ReportInfo, SeqTracker, StationState2, Tx2Record,
+    ReportInfo, SeqTracker, StationState2, Tx2Record, TxCost, TxLimit,
 };
 pub use tls::{server_config_from_pem, server_config_with_client_ca};
