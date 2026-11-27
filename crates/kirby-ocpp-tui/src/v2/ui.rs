@@ -101,7 +101,8 @@ fn draw_header(f: &mut Frame<'_>, app: &App2, area: Rect) {
     // The chips in the order they give way to a narrow terminal: the connection and the
     // registration always stay.
     let mut chips = vec![chip(&conn_text, conn_color), chip(&reg_text, reg_color)];
-    let mut optional = vec![chip(&sanitize(&s.protocol), Color::Blue)];
+    let protocol = s.protocol.strip_prefix("ocpp").unwrap_or(&s.protocol);
+    let mut optional = vec![chip(&format!("OCPP {}", sanitize(protocol)), Color::Blue)];
     if !app.pending.is_empty() {
         optional.push(chip(
             &format!("{} pending", app.pending.len()),
@@ -320,7 +321,12 @@ fn draw_overlay(f: &mut Frame<'_>, app: &App2, area: Rect) {
                 || (String::new(), true),
                 |a| {
                     (
-                        format!("{}: {}", a.tab.title(), a.label),
+                        format!(
+                            "{}{}: {}",
+                            overlays::key_column(a.key),
+                            a.tab.title(),
+                            a.label
+                        ),
                         app.reason_for2(a.id).is_some(),
                     )
                 },
@@ -365,6 +371,7 @@ const HELP2: &[&str] = &[
     "",
     "1-6 / Tab / Shift-Tab   switch tab",
     "Up Down j k             move in the focused pane",
+    "PgUp PgDn Home End      page / first / last (log: oldest / newest)",
     "Left Right              change focused pane (EVSEs, actions, log)",
     "[ ]                     previous / next EVSE",
     "Enter                   run action / open log row",

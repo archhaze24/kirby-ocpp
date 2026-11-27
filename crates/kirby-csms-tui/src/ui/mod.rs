@@ -6,7 +6,9 @@ mod panes;
 use kirby_ocpp_tui::app::NoticeLevel;
 use kirby_ocpp_tui::text::{sanitize, truncate};
 use kirby_ocpp_tui::theme::{Level, level_mark};
-use kirby_ocpp_tui::ui::{PendingRow, dim, hint_line_pinned, pending_list};
+use kirby_ocpp_tui::ui::{
+    PendingRow, content_height, dim, hint_line_pinned, pending_list, visible_scroll,
+};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -357,13 +359,13 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
             let rect = centered(
                 area,
                 area.width.saturating_sub(4),
-                area.height.saturating_sub(2),
+                content_height(area.height, d.lines.len()),
             );
             let inner = popup(f, rect, &sanitize(&d.title));
             let lines: Vec<Line<'_>> = d
                 .lines
                 .iter()
-                .skip(d.scroll)
+                .skip(visible_scroll(d.scroll, d.lines.len(), inner.height))
                 .take(usize::from(inner.height))
                 .map(|l| Line::raw(truncate(l, usize::from(inner.width))))
                 .collect();

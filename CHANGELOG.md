@@ -10,12 +10,22 @@ tag as the GitHub release notes.
 ### ✨ Added
 
 - OCPP 2.1 emulator: a used reservation whose EV does not connect within `EVConnectionTimeOut` ends with `ReservationStatusUpdate` `NoTransaction` (H03.FR.11) instead of returning to the EVSE.
+- Terminal UIs: `Home` and `End` jump to the first and last row in every pane of the emulator (connectors/EVSEs, actions, log; `End` follows the newest log row), as they already did in `kirby-csms`.
+- Emulator terminal UI: the OCPP 1.6 header shows the protocol (`OCPP 1.6`), like the 2.x header (`OCPP 2.0.1`, `OCPP 2.1`).
 
 ### 🔧 Changed
 
 - `kirby-csms-core`: `CsmsEvent::Connected` carries the `remote_addr` and `subprotocol` of the connection it reports. Code that matches `Connected { station }` needs `Connected { station, .. }`.
+- Command palette of both UIs: without a query the entries are ordered by task (connect, plug, authorize and transactions, messages, faults, scenarios, configuration), the emulator palette shows each accelerator, and labels are short verb phrases (`Send BootNotification`, `Edit config keys...`, `Show pending calls...`, `Set response rule...`).
+- JSON popups (log row details, command answers) are as tall as their content instead of filling the screen; longer content scrolls.
+- Emulator terminal UI: the Scenarios tab shows the selected scenario's description wrapped in the details pane instead of cutting it off at 80 columns.
+- Emulator terminal UI (OCPP 2.x): the token type of the Authorize and Present token forms defaults to `ISO14443`, matching the `kirby-csms` forms.
+- OCPP 2.x emulator: a token that matches a reservation by value but has another type is refused with a message that names the reserved token and both types.
 
 ### 🐛 Fixed
+
+- Refusals shown in the emulator status line no longer start with `invalid argument:`; the message stands alone (`EVSE 1 does not exist`).
+- Fleet terminal UI: the first station's boot events could be missing from the log when the stations connected before the UI subscribed to them.
 
 - `kirby-csms`: a `connected` event (`--json`, the event stream, the event log) could show the address and protocol of a newer connection of the same station that replaced it before the event was printed. Each event now shows its own connection.
 

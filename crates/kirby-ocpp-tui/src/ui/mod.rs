@@ -2,9 +2,11 @@
 
 mod browser;
 pub(crate) mod overlays;
-mod panes;
+pub(crate) mod panes;
 
-pub use overlays::{PendingRow, help_lines, pending_line, pending_list};
+pub use overlays::{
+    PendingRow, content_height, help_lines, pending_line, pending_list, visible_scroll,
+};
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -229,6 +231,13 @@ fn draw_header(f: &mut Frame<'_>, app: &App, area: Rect) {
         Span::raw(" "),
         reg_chip,
     ];
+    // The protocol chip goes after the registration when the line has room for it.
+    let protocol = chip("OCPP 1.6", Color::Blue);
+    let used: usize = spans.iter().map(Span::width).sum();
+    if w >= used + protocol.width() + 1 + 10 {
+        spans.push(Span::raw(" "));
+        spans.push(protocol);
+    }
     let used: usize = spans.iter().map(Span::width).sum();
     if w > used + 4 {
         spans.push(Span::styled(

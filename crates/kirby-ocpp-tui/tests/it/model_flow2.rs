@@ -204,7 +204,7 @@ async fn boot_plug_present_token_meter_stop_are_reflected_in_the_model() {
     let csms = v201_csms().await;
     let mut d = booted(&csms).await;
     assert!(d.app.snapshot.booted());
-    assert!(d.screen(110, 30).contains("ocpp2.0.1"));
+    assert!(d.screen(110, 30).contains("OCPP 2.0.1"));
 
     // EVSE tab: plug in the selected EVSE.
     d.keys("2p").await;

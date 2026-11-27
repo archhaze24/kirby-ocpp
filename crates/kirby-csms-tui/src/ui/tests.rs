@@ -630,8 +630,11 @@ mod commands {
         let screen = render(&app, 100, 40);
         assert!(screen.contains("Actions"), "{screen}");
         assert!(screen.contains("t  Remote start transaction (no station selected)"));
-        assert!(screen.contains("Response rule"));
-        assert!(!screen.contains("Response rule ("), "rules need no station");
+        assert!(screen.contains("Set response rule"));
+        assert!(
+            !screen.contains("Set response rule ("),
+            "rules need no station"
+        );
         type_text(&mut app, "reset");
         let screen = render(&app, 100, 30);
         assert!(screen.contains(": reset"), "{screen}");

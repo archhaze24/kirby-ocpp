@@ -23,6 +23,11 @@ pub(crate) fn centered(area: Rect, w: u16, h: u16) -> Rect {
     )
 }
 
+/// The accelerator column of a palette row: the key, or blanks of the same width.
+pub(crate) fn key_column(key: Option<char>) -> String {
+    key.map_or_else(|| "   ".to_owned(), |k| format!("{k}  "))
+}
+
 pub(crate) fn popup(f: &mut Frame<'_>, rect: Rect, title: &str) -> Rect {
     f.render_widget(Clear, rect);
     let block = Block::bordered()
@@ -39,7 +44,7 @@ pub fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
         Mode::Palette(p) => palette(f, p, area, |i| {
             let a = &app.catalog[i];
             (
-                format!("{}: {}", a.tab.title(), a.label),
+                format!("{}{}: {}", key_column(a.key), a.tab.title(), a.label),
                 app.reason_for(a.id).is_some(),
             )
         }),
@@ -309,6 +314,7 @@ const HELP: &[&str] = &[
     "",
     "1-7 / Tab / Shift-Tab   switch tab",
     "Up Down j k             move in the focused pane",
+    "PgUp PgDn Home End      page / first / last (log: oldest / newest)",
     "Left Right              change focused pane (connectors, actions, log)",
     "[ ]                     previous / next connector",
     "Enter                   run action / open log row",
@@ -367,18 +373,28 @@ pub(crate) fn help(f: &mut Frame<'_>, text: &[&str], area: Rect) {
     );
 }
 
+/// Height of a popup that shows `lines` rows: the content plus borders, at most the free
+/// area (a one-row margin above and below).
+pub fn content_height(area_height: u16, lines: usize) -> u16 {
+    let want = u16::try_from(lines.saturating_add(2)).unwrap_or(u16::MAX);
+    want.min(area_height.saturating_sub(2)).max(3)
+}
+
+/// The first row to draw: `scroll`, but never past the point where the last row would leave
+/// the popup half empty.
+pub fn visible_scroll(scroll: usize, lines: usize, rows: u16) -> usize {
+    scroll.min(lines.saturating_sub(usize::from(rows)))
+}
+
 pub(crate) fn detail(f: &mut Frame<'_>, d: &Detail, area: Rect) {
-    let rect = Rect::new(
-        area.x + 1.min(area.width / 4),
-        area.y + 1.min(area.height / 4),
-        area.width.saturating_sub(2),
-        area.height.saturating_sub(2),
-    );
+    let w = area.width.saturating_sub(2);
+    let rect = centered(area, w, content_height(area.height, d.lines.len()));
     let inner = popup(f, rect, &sanitize(&d.title));
+    let start = visible_scroll(d.scroll, d.lines.len(), inner.height);
     let lines: Vec<Line<'_>> = d
         .lines
         .iter()
-        .skip(d.scroll)
+        .skip(start)
         .take(usize::from(inner.height))
         .map(|l| Line::raw(l.as_str()))
         .collect();

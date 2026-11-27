@@ -7,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
 
 use super::dim;
 use crate::actions::Tab;
@@ -123,7 +123,12 @@ pub fn details(f: &mut Frame<'_>, app: &App, area: Rect) {
         Tab::Station | Tab::Maintenance | Tab::Data => "Station".to_owned(),
         _ => format!("Connector {}", app.connector),
     };
-    f.render_widget(Paragraph::new(lines).block(block(title, false)), area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block(title, false)),
+        area,
+    );
 }
 
 fn station_lines(app: &App) -> Vec<Line<'static>> {
@@ -280,13 +285,32 @@ fn connector_lines(c: &ConnectorSnapshot) -> Vec<Line<'static>> {
     v
 }
 
+/// Before the first run: the selected scenario with its full description (the footer shows
+/// only one truncated line of it).
+pub(crate) fn idle_scenario_lines(selected: Option<(&str, &str)>) -> Vec<Line<'static>> {
+    let mut v = Vec::new();
+    if let Some((label, desc)) = selected {
+        v.push(Line::styled(
+            sanitize(label),
+            Style::new().add_modifier(Modifier::BOLD),
+        ));
+        v.push(Line::raw(sanitize(desc)));
+        v.push(Line::raw(""));
+    }
+    v.push(Line::styled(
+        "No scenario run yet. Enter runs the selected action.",
+        dim(),
+    ));
+    v
+}
+
 fn scenario_lines(app: &App) -> Vec<Line<'static>> {
     let sc = &app.scenario;
     if sc.name.is_empty() {
-        return vec![Line::styled(
-            "No scenario run yet. Pick one in the actions list.",
-            dim(),
-        )];
+        return idle_scenario_lines(
+            app.selected_action()
+                .map(|a| (a.label.as_str(), a.desc.as_str())),
+        );
     }
     let state = match (&sc.report, sc.running) {
         (_, true) => "running".to_owned(),

@@ -776,3 +776,64 @@ fn time_none_drops_the_clock_of_log_rows() {
     assert!(!without.contains("22:13"), "{without}");
     assert!(without.contains("→ CALL Authorize idTag=ABC"), "{without}");
 }
+
+#[test]
+fn scenarios_tab_wraps_the_description_instead_of_clipping_it() {
+    let mut a = app();
+    keys(&mut a, "7");
+    let text = render(&a, 80, 24);
+    // The full description is in the details pane, split over lines.
+    assert!(text.contains("Run: charge-session"), "{text}");
+    assert!(
+        text.contains("StartTransaction and send MeterValues"),
+        "{text}"
+    );
+    assert!(text.contains("(connector 1)."), "{text}");
+    // Also at a narrow width nothing is cut off mid-word.
+    let narrow = render(&a, 50, 24);
+    assert!(narrow.contains("Plug the EV in,"), "{narrow}");
+}
+
+#[test]
+fn header_shows_the_protocol_chip() {
+    let a = app();
+    assert!(render(&a, 80, 24).contains("OCPP 1.6"));
+}
+
+#[test]
+fn detail_popup_is_as_tall_as_its_content() {
+    use crate::app::Detail;
+    let mut a = app();
+    a.mode = Mode::Detail(Detail {
+        title: "Heartbeat".to_owned(),
+        lines: vec!["{}".to_owned(), String::new()],
+        scroll: 0,
+        copy: String::new(),
+    });
+    let text = render(&a, 80, 24);
+    let top = text.lines().position(|l| l.contains("Heartbeat")).unwrap();
+    let bottom = text
+        .lines()
+        .skip(top)
+        .position(|l| l.contains('└'))
+        .map(|n| n + top)
+        .unwrap();
+    // Two content rows plus the two borders.
+    assert_eq!(bottom - top + 1, 4, "{text}");
+}
+
+#[test]
+fn unfiltered_palette_orders_by_task_and_shows_keys() {
+    let mut a = app();
+    keys(&mut a, ":");
+    let text = render(&a, 100, 60);
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle}\n{text}"))
+    };
+    assert!(at("Station: Connect") < at("Connector: Plug / unplug"));
+    assert!(at("Connector: Plug / unplug") < at("Transaction: Authorize token..."));
+    assert!(at("Transaction: Authorize token...") < at("Connector: Inject or clear fault"));
+    assert!(at("Connector: Inject or clear fault") < at("Station: Edit config keys..."));
+    assert!(text.contains("c  Station: Connect"), "{text}");
+}

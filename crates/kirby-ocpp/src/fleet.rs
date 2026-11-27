@@ -165,7 +165,11 @@ pub async fn interactive(
         let mut connect_failures = Vec::new();
         let result = {
             let mut connecting = std::pin::pin!(fleet.connect_all());
+            // Biased: the UI future runs first, up to the point where it has subscribed to
+            // every station, before `connect_all` is polled for the first time; otherwise
+            // the first station's boot events could be sent before anyone listens.
             tokio::select! {
+                biased;
                 result = &mut ui => Some(result),
                 failed = &mut connecting => {
                     connect_failures = failed;

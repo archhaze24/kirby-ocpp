@@ -467,7 +467,7 @@ fn authorize_form_sends_the_token_and_type() {
             "authorize",
             vec![Command2::Authorize {
                 id_token: "TOKEN-1".to_owned(),
-                token_type: IdTokenType::Local,
+                token_type: IdTokenType::Iso14443,
             }],
             false
         )]
@@ -496,7 +496,7 @@ fn token_type_options_are_the_wire_names() {
     let wire: Vec<&str> = IdTokenType::KNOWN.iter().map(IdTokenType::as_str).collect();
     assert_eq!(options.iter().map(String::as_str).collect::<Vec<_>>(), wire);
     assert!(wire.contains(&"eMAID") && wire.contains(&"ISO14443"));
-    // `Right` moves from Local to MacAddress.
+    // `Right` moves from ISO14443 to ISO15693.
     press_code(&mut app, KeyCode::Tab);
     press_code(&mut app, KeyCode::Right);
     press_code(&mut app, KeyCode::BackTab);
@@ -506,7 +506,7 @@ fn token_type_options_are_the_wire_names() {
         commands(&fx),
         vec![Command2::Authorize {
             id_token: "x".to_owned(),
-            token_type: IdTokenType::MacAddress,
+            token_type: IdTokenType::Iso15693,
         }]
     );
 }
@@ -527,7 +527,7 @@ fn present_token_with_and_without_an_evse() {
             vec![Command2::PresentToken {
                 evse: Some(1),
                 id_token: "CARD".to_owned(),
-                token_type: IdTokenType::Local,
+                token_type: IdTokenType::Iso14443,
             }],
             false
         )]
@@ -545,7 +545,7 @@ fn present_token_with_and_without_an_evse() {
         vec![Command2::PresentToken {
             evse: None,
             id_token: "CARD".to_owned(),
-            token_type: IdTokenType::Local,
+            token_type: IdTokenType::Iso14443,
         }]
     );
 }
@@ -1601,4 +1601,31 @@ fn notices_are_sanitized() {
         Msg2::Notice(NoticeLevel::Error, "bad\u{1b}[31m text".to_owned()),
     );
     assert!(!notice(&app).0.contains('\u{1b}'));
+}
+
+#[test]
+fn home_and_end_jump_in_every_pane() {
+    let mut app = app();
+    press_code(&mut app, KeyCode::End);
+    assert!(app.action_sel[0] > 0, "End selects the last action");
+    press_code(&mut app, KeyCode::Home);
+    assert_eq!(app.action_sel[0], 0);
+    press_code(&mut app, KeyCode::Left);
+    press_code(&mut app, KeyCode::End);
+    let last = app.snapshot.evses.last().unwrap().id;
+    assert_eq!(app.evse, last);
+    press_code(&mut app, KeyCode::Home);
+    assert_eq!(app.evse, app.snapshot.evses[0].id);
+}
+
+#[test]
+fn unfiltered_palette_orders_by_task() {
+    let app = app();
+    let rows = palette_rows(&app.catalog);
+    let order = crate::palette::rank_rows(&rows, "");
+    let pos = |id: ActionId2| order.iter().position(|&i| app.catalog[i].id == id).unwrap();
+    assert!(pos(ActionId2::Connect) < pos(ActionId2::PlugToggle));
+    assert!(pos(ActionId2::PlugToggle) < pos(ActionId2::Authorize));
+    assert!(pos(ActionId2::StopTransaction) < pos(ActionId2::FaultToggle));
+    assert!(pos(ActionId2::FaultToggle) < pos(ActionId2::DeviceModel));
 }

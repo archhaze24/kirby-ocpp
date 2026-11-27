@@ -21,6 +21,10 @@ pub struct PaletteRow<'a> {
     pub label: &'a str,
     pub desc: &'a str,
     pub tab: &'a str,
+    /// Position of the task group in the unfiltered palette (smaller first, ties keep the
+    /// catalogue order): connection, plug, authorize and transactions, messages, faults,
+    /// scenarios, configuration and the rest.
+    pub group: u8,
 }
 
 impl<'a> From<&'a ActionDef> for PaletteRow<'a> {
@@ -29,6 +33,7 @@ impl<'a> From<&'a ActionDef> for PaletteRow<'a> {
             label: &a.label,
             desc: &a.desc,
             tab: a.tab.title(),
+            group: crate::actions::palette_group(a.id),
         }
     }
 }
@@ -84,12 +89,18 @@ pub fn haystack_row(r: &PaletteRow<'_>) -> String {
 }
 
 pub fn rank(catalog: &[ActionDef], query: &str) -> Vec<usize> {
-    rank_by(catalog, query, haystack)
+    let rows: Vec<PaletteRow<'_>> = catalog.iter().map(PaletteRow::from).collect();
+    rank_rows(&rows, query)
 }
 
 /// [`rank`] over rows.
 pub fn rank_rows(rows: &[PaletteRow<'_>], query: &str) -> Vec<usize> {
-    rank_by(rows, query, haystack_row)
+    let mut ranked = rank_by(rows, query, haystack_row);
+    if query.trim().is_empty() {
+        // Without a query the list is ordered by task; a query ranks by match quality.
+        ranked.sort_by_key(|&i| rows[i].group);
+    }
+    ranked
 }
 
 /// Fuzzy ranking over any catalogue: indices of the items matching `query`, best first

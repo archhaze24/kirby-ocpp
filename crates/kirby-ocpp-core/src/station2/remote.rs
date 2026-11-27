@@ -202,9 +202,10 @@ impl Station2Actor {
         if self.reservation_blocks(evse, token, group.as_deref()) {
             self.sc_forget_pending(evse, remote_start_id);
             self.forget_driver_tariff(token);
+            let why = self.reserved_for(evse, token, "requested");
             self.log(
                 LogLevel::Warn,
-                format!("remote start on EVSE {evse}: the EVSE is reserved for another token"),
+                format!("remote start on EVSE {evse}: the EVSE is {why}"),
             );
             return;
         }

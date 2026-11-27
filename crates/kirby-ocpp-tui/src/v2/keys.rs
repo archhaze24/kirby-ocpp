@@ -208,8 +208,8 @@ fn normal(app: &mut App2, key: KeyEvent, fx: &mut Vec<Effect2>) {
         KeyCode::Down | KeyCode::Char('j') => step(app, 1),
         KeyCode::PageUp => step(app, -10),
         KeyCode::PageDown => step(app, 10),
-        KeyCode::Home if app.focus == Focus::Log => app.log.select_first(),
-        KeyCode::End if app.focus == Focus::Log => app.log.follow_tail(),
+        KeyCode::Home => jump(app, false),
+        KeyCode::End => jump(app, true),
         KeyCode::Esc => {
             if !app.log.search.is_empty() {
                 app.log.search.clear();
@@ -244,6 +244,17 @@ fn shift_focus(f: Focus, d: isize) -> Focus {
     const ORDER: [Focus; 3] = [Focus::Connectors, Focus::Actions, Focus::Log];
     let i = ORDER.iter().position(|x| *x == f).unwrap_or(1);
     ORDER[i.saturating_add_signed(d).min(2)]
+}
+
+/// `Home` / `End`: the first / last row of the focused pane (the log: oldest row / follow the
+/// newest).
+fn jump(app: &mut App2, last: bool) {
+    match app.focus {
+        Focus::Connectors => app.move_evse(if last { isize::MAX } else { isize::MIN }),
+        Focus::Actions => app.select_action_edge(last),
+        Focus::Log if last => app.log.follow_tail(),
+        Focus::Log => app.log.select_first(),
+    }
 }
 
 fn step(app: &mut App2, d: isize) {

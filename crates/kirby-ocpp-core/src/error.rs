@@ -82,7 +82,7 @@ pub enum StationError {
         reason: String,
     },
     /// The command carries an argument that is out of range or malformed.
-    #[error("invalid argument: {0}")]
+    #[error("{0}")]
     InvalidArgument(String),
     #[error(transparent)]
     Call(#[from] CallError),
@@ -99,6 +99,12 @@ pub enum StationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_argument_shows_the_bare_message() {
+        let error = StationError::InvalidArgument("EVSE 1 does not exist".into());
+        assert_eq!(error.to_string(), "EVSE 1 does not exist");
+    }
 
     #[test]
     fn call_error_messages_name_the_action() {

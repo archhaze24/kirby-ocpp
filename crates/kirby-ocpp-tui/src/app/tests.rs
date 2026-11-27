@@ -114,6 +114,20 @@ fn up_down_move_in_the_focused_pane() {
 }
 
 #[test]
+fn home_and_end_jump_in_every_pane() {
+    let mut a = app();
+    code(&mut a, KeyCode::End);
+    assert!(a.action_sel[0] > 0, "End selects the last action");
+    code(&mut a, KeyCode::Home);
+    assert_eq!(a.action_sel[0], 0);
+    code(&mut a, KeyCode::Left);
+    code(&mut a, KeyCode::End);
+    assert_eq!(a.connector.get(), 2, "End selects the last connector");
+    code(&mut a, KeyCode::Home);
+    assert_eq!(a.connector.get(), 1);
+}
+
+#[test]
 fn enter_runs_the_selected_action() {
     let mut a = app();
     let fx = code(&mut a, KeyCode::Enter); // Boot, but disconnected

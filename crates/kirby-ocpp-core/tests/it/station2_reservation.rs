@@ -360,6 +360,56 @@ async fn cancelling_frees_the_evse_and_an_unknown_id_is_rejected() {
 // ---- H03: use a reserved EVSE ------------------------------------------------------------
 
 #[tokio::test]
+async fn a_token_of_another_type_is_refused_with_the_reserved_type_named() {
+    tokio::time::timeout(STEP * 4, async {
+        let csms = v201_csms().await;
+        let clock = ManualClock::new(Utc::now());
+        let mut config = StationConfig::new(csms.url())
+            .with_connectors(1)
+            .without_persistence();
+        config.protocol = Protocol::V201;
+        Protocol::V201
+            .token()
+            .clone_into(&mut config.ws_subprotocol);
+        let (station, task) = Station2::spawn(config, Arc::new(clock.clone()));
+        timeout(STEP, station.connect()).await.unwrap().unwrap();
+        wait_booted(&station).await;
+        let expiry = stamp(clock_now(&clock) + Duration::hours(1));
+        assert_eq!(
+            call_status(&csms, "ReserveNow", reserve_body(56, Some(1), "A", &expiry)).await,
+            "Accepted"
+        );
+        let mut events = station.subscribe();
+        let outcome = timeout(
+            STEP,
+            station.send(Command2::PresentToken {
+                evse: Some(1),
+                id_token: "A".to_owned(),
+                token_type: IdTokenType::Iso14443,
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(authorized_status(&outcome), "NotAtThisLocation");
+        let text = loop {
+            if let kirby_ocpp_core::station::Event::Log(record) = events.recv().await.unwrap()
+                && record.text.contains("is reserved for")
+            {
+                break record.text;
+            }
+        };
+        assert_eq!(
+            text,
+            "EVSE 1 is reserved for token A of type Central (presented as ISO14443)"
+        );
+        super::station2_transactions::stop(&station, task).await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
 async fn any_evse_reservation_blocks_an_unrelated_token_after_plug_in() {
     tokio::time::timeout(STEP * 4, async {
         let csms = v201_csms().await;

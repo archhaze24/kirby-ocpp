@@ -837,10 +837,8 @@ impl Station2Actor {
         ) {
             // H03: the EVSE is held for another token.
             self.forget_driver_tariff(&token);
-            self.log(
-                LogLevel::Warn,
-                format!("EVSE {evse} is reserved for another token"),
-            );
+            let why = self.reserved_for(evse, &token, "presented");
+            self.log(LogLevel::Warn, format!("EVSE {evse} is {why}"));
             Ok(Outcome2::Authorized {
                 status: AuthorizationStatus::NotAtThisLocation.as_str().to_owned(),
                 id_token_info: info,

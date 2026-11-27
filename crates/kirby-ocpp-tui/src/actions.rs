@@ -131,6 +131,26 @@ fn def(id: ActionId, tab: Tab, key: char, label: &str, desc: &str) -> ActionDef 
     }
 }
 
+/// The task group of an action in the unfiltered palette (see `PaletteRow::group`).
+pub fn palette_group(id: ActionId) -> u8 {
+    use ActionId as A;
+    match id {
+        A::Connect | A::Disconnect | A::Reconnect => 0,
+        A::PlugToggle => 1,
+        A::Authorize | A::StartTx | A::StopTx | A::Meter120 | A::MeterCustom => 2,
+        A::Boot
+        | A::Heartbeat
+        | A::StatusNotification
+        | A::CycleStatus
+        | A::SetStatus
+        | A::DataTransfer
+        | A::VendorPing => 3,
+        A::FaultToggle | A::RuleSet | A::RulesClear => 4,
+        A::RunScenario(_) | A::LoadScenario | A::CancelScenario => 5,
+        _ => 6,
+    }
+}
+
 pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
     use ActionId as A;
     use Tab as T;
@@ -139,14 +159,14 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             A::Boot,
             T::Station,
             'b',
-            "BootNotification",
+            "Send BootNotification",
             "Send BootNotification.",
         ),
         def(
             A::Heartbeat,
             T::Station,
             'h',
-            "Heartbeat",
+            "Send Heartbeat",
             "Send Heartbeat.",
         ),
         def(
@@ -182,7 +202,7 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             tab: T::Station,
             // `W` works on every tab (it is in `RESERVED_KEYS`), so it is not a tab accelerator.
             key: None,
-            label: "Pending calls...".to_owned(),
+            label: "Show pending calls...".to_owned(),
             desc: "List the commands waiting for the Central System (key W); x cancels the selected one."
                 .to_owned(),
         },
@@ -190,7 +210,7 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             A::RuleSet,
             T::Station,
             'm',
-            "Response rule...",
+            "Set response rule...",
             "Make the station misbehave on a CSMS command: Action=reject|delay:MS|error:Code|drop|ignore, optional *COUNT; Action=off removes a rule.",
         ),
         def(
@@ -204,28 +224,28 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             A::BrowseConfig,
             T::Station,
             'K',
-            "Config keys...",
+            "Edit config keys...",
             "Browse the configuration keys and edit a writable one (like ChangeConfiguration, locally).",
         ),
         def(
             A::BrowseLocalList,
             T::Station,
             'L',
-            "Local auth list...",
+            "Edit local auth list...",
             "Browse the local auth list; add, edit, remove entries or clear it (bumps the list version).",
         ),
         def(
             A::BrowseProfiles,
             T::Station,
             'P',
-            "Charging profiles...",
+            "Edit charging profiles...",
             "Browse installed charging profiles; install one from JSON, delete one or clear all.",
         ),
         def(
             A::BrowseCertificates,
             T::Station,
             'Y',
-            "Certificates...",
+            "View certificates...",
             "Browse the installed certificates (read-only): roots, manufacturer roots and the station certificate.",
         ),
         def(
@@ -253,35 +273,35 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             A::CycleStatus,
             T::Connector,
             's',
-            "Cycle status",
+            "Cycle connector status",
             "Advance the connector status to the next one.",
         ),
         def(
             A::SetStatus,
             T::Connector,
             't',
-            "Set status...",
+            "Set connector status...",
             "Pick a connector status.",
         ),
         def(
             A::StatusNotification,
             T::Connector,
             'n',
-            "StatusNotification",
+            "Send StatusNotification",
             "Re-send the connector's current status.",
         ),
         def(
             A::FaultToggle,
             T::Connector,
             'f',
-            "Fault / clear fault",
+            "Inject or clear fault",
             "Inject a fault, or clear the current one.",
         ),
         def(
             A::Authorize,
             T::Transaction,
             'a',
-            "Authorize...",
+            "Authorize token...",
             "Send Authorize for an idTag.",
         ),
         def(
@@ -302,70 +322,70 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             A::Meter120,
             T::Transaction,
             'm',
-            "MeterValues +120 Wh",
+            "Send meter +120 Wh",
             "Advance the meter by 120 Wh and send MeterValues.",
         ),
         def(
             A::MeterCustom,
             T::Transaction,
             'c',
-            "MeterValues custom...",
+            "Send custom meter values...",
             "MeterValues with a chosen Wh delta and measurands.",
         ),
         def(
             A::DiagOutcome,
             T::Maintenance,
             'd',
-            "Diagnostics outcome...",
+            "Set diagnostics outcome...",
             "How the next simulated diagnostics upload ends.",
         ),
         def(
             A::FwOutcome,
             T::Maintenance,
             'u',
-            "Firmware outcome...",
+            "Set firmware outcome...",
             "How the next simulated firmware update ends.",
         ),
         def(
             A::DiagStatus,
             T::Maintenance,
             'i',
-            "DiagnosticsStatusNotification...",
+            "Send DiagnosticsStatusNotification...",
             "Send a DiagnosticsStatusNotification.",
         ),
         def(
             A::FwStatus,
             T::Maintenance,
             'f',
-            "FirmwareStatusNotification...",
+            "Send FirmwareStatusNotification...",
             "Send a FirmwareStatusNotification.",
         ),
         def(
             A::DataTransfer,
             T::Data,
             'd',
-            "DataTransfer...",
+            "Send DataTransfer...",
             "Send a DataTransfer (vendor, message id, data).",
         ),
         def(
             A::VendorPing,
             T::Data,
             'v',
-            "Vendor ping",
+            "Send vendor ping",
             "Send a DataTransfer with data `ping` from the station vendor.",
         ),
         def(
             A::RawCall,
             T::Data,
             'r',
-            "Raw CALL...",
+            "Send raw CALL...",
             "Compose any CALL, validated against the OCPP schema.",
         ),
         def(
             A::LogCopySelected,
             T::Logs,
             'y',
-            "Copy selected frame",
+            "Copy selected row",
             "Copy the selected log row as pretty JSON.",
         ),
         def(
@@ -379,35 +399,35 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
             A::LogFilter,
             T::Logs,
             'f',
-            "Cycle filter",
+            "Cycle log filter",
             "all / calls / errors / station / csms.",
         ),
         def(
             A::LogSearch,
             T::Logs,
             's',
-            "Search...",
+            "Search log...",
             "Filter rows by text (action, summary, payload).",
         ),
         def(
             A::LogPause,
             T::Logs,
             'p',
-            "Pause / follow",
+            "Pause or follow log",
             "Stop or resume following the newest row.",
         ),
         def(
             A::LogBottom,
             T::Logs,
             'G',
-            "Jump to newest",
+            "Jump to newest row",
             "Select the newest row and follow.",
         ),
         def(
             A::LogExport,
             T::Logs,
             'e',
-            "Export JSONL...",
+            "Export log...",
             "Write the whole log to a JSONL file.",
         ),
         def(
@@ -431,14 +451,14 @@ pub fn catalog(scenarios: &[Scenario]) -> Vec<ActionDef> {
         A::LoadScenario,
         T::Scenarios,
         'l',
-        "Load from file...",
+        "Run scenario file...",
         "Run a scenario TOML file.",
     ));
     v.push(def(
         A::CancelScenario,
         T::Scenarios,
         'x',
-        "Cancel running scenario",
+        "Cancel scenario",
         "Stop the running scenario.",
     ));
     v

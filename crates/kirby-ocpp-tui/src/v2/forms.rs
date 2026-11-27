@@ -75,7 +75,7 @@ fn names<T: WireEnum>() -> Vec<String> {
     T::ALL.iter().map(|v| v.as_str().to_owned()).collect()
 }
 
-/// The `IdTokenEnumType` select, on `Local` (the usual type of a typed-in token).
+/// The `IdTokenEnumType` select, on `ISO14443` (the default of the CSMS forms too).
 fn token_type_field() -> Field {
     let options = IdTokenType::KNOWN
         .iter()
@@ -84,7 +84,7 @@ fn token_type_field() -> Field {
     let mut field = Field::new("type", FieldKind::Select, "").with_options(options);
     if let Some(i) = IdTokenType::KNOWN
         .iter()
-        .position(|t| *t == IdTokenType::Local)
+        .position(|t| *t == IdTokenType::Iso14443)
     {
         field.option = i;
     }

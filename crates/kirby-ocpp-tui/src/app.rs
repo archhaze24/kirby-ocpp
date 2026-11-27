@@ -414,6 +414,14 @@ impl App {
         self.connector = self.snapshot.connectors[next].id;
     }
 
+    /// Selects the first or last action of the active tab.
+    pub fn select_action_edge(&mut self, last: bool) {
+        let n = self.tab_actions().len();
+        if n > 0 {
+            self.action_sel[self.tab.index()] = if last { n - 1 } else { 0 };
+        }
+    }
+
     pub fn move_action(&mut self, delta: isize) {
         let n = self.tab_actions().len();
         if n > 0 {

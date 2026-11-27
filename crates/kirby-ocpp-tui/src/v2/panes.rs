@@ -13,7 +13,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
 
 use super::actions::Tab2;
 use super::app::App2;
@@ -181,7 +181,12 @@ pub(super) fn details(f: &mut Frame<'_>, app: &App2, area: Rect) {
         Tab2::Evse => (format!("EVSE {}", app.evse), evse_lines(app, false)),
         Tab2::Transaction => (format!("EVSE {}", app.evse), evse_lines(app, true)),
     };
-    f.render_widget(Paragraph::new(lines).block(block(title, false)), area);
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(block(title, false)),
+        area,
+    );
 }
 
 fn station_lines(app: &App2) -> Vec<Line<'static>> {
@@ -353,10 +358,10 @@ fn evse_lines(app: &App2, transaction_first: bool) -> Vec<Line<'static>> {
 fn scenario_lines(app: &App2) -> Vec<Line<'static>> {
     let sc = &app.scenario;
     if sc.name.is_empty() {
-        return vec![Line::styled(
-            "No scenario run yet. Pick one in the actions list.",
-            dim(),
-        )];
+        return crate::ui::panes::idle_scenario_lines(
+            app.selected_action()
+                .map(|a| (a.label.as_str(), a.desc.as_str())),
+        );
     }
     let state = match (&sc.report, sc.running) {
         (_, true) => "running".to_owned(),

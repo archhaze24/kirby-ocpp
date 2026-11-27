@@ -207,7 +207,7 @@ fn header_chips_come_from_the_snapshot() {
     assert!(text.contains("CP-2"), "{text}");
     assert!(text.contains("connected"), "{text}");
     assert!(text.contains("Accepted"), "{text}");
-    assert!(text.contains("ocpp2.0.1"), "{text}");
+    assert!(text.contains("OCPP 2.0.1"), "{text}");
     for title in [
         "Station",
         "EVSE",
@@ -222,8 +222,8 @@ fn header_chips_come_from_the_snapshot() {
     // The chip is the snapshot's value, never a literal.
     a.snapshot.protocol = "ocpp2.1".to_owned();
     let text = render(&a, 110, 30);
-    assert!(text.contains("ocpp2.1"), "{text}");
-    assert!(!text.contains("ocpp2.0.1"), "{text}");
+    assert!(text.contains("OCPP 2.1"), "{text}");
+    assert!(!text.contains("OCPP 2.0.1"), "{text}");
     a.snapshot.registration = None;
     assert!(render(&a, 110, 30).contains("not booted"));
 }
@@ -611,7 +611,7 @@ fn a_2_1_station_shows_the_2_1_version_where_2_0_1_shows_its_own() {
     let mut a = App2::new(snapshot, "ws://csms.example/ocpp", "Acme");
     assert_eq!(a.protocol, Protocol::V21);
     let text = render(&a, 110, 30);
-    assert!(text.contains("ocpp2.1"), "{text}");
+    assert!(text.contains("OCPP 2.1"), "{text}");
     a.mode = Mode2::Help;
     let text = render(&a, 110, 60);
     assert!(text.contains("Not available for OCPP 2.1"), "{text}");
@@ -659,7 +659,7 @@ fn overlays_draw_for_each_mode() {
     )));
     let text = render(&a, 110, 40);
     assert!(text.contains("Command palette"), "{text}");
-    assert!(text.contains("Station: BootNotification"), "{text}");
+    assert!(text.contains("Station: Send BootNotification"), "{text}");
 
     a.pending.push(PendingCall {
         label: "boot notification".to_owned(),

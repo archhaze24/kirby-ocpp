@@ -148,14 +148,14 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             A::Boot,
             T::Station,
             'b',
-            "BootNotification",
+            "Send BootNotification",
             "Send BootNotification.",
         ),
         def(
             A::Heartbeat,
             T::Station,
             'h',
-            "Heartbeat",
+            "Send Heartbeat",
             "Send Heartbeat.",
         ),
         def(
@@ -183,7 +183,7 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             A::DeviceModel,
             T::Station,
             'K',
-            "Device model...",
+            "Edit device model...",
             "Browse the station-level variables of the device model and edit a ReadWrite one (like SetVariables, locally).",
         ),
         def(
@@ -198,7 +198,7 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             tab: T::Station,
             // `W` works on every tab (it is in `RESERVED_KEYS`), so it is not a tab accelerator.
             key: None,
-            label: "Pending calls...".to_owned(),
+            label: "Show pending calls...".to_owned(),
             desc: "List the commands waiting for the CSMS (key W); OCPP 2.0.1 commands cannot be cancelled."
                 .to_owned(),
         },
@@ -213,14 +213,14 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             A::FaultToggle,
             T::Evse,
             'f',
-            "Fault / clear fault",
+            "Inject or clear fault",
             "Inject a fault on every connector of the selected EVSE, or clear it.",
         ),
         def(
             A::StatusNotification,
             T::Evse,
             'n',
-            "StatusNotification",
+            "Send StatusNotification",
             "Re-send the current connector status of the selected EVSE.",
         ),
         def(
@@ -241,7 +241,7 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             A::Authorize,
             T::Transaction,
             'a',
-            "Authorize...",
+            "Authorize token...",
             "Send Authorize for an idToken.",
         ),
         def(
@@ -262,14 +262,14 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             A::Meter120,
             T::Transaction,
             'm',
-            "Meter +120 Wh",
+            "Send meter +120 Wh",
             "Advance the meter of the selected EVSE by 120 Wh and send a sample.",
         ),
         def(
             A::MeterCustom,
             T::Transaction,
             'c',
-            "Meter custom...",
+            "Send custom meter values...",
             "Advance the meter by a chosen Wh delta, with or without a sample.",
         ),
         def(
@@ -297,28 +297,28 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             A::DataTransfer,
             T::Data,
             'd',
-            "DataTransfer...",
+            "Send DataTransfer...",
             "Send a DataTransfer (vendor, message id, data as any JSON value).",
         ),
         def(
             A::VendorPing,
             T::Data,
             'v',
-            "Vendor ping",
+            "Send vendor ping",
             "Send a DataTransfer with only the vendor id of the station.",
         ),
         def(
             A::RawCall,
             T::Data,
             'r',
-            "Raw CALL...",
+            "Send raw CALL...",
             "Compose any station-to-CSMS CALL, validated against the OCPP 2.0.1 schema.",
         ),
         def(
             A::LogCopySelected,
             T::Logs,
             'y',
-            "Copy selected frame",
+            "Copy selected row",
             "Copy the selected log row as pretty JSON.",
         ),
         def(
@@ -332,35 +332,35 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
             A::LogFilter,
             T::Logs,
             'f',
-            "Cycle filter",
+            "Cycle log filter",
             "all / calls / errors / station / csms.",
         ),
         def(
             A::LogSearch,
             T::Logs,
             's',
-            "Search...",
+            "Search log...",
             "Filter rows by text (action, summary, payload).",
         ),
         def(
             A::LogPause,
             T::Logs,
             'p',
-            "Pause / follow",
+            "Pause or follow log",
             "Stop or resume following the newest row.",
         ),
         def(
             A::LogBottom,
             T::Logs,
             'G',
-            "Jump to newest",
+            "Jump to newest row",
             "Select the newest row and follow.",
         ),
         def(
             A::LogExport,
             T::Logs,
             'e',
-            "Export JSONL...",
+            "Export log...",
             "Write the whole log to a JSONL file.",
         ),
         def(
@@ -384,14 +384,14 @@ pub fn catalog2(scenarios: &[Scenario]) -> Vec<ActionDef2> {
         A::LoadScenario,
         T::Scenarios,
         'l',
-        "Load from file...",
+        "Run scenario file...",
         "Run a scenario TOML file.",
     ));
     v.push(def(
         A::CancelScenario,
         T::Scenarios,
         'x',
-        "Cancel running scenario",
+        "Cancel scenario",
         "Stop the running scenario.",
     ));
     v
@@ -405,8 +405,28 @@ pub(super) fn palette_rows(catalog: &[ActionDef2]) -> Vec<PaletteRow<'_>> {
             label: &a.label,
             desc: &a.desc,
             tab: a.tab.title(),
+            group: palette_group2(a.id),
         })
         .collect()
+}
+
+/// The task group of an action in the unfiltered palette (see `PaletteRow::group`).
+fn palette_group2(id: ActionId2) -> u8 {
+    use ActionId2 as A;
+    match id {
+        A::Connect | A::Disconnect | A::Reconnect => 0,
+        A::PlugToggle => 1,
+        A::Authorize
+        | A::PresentToken
+        | A::StopTransaction
+        | A::Meter120
+        | A::MeterCustom
+        | A::ChargingState => 2,
+        A::Boot | A::Heartbeat | A::StatusNotification | A::DataTransfer | A::VendorPing => 3,
+        A::FaultToggle => 4,
+        A::RunScenario(_) | A::LoadScenario | A::CancelScenario => 5,
+        _ => 6,
+    }
 }
 
 /// What the actions need to know to say whether they can run.

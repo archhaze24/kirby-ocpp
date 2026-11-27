@@ -252,6 +252,28 @@ impl Station2Actor {
         free_elsewhere < others
     }
 
+    /// Why the reservations keep `token` from `evse`: names the reserved token when the
+    /// presented value matches a reservation of another type, else "another token".
+    pub(super) fn reserved_for(&self, evse: u32, token: &IdTokenRef, verb: &str) -> String {
+        let now = self.clock.now_utc();
+        let same_value = self.reservations.list.iter().find(|reservation| {
+            !reservation.lost
+                && reservation.expires_at > now
+                && reservation.evse.is_none_or(|held| held == evse)
+                && reservation.id_token.id_token == token.id_token
+                && reservation.id_token.kind != token.kind
+        });
+        match same_value {
+            Some(reservation) => format!(
+                "reserved for token {} of type {} ({verb} as {})",
+                crate::text::escape_unsafe(&reservation.id_token.id_token),
+                crate::text::escape_unsafe(reservation.id_token.kind.as_str()),
+                crate::text::escape_unsafe(token.kind.as_str()),
+            ),
+            None => "reserved for another token".to_owned(),
+        }
+    }
+
     /// Whether learning a reservation group could admit this token to the EVSE.
     pub(super) fn reservation_group_may_allow(&self, evse: u32, token: &IdTokenRef) -> bool {
         let now = self.clock.now_utc();

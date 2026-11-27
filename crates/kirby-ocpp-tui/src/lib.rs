@@ -237,6 +237,12 @@ fn forward_station(handle: &StationHandle, station: usize, tx: &mpsc::Sender<Inb
 /// Runs the UI over one or more stations until the user quits. With more than one station
 /// a selector row is shown (see [`fleet`]). Does not shut the stations down; the caller does.
 pub async fn run_fleet(stations: &[StationHandle], options: TuiOptions) -> Result<(), TuiError> {
+    // Subscribe before anything slow (the terminal setup): the first station may already be
+    // booting, and an event sent before the subscription is lost to the log and the counters.
+    let (event_tx, mut event_rx) = mpsc::channel::<Inbound>(EVENT_QUEUE);
+    for (station, handle) in stations.iter().enumerate() {
+        forward_station(handle, station, &event_tx);
+    }
     let mut guard = terminal::TerminalGuard::enter()?;
     let apps: Vec<App> = stations
         .iter()
@@ -262,14 +268,12 @@ pub async fn run_fleet(stations: &[StationHandle], options: TuiOptions) -> Resul
 
     // User-action results (few, never dropped) and forwarded station events (bounded).
     let (user_tx, mut user_rx) = mpsc::unbounded_channel::<Inbound>();
-    let (event_tx, mut event_rx) = mpsc::channel::<Inbound>(EVENT_QUEUE);
     let mut ctxs: Vec<Ctx> = Vec::with_capacity(stations.len());
     for (station, handle) in stations.iter().enumerate() {
         let out = Out {
             tx: user_tx.clone(),
             station,
         };
-        forward_station(handle, station, &event_tx);
         ctxs.push(Ctx {
             handle: handle.clone(),
             runner: ScenarioRunner::new(handle.clone()),
