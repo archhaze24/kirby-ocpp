@@ -1371,12 +1371,12 @@ fn a_raw_form_starts_with_a_valid_template_and_the_error_comes_with_the_edit() {
     let index = table21()
         .csms_actions
         .iter()
-        .position(|spec| spec.name == "SetDefaultTariff")
-        .expect("SetDefaultTariff");
+        .position(|spec| spec.name == "SetDERControl")
+        .expect("SetDERControl");
     let mut fx = Vec::new();
     app.run_action(ActionId::Call(index), &mut fx);
     let Mode::Form(form) = &mut app.mode else {
-        panic!("SetDefaultTariff opened no form");
+        panic!("SetDERControl opened no form");
     };
     assert_eq!(form.fields[1].error, None);
     assert_eq!(form.fields[1].hint, "empty sends {}");
@@ -1505,7 +1505,7 @@ fn raw_json_forms_start_with_a_template_and_required_reads_as_a_hint() {
 fn single_value_selectors_are_hidden_and_focus_skips_them() {
     let mut app = station21();
     // A raw-payload action names itself in the title: its action selector has one value.
-    let mut form = open_21(&mut app, "SetDefaultTariff");
+    let mut form = open_21(&mut app, "SetDERControl");
     assert!(form.fields[0].is_hidden());
     assert!(!form.fields[1].is_hidden());
     // Focus starts on the payload and stays there.
@@ -1563,5 +1563,131 @@ fn hints_fit_in_one_line_at_80x24() {
                 );
             }
         }
+    }
+}
+
+// ---- forms of the actions new in OCPP 2.1 -------------------------------------------------
+
+/// Input for the 2.1 forms whose required fields have no default, by field name.
+fn typed_input_21(action: &str) -> Vec<(&'static str, &'static str)> {
+    match action {
+        "AFRRSignal" => vec![("signal", "-5")],
+        "AdjustPeriodicEventStream" => vec![("id", "1"), ("params.interval", "30")],
+        "RequestBatterySwap" => vec![("idToken.idToken", "TAG1")],
+        "UpdateDynamicSchedule" => {
+            vec![("chargingProfileId", "1"), ("scheduleUpdate.limit", "16.5")]
+        }
+        _ => Vec::new(),
+    }
+}
+
+#[test]
+fn every_2_1_only_form_builds_a_schema_valid_request() {
+    let schemas = SchemaRegistry::for_protocol(Protocol::V21).expect("2.1 schemas");
+    let mut app = station21();
+    let mut forms = 0;
+    for spec in table21().csms_actions {
+        if registry::csms_action(V201, spec.name).is_some() || spec.fields.is_empty() {
+            continue;
+        }
+        forms += 1;
+        let mut form = open_21(&mut app, spec.name);
+        for (name, text) in typed_input_21(spec.name) {
+            set(&mut form, name, text);
+        }
+        let (action, payload) = sent(&mut form);
+        assert_eq!(action, spec.name);
+        assert!(
+            schemas.validate_request(spec.name, &payload).is_ok(),
+            "{}: {payload}",
+            spec.name
+        );
+    }
+    assert_eq!(forms, 13);
+}
+
+#[test]
+fn a_boolean_field_sends_a_json_boolean_and_an_optional_one_can_be_left_out() {
+    let mut app = station21();
+    let mut form = open_21(&mut app, "UsePriorityCharging");
+    let (_, payload) = sent(&mut form.clone());
+    assert_eq!(payload, json!({"transactionId": TX_ID, "activate": true}));
+    let activate = form
+        .fields
+        .iter()
+        .position(|f| f.label == "activate")
+        .unwrap();
+    assert_eq!(form.fields[activate].options, ["true", "false"]);
+    form.fields[activate].option = 1;
+    let (_, payload) = sent(&mut form);
+    assert_eq!(payload["activate"], false);
+
+    let mut form = open_21(&mut app, "GetDERControl");
+    let (_, payload) = sent(&mut form.clone());
+    assert!(payload.get("isDefault").is_none(), "{payload}");
+    let is_default = form
+        .fields
+        .iter()
+        .position(|f| f.label == "isDefault (optional)")
+        .unwrap();
+    assert_eq!(form.fields[is_default].options, ["(any)", "true", "false"]);
+    form.fields[is_default].option = 1;
+    let (_, payload) = sent(&mut form);
+    assert_eq!(payload["isDefault"], true);
+}
+
+#[test]
+fn the_2_1_forms_start_with_a_valid_signal_time_and_tariff() {
+    let mut app = station21();
+    let form = open_21(&mut app, "AFRRSignal");
+    let time = form.fields[0].input.text();
+    assert!(chrono::DateTime::parse_from_rfc3339(time).is_ok(), "{time}");
+    let mut form = open_21(&mut app, "SetDefaultTariff");
+    let (_, payload) = sent(&mut form);
+    assert_eq!(payload["evseId"], 0);
+    assert_eq!(payload["tariff"]["currency"], "EUR");
+}
+
+#[test]
+fn get_event_streams_is_sent_without_a_form() {
+    let mut app = station21();
+    let index = table21()
+        .csms_actions
+        .iter()
+        .position(|s| s.name == "GetPeriodicEventStream")
+        .unwrap();
+    let mut fx = Vec::new();
+    app.run_action(ActionId::Call(index), &mut fx);
+    assert!(matches!(app.mode, Mode::Normal));
+    let [Effect::Send { command, .. }] = <[Effect; 1]>::try_from(fx).expect("one Send") else {
+        panic!("not a Send");
+    };
+    assert_eq!(
+        command,
+        Command::Raw {
+            action: "GetPeriodicEventStream".into(),
+            payload: json!({})
+        }
+    );
+}
+
+#[test]
+fn transaction_actions_of_2_1_need_a_running_transaction() {
+    let idle = station_with(V21, Vec::new());
+    for name in [
+        "ChangeTransactionTariff",
+        "NotifyAllowedEnergyTransfer",
+        "UsePriorityCharging",
+    ] {
+        let index = table21()
+            .csms_actions
+            .iter()
+            .position(|s| s.name == name)
+            .unwrap();
+        assert_eq!(
+            idle.reason_for(ActionId::Call(index)).as_deref(),
+            Some("no active transaction"),
+            "{name}"
+        );
     }
 }

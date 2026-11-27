@@ -1054,6 +1054,9 @@ impl Form {
             let Some(spec) = f.spec else { continue };
             let value = if f.kind == FieldKind::Select {
                 match f.chosen_value() {
+                    Some(v) if v != ANY && spec.ty == registry::FieldType::Boolean => {
+                        Value::Bool(v == "true")
+                    }
                     Some(v) if v != ANY => Value::String(v.to_owned()),
                     _ => continue,
                 }
@@ -1948,8 +1951,13 @@ fn prefill_input(value: &str) -> TextInput {
 }
 
 fn spec_field(spec: &'static registry::FieldSpec, ctx: &SpecContext) -> Field {
-    let mut field = if spec.ty == registry::FieldType::Choice {
-        let (mut options, mut values) = if spec.choices.is_empty() {
+    let mut field = if matches!(
+        spec.ty,
+        registry::FieldType::Choice | registry::FieldType::Boolean
+    ) {
+        let (mut options, mut values) = if spec.ty == registry::FieldType::Boolean {
+            (names(["true", "false"]), Vec::new())
+        } else if spec.choices.is_empty() {
             transaction_options(&ctx.transactions)
         } else {
             (names(spec.choices), Vec::new())
@@ -1970,6 +1978,10 @@ fn spec_field(spec: &'static registry::FieldSpec, ctx: &SpecContext) -> Field {
         let default = match spec.name {
             // A fresh id per form, as the 1.6 forms take one from the session counter.
             "remoteStartId" | "requestId" => ctx.request_id.to_string(),
+            // A signal time (AFRRSignal) starts at now.
+            "timestamp" if spec.ty == registry::FieldType::Timestamp => {
+                Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+            }
             _ => spec.default.unwrap_or_default().to_owned(),
         };
         Field::new(spec.label, FieldKind::Spec, &default)

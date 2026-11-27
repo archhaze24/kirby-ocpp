@@ -9,7 +9,7 @@
 
 use super::{ActionGroup, ActionSpec, FieldSpec, FieldType, ProtocolActions};
 
-const fn field(
+pub(super) const fn field(
     name: &'static str,
     label: &'static str,
     ty: FieldType,
@@ -26,19 +26,19 @@ const fn field(
     }
 }
 
-const fn text(name: &'static str, label: &'static str, required: bool) -> FieldSpec {
+pub(super) const fn text(name: &'static str, label: &'static str, required: bool) -> FieldSpec {
     field(name, label, FieldType::Text, required)
 }
 
-const fn number(name: &'static str, label: &'static str, required: bool) -> FieldSpec {
+pub(super) const fn number(name: &'static str, label: &'static str, required: bool) -> FieldSpec {
     field(name, label, FieldType::Integer, required)
 }
 
-const fn json(name: &'static str, label: &'static str, required: bool) -> FieldSpec {
+pub(super) const fn json(name: &'static str, label: &'static str, required: bool) -> FieldSpec {
     field(name, label, FieldType::Json, required)
 }
 
-const fn choice(
+pub(super) const fn choice(
     name: &'static str,
     label: &'static str,
     choices: &'static [&'static str],
@@ -50,18 +50,18 @@ const fn choice(
     }
 }
 
-const fn with_default(spec: FieldSpec, default: &'static str) -> FieldSpec {
+pub(super) const fn with_default(spec: FieldSpec, default: &'static str) -> FieldSpec {
     FieldSpec {
         default: Some(default),
         ..spec
     }
 }
 
-const fn with_hint(spec: FieldSpec, hint: &'static str) -> FieldSpec {
+pub(super) const fn with_hint(spec: FieldSpec, hint: &'static str) -> FieldSpec {
     FieldSpec { hint, ..spec }
 }
 
-const fn action(
+pub(super) const fn action(
     name: &'static str,
     title: &'static str,
     summary: &'static str,
@@ -122,7 +122,7 @@ pub(super) const RESET_21: ActionSpec = action(
     ],
 );
 const UPDATE_TYPES: &[&str] = &["Differential", "Full"];
-const ID_TOKEN_TYPES: &[&str] = &[
+pub(super) const ID_TOKEN_TYPES: &[&str] = &[
     "Central",
     "eMAID",
     "ISO14443",
@@ -782,6 +782,7 @@ pub(in crate::registry) mod tests {
                 let kind = node.get("type").and_then(Value::as_str);
                 match field.ty {
                     FieldType::Integer => assert_eq!(kind, Some("integer"), "{context}: type"),
+                    FieldType::Boolean => assert_eq!(kind, Some("boolean"), "{context}: type"),
                     FieldType::Text | FieldType::Choice => {
                         assert_eq!(kind, Some("string"), "{context}: type");
                     }

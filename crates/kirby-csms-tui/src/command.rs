@@ -278,7 +278,27 @@ pub fn takes_raw_payload(protocol: &str, spec: &registry::ActionSpec) -> bool {
     let typed_v2 = Protocol::from_token(protocol).is_some_and(|protocol| {
         v2_registry::lookup_for(protocol, spec.name).is_some_and(|a| a.typed)
     });
-    spec.fields.is_empty() && !typed_v2
+    spec.fields.is_empty() && !typed_v2 && has_request_input(protocol, spec.name)
+}
+
+/// Whether the request schema of `action` has a member other than `customData`; `true` when
+/// the schema is unknown.
+fn has_request_input(protocol: &str, action: &str) -> bool {
+    let Some(schemas) = Protocol::from_token(protocol)
+        .and_then(|protocol| kirby_ocpp_core::ocpp::SchemaRegistry::for_protocol(protocol).ok())
+    else {
+        return true;
+    };
+    let Some(source) = schemas.schema_source(action, kirby_ocpp_core::ocpp::PayloadKind::Request)
+    else {
+        return true;
+    };
+    serde_json::from_str::<Value>(source).map_or(true, |schema| {
+        schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_none_or(|members| members.keys().any(|key| key != "customData"))
+    })
 }
 
 fn content_by_name(protocol: &str, action: &str, response: &Value) -> bool {

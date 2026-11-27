@@ -63,6 +63,9 @@ pub enum FieldType {
     Pem,
     /// An RFC 3339 time.
     Timestamp,
+    /// `true` or `false`, sent as a JSON boolean; the default, if any, is `"true"` or
+    /// `"false"`.
+    Boolean,
 }
 
 /// One input of an action.

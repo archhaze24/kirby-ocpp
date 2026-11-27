@@ -887,13 +887,20 @@ impl App {
         let connected = self.summary(selected).is_some_and(|s| s.connected);
         match id {
             ActionId::Call(index) => {
-                let stop = self
+                // A required choice without fixed values picks a running transaction.
+                let needs_transaction = self
                     .protocol_of(selected)
                     .and_then(|table| table.csms_actions.get(index))
-                    .is_some_and(|spec| spec.name == "RequestStopTransaction");
+                    .is_some_and(|spec| {
+                        spec.fields.iter().any(|field| {
+                            field.ty == registry::FieldType::Choice
+                                && field.choices.is_empty()
+                                && field.required
+                        })
+                    });
                 if !connected {
                     reason("station is disconnected")
-                } else if stop
+                } else if needs_transaction
                     && self
                         .state
                         .as_ref()
