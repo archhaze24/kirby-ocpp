@@ -58,8 +58,39 @@ pub(crate) const EXIT_USAGE: u8 = 2;
 /// `run` stopped by SIGINT (128 + 2, the shell convention).
 pub(crate) const EXIT_INTERRUPTED: u8 = 130;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// Stack of the thread that runs the async main: the Windows default of 1 MiB is too small for debug builds.
+const MAIN_STACK: usize = 8 * 1024 * 1024;
+
+fn main() -> ExitCode {
+    let thread = std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(MAIN_STACK)
+        .spawn(|| {
+            match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(async_main()),
+                Err(error) => {
+                    eprintln!("error: cannot start the async runtime: {error}");
+                    ExitCode::FAILURE
+                }
+            }
+        });
+    let thread = match thread {
+        Ok(thread) => thread,
+        Err(error) => {
+            eprintln!("error: cannot start the main thread: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match thread.join() {
+        Ok(code) => code,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+async fn async_main() -> ExitCode {
     let code = real_main().await;
     // Queued stdout lines (events, the report) are written by a helper thread.
     headless::flush_stdout();
