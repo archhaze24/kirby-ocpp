@@ -1487,7 +1487,34 @@ async fn slow_clients_and_connection_flood_are_cut() {
         .expect("extra connection stays open");
     assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
     drop(open);
-    assert_eq!(csms.get("/v1/health").await.0, 200);
+    // Slots come back only as the server sees each close; until then a request is cut too.
+    let request = format!("GET /v1/health HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        if try_exchange(addr, &request)
+            .await
+            .is_some_and(|answer| status_of(&answer) == 200)
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "slots never came back"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Like [`raw_exchange`], but a refused, reset or cut connection is `None`.
+async fn try_exchange(addr: &str, request: &str) -> Option<String> {
+    let mut stream = TcpStream::connect(addr).await.ok()?;
+    stream.write_all(request.as_bytes()).await.ok()?;
+    let mut raw = Vec::new();
+    tokio::time::timeout(WAIT, stream.read_to_end(&mut raw))
+        .await
+        .ok()?
+        .ok()?;
+    Some(String::from_utf8_lossy(&raw).into_owned())
 }
 
 /// `EMFILE` ("Too many open files"): a low `ulimit -n` on the runner, not a product failure.
