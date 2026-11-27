@@ -2,7 +2,7 @@
 
 Drive a running `kirby-csms` from any language or CI without stdin plumbing. JSON, plain HTTP or HTTPS, off by default.
 
-Contents: [Contract](#contract) · [Start](#start) · [Auth model](#auth-model) · [TLS](#tls) · [Endpoints](#endpoints) · [Bulk calls](#bulk-calls) · [Event stream](#event-stream) · [History, export and metrics](#history-export-and-metrics) · [Rules and faults](#rules-and-faults) · [Command-line client](#command-line-client) · [Errors and limits](#errors-and-limits) · [Related pages](#related-pages)
+Contents: [Contract](#contract) · [Start](#start) · [Auth model](#auth-model) · [Web UI](#web-ui) · [TLS](#tls) · [Endpoints](#endpoints) · [Actions](#actions) · [Bulk calls](#bulk-calls) · [Event stream](#event-stream) · [History, export and metrics](#history-export-and-metrics) · [Rules and faults](#rules-and-faults) · [Command-line client](#command-line-client) · [Errors and limits](#errors-and-limits) · [Related pages](#related-pages)
 
 ## Contract
 
@@ -18,10 +18,10 @@ The shapes in this page are a public contract, versioned by the path prefix and 
 - Not part of the contract: the text of `message` fields and of `error` strings in call answers, the order of object keys, the order of stations in a list, and the `ts` precision.
 - The API is protocol-neutral. A station object carries `protocol`, the WebSocket subprotocol negotiated for its connection (`"ocpp1.6"`, `"ocpp2.0.1"` or `"ocpp2.1"`, `null` when the subprotocol policy selected none), so that stations of several OCPP versions are served on the same listener without a new API version. Protocol ids are strings in the API (see [Ids](#ids)).
 - Protocol-level outcomes of a call (the station answered with a CALLERROR, or did not answer in time) are HTTP `200` with `"ok":false`; HTTP errors mean the request was not delivered or was not valid, see [Errors and limits](#errors-and-limits).
-- Browsers are refused by design: there are no CORS headers, and a request with an `Origin` header is refused without a token. `OPTIONS` answers `204` with an `Allow` header for every known path (behind the same token and `Host` checks) and is meant for tools, not for browser preflights.
+- Browsers are refused by design: there are no CORS headers, and a request with an `Origin` header is refused without a token. The one exception is the page of the [web UI](#web-ui) calling its own listener. `OPTIONS` answers `204` with an `Allow` header for every known path (behind the same token and `Host` checks) and is meant for tools, not for browser preflights.
 - `Allow` is derived from the route table that `GET /v1` lists and appears only on a `405` and on the `204` answer to `OPTIONS`, in one format: the route's methods plus `HEAD` (for a `GET` route) and `OPTIONS`, sorted, joined by a comma and a space (`GET, HEAD, OPTIONS`). No other status (`200`, `401`, `403`, `404`, ...) carries it.
 - Absent and `null`: a field that exists in a shape is always present, with one exception: the outcome-dependent fields of the single-call answer (`POST /v1/stations/{id}/calls`). `outcome` and `ok` are always present; `result` is present only for `outcome` `result`; `error`, `code` and `details` are present only for `call_error`; a `timeout` carries `error` and no `result`, `code` or `details`. A value that is not known yet is an explicit `null` (a station that never booted has `"vendor":null`), a collection that is empty is `[]` or `{}`, a counter is `0`. A key that is missing means the field does not exist in this version of the API: clients must tolerate keys they do not know and must not rely on a key being absent. Optional extension fields that are not defined yet are simply not sent.
-- Golden shapes (top-level keys, checked by the test suite): health `ok`, `api_version`, `version`, `stations`; index `api_version`, `version`, `resources` (each `path`, `methods`); station object (in the list and in `GET /v1/stations/{id}`) `id`, `connected`, `protocol`, `received_calls`, `remote_addr`, `vendor`, `model`, `connectors`, `active_transactions`, `security_events`, and `state` in `GET /v1/stations/{id}` only; history `station`, `frames`, `next_cursor`, `gap`, each history frame the keys of an event frame plus `cursor`; transaction list `transactions`, `truncated`, each transaction `station`, `id`, `connector`, `id_tag`, `id_tag_status`, `meter_start`, `started_at`, `status`, `meter_stop`, `stopped_at`, `stop_reason`, `energy_wh`, `power_w`, `last_meter_at`, `evse`, `tariff_id`, `transaction_limit`, `cost`, `priority_charging`; frames and events as in [Event stream](#event-stream); faults list `remaining`, `faults`, each fault `id`, `scope`, `station`, `protocol`, `action`, `kind`, `remaining`; station rules list `station`, `rules` (each `action`, `protocol`, `payload`); one station rule `station`, `action`, `protocol`, `payload`.
+- Golden shapes (top-level keys, checked by the test suite): health `ok`, `api_version`, `version`, `stations`; index `api_version`, `version`, `resources` (each `path`, `methods`); station object (in the list and in `GET /v1/stations/{id}`) `id`, `connected`, `protocol`, `received_calls`, `remote_addr`, `vendor`, `model`, `connectors`, `active_transactions`, `security_events`, and `state` in `GET /v1/stations/{id}` only; history `station`, `frames`, `next_cursor`, `gap`, each history frame the keys of an event frame plus `cursor`; transaction list `transactions`, `truncated`, each transaction `station`, `id`, `connector`, `id_tag`, `id_tag_status`, `meter_start`, `started_at`, `status`, `meter_stop`, `stopped_at`, `stop_reason`, `energy_wh`, `power_w`, `last_meter_at`, `evse`, `tariff_id`, `transaction_limit`, `cost`, `priority_charging`; frames and events as in [Event stream](#event-stream); action table `protocol`, `actions`, each action `name`, `title`, `summary`, `group`, `input`, `fields`, `template`, each field `name`, `label`, `type`, `choices`, `default`, `required`, `hint`; faults list `remaining`, `faults`, each fault `id`, `scope`, `station`, `protocol`, `action`, `kind`, `remaining`; station rules list `station`, `rules` (each `action`, `protocol`, `payload`); one station rule `station`, `action`, `protocol`, `payload`.
 
 ## Start
 
@@ -38,10 +38,26 @@ The `api listening` line comes right after the `listening` line (with `--json`: 
   - Browsers are kept out by three checks, each answered with `403`: a request with an `Origin` header; a request with `Sec-Fetch-Site: cross-site`; and a `Host` header that is not a loopback IP literal (`127.0.0.1`, `[::1]`, `[0:0:0:0:0:0:0:1]`, any `127.x.y.z`), the address the API is bound to (when it is a specific address), or `localhost` / `localhost.` (case-insensitive), each with an optional port.
   - The `403` text lists the accepted values. The `Host` rule is what stops DNS rebinding: a page on `evil.example` rebound to 127.0.0.1 sends no `Origin` on a same-origin GET, but its `Host` is still `evil.example`. A request without any `Host` header is let through (no browser sends one).
   - Reaching the API by another name (an SSH tunnel to a host name, a reverse proxy) needs a token.
+  - With `--web` a request from the web UI's own page is also accepted: its `Origin` equals `<scheme>://<Host>` exactly (`http`, or `https` with API TLS; compared case-insensitively), the `Host` passes the loopback check above and `Sec-Fetch-Site` is absent or `same-origin`. `Origin: null`, any other origin and `Sec-Fetch-Site` `cross-site` or `same-site` stay `403`.
 - With `--api-token TOKEN` / `--api-token-file FILE` (env `KIRBY_CSMS_API_TOKEN`, `KIRBY_CSMS_API_TOKEN_FILE`) every request, whatever the path, needs exactly one `Authorization: Bearer TOKEN` header (scheme case-insensitive, exactly one space, compared in constant time; two `Authorization` headers are refused), otherwise `401` with `WWW-Authenticate: Bearer`.
   - With a token the `Host` and `Origin` rules do not apply: the bearer proves intent. A token must be visible ASCII without spaces (startup exit code 2 otherwise).
+  - With `--web` the four files of the [web UI](#web-ui) are served without the token, since they hold no data; every other path still needs it. The page asks for the token itself.
   - `--api-token` is visible in `ps`; prefer the environment variable or the file (read once, trailing newline dropped, must not be empty; on unix a warning goes to stderr when the file is readable by group or others). `KIRBY_CSMS_API_TOKEN` and `--api-token-file` together are a usage error (exit 2), like `--api-token` with it.
 - There is no per-user permission. Over plain HTTP the token is sent in clear text, so a plain listener belongs on loopback; see [TLS](#tls). Everything the API can do (sending any CALL to any station, forgetting stations) is available to every holder of the token.
+
+## Web UI
+
+`--web` (env `KIRBY_CSMS_WEB`, key `web` in `[api]`) serves a browser UI on the API listener. Without `--api-listen` the API then listens on `127.0.0.1:9100`; when that address is taken, startup fails (exit 1) and the error names `--api-listen` as the way to pick another one. After the `api listening` line the server prints `web UI on URL` (the API URL plus `/`, `https` with API TLS; with `--json` `{"type":"web_ui","url":"..."}`). It works in the TUI, headless and `--script` modes; the Station pane of the TUI shows `Web UI: URL` while no station is selected.
+
+```text
+kirby-csms --web
+api listening on http://127.0.0.1:9100
+web UI on http://127.0.0.1:9100/
+```
+
+- Four static files are embedded in the binary: `GET` and `HEAD` of `/` and `/index.html` (`text/html; charset=utf-8`), `/assets/app.js` (`text/javascript; charset=utf-8`), `/assets/style.css` (`text/css; charset=utf-8`) and `/assets/favicon.svg` (`image/svg+xml`). Without `--web` these paths are `404` `not_found`. They are not part of `/v1`: `GET /v1` and the OpenAPI document do not list them.
+- Every file carries `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-cache` and `Connection: close`.
+- The page calls the `/v1` endpoints of its own listener. Without a token the same-origin rule of the [auth model](#auth-model) lets those calls through (`/v1/events` included); with a token the page sends the bearer itself. No CORS headers are sent.
 
 ## TLS
 
@@ -60,7 +76,7 @@ Which combinations start:
 
 | `--api-listen` address | Token | TLS | Result |
 | --- | --- | --- | --- |
-| loopback | none | none | starts; the `Origin`, `Sec-Fetch-Site` and `Host` checks of the [auth model](#auth-model) apply |
+| loopback | none | none | starts; the `Origin`, `Sec-Fetch-Site` and `Host` checks of the [auth model](#auth-model) apply (with `--web`, a request from the page's own origin passes the `Origin` check) |
 | loopback | set | none | starts |
 | loopback | none or set | set | starts; with TLS and no token the same browser checks apply |
 | other (including `0.0.0.0`, `[::]`) | none | any | exit 2: a token is required |
@@ -88,6 +104,7 @@ JSON in and out, `Content-Type: application/json`. Errors have the body `{"error
 | `GET /v1/stations/{id}/history` | `{"station":..,"frames":[...],"next_cursor":..,"gap":..}`, oldest first; query parameters `limit`, `since`, `action`, `kind`, `direction`, `format` (`json`, `ndjson`, `csv`); frames are shaped like the `--json` frame lines plus a `cursor`; `AuthorizationKey` values are redacted unless `--show-secrets`; `404` `unknown_station` if never seen. See [History, export and metrics](#history-export-and-metrics) |
 | `GET /v1/transactions` | `{"transactions":[...],"truncated":..}`: the transactions of every station, with the filters `station`, `state`, `since`, `limit` and `format` (`json`, `csv`) |
 | `GET /v1/metrics` | Counters and gauges in the Prometheus text format |
+| `GET /v1/actions?protocol=P` | The actions the server can send in protocol `P` with the input of each, see [Actions](#actions) |
 | `POST /v1/stations/{id}/calls` | Sends a CALL; body `{"action":"Reset","payload":{...},"timeout_ms":5000}` (`payload` default `{}`, `timeout_ms` 1..=86400000, default `--call-timeout`). Answers with `outcome` (`"result"`, `"call_error"` or `"timeout"`) and `ok` always, plus `result` for `result`, `error`, `code` and `details` for `call_error`, and `error` for `timeout` (the fields of the other outcomes are absent); `result` and `details` have `AuthorizationKey` values redacted unless `--show-secrets`; no `type`, `station` or `action` (the request names them), see below |
 | `POST /v1/calls` | Sends one action to at most 64 stations selected by a glob and optional protocol; returns bounded per-station outcomes, sorted by station id. See [Bulk calls](#bulk-calls) |
 | `DELETE /v1/stations/{id}` | Forgets a disconnected station (`{"station":..,"forgotten":true}`); `409` `conflict` while it is connected (decided atomically with the removal), `404` `unknown_station` if never seen |
@@ -142,6 +159,34 @@ $ curl -s -X POST http://127.0.0.1:9100/v1/stations/CP-1/calls \
 $ curl -s 'http://127.0.0.1:9100/v1/stations/CP-1/history?limit=5'
 $ curl -s -X DELETE http://127.0.0.1:9100/v1/stations/CP-1
 ```
+
+## Actions
+
+`GET /v1/actions?protocol=P` returns the action table of one protocol: what the server can send to a station (the data behind the forms of the terminal UI), in table order. `protocol` is required and takes `ocpp1.6`, `ocpp2.0.1` or `ocpp2.1`; it must be given once, no other parameter is accepted, and a missing, repeated or unknown value is `400` `bad_request`. The endpoint is always available, with or without `--web`.
+
+```json
+{"protocol":"ocpp2.1","actions":[{"name":"Reset","title":"Reset","summary":"...","group":"core","input":"form","fields":[{"name":"type","label":"type","type":"choice","choices":["Immediate","OnIdle","ImmediateAndResume"],"default":"OnIdle","required":true,"hint":""}],"template":null}]}
+```
+
+| Action key | Value |
+| --- | --- |
+| `name` | The action name as it appears in a CALL; send it with `POST /v1/stations/{id}/calls` |
+| `title`, `summary` | The menu title and the one-line description |
+| `group` | `core`, or `security` (the OCPP 1.6 security whitepaper actions) |
+| `input` | `form`: build the payload from `fields`. `none`: the action takes no input, send `{}`. `raw`: edit the payload as JSON, starting from `template` |
+| `fields` | The form fields in order, `[]` unless `input` is `form` |
+| `template` | For `raw`: a minimal valid payload, or `null` when none could be derived; `null` otherwise |
+
+| Field key | Value |
+| --- | --- |
+| `name` | The JSON key in the payload; a dotted name (`log.remoteLocation`) is a key of a nested object |
+| `label`, `hint` | The form label and a short note (`""` when none) |
+| `type` | `text`, `integer`, `choice`, `json`, `pem`, `timestamp`, `boolean`, or `transaction`: a choice among the running transactions of the station, which the client fills in |
+| `choices` | The allowed values of a `choice` field in menu order, `[]` otherwise |
+| `default` | The initial value as a string (`"true"` or `"false"` for a `boolean`), `null` when there is none |
+| `required` | Whether the request is invalid without a value |
+
+Every key is always present. New action keys and field types may be added within `/v1`.
 
 ## Bulk calls
 
@@ -449,7 +494,7 @@ Every error the API produces has the body `{"error":{"code":"<code>","message":"
 | 400 | `bad_request` | Invalid JSON or fields, bad `timeout_ms`, bad `limit`, `since`, `action`, `kind`, `direction`, `state` or `format`, a malformed `last_event_id`, unknown or repeated query parameter, unsafe or over-long station id, more than one `Host` header, bad fault, an unknown `protocol`, a rule body that is not an object |
 | 400 | `unsupported_action` | `PUT`/`DELETE` of `/v1/rules/{action}` or `/v1/stations/{id}/rules/{action}`, and `GET` of the latter, with an action that is not a known charge-point action for the protocol (`StartTransaction` with `?protocol=ocpp2.0.1`, for example) |
 | 401 | `unauthorized` | Token configured and missing or wrong |
-| 403 | `forbidden` | No token configured and the request has an `Origin` header, `Sec-Fetch-Site: cross-site` or a non-loopback `Host` |
+| 403 | `forbidden` | No token configured and the request has an `Origin` header (with `--web`: other than the page's own origin), `Sec-Fetch-Site: cross-site` or a non-loopback `Host` |
 | 404 | `not_found` | Unknown route |
 | 404 | `unknown_rule` | `GET /v1/stations/{id}/rules/{action}` for a station that has no rule for the action |
 | 404 | `unknown_station` | The station id was never seen (or was forgotten) |

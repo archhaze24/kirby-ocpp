@@ -3,12 +3,13 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
 use super::ApiState;
 use super::error::error;
+use super::web;
 
 /// Equality that does not stop at the first differing byte.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
@@ -55,10 +56,34 @@ fn valid_port(text: &str) -> bool {
     })
 }
 
-/// With a token every request needs exactly one `Authorization: Bearer TOKEN`. Without one the
-/// API trusts the loopback address only, so a browser must not be able to reach it: a request
-/// with an `Origin` header, a `Sec-Fetch-Site: cross-site` header or a `Host` that is not a
-/// loopback name (DNS rebinding) is refused.
+/// Whether a request comes from the web UI page this listener served: its `Origin` is exactly
+/// `<scheme>://<Host>` (compared case-insensitively), the `Host` names this machine and the
+/// browser says the request is `same-origin` (or sends no `Sec-Fetch-Site`).
+fn from_own_page(headers: &HeaderMap, state: &ApiState) -> bool {
+    let (Some(origin), Some(host)) = (
+        headers.get(header::ORIGIN),
+        headers
+            .get(header::HOST)
+            .and_then(|host| host.to_str().ok()),
+    ) else {
+        return false;
+    };
+    let scheme = if state.https { "https" } else { "http" };
+    let own = format!("{scheme}://{host}");
+    state.web
+        && origin.as_bytes().eq_ignore_ascii_case(own.as_bytes())
+        && is_loopback_host(host, state.bound)
+        && headers
+            .get("sec-fetch-site")
+            .is_none_or(|value| value.as_bytes().eq_ignore_ascii_case(b"same-origin"))
+}
+
+/// With a token every request needs exactly one `Authorization: Bearer TOKEN`; the pages of
+/// the web UI are the exception, they hold no data. Without a token the API trusts the
+/// loopback address only, so a browser must not be able to reach it: a request with an
+/// `Origin` header, a `Sec-Fetch-Site: cross-site` header or a `Host` that is not a loopback
+/// name (DNS rebinding) is refused. With the web UI on, a request from its own page (see
+/// [`from_own_page`]) passes the `Origin` check.
 pub(super) async fn auth(State(state): State<ApiState>, request: Request, next: Next) -> Response {
     let headers = request.headers();
     if headers.get_all(header::HOST).iter().nth(1).is_some() {
@@ -67,6 +92,9 @@ pub(super) async fn auth(State(state): State<ApiState>, request: Request, next: 
             "bad_request",
             "more than one Host header",
         );
+    }
+    if state.token.is_some() && state.web && web::is_asset(request.uri().path()) {
+        return next.run(request).await;
     }
     if let Some(token) = &state.token {
         let mut values = headers.get_all(header::AUTHORIZATION).iter();
@@ -90,7 +118,7 @@ pub(super) async fn auth(State(state): State<ApiState>, request: Request, next: 
                 .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
             return response;
         }
-    } else if headers.contains_key(header::ORIGIN) {
+    } else if headers.contains_key(header::ORIGIN) && !from_own_page(headers, &state) {
         return error(
             StatusCode::FORBIDDEN,
             "forbidden",

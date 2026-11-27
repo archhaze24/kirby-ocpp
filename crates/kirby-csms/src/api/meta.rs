@@ -23,6 +23,7 @@ pub(super) const ROUTES: &[(&str, &[&str])] = &[
     ("/v1/stations/{id}/history", &["GET"]),
     ("/v1/transactions", &["GET"]),
     ("/v1/metrics", &["GET"]),
+    ("/v1/actions", &["GET"]),
     ("/v1/calls", &["POST"]),
     ("/v1/stations/{id}/calls", &["POST"]),
     ("/v1/stations/{id}/rules", &["GET"]),
@@ -38,25 +39,30 @@ pub(super) const ROUTES: &[(&str, &[&str])] = &[
 ];
 
 /// The methods of the route that `path` matches (`{name}` matches one non-empty segment).
-fn route_methods(path: &str) -> Option<&'static [&'static str]> {
-    ROUTES.iter().find_map(|(pattern, methods)| {
-        let mut want = pattern.split('/');
-        let mut have = path.split('/');
-        loop {
-            match (want.next(), have.next()) {
-                (None, None) => return Some(*methods),
-                (Some(w), Some(h)) if w.starts_with('{') && !h.is_empty() => {}
-                (Some(w), Some(h)) if w == h => {}
-                _ => return None,
+/// With `web`, the pages of the web UI are known paths too (`GET` only); they are not in
+/// [`ROUTES`] because they are not part of `/v1`.
+fn route_methods(path: &str, web: bool) -> Option<&'static [&'static str]> {
+    ROUTES
+        .iter()
+        .find_map(|(pattern, methods)| {
+            let mut want = pattern.split('/');
+            let mut have = path.split('/');
+            loop {
+                match (want.next(), have.next()) {
+                    (None, None) => return Some(*methods),
+                    (Some(w), Some(h)) if w.starts_with('{') && !h.is_empty() => {}
+                    (Some(w), Some(h)) if w == h => {}
+                    _ => return None,
+                }
             }
-        }
-    })
+        })
+        .or_else(|| (web && super::web::is_asset(path)).then_some(&["GET"][..]))
 }
 
 /// The `Allow` value of a known path: its methods plus `HEAD` (for a `GET` route) and
 /// `OPTIONS`, sorted, joined by a comma and a space.
-fn allow_value(path: &str) -> Option<HeaderValue> {
-    let methods = route_methods(path)?;
+fn allow_value(path: &str, web: bool) -> Option<HeaderValue> {
+    let methods = route_methods(path, web)?;
     let mut allow: Vec<&str> = methods.to_vec();
     if methods.contains(&"GET") {
         allow.push("HEAD");
@@ -71,8 +77,8 @@ fn allow_value(path: &str) -> Option<HeaderValue> {
 /// the token and `Host` rules apply.
 ///
 /// [`auth`]: super::auth::auth
-pub(super) async fn options(request: Request, next: Next) -> Response {
-    if request.method() == Method::OPTIONS && route_methods(request.uri().path()).is_some() {
+pub(super) async fn options(State(web): State<bool>, request: Request, next: Next) -> Response {
+    if request.method() == Method::OPTIONS && route_methods(request.uri().path(), web).is_some() {
         return StatusCode::NO_CONTENT.into_response();
     }
     next.run(request).await
@@ -81,9 +87,13 @@ pub(super) async fn options(request: Request, next: Next) -> Response {
 /// The one place that shapes headers common to every response: `Connection: close` (so one
 /// connection serves one request) and `Allow`. Any `Allow` the router set is dropped; it is
 /// written back only on a `405` and on the `204` answer to `OPTIONS`, derived from [`ROUTES`].
-pub(super) async fn finish_response(request: Request, next: Next) -> Response {
+pub(super) async fn finish_response(
+    State(web): State<bool>,
+    request: Request,
+    next: Next,
+) -> Response {
     let options = request.method() == Method::OPTIONS;
-    let allow = allow_value(request.uri().path());
+    let allow = allow_value(request.uri().path(), web);
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(header::CONNECTION, HeaderValue::from_static("close"));

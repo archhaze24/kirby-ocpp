@@ -368,9 +368,10 @@ Rules can also be changed at run time from the TUI and from scenarios (`set_rule
 | --- | --- | --- | --- |
 | `--listen <ADDR>` | `KIRBY_CSMS_LISTEN` | `0.0.0.0:9000` | Address to listen on; port `0` picks a free port (the real address is printed first) |
 | `--api-listen <ADDR>` | `KIRBY_CSMS_API_LISTEN` | off | Address of the local HTTP control API; port `0` picks a free port. A non-loopback address needs a token and `--api-tls-cert` (exit 2 otherwise). See [api.md](api.md#tls) |
-| `--api-token <TOKEN>` | `KIRBY_CSMS_API_TOKEN` | none | Bearer token the API requires (visible in `ps`: prefer the environment variable or `--api-token-file`); needs `--api-listen`, excludes `--api-token-file` |
-| `--api-token-file <FILE>` | `KIRBY_CSMS_API_TOKEN_FILE` | none | File holding the API bearer token (read once, trailing newline dropped, must not be empty, valid UTF-8, at most 64 KiB; a warning on unix when group/world readable); needs `--api-listen`, excludes `KIRBY_CSMS_API_TOKEN`; a token is visible ASCII without spaces |
-| `--api-tls-cert <FILE>` | `KIRBY_CSMS_API_TLS_CERT` | none | Server certificate chain (PEM) that makes the API serve HTTPS; needs `--api-tls-key` and `--api-listen`. See [api.md](api.md#tls) |
+| `--web` | `KIRBY_CSMS_WEB` | off | Serve the web UI on the API listener (key `web` in `[api]`). Without `--api-listen` the API listens on `127.0.0.1:9100`; a busy address is a startup error (exit 1) that names `--api-listen`. Prints `web UI on URL` after the `api listening` line. See [api.md](api.md#web-ui) |
+| `--api-token <TOKEN>` | `KIRBY_CSMS_API_TOKEN` | none | Bearer token the API requires (visible in `ps`: prefer the environment variable or `--api-token-file`); needs `--api-listen` or `--web`, excludes `--api-token-file` |
+| `--api-token-file <FILE>` | `KIRBY_CSMS_API_TOKEN_FILE` | none | File holding the API bearer token (read once, trailing newline dropped, must not be empty, valid UTF-8, at most 64 KiB; a warning on unix when group/world readable); needs `--api-listen` or `--web`, excludes `KIRBY_CSMS_API_TOKEN`; a token is visible ASCII without spaces |
+| `--api-tls-cert <FILE>` | `KIRBY_CSMS_API_TLS_CERT` | none | Server certificate chain (PEM) that makes the API serve HTTPS; needs `--api-tls-key` and `--api-listen` or `--web`. See [api.md](api.md#tls) |
 | `--api-tls-key <FILE>` | `KIRBY_CSMS_API_TLS_KEY` | none | Server private key (PEM) of the API certificate; needs `--api-tls-cert` |
 | `--api-tls-client-ca <FILE>` | `KIRBY_CSMS_API_TLS_CLIENT_CA` | none | Trusted CA(s) for API client certificates; every client must present one (mutual TLS); needs `--api-tls-cert` |
 | `--tls-cert <FILE>` | `KIRBY_CSMS_TLS_CERT` | none | Server certificate chain (PEM) for `wss://`; needs `--tls-key` |
@@ -450,7 +451,7 @@ For every setting: command-line flag, then environment variable, then the select
 | Table | Keys |
 | --- | --- |
 | `[listener]` | `listen`, `subprotocol` |
-| `[api]` | `api_listen`, `api_token_file`, `api_tls_cert`, `api_tls_key`, `api_tls_client_ca` |
+| `[api]` | `api_listen`, `web`, `api_token_file`, `api_tls_cert`, `api_tls_key`, `api_tls_client_ca` |
 | `[tls]` | `tls_cert`, `tls_key`, `tls_client_ca` |
 | `[security]` | `security_profile`, `auth_keys_file`, `default_auth_key_file`, `show_secrets` |
 | `[behavior]` | `transaction_ids`, `heartbeat_interval`, `validate_inbound`, `ping_interval`, `pong_timeout`, `call_timeout`, `history_cap`, `transaction_history_cap` |

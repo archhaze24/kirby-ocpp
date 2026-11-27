@@ -138,6 +138,7 @@ const ENV_VARS: &[&str] = &[
     "KIRBY_CSMS_API_LISTEN",
     "KIRBY_CSMS_API_TOKEN",
     "KIRBY_CSMS_API_TOKEN_FILE",
+    "KIRBY_CSMS_WEB",
     "KIRBY_CSMS_SHOW_SECRETS",
     "KIRBY_CSMS_STDIN",
     "KIRBY_CSMS_SCRIPT",
@@ -157,7 +158,7 @@ fn command(args: &[&str]) -> Command {
 struct Csms {
     child: Child,
     /// Keeps the stdout reader alive (and the pipe drained).
-    _lines: Receiver<String>,
+    lines: Receiver<String>,
     station_addr: String,
     api_addr: String,
     api_line: Value,
@@ -204,7 +205,7 @@ impl Csms {
         let api_line = api_line.unwrap();
         Self {
             child,
-            _lines: lines,
+            lines,
             station_addr: station_addr.unwrap(),
             api_addr: api_line["addr"].as_str().unwrap().to_owned(),
             api_line,
@@ -1987,6 +1988,27 @@ async fn golden_key_sets_of_the_shapes() {
     for resource in index["resources"].as_array().unwrap() {
         assert_eq!(keys(resource), ["methods", "path"]);
     }
+    let (status, actions) = csms.get("/v1/actions?protocol=ocpp2.1").await;
+    assert_eq!(status, 200);
+    assert_eq!(keys(&actions), ["actions", "protocol"]);
+    for action in actions["actions"].as_array().unwrap() {
+        assert_eq!(
+            keys(action),
+            [
+                "fields", "group", "input", "name", "summary", "template", "title"
+            ],
+            "{action}"
+        );
+        for field in action["fields"].as_array().unwrap() {
+            assert_eq!(
+                keys(field),
+                [
+                    "choices", "default", "hint", "label", "name", "required", "type"
+                ],
+                "{field}"
+            );
+        }
+    }
 
     // A station that never booted: every key is there, unknown values are null or empty.
     let _silent = silent_station(&csms.station_addr, "RAW-1").await;
@@ -3400,4 +3422,395 @@ async fn history_limit_keeps_the_shape_on_a_long_history() {
     assert_eq!(filtered["frames"].as_array().unwrap().len(), 1);
     assert_eq!(filtered["frames"][0]["kind"], "result");
     let _ = station.shutdown().await;
+}
+
+// ---- web UI and the action tables -----------------------------------------------------------
+
+const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
+connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+/// The four embedded files: path, content type, content.
+fn web_assets() -> [(&'static str, &'static str, &'static str); 5] {
+    [
+        (
+            "/",
+            "text/html; charset=utf-8",
+            include_str!("../web/index.html"),
+        ),
+        (
+            "/index.html",
+            "text/html; charset=utf-8",
+            include_str!("../web/index.html"),
+        ),
+        (
+            "/assets/app.js",
+            "text/javascript; charset=utf-8",
+            include_str!("../web/app.js"),
+        ),
+        (
+            "/assets/style.css",
+            "text/css; charset=utf-8",
+            include_str!("../web/style.css"),
+        ),
+        (
+            "/assets/favicon.svg",
+            "image/svg+xml",
+            include_str!("../web/favicon.svg"),
+        ),
+    ]
+}
+
+/// One request with the given extra header lines; returns the status, the head with
+/// lowercased lines and the body text.
+async fn page(
+    addr: &str,
+    method: &str,
+    path: &str,
+    extra: &[(&str, &str)],
+) -> (u16, String, String) {
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+    for (name, value) in extra {
+        let _ = write!(request, "{name}: {value}\r\n");
+    }
+    request.push_str("\r\n");
+    let answer = raw_exchange(addr, &request).await;
+    let (head, body) = answer.split_once("\r\n\r\n").expect("complete response");
+    (status_of(&answer), head.to_lowercase(), body.to_owned())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_serves_the_four_assets_with_their_headers() {
+    let csms = Csms::start(&["--web"]);
+    // The `web UI on` line follows the `api listening` line.
+    let web_line = loop {
+        let line = csms.lines.recv_timeout(WAIT).expect("web_ui line");
+        if let Ok(value) = serde_json::from_str::<Value>(&line)
+            && value["type"] == "web_ui"
+        {
+            break value;
+        }
+    };
+    assert_eq!(keys(&web_line), ["type", "url"]);
+    assert_eq!(web_line["url"], format!("http://{}/", csms.api_addr));
+    let addr = csms.api_addr.clone();
+    for (path, content_type, content) in web_assets() {
+        let (status, head, body) = page(&addr, "GET", path, &[]).await;
+        assert_eq!(status, 200, "{path}: {head}");
+        assert_eq!(body, content, "{path}");
+        for line in [
+            format!("content-type: {content_type}"),
+            format!("content-security-policy: {CSP}"),
+            "x-content-type-options: nosniff".to_owned(),
+            "referrer-policy: no-referrer".to_owned(),
+            "cache-control: no-cache".to_owned(),
+            "connection: close".to_owned(),
+        ] {
+            assert!(head.lines().any(|have| have == line), "{path}: {head}");
+        }
+        let (status, head_only, body) = page(&addr, "HEAD", path, &[]).await;
+        assert_eq!(status, 200, "{path}");
+        assert!(body.is_empty(), "{path}: HEAD carries no body");
+        assert!(
+            head_only.contains(&format!("content-type: {content_type}")),
+            "{path}: {head_only}"
+        );
+    }
+    // The pages are not part of `/v1`.
+    let (_, index) = csms.get("/v1").await;
+    for resource in index["resources"].as_array().unwrap() {
+        let path = resource["path"].as_str().unwrap();
+        assert!(path.starts_with("/v1"), "{path}");
+    }
+    // Other methods and paths: `405` with `Allow`, and `404` for the rest.
+    let (status, head, _) = page(&addr, "POST", "/", &[]).await;
+    assert_eq!(status, 405, "{head}");
+    assert!(head.contains("allow: get, head, options"), "{head}");
+    assert_eq!(page(&addr, "GET", "/assets/other.js", &[]).await.0, 404);
+    assert_eq!(page(&addr, "OPTIONS", "/", &[]).await.0, 204);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_pages_are_unknown_without_the_flag() {
+    let csms = Csms::start(&[]);
+    for (path, _, _) in web_assets() {
+        let (status, body) = csms.get(path).await;
+        assert_eq!(status, 404, "{path}");
+        assert_eq!(body["error"]["code"], "not_found", "{path}");
+    }
+    assert_eq!(page(&csms.api_addr, "OPTIONS", "/", &[]).await.0, 404);
+    let tokened = Csms::start(&["--api-token", "tok"]);
+    assert_eq!(page(&tokened.api_addr, "GET", "/", &[]).await.0, 401);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_accepts_requests_from_its_own_page_only() {
+    let csms = Csms::start(&["--web"]);
+    let addr = csms.api_addr.clone();
+    let own = format!("http://{addr}");
+    let upper = format!("HTTP://{}", addr.to_uppercase());
+    let get = |path: &'static str, headers: Vec<(&'static str, String)>| {
+        let addr = addr.clone();
+        async move {
+            let refs: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
+            page(&addr, "GET", path, &refs).await.0
+        }
+    };
+    for path in ["/v1/health", "/v1/stations", "/v1/actions?protocol=ocpp1.6"] {
+        assert_eq!(
+            get(path, vec![("Origin", own.clone())]).await,
+            200,
+            "{path}"
+        );
+        assert_eq!(
+            get(path, vec![("Origin", upper.clone())]).await,
+            200,
+            "{path}"
+        );
+        assert_eq!(
+            get(
+                path,
+                vec![
+                    ("Origin", own.clone()),
+                    ("Sec-Fetch-Site", "same-origin".into())
+                ]
+            )
+            .await,
+            200,
+            "{path}"
+        );
+    }
+    // Without an Origin header nothing changed.
+    assert_eq!(get("/v1/health", vec![]).await, 200);
+    assert_eq!(
+        get("/v1/health", vec![("Sec-Fetch-Site", "same-origin".into())]).await,
+        200
+    );
+    let port = addr.rsplit(':').next().unwrap();
+    for origin in [
+        "http://evil.example".to_owned(),
+        "null".to_owned(),
+        format!("http://localhost:{port}"),
+        format!("https://{addr}"),
+        format!("{own}/"),
+        String::new(),
+    ] {
+        assert_eq!(
+            get("/v1/health", vec![("Origin", origin.clone())]).await,
+            403,
+            "{origin:?}"
+        );
+    }
+    for site in ["cross-site", "same-site", "none"] {
+        assert_eq!(
+            get(
+                "/v1/health",
+                vec![("Origin", own.clone()), ("Sec-Fetch-Site", site.into())]
+            )
+            .await,
+            403,
+            "{site}"
+        );
+    }
+    assert_eq!(
+        get("/v1/health", vec![("Sec-Fetch-Site", "cross-site".into())]).await,
+        403
+    );
+    // The `Host` must still be a loopback name, even when `Origin` repeats it.
+    let request =
+        "GET /v1/health HTTP/1.1\r\nHost: evil.example\r\nOrigin: http://evil.example\r\n\r\n";
+    assert_eq!(status_of(&raw_exchange(&addr, request).await), 403);
+    // The event stream follows the same rule.
+    let (status, _) = Sse::open(&addr, "/v1/events", &[("Origin", &own)]).await;
+    assert_eq!(status, 200);
+    let (status, _) = Sse::open(&addr, "/v1/events", &[("Origin", "http://evil.example")]).await;
+    assert_eq!(status, 403);
+    // Without `--web` the same-origin request is refused as before.
+    let plain = Csms::start(&[]);
+    let own = format!("http://{}", plain.api_addr);
+    assert_eq!(
+        page(&plain.api_addr, "GET", "/v1/health", &[("Origin", &own)])
+            .await
+            .0,
+        403
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn web_pages_need_no_token_but_the_api_does() {
+    let csms = Csms::start(&["--web", "--api-token", "tok"]);
+    let addr = &csms.api_addr;
+    for (path, _, content) in web_assets() {
+        let (status, _, body) = page(addr, "GET", path, &[]).await;
+        assert_eq!(status, 200, "{path}");
+        assert_eq!(body, content);
+    }
+    for path in ["/v1/health", "/v1/actions?protocol=ocpp1.6", "/v1/events"] {
+        assert_eq!(page(addr, "GET", path, &[]).await.0, 401, "{path}");
+    }
+    let (status, _, _) = page(
+        addr,
+        "GET",
+        "/v1/health",
+        &[("Authorization", "Bearer tok")],
+    )
+    .await;
+    assert_eq!(status, 200);
+    // Paths that are not pages need the token, whether they exist or not.
+    assert_eq!(page(addr, "GET", "/assets/other.js", &[]).await.0, 401);
+    assert_eq!(page(addr, "POST", "/", &[]).await.0, 405);
+}
+
+#[test]
+fn web_is_a_flag_an_environment_variable_and_a_config_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("csms.toml");
+    std::fs::write(&file, "[api]\nweb = true\n").unwrap();
+    let file = file.to_str().unwrap();
+    for (args, env, expected) in [
+        (vec!["--print-config=toml", "--web"], None, "web = true"),
+        (vec!["--print-config=toml"], Some("1"), "web = true"),
+        (vec!["--print-config=toml"], None, "web = false"),
+        (
+            vec!["--print-config=toml", "--config", file],
+            None,
+            "web = true",
+        ),
+    ] {
+        let mut cmd = command(&args);
+        if let Some(value) = env {
+            cmd.env("KIRBY_CSMS_WEB", value);
+        }
+        let output = cmd.stdin(Stdio::null()).output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "{args:?}");
+        let text = String::from_utf8_lossy(&output.stdout);
+        assert!(text.contains(expected), "{args:?}: {text}");
+    }
+    let (code, _) = run_to_end(&["--check-config", "--web"]);
+    assert_eq!(code, 0);
+    // A token or a certificate needs a listener: `--web` is one.
+    let (code, stderr) = run_to_end(&["--check-config", "--web", "--api-token", "x"]);
+    assert_eq!(code, 0, "{stderr}");
+}
+
+#[test]
+fn a_busy_default_web_address_names_api_listen() {
+    // The default address of `--web` is 127.0.0.1:9100. Hold it (when someone else already
+    // does, it is busy all the same), so the test does not depend on the port being free.
+    let _busy = std::net::TcpListener::bind("127.0.0.1:9100");
+    let (code, stderr) = run_to_end(&["--listen", "127.0.0.1:0", "--web"]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(
+        stderr.contains("cannot bind the API listener 127.0.0.1:9100"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("--api-listen"), "{stderr}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actions_list_each_protocol_in_registry_order() {
+    let csms = Csms::start(&[]);
+    for protocol in ["ocpp1.6", "ocpp2.0.1", "ocpp2.1"] {
+        let (status, body) = csms.get(&format!("/v1/actions?protocol={protocol}")).await;
+        assert_eq!(status, 200, "{protocol}: {body}");
+        validate_openapi("ActionList", &body);
+        assert_eq!(body["protocol"], protocol);
+        let names: Vec<&str> = body["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|action| action["name"].as_str().unwrap())
+            .collect();
+        let table: Vec<&str> = kirby_csms_core::registry::protocol_actions(protocol)
+            .unwrap()
+            .csms_actions
+            .iter()
+            .map(|spec| spec.name)
+            .collect();
+        assert_eq!(names, table, "{protocol}");
+    }
+    let (_, reset) = csms.get("/v1/actions?protocol=ocpp2.1").await;
+    let reset = reset["actions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|action| action["name"] == "Reset")
+        .unwrap();
+    assert_eq!(reset["group"], "core");
+    assert_eq!(reset["input"], "form");
+    assert_eq!(reset["template"], Value::Null);
+    assert_eq!(
+        reset["fields"][0],
+        json!({
+            "name": "type",
+            "label": "type",
+            "type": "choice",
+            "choices": ["Immediate", "OnIdle", "ImmediateAndResume"],
+            "default": "OnIdle",
+            "required": true,
+            "hint": "",
+        })
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actions_tell_forms_from_raw_and_no_input() {
+    let csms = Csms::start(&[]);
+    let (_, body) = csms.get("/v1/actions?protocol=ocpp2.1").await;
+    let find = |name: &str| {
+        body["actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|action| action["name"] == name)
+            .unwrap_or_else(|| panic!("no {name}"))
+    };
+    let raw = find("SetDERControl");
+    assert_eq!(raw["input"], "raw");
+    assert_eq!(raw["fields"], json!([]));
+    assert!(raw["template"].is_object(), "{raw}");
+    let none = find("GetPeriodicEventStream");
+    assert_eq!(none["input"], "none");
+    assert_eq!(none["fields"], json!([]));
+    assert_eq!(none["template"], Value::Null);
+    let form = find("UsePriorityCharging");
+    assert_eq!(form["input"], "form");
+    assert_eq!(form["template"], Value::Null);
+    let types: Vec<&str> = form["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|field| field["type"].as_str().unwrap())
+        .collect();
+    assert_eq!(types, ["transaction", "boolean"]);
+    assert_eq!(form["fields"][0]["choices"], json!([]));
+    assert_eq!(form["fields"][1]["default"], "true");
+    assert_eq!(form["fields"][0]["default"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn actions_refuse_a_bad_protocol_query() {
+    let csms = Csms::start(&[]);
+    for query in [
+        "",
+        "?protocol=",
+        "?protocol=ocpp9.9",
+        "?protocol=ocpp2.1&protocol=ocpp1.6",
+        "?protocol=ocpp2.1&extra=1",
+        "?other=ocpp2.1",
+        "?protocol",
+    ] {
+        let (status, body) = csms.get(&format!("/v1/actions{query}")).await;
+        assert_eq!(status, 400, "{query}: {body}");
+        assert_eq!(body["error"]["code"], "bad_request", "{query}");
+    }
+    let tokened = Csms::start(&["--api-token", "tok"]);
+    assert_eq!(tokened.get("/v1/actions?protocol=ocpp1.6").await.0, 401);
+    let (status, _, _) = page(
+        &tokened.api_addr,
+        "GET",
+        "/v1/actions?protocol=ocpp1.6",
+        &[("Authorization", "Bearer tok")],
+    )
+    .await;
+    assert_eq!(status, 200);
 }

@@ -59,6 +59,8 @@ pub struct TuiOptions {
     pub monochrome: bool,
     /// Clock of the log rows.
     pub time: TimeMode,
+    /// The URL of the web UI, when the server serves one; the station pane names it.
+    pub web_url: Option<String>,
 }
 
 impl Default for TuiOptions {
@@ -67,6 +69,7 @@ impl Default for TuiOptions {
             tick_rate: Duration::from_millis(33),
             monochrome: false,
             time: TimeMode::Utc,
+            web_url: None,
         }
     }
 }
@@ -341,6 +344,7 @@ where
     app.security_profile = handle.security_profile().number();
     app.mono = options.monochrome;
     app.time = options.time;
+    app.web_url.clone_from(&options.web_url);
     if let Ok(size) = terminal.size() {
         app.size = (size.width, size.height);
     }

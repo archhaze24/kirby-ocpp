@@ -70,10 +70,11 @@ Then one line per event:
 | `forgotten` | `... CP-1 forgotten` | |
 | `auth_failed` | `... CP-1 refused (reason) from ADDR` | JSON: `{"type":"auth_failed","station":..,"remote_addr":..,"reason":..}`; `station` is `null` when the TLS handshake failed or the URL holds no valid station id |
 | `listening`, `api_listening` | `listening on URL`, `api listening on URL` | startup lines, see above; JSON has `addr` and `url` |
+| `web_ui` | `web UI on URL` | after `api_listening` when `--web` is on; JSON has `url` |
 | `warning` | `warning: ...` | the security profile 0 warning at startup; JSON `{"type":"warning","text":..}` |
 | `note` | `note: ...` | for example lines dropped because the output could not keep up, or the `stations connect to ...` startup line; JSON `{"type":"note","text":..}` |
 
-JSON events carry `ts` (RFC 3339, milliseconds), except the startup and housekeeping events `listening`, `api_listening`, `warning` and `note`, which have none. Text supplied by stations is shown with control characters replaced, because station ids and payloads are attacker-controlled. `AuthorizationKey` values in frames are replaced by `***` unless `--show-secrets` is set; see [security.md](security.md#redaction-and---show-secrets).
+JSON events carry `ts` (RFC 3339, milliseconds), except the startup and housekeeping events `listening`, `api_listening`, `web_ui`, `warning` and `note`, which have none. Text supplied by stations is shown with control characters replaced, because station ids and payloads are attacker-controlled. `AuthorizationKey` values in frames are replaced by `***` unless `--show-secrets` is set; see [security.md](security.md#redaction-and---show-secrets).
 
 `--log-file PATH` appends every event as a JSON line, also under the TUI. Stdout and the log file are written by helper threads: if nobody reads stdout, the process keeps running, the log file keeps being written, and the lines that did not fit are dropped with a `note` line saying how many.
 
@@ -208,6 +209,10 @@ Rules:
 `--api-listen 127.0.0.1:9100` starts a local JSON HTTP API next to the server (off by default; works with the TUI, headless and `--script`): list stations, read state and frame history (with cursors, filters and CSV or NDJSON export), list transactions, send CALLs, forget stations, stream events (SSE, resumable with `Last-Event-ID`), scrape Prometheus metrics and manage response rules and faults. See [History, export and metrics](api.md#history-export-and-metrics).
 - Calls share the 256-command limit with stdin. The answer is the stdin result object without `type`, `station` and `action`, plus an `outcome` field; stdin answers are unchanged. After the `listening` line the server prints `api listening on http://ADDR` (`https://` with TLS) (`{"type":"api_listening","addr":..,"url":..}` with `--json`).
 - A non-loopback address needs `--api-token` / `--api-token-file` and `--api-tls-cert` / `--api-tls-key` (HTTPS, optional client certificates with `--api-tls-client-ca`); without a token browser-like requests (`Origin`, cross-site, non-loopback `Host`) are refused. Plain HTTP is for loopback. The shapes are a versioned contract (`/v1`, `api_version` 1; a release that serves OCPP 2.0.1 or 2.1 on the same listener keeps them). Endpoints, error codes, auth model and examples: [api.md](api.md). `kirby-csms ctl` drives a running server through the API from a shell, see [Command-line client](api.md#command-line-client).
+
+## Web UI
+
+`--web` serves a browser UI on the API listener, next to the terminal UI or headless mode. Without `--api-listen` it listens on `127.0.0.1:9100`; the server prints `web UI on http://127.0.0.1:9100/` and the terminal UI shows the address while no station is selected. The page uses the same API: with an API token it asks for the token, without one it is accepted from its own address only. Security details: [api.md](api.md#web-ui).
 
 ## Response rules and fault injection
 

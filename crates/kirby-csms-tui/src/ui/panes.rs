@@ -173,6 +173,9 @@ pub(super) fn empty_state(app: &App) -> Vec<Line<'static>> {
             dim(),
         ),
     ];
+    if let Some(web) = &app.web_url {
+        lines.push(Line::raw(format!("Web UI: {}", sanitize(web))));
+    }
     if app.security_profile == 0 {
         lines.push(Line::styled(
             "Security profile 0: any peer can connect.",

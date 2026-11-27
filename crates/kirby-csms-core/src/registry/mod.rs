@@ -18,6 +18,10 @@
 //! assert!(registry::protocol_actions("ocpp9.9").is_none());
 //! ```
 
+use kirby_ocpp_core::ocpp::v2::registry as v2_registry;
+use kirby_ocpp_core::ocpp::{PayloadKind, Protocol, SchemaRegistry};
+use serde_json::Value;
+
 pub mod ocpp16;
 pub mod ocpp201;
 pub mod ocpp21;
@@ -148,4 +152,104 @@ pub fn csms_action(protocol: &str, name: &str) -> Option<&'static ActionSpec> {
 /// Whether a station of `protocol` can send `action`.
 pub fn is_station_action(protocol: &str, action: &str) -> bool {
     protocol_actions(protocol).is_some_and(|table| table.station_actions.contains(&action))
+}
+
+/// How a client supplies the request payload of a central-system action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ActionInput {
+    /// The action has form fields: the payload is built from them.
+    Form,
+    /// The action has no form fields but its request has members: the payload is edited as
+    /// raw JSON (start from [`payload_template`]).
+    Raw,
+    /// The action takes no input: the payload is `{}`.
+    None,
+}
+
+/// How the payload of `spec` (an action of `protocol`) is supplied.
+///
+/// An action without form fields takes no input when its payload layer types it (a form
+/// elsewhere builds the request) or when its request schema has no member besides
+/// `customData`. A protocol or action the schemas do not know counts as taking raw input.
+pub fn takes_input(protocol: &str, spec: &ActionSpec) -> ActionInput {
+    if !spec.fields.is_empty() {
+        return ActionInput::Form;
+    }
+    let protocol_id = Protocol::from_token(protocol);
+    let typed = protocol_id
+        .is_some_and(|id| v2_registry::lookup_for(id, spec.name).is_some_and(|info| info.typed));
+    if typed || !has_request_input(protocol_id, spec.name) {
+        ActionInput::None
+    } else {
+        ActionInput::Raw
+    }
+}
+
+/// Whether the request schema of `action` has a member other than `customData`; `true` when
+/// the schema is unknown.
+fn has_request_input(protocol: Option<Protocol>, action: &str) -> bool {
+    let Some(schemas) = protocol.and_then(|id| SchemaRegistry::for_protocol(id).ok()) else {
+        return true;
+    };
+    let Some(source) = schemas.schema_source(action, PayloadKind::Request) else {
+        return true;
+    };
+    serde_json::from_str::<Value>(source).map_or(true, |schema| {
+        schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .is_none_or(|members| members.keys().any(|key| key != "customData"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(protocol: &str, name: &str) -> ActionInput {
+        let spec = csms_action(protocol, name).expect("registered action");
+        takes_input(protocol, spec)
+    }
+
+    #[test]
+    fn actions_with_fields_are_forms() {
+        assert_eq!(input("ocpp1.6", "Reset"), ActionInput::Form);
+        assert_eq!(input("ocpp2.1", "UsePriorityCharging"), ActionInput::Form);
+    }
+
+    #[test]
+    fn raw_and_no_input_actions() {
+        assert_eq!(input("ocpp2.1", "SetDERControl"), ActionInput::Raw);
+        assert_eq!(
+            input("ocpp2.1", "GetPeriodicEventStream"),
+            ActionInput::None
+        );
+        assert_eq!(input("ocpp1.6", "ClearCache"), ActionInput::None);
+    }
+
+    #[test]
+    fn unknown_protocol_or_action_is_raw() {
+        let spec = ActionSpec {
+            name: "NoSuchAction",
+            group: ActionGroup::Core,
+            title: "",
+            summary: "",
+            fields: &[],
+        };
+        assert_eq!(takes_input("ocpp1.6", &spec), ActionInput::Raw);
+        assert_eq!(takes_input("ocpp9.9", &spec), ActionInput::Raw);
+    }
+
+    #[test]
+    fn typed_action_without_fields_takes_no_input() {
+        let spec = ActionSpec {
+            name: "GetBaseReport",
+            group: ActionGroup::Core,
+            title: "",
+            summary: "",
+            fields: &[],
+        };
+        assert_eq!(takes_input("ocpp2.0.1", &spec), ActionInput::None);
+    }
 }

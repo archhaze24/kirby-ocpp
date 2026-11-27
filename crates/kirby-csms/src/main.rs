@@ -160,10 +160,7 @@ async fn run_server(
         std::io::stdout().is_terminal(),
     ) {
         eprintln!("listening on {}", handle.url());
-        if let Some(plan) = &api_plan {
-            let scheme = if plan.tls.is_some() { "https" } else { "http" };
-            eprintln!("api listening on {scheme}://{}", plan.addr);
-        }
+        api_plan.iter().for_each(ApiPlan::print_urls);
         startup_notes(&handle, cli.json, None);
         match kirby_csms_tui::Session::enter() {
             Ok(session) => Some(session),
@@ -186,10 +183,11 @@ async fn run_server(
     // printing events: that line always comes first and nothing is missed.
     headless::announce(&out, &handle);
     if let Some(plan) = &api_plan {
-        headless::announce_api(&out, plan.addr, plan.tls.is_some());
+        headless::announce_api(&out, plan.addr, plan.tls.is_some(), plan.web);
     }
     startup_notes(&handle, cli.json, Some(&out));
     let limits = commands::new_limits();
+    let web_url = api_plan.as_ref().and_then(ApiPlan::web_url);
     let api = api_plan.map(|plan| plan.spawn(&handle, &limits, api_events));
     let scheduler = start_automation(&handle, &cli, &limits, &out);
     let sink = (session.is_none() || cli.log_file.is_some())
@@ -204,7 +202,10 @@ async fn run_server(
     }
 
     let code = if let Some(session) = session {
-        match session.run(handle.clone(), tui_options(&cli)).await {
+        match session
+            .run(handle.clone(), tui_options(&cli, web_url))
+            .await
+        {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 // The terminal may be gone (SIGHUP): `eprintln!` would panic and skip the
@@ -381,9 +382,26 @@ struct ApiPlan {
     addr: std::net::SocketAddr,
     token: Option<String>,
     tls: Option<std::sync::Arc<api::TlsConfig>>,
+    /// Whether the listener also serves the web UI.
+    web: bool,
 }
 
 impl ApiPlan {
+    /// The URL of the web UI, when it is on.
+    fn web_url(&self) -> Option<String> {
+        self.web
+            .then(|| headless::web_url(self.addr, self.tls.is_some()))
+    }
+
+    /// Prints the `api listening` line, and with the web UI the `web UI on` line, on stderr.
+    fn print_urls(&self) {
+        let tls = self.tls.is_some();
+        eprintln!("api listening on {}", headless::api_url(self.addr, tls));
+        if self.web {
+            eprintln!("web UI on {}", headless::web_url(self.addr, tls));
+        }
+    }
+
     /// Starts serving on the bound listener.
     fn spawn(
         self,
@@ -391,12 +409,16 @@ impl ApiPlan {
         limits: &commands::CommandLimits,
         events: broadcast::Receiver<CsmsEvent>,
     ) -> api::Api {
+        let access = api::Access {
+            token: self.token,
+            tls: self.tls,
+            web: self.web,
+        };
         api::spawn_with_events(
             self.listener,
             handle.clone(),
             limits.clone(),
-            self.token,
-            self.tls,
+            access,
             events,
         )
     }
@@ -413,15 +435,20 @@ fn load_api_tls(cli: &Cli) -> Result<Option<std::sync::Arc<api::TlsConfig>>, Str
 }
 
 /// Validates the API flags and binds its listener (before the CSMS starts, so a busy port
-/// fails early). `None` when `--api-listen` is not given.
+/// fails early). `None` when neither `--api-listen` nor `--web` is given.
 async fn prepare_api(cli: &Cli) -> Result<Option<ApiPlan>, ExitCode> {
     let token = cli.api_token().map_err(|error| usage_error(&error))?;
     let tls = load_api_tls(cli).map_err(|error| usage_error(&error))?;
-    let Some(addr) = cli.api_listen else {
+    let Some(addr) = cli.api_addr() else {
         return Ok(None);
     };
     let listener = api::bind(addr).await.map_err(|error| {
-        eprintln!("error: cannot bind the API listener {addr}: {error}");
+        let hint = if cli.api_listen.is_none() {
+            " (the default of --web); pass --api-listen ADDR to use another address"
+        } else {
+            ""
+        };
+        eprintln!("error: cannot bind the API listener {addr}: {error}{hint}");
         ExitCode::FAILURE
     })?;
     let addr = listener.local_addr().unwrap_or(addr);
@@ -430,6 +457,7 @@ async fn prepare_api(cli: &Cli) -> Result<Option<ApiPlan>, ExitCode> {
         addr,
         token,
         tls,
+        web: cli.web,
     }))
 }
 
@@ -459,11 +487,12 @@ fn merge_auth_keys_file(config: &mut CsmsConfig, path: &Path) -> Result<(), Stri
 
 /// The terminal UI settings that come from the output flags: color (`--color`, `NO_COLOR`) and
 /// the clock of the log rows (`--time`).
-fn tui_options(cli: &cli::Cli) -> kirby_csms_tui::TuiOptions {
+fn tui_options(cli: &cli::Cli, web_url: Option<String>) -> kirby_csms_tui::TuiOptions {
     let no_color = std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty());
     kirby_csms_tui::TuiOptions {
         monochrome: cli.color.monochrome(no_color),
         time: cli.time.mode(),
+        web_url,
         ..kirby_csms_tui::TuiOptions::default()
     }
 }

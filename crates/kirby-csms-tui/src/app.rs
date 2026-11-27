@@ -272,6 +272,8 @@ pub struct App {
     pub rules: Rules,
     /// The server's connection security profile (0 to 3).
     pub security_profile: u8,
+    /// The URL of the web UI, when the server serves one.
+    pub web_url: Option<String>,
     /// Connections refused by the security policy since the UI started.
     pub auth_failures: u64,
     last_auth_notice: Option<DateTime<Utc>>,
@@ -447,6 +449,7 @@ impl App {
             results: HashMap::new(),
             rules: Rules::default(),
             security_profile: 0,
+            web_url: None,
             auth_failures: 0,
             last_auth_notice: None,
             next_request_id: 1,

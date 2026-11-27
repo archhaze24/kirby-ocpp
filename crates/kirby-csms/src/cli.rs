@@ -23,6 +23,11 @@ use kirby_csms_core::{CsmsConfig, SecurityProfile, SubprotocolPolicy, Transactio
     version,
     about,
     group(clap::ArgGroup::new("run_input").args(["script", "replay"])),
+    group(
+        clap::ArgGroup::new("api_on")
+            .args(["api_listen", "web"])
+            .multiple(true)
+    ),
     after_help = "Examples:\n  \
   kirby-csms --listen 0.0.0.0:9000\n  \
   kirby-csms --listen 127.0.0.1:0 --json --subprotocol omit\n  \
@@ -52,27 +57,34 @@ pub struct Cli {
     #[arg(long, env = "KIRBY_CSMS_API_LISTEN", value_name = "ADDR")]
     pub api_listen: Option<SocketAddr>,
 
+    /// Serve the web UI on the API listener (127.0.0.1:9100 unless --api-listen is given)
+    #[arg(
+        long, env = "KIRBY_CSMS_WEB", action = ArgAction::SetTrue,
+        value_parser = BoolishValueParser::new()
+    )]
+    pub web: bool,
+
     /// Bearer token the API requires (visible in `ps`: prefer the environment variable or
-    /// --api-token-file); needs --api-listen
+    /// --api-token-file); needs --api-listen or --web
     #[arg(
         long, env = "KIRBY_CSMS_API_TOKEN", value_name = "TOKEN", hide_env_values = true,
-        value_parser = non_empty_secret, requires = "api_listen", conflicts_with = "api_token_file"
+        value_parser = non_empty_secret, requires = "api_on", conflicts_with = "api_token_file"
     )]
     pub api_token: Option<String>,
 
     /// File holding the API bearer token (read once; a trailing newline is dropped); needs
-    /// --api-listen
+    /// --api-listen or --web
     #[arg(
         long, env = "KIRBY_CSMS_API_TOKEN_FILE", value_name = "FILE", value_parser = non_empty_path,
-        requires = "api_listen"
+        requires = "api_on"
     )]
     pub api_token_file: Option<PathBuf>,
 
     /// Server certificate chain (PEM) that makes the API serve HTTPS; needs --api-tls-key and
-    /// --api-listen. A non-loopback --api-listen needs it
+    /// --api-listen or --web. A non-loopback --api-listen needs it
     #[arg(
         long, env = "KIRBY_CSMS_API_TLS_CERT", value_name = "FILE", value_parser = non_empty_path,
-        requires = "api_tls_key", requires = "api_listen"
+        requires = "api_tls_key", requires = "api_on"
     )]
     pub api_tls_cert: Option<PathBuf>,
 
@@ -426,6 +438,7 @@ const HEADINGS: &[(&str, &[&str])] = &[
         "API",
         &[
             "api_listen",
+            "web",
             "api_token",
             "api_token_file",
             "api_tls_cert",
@@ -594,10 +607,30 @@ fn script_var(text: &str) -> Result<(String, serde_json::Value), String> {
     kirby_ocpp_core::scenario::vars::parse_assignment(text)
 }
 
+/// Where the API listens with `--web` and no `--api-listen`.
+pub const DEFAULT_WEB_LISTEN: SocketAddr =
+    SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 9100);
+
 impl Cli {
+    /// The address of the API listener: `--api-listen`, else [`DEFAULT_WEB_LISTEN`] with
+    /// `--web`, else none (the API is off).
+    pub fn api_addr(&self) -> Option<SocketAddr> {
+        self.api_listen.or(self.web.then_some(DEFAULT_WEB_LISTEN))
+    }
+
     /// The API token (`--api-token`, or the content of `--api-token-file`), checked against
     /// the listen address: a non-loopback address needs a token and TLS.
     pub fn api_token(&self) -> Result<Option<String>, String> {
+        if self.api_addr().is_none()
+            && (self.api_token.is_some()
+                || self.api_token_file.is_some()
+                || self.api_tls_cert.is_some())
+        {
+            return Err(
+                "--api-token, --api-token-file and --api-tls-cert need --api-listen or --web"
+                    .to_owned(),
+            );
+        }
         let token = if let Some(path) = &self.api_token_file {
             Some(read_key_file(
                 path,
@@ -614,7 +647,7 @@ impl Cli {
                     .to_owned(),
             );
         }
-        if let Some(addr) = self.api_listen
+        if let Some(addr) = self.api_addr()
             && !addr.ip().is_loopback()
         {
             if token.is_none() {
@@ -881,6 +914,32 @@ mod tests {
         assert!(!cli(&["--json"]).wants_tui(true, true));
         assert!(!cli(&["--stdin"]).wants_tui(true, true));
         assert!(!cli(&["--script", "s.toml"]).wants_tui(true, true));
+    }
+
+    #[test]
+    fn web_listens_on_the_default_address_unless_api_listen_is_given() {
+        let cli = |args: &[&str]| {
+            Cli::parse_from(std::iter::once("kirby-csms").chain(args.iter().copied()))
+        };
+        assert_eq!(cli(&[]).api_addr(), None);
+        assert_eq!(
+            cli(&["--web"]).api_addr(),
+            Some("127.0.0.1:9100".parse().unwrap())
+        );
+        assert_eq!(
+            cli(&["--web", "--api-listen", "127.0.0.1:9200"]).api_addr(),
+            Some("127.0.0.1:9200".parse().unwrap())
+        );
+        assert_eq!(
+            cli(&["--api-listen", "127.0.0.1:9200"]).api_addr(),
+            Some("127.0.0.1:9200".parse().unwrap())
+        );
+        // A token or certificate has a listener to belong to with `--web`.
+        assert!(
+            Cli::try_parse_from(["kirby-csms", "--web", "--api-token", "x"])
+                .is_ok_and(|cli| cli.api_token().is_ok())
+        );
+        assert!(Cli::try_parse_from(["kirby-csms", "--api-token", "x"]).is_err());
     }
 
     #[test]

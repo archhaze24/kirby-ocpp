@@ -3,7 +3,6 @@
 
 use kirby_csms_core::{ACTIONS_PROTOCOL, CsmsError, CsmsHandle, Frame, registry};
 use kirby_ocpp_core::ids::{ConnectorId, IdTag};
-use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::messages::{
     CertificateHashData, CertificateUse, ChargingProfile, ClearChargingProfileRequest,
     ExtendedMessageTrigger, GetDiagnosticsRequest, GetLogRequest, ReserveNowRequest,
@@ -12,7 +11,6 @@ use kirby_ocpp_core::ocpp::messages::{
 use kirby_ocpp_core::ocpp::types::{
     AvailabilityType, ChargingRateUnitType, MessageTrigger, ResetType,
 };
-use kirby_ocpp_core::ocpp::v2::registry as v2_registry;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -275,30 +273,7 @@ const CONTENT_BY_NAME: &[&str] = &[
 /// Whether the registry entry `spec` of `protocol` takes its payload as raw JSON: it has no
 /// form fields and is not an action that simply takes no input.
 pub fn takes_raw_payload(protocol: &str, spec: &registry::ActionSpec) -> bool {
-    let typed_v2 = Protocol::from_token(protocol).is_some_and(|protocol| {
-        v2_registry::lookup_for(protocol, spec.name).is_some_and(|a| a.typed)
-    });
-    spec.fields.is_empty() && !typed_v2 && has_request_input(protocol, spec.name)
-}
-
-/// Whether the request schema of `action` has a member other than `customData`; `true` when
-/// the schema is unknown.
-fn has_request_input(protocol: &str, action: &str) -> bool {
-    let Some(schemas) = Protocol::from_token(protocol)
-        .and_then(|protocol| kirby_ocpp_core::ocpp::SchemaRegistry::for_protocol(protocol).ok())
-    else {
-        return true;
-    };
-    let Some(source) = schemas.schema_source(action, kirby_ocpp_core::ocpp::PayloadKind::Request)
-    else {
-        return true;
-    };
-    serde_json::from_str::<Value>(source).map_or(true, |schema| {
-        schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .is_none_or(|members| members.keys().any(|key| key != "customData"))
-    })
+    registry::takes_input(protocol, spec) == registry::ActionInput::Raw
 }
 
 fn content_by_name(protocol: &str, action: &str, response: &Value) -> bool {

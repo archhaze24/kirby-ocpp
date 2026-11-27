@@ -133,13 +133,30 @@ pub fn announce(out: &Output, handle: &CsmsHandle) {
     );
 }
 
-/// Prints the `api listening` line.
-pub fn announce_api(out: &Output, addr: std::net::SocketAddr, tls: bool) {
-    let url = format!("{}://{addr}", if tls { "https" } else { "http" });
+/// The base URL of the API listener.
+pub fn api_url(addr: std::net::SocketAddr, tls: bool) -> String {
+    format!("{}://{addr}", if tls { "https" } else { "http" })
+}
+
+/// The URL of the web UI: the API URL plus `/`.
+pub fn web_url(addr: std::net::SocketAddr, tls: bool) -> String {
+    format!("{}/", api_url(addr, tls))
+}
+
+/// Prints the `api listening` line, and with `web` the `web UI on` line after it.
+pub fn announce_api(out: &Output, addr: std::net::SocketAddr, tls: bool, web: bool) {
+    let url = api_url(addr, tls);
     out.event(
         &json!({"type": "api_listening", "addr": addr.to_string(), "url": url}),
         &format!("api listening on {url}"),
     );
+    if web {
+        let url = web_url(addr, tls);
+        out.event(
+            &json!({"type": "web_ui", "url": url}),
+            &format!("web UI on {url}"),
+        );
+    }
 }
 
 /// A compact JSON view of one station: connection, boot info, connector statuses, transactions.

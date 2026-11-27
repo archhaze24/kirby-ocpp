@@ -41,6 +41,7 @@ pub const SCHEMA: Schema = Schema {
             path: &["api"],
             keys: &[
                 KeySpec::new("api_listen", Kind::Text),
+                KeySpec::new("web", Kind::Switch),
                 KeySpec::new(
                     "api_token",
                     Kind::Secret {
@@ -623,6 +624,7 @@ impl Cli {
         if let Some(addr) = self.api_listen {
             values.push(("api_listen", text(&addr.to_string())));
         }
+        values.push(("web", Value::Bool(self.web)));
         for (key, file) in [
             ("api_token_file", &self.api_token_file),
             ("api_tls_cert", &self.api_tls_cert),

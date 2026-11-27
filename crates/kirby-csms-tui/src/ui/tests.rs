@@ -962,6 +962,20 @@ fn empty_state_shows_url_example_and_profile_zero_note() {
 }
 
 #[test]
+fn empty_state_names_the_web_ui_only_when_it_is_on() {
+    let mut app = App::new("ws://0.0.0.0:9000", at(0));
+    assert!(!render(&app, 120, 30).contains("Web UI"));
+    app.web_url = Some("http://127.0.0.1:9100/".to_owned());
+    let text = render(&app, 120, 30);
+    assert!(text.contains("Web UI: http://127.0.0.1:9100/"), "{text}");
+    let narrow = render(&app, 80, 30);
+    assert!(
+        narrow.contains("Web UI: http://127.0.0.1:9100/"),
+        "{narrow}"
+    );
+}
+
+#[test]
 fn station_url_example_keeps_specific_hosts() {
     assert_eq!(
         station_url_example("ws://192.168.1.5:9000", false),

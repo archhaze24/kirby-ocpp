@@ -14,6 +14,7 @@ mod json;
 mod limits;
 mod meta;
 mod metrics;
+mod routes_actions;
 mod routes_calls;
 mod routes_history;
 mod routes_rules;
@@ -22,6 +23,7 @@ mod server;
 mod sse;
 #[cfg(test)]
 mod tests;
+mod web;
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -48,6 +50,7 @@ use self::event_log::{EventLog, spawn_pump};
 use self::limits::{Limits, MAX_CONNECTIONS, MAX_STREAMS};
 use self::meta::{finish_response, health, index, options};
 use self::metrics::{Metrics, metrics};
+use self::routes_actions::actions;
 use self::routes_calls::{bulk, call};
 use self::routes_history::{history, transactions};
 use self::routes_rules::{
@@ -68,6 +71,10 @@ struct ApiState {
     streams: Arc<Semaphore>,
     /// The address the API listens on.
     bound: IpAddr,
+    /// Whether the web UI is served (`--web`).
+    web: bool,
+    /// Whether the listener serves HTTPS.
+    https: bool,
     /// How long an event stream lasts.
     stream_max_age: Duration,
     /// The events of `GET /v1/events`, with their ids.
@@ -88,6 +95,17 @@ pub async fn bind(addr: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::bind(addr).await
 }
 
+/// How the API authenticates, encrypts and what it serves besides `/v1`.
+#[derive(Default)]
+pub struct Access {
+    /// The bearer token every request needs.
+    pub token: Option<String>,
+    /// With a configuration the listener serves HTTPS (HTTP/1.1 only), otherwise plain HTTP.
+    pub tls: Option<Arc<TlsConfig>>,
+    /// Serve the web UI (see `web`).
+    pub web: bool,
+}
+
 /// Serves the API on `listener` until [`Api::finish`].
 /// With `tls` the listener serves HTTPS (HTTP/1.1 only), otherwise plain HTTP.
 #[cfg(test)]
@@ -99,7 +117,12 @@ pub fn spawn(
     tls: Option<Arc<TlsConfig>>,
 ) -> Api {
     let events = handle.subscribe();
-    spawn_with_events(listener, handle, commands, token, tls, events)
+    let access = Access {
+        token,
+        tls,
+        web: false,
+    };
+    spawn_with_events(listener, handle, commands, access, events)
 }
 
 /// Serves the API with an event subscription taken before the first station was accepted.
@@ -107,19 +130,10 @@ pub fn spawn_with_events(
     listener: TcpListener,
     handle: CsmsHandle,
     commands: crate::commands::CommandLimits,
-    token: Option<String>,
-    tls: Option<Arc<TlsConfig>>,
+    access: Access,
     events: broadcast::Receiver<CsmsEvent>,
 ) -> Api {
-    spawn_inner(
-        listener,
-        handle,
-        commands,
-        token,
-        Limits::DEFAULT,
-        tls,
-        events,
-    )
+    spawn_inner(listener, handle, commands, Limits::DEFAULT, access, events)
 }
 
 #[cfg(test)]
@@ -135,18 +149,23 @@ fn spawn_with(
         payload: Arc::new(Semaphore::new(limits.payload_budget)),
     };
     let events = handle.subscribe();
-    spawn_inner(listener, handle, commands, token, limits, None, events)
+    let access = Access {
+        token,
+        ..Access::default()
+    };
+    spawn_inner(listener, handle, commands, limits, access, events)
 }
 
 fn spawn_inner(
     listener: TcpListener,
     handle: CsmsHandle,
     commands: crate::commands::CommandLimits,
-    token: Option<String>,
     limits: Limits,
-    tls: Option<Arc<TlsConfig>>,
+    access: Access,
     events: broadcast::Receiver<CsmsEvent>,
 ) -> Api {
+    let Access { token, tls, web } = access;
+    let https = tls.is_some();
     let tls = tls.map(|config| {
         let mut config = (*config).clone();
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -167,6 +186,8 @@ fn spawn_inner(
         token: token.map(Arc::from),
         streams: Arc::new(Semaphore::new(MAX_STREAMS)),
         bound,
+        web,
+        https,
         stream_max_age: limits.stream_max_age,
         log: EventLog::new(unix_micros()),
         metrics: Metrics::new(),
@@ -206,7 +227,8 @@ fn router(state: ApiState) -> Router {
     // each route's method router, which sets its own `Allow` after them. The response counter
     // is the outermost layer, so it also counts the `401`, `403` and `404` answers.
     let counters = Arc::clone(&state.metrics);
-    let routes = Router::new()
+    let web = state.web;
+    let mut routes = Router::new()
         .route("/v1", get(index))
         .route("/v1/health", get(health))
         .route("/v1/stations", get(list_stations))
@@ -214,6 +236,7 @@ fn router(state: ApiState) -> Router {
         .route("/v1/stations/{id}/history", get(history))
         .route("/v1/transactions", get(transactions))
         .route("/v1/metrics", get(metrics))
+        .route("/v1/actions", get(actions))
         .route("/v1/calls", post(bulk))
         .route("/v1/stations/{id}/calls", post(call))
         .route("/v1/events", get(events))
@@ -232,7 +255,15 @@ fn router(state: ApiState) -> Router {
                 .post(inject_fault)
                 .delete(clear_faults),
         )
-        .route("/v1/faults/{id}", delete(remove_fault))
+        .route("/v1/faults/{id}", delete(remove_fault));
+    // The web UI is not part of `/v1`: its pages are not in the route table or the OpenAPI
+    // document. Without `--web` these paths stay unknown (`404`).
+    if web {
+        for path in web::paths() {
+            routes = routes.route(path, get(web::asset));
+        }
+    }
+    let routes = routes
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "not found") })
         .method_not_allowed_fallback(|| async {
             error(
@@ -241,12 +272,12 @@ fn router(state: ApiState) -> Router {
                 "method not allowed",
             )
         })
-        .layer(middleware::from_fn(options))
+        .layer(middleware::from_fn_with_state(web, options))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .with_state(state);
     Router::new()
         .fallback_service(routes)
-        .layer(middleware::from_fn(finish_response))
+        .layer(middleware::from_fn_with_state(web, finish_response))
         .layer(middleware::from_fn(move |request: Request, next: Next| {
             let counters = Arc::clone(&counters);
             async move {
