@@ -22,6 +22,7 @@ use crate::ocpp::responder::Responder;
 use crate::ocpp::types::{DiagnosticsStatus, FirmwareStatus};
 use crate::station::actor::{StationActor, TimerKey};
 use crate::station::calls::Origin;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::station::certificates::parse_pem_chain;
 use crate::station::event::LogLevel;
 use crate::station::maintenance::{
@@ -134,6 +135,7 @@ pub(super) fn update_firmware(
 
 /// Checks the signing certificate of a `SignedUpdateFirmware`: it must parse, be valid now and,
 /// when a manufacturer root is installed, chain to one (issuer name match, no signature check).
+#[cfg(not(target_arch = "wasm32"))]
 fn check_signing_certificate(actor: &StationActor, pem: &str) -> Result<(), String> {
     let chain = parse_pem_chain(pem)?;
     let now = actor.clock.now_utc();
@@ -144,6 +146,11 @@ fn check_signing_certificate(actor: &StationActor, pem: &str) -> Result<(), Stri
         return Err("does not chain to an installed manufacturer root".to_owned());
     }
     Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn check_signing_certificate(_actor: &StationActor, _pem: &str) -> Result<(), String> {
+    Err(crate::UNSUPPORTED_IN_BROWSER.to_owned())
 }
 
 /// `SignedUpdateFirmware` (Security Whitepaper): validation, then a simulated update that reports

@@ -99,6 +99,8 @@ RUSTFLAGS='-D warnings' cargo clippy --workspace --all-targets -- -D warnings
 
 A second job, `rust-version 1.88`, runs `cargo +1.88 check --workspace --locked` so the declared `rust-version` keeps building.
 
+A third job, `wasm32 core check`, runs `cargo clippy -p kirby-ocpp-core --target wasm32-unknown-unknown -- -D warnings` so the core keeps compiling for the browser target. Networking, TLS, certificates and file storage are native-only there and return `not supported in the browser build`.
+
 `.github/workflows/audit.yml` runs `cargo deny check advisories` (configuration in `deny.toml`) on pushes to `main`, `ci-check/**` and `dev-*`, weekly and manually.
 
 ### The `ci` nextest profile

@@ -18,6 +18,9 @@ use crate::store::StoreError;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum CallError {
+    #[cfg(target_arch = "wasm32")]
+    #[error("{}", crate::UNSUPPORTED_IN_BROWSER)]
+    UnsupportedInBrowser,
     /// No open connection when the CALL was submitted.
     #[error("not connected to the central system")]
     NotConnected,

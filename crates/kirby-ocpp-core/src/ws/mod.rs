@@ -2,7 +2,7 @@
 //!
 //! # Model
 //!
-//! [`Connection::connect`] performs the handshake and returns a cloneable
+//! On native targets, `Connection::connect` performs the handshake and returns a cloneable
 //! [`Connection`] handle plus the receiver of [`ConnectionEvent`]s. A background
 //! task owns the socket. Everything that must happen in order goes through it:
 //!
@@ -40,27 +40,33 @@
 //! queued behind an earlier CALL. The connection attempt (TCP, TLS and the HTTP
 //! upgrade) is bounded by [`ConnectOptions::call_timeout`] as well.
 
+#[cfg(not(target_arch = "wasm32"))]
 mod handshake;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod probe;
+#[cfg(not(target_arch = "wasm32"))]
 mod task;
+#[cfg(not(target_arch = "wasm32"))]
 mod tls;
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) use tls::WILDCARD_REFUSED;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::net::TcpStream;
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::timeout;
-use tokio_rustls::TlsConnector;
+use tokio::sync::oneshot;
 use url::Url;
+#[cfg(not(target_arch = "wasm32"))]
+use {tokio::net::TcpStream, tokio::sync::mpsc, tokio::time::timeout, tokio_rustls::TlsConnector};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::config::TlsConfig;
 use crate::error::CallError;
 use crate::ocpp::action::OutboundAction;
@@ -69,6 +75,7 @@ use crate::ocpp::responder::ReplyHandle;
 use crate::ocpp::{ErrorCode, Protocol, SchemaError, SchemaRegistry, SchemaViolation};
 
 /// Bounded capacity of the event channel.
+#[cfg(not(target_arch = "wasm32"))]
 const EVENT_CAPACITY: usize = 64;
 
 /// The schema registry a connection validates against, shared by pointer.
@@ -238,10 +245,13 @@ pub struct IncomingCall {
     pub reply: ReplyHandle,
 }
 
-/// Why [`Connection::connect`] failed.
+/// Why a connection could not be opened.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum ConnectError {
+    #[cfg(target_arch = "wasm32")]
+    #[error("{}", crate::UNSUPPORTED_IN_BROWSER)]
+    UnsupportedInBrowser,
     #[error("invalid URL: {0}")]
     InvalidUrl(String),
     /// The Basic Auth credentials could not be built; the attempt made no request.
@@ -277,6 +287,9 @@ pub enum ConnectError {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum SendError {
+    #[cfg(target_arch = "wasm32")]
+    #[error("{}", crate::UNSUPPORTED_IN_BROWSER)]
+    UnsupportedInBrowser,
     /// The socket is closed.
     #[error("not connected to the central system")]
     NotConnected,
@@ -292,11 +305,19 @@ pub enum SendError {
 ///
 /// Dropping the last handle closes the connection gracefully.
 #[derive(Debug, Clone)]
+#[cfg(not(target_arch = "wasm32"))]
 pub struct Connection {
     commands: mpsc::UnboundedSender<task::Command>,
     open: Arc<AtomicBool>,
     default_timeout: Duration,
     schemas: SchemaSet,
+}
+
+/// Connection handle. This target has no WebSocket transport.
+#[derive(Debug, Clone)]
+#[cfg(target_arch = "wasm32")]
+pub struct Connection {
+    _private: (),
 }
 
 /// The answer of a CALL queued with [`Connection::enqueue`].
@@ -314,7 +335,7 @@ impl PendingReply {
 
 impl Connection {
     /// A channel-backed connection for deterministic station handoff tests.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn test_reply_channel() -> (
         Self,
         impl FnMut() -> oneshot::Sender<Result<Value, CallError>>,
@@ -323,7 +344,7 @@ impl Connection {
     }
 
     /// [`Connection::test_reply_channel`] validating against `schemas`.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn test_reply_channel_with(
         schemas: SchemaSet,
     ) -> (
@@ -347,6 +368,7 @@ impl Connection {
     ///
     /// Returns the handle and the stream of events. The receiver is bounded; the
     /// owner must drain it (the station actor does).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn connect(
         url: &str,
         charge_point_id: &str,
@@ -442,6 +464,7 @@ impl Connection {
     /// # Errors
     /// [`CallError::NotConnected`] when the socket is closed, [`CallError::Schema`] when
     /// `validate` is set and the request violates its schema.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn enqueue(
         &self,
         action: &str,
@@ -469,6 +492,21 @@ impl Connection {
         Ok(PendingReply(response))
     }
 
+    /// Queues a CALL.
+    ///
+    /// # Errors
+    /// [`CallError::UnsupportedInBrowser`] on this target.
+    #[cfg(target_arch = "wasm32")]
+    pub fn enqueue(
+        &self,
+        _action: &str,
+        _payload: Value,
+        _timeout: Option<Duration>,
+        _validate: bool,
+    ) -> Result<PendingReply, CallError> {
+        Err(CallError::UnsupportedInBrowser)
+    }
+
     /// Sends a SEND (OCPP 2.1 message type 6): an unconfirmed message that is never
     /// answered. The payload is validated first. The frame is written as soon as the
     /// connection task reaches this command: it does not wait behind queued CALLs or for the
@@ -479,6 +517,7 @@ impl Connection {
     /// [`SendError::Unsupported`] on an OCPP 1.6J or 2.0.1 connection, [`SendError::Schema`]
     /// for an action that is no SEND message or a payload that violates its schema,
     /// [`SendError::NotConnected`] when the socket is closed.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn send_unconfirmed(&self, action: &str, payload: Value) -> Result<String, SendError> {
         let registry = self.schemas.registry();
         if registry.protocol() != Protocol::V21 {
@@ -499,6 +538,15 @@ impl Connection {
             }))
             .map_err(|_| SendError::NotConnected)?;
         Ok(id)
+    }
+
+    /// Sends a SEND.
+    ///
+    /// # Errors
+    /// [`SendError::UnsupportedInBrowser`] on this target.
+    #[cfg(target_arch = "wasm32")]
+    pub fn send_unconfirmed(&self, _action: &str, _payload: Value) -> Result<String, SendError> {
+        Err(SendError::UnsupportedInBrowser)
     }
 
     /// Typed variant of [`Connection::call`] for charge-point-initiated actions.
@@ -524,17 +572,28 @@ impl Connection {
     /// emits [`ConnectionEvent::Closed`] with `by_us: true`. Calls not yet answered
     /// fail with [`CallError::Closed`].
     pub fn close(&self) {
-        self.open.store(false, Ordering::SeqCst);
-        let _ = self.commands.send(task::Command::Close);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.open.store(false, Ordering::SeqCst);
+            let _ = self.commands.send(task::Command::Close);
+        }
     }
 
     /// `true` while the socket is open (and no close has been requested).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn is_open(&self) -> bool {
         self.open.load(Ordering::SeqCst)
+    }
+
+    /// Whether the connection is open. This target has no WebSocket transport.
+    #[cfg(target_arch = "wasm32")]
+    pub fn is_open(&self) -> bool {
+        false
     }
 }
 
 /// Opens the TCP connection to the URL's host and port.
+#[cfg(not(target_arch = "wasm32"))]
 async fn tcp_connect(url: &Url) -> Result<TcpStream, ConnectError> {
     let host = url
         .host_str()
@@ -603,7 +662,7 @@ fn redact_text(base: &str) -> String {
     crate::config::redact_unparsable_url(base)
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

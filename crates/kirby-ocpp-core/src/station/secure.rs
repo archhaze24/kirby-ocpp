@@ -40,7 +40,9 @@ use crate::ocpp::messages::{
 use crate::ocpp::types::RegistrationStatus;
 use crate::station::certificates::generate_csr;
 use crate::station::config_registry::{AUTHORIZATION_KEY, SECURITY_PROFILE};
-use crate::ws::{ConnectError, WILDCARD_REFUSED};
+use crate::ws::ConnectError;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::ws::WILDCARD_REFUSED;
 
 /// `bytes` percent-encoded so that nothing but ASCII letters and digits is left as is: the URL
 /// userinfo is percent-decoded when the handshake builds the `Authorization` header, and the
@@ -659,7 +661,10 @@ impl StationActor {
     /// profile (`A05.FR.08`): the caller reconnects at once.
     pub(super) fn report_connect_failure(&mut self, error: &ConnectError) -> bool {
         let certificate_error = classify_failure(error) == FailureClass::ServerCertificate;
+        #[cfg(not(target_arch = "wasm32"))]
         let wildcard = matches!(error, ConnectError::Tls(text) if text.contains(WILDCARD_REFUSED));
+        #[cfg(target_arch = "wasm32")]
+        let wildcard = false;
         if certificate_error && !wildcard && self.certs.has_fallback() {
             self.use_fallback_root = !self.use_fallback_root;
         }
@@ -878,7 +883,7 @@ impl StationActor {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use rustls::{AlertDescription, Error, PeerIncompatible};
 

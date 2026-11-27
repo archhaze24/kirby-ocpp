@@ -1,8 +1,9 @@
 //! File helpers that do not depend on OCPP: the durable atomic write used by the state store.
 
-use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(not(target_arch = "wasm32"))]
+use std::{fs, io::Write};
 
 use thiserror::Error;
 
@@ -24,6 +25,7 @@ pub struct WriteError {
 ///
 /// # Errors
 /// [`WriteError`] naming the path of the step that failed.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let fail = |at: &Path, source: io::Error| WriteError {
@@ -43,7 +45,17 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), WriteError> {
     }
 }
 
+/// Returns a [`WriteError`] because atomic file writes are unsupported on this target.
+#[cfg(target_arch = "wasm32")]
+pub fn write_atomic(path: &Path, _bytes: &[u8]) -> Result<(), WriteError> {
+    Err(WriteError {
+        path: path.to_owned(),
+        source: io::Error::new(io::ErrorKind::Unsupported, crate::UNSUPPORTED_IN_BROWSER),
+    })
+}
+
 /// Whether a directory `fsync` failed only because the filesystem does not support it.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn dir_sync_unsupported(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -54,11 +66,13 @@ pub(crate) fn dir_sync_unsupported(error: &io::Error) -> bool {
 /// Makes the rename durable. Directories cannot be opened and synced on Windows (and NTFS
 /// journals the rename), so it is a no-op there.
 #[cfg(unix)]
+#[cfg(not(target_arch = "wasm32"))]
 fn sync_dir(dir: &Path) -> io::Result<()> {
     fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(not(unix))]
+#[cfg(not(target_arch = "wasm32"))]
 #[allow(
     clippy::unnecessary_wraps,
     reason = "same signature as the unix version"
@@ -67,7 +81,7 @@ fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

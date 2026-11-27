@@ -36,3 +36,6 @@ pub use station2::{Command2, Outcome2, Snapshot2, Station2, Station2Handle};
 
 /// Version of this crate (equal to the workspace version).
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) const UNSUPPORTED_IN_BROWSER: &str = "not supported in the browser build";

@@ -87,3 +87,24 @@ jobs:
 
       - name: Check
         run: cargo +1.88 check --workspace --locked
+
+  wasm:
+    name: wasm32 core check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: clippy
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+
+      - name: Clippy (wasm32)
+        run: cargo clippy -p kirby-ocpp-core --target wasm32-unknown-unknown -- -D warnings

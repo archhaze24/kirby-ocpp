@@ -124,6 +124,7 @@ pub(crate) async fn wait_for_close(mut events: mpsc::Receiver<ConnectionEvent>) 
 }
 
 /// Opens the connection described by `config` (its `url`, `tls` and subprotocol) with `options`.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn open_connection(
     config: &StationConfig,
     options: ConnectOptions,
@@ -136,6 +137,18 @@ pub(crate) async fn open_connection(
         options,
     )
     .await
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(
+    clippy::unused_async,
+    reason = "same signature as the native connection opener"
+)]
+pub(crate) async fn open_connection(
+    _config: &StationConfig,
+    _options: ConnectOptions,
+) -> Result<(Connection, mpsc::Receiver<ConnectionEvent>), ConnectError> {
+    Err(ConnectError::UnsupportedInBrowser)
 }
 
 /// The log line for a `Closed` event. `reason` has to be printable already.
