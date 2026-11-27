@@ -12,7 +12,7 @@ use ratatui::widgets::{List, ListItem, ListState, Paragraph};
 
 use super::{centered, popup};
 use crate::actions::{Palette, ResultsList, results_of};
-use crate::app::{App, Confirm};
+use crate::app::{App, Confirm, ConfirmAction};
 use crate::form::{Field, FieldKind, Form};
 
 const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
@@ -29,11 +29,15 @@ pub(super) fn palette(f: &mut Frame<'_>, app: &App, p: &Palette, area: Rect) {
     }
     let w = usize::from(inner.width);
     let (shown, col) = p.query.window(w.saturating_sub(3));
+    let mut prompt = vec![
+        Span::styled(": ", Style::new().fg(Color::Cyan)),
+        Span::raw(sanitize(&shown)),
+    ];
+    if p.query.is_empty() {
+        prompt.push(Span::styled("type to filter", dim()));
+    }
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(": ", Style::new().fg(Color::Cyan)),
-            Span::raw(sanitize(&shown)),
-        ])),
+        Paragraph::new(Line::from(prompt)),
         Rect { height: 1, ..inner },
     );
     f.set_cursor_position(Position::new(
@@ -69,6 +73,10 @@ pub(super) fn palette(f: &mut Frame<'_>, app: &App, p: &Palette, area: Rect) {
 fn field_value(fl: &Field, w: usize, focused: bool, secret: bool) -> (String, Option<usize>) {
     if fl.kind == FieldKind::Select {
         let cur = fl.chosen().unwrap_or("(none)");
+        if fl.options.len() == 1 {
+            // Nothing to choose: the value without the arrows.
+            return (cur.to_owned(), None);
+        }
         (
             format!("◀ {cur} ▶  ({}/{})", fl.option + 1, fl.options.len()),
             None,
@@ -84,9 +92,17 @@ fn field_value(fl: &Field, w: usize, focused: bool, secret: bool) -> (String, Op
 }
 
 /// Lines under a field: its error wrapped to three lines, the hint of a hidden value, or the
-/// hint of the focused field.
+/// hint of the focused field. A required field nobody edited yet shows `required` (its hint
+/// while focused) as a hint, not as an error.
 fn field_notes(fl: &Field, secret: bool, focused: bool, w: usize) -> Vec<(String, bool)> {
-    if let Some(err) = &fl.error {
+    if fl.error.is_some() && fl.is_quiet() {
+        let text = if focused && !fl.hint.is_empty() {
+            sanitize(fl.hint)
+        } else {
+            "required".to_owned()
+        };
+        vec![(truncate(&text, w), false)]
+    } else if let Some(err) = &fl.error {
         wrap_text(&sanitize(err), w, 3)
             .into_iter()
             .map(|l| (l, true))
@@ -100,30 +116,59 @@ fn field_notes(fl: &Field, secret: bool, focused: bool, w: usize) -> Vec<(String
     }
 }
 
-pub(super) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
-    let width_cells = popup_width(area.width, 90);
+/// Widths of a form at terminal width `area_width`: the popup, the label column and the room
+/// for the value or note beside it. Hidden fields take no column.
+pub(super) fn form_columns(form: &Form, area_width: u16) -> (u16, usize, usize) {
+    let width_cells = popup_width(area_width, 90);
     let inner_w = usize::from(width_cells.saturating_sub(2));
     let label_w = form
         .fields
         .iter()
+        .filter(|x| !x.is_hidden())
         .map(|x| width(x.label))
         .max()
         .unwrap_or(0)
         .min(inner_w / 2)
         + 2;
     let note_w = inner_w.saturating_sub(label_w).max(1);
+    (width_cells, label_w, note_w)
+}
+
+pub(super) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
+    let (width_cells, label_w, note_w) = form_columns(form, area.width);
+    let inner_w = usize::from(width_cells.saturating_sub(2));
+    // Hidden fields are neither drawn nor given a row.
     let notes: Vec<Vec<(String, bool)>> = form
         .fields
         .iter()
         .enumerate()
-        .map(|(i, fl)| field_notes(fl, form.is_secret(i), i == form.focus, note_w))
+        .map(|(i, fl)| {
+            if fl.is_hidden() {
+                Vec::new()
+            } else {
+                field_notes(fl, form.is_secret(i), i == form.focus, note_w)
+            }
+        })
         .collect();
+    let row_count = |i: usize, fl: &Field| {
+        if fl.is_hidden() {
+            0
+        } else {
+            1 + notes.get(i).map_or(0, Vec::len)
+        }
+    };
     let form_error: Vec<String> = form
         .error
         .as_deref()
         .map(|e| wrap_text(&sanitize(e), inner_w.max(1), 3))
         .unwrap_or_default();
-    let rows: usize = notes.iter().map(|n| 1 + n.len()).sum::<usize>() + form_error.len();
+    let rows: usize = form
+        .fields
+        .iter()
+        .enumerate()
+        .map(|(i, fl)| row_count(i, fl))
+        .sum::<usize>()
+        + form_error.len();
     let h = u16::try_from(rows + 2).unwrap_or(u16::MAX).min(area.height);
     let rect = centered(area, width_cells, h);
     let inner = popup(f, rect, &sanitize(&form.title));
@@ -132,6 +177,9 @@ pub(super) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
     for (i, fl) in form.fields.iter().enumerate() {
         if y >= inner.y + inner.height {
             break;
+        }
+        if fl.is_hidden() {
+            continue;
         }
         let focused = i == form.focus;
         let (value, cursor) = field_value(fl, value_w, focused, form.is_secret(i));
@@ -183,14 +231,21 @@ pub(super) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
 }
 
 pub(super) fn confirm(f: &mut Frame<'_>, c: &Confirm, area: Rect) {
-    let w = u16::try_from(width(&c.message) + 12)
+    // The quit question names its keys, as the emulator's does.
+    let keys = if c.action == ConfirmAction::Quit {
+        "[y/q quit, n/Esc stay]"
+    } else {
+        "[y/N]"
+    };
+    let w = u16::try_from(width(&c.message) + width(keys) + 4)
         .unwrap_or(u16::MAX)
-        .max(24);
+        .max(24)
+        .min(area.width);
     let rect = centered(area, w, 3);
     let inner = popup(f, rect, "Confirm");
     f.render_widget(
         Paragraph::new(truncate(
-            &format!("{}  [y/N]", sanitize(&c.message)),
+            &format!("{}  {keys}", sanitize(&c.message)),
             usize::from(inner.width),
         )),
         inner,

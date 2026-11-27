@@ -74,7 +74,11 @@ fn palette_filters_runs_and_explains_disabled_actions() {
     };
     assert_eq!(p.chosen(), Some(ActionId::Reset));
     press(&mut app, KeyCode::Enter);
-    assert!(matches!(&app.mode, Mode::Form(f) if f.title == "Reset"));
+    assert!(
+        matches!(&app.mode, Mode::Form(f) if f.title == "Reset \u{2192} CP-1 (1.6)"),
+        "{:?}",
+        app.mode
+    );
     press(&mut app, KeyCode::Esc);
     assert!(matches!(app.mode, Mode::Normal));
 
@@ -253,6 +257,14 @@ fn raw_form_reports_schema_errors_inline_and_sends_valid_payloads() {
         }
         press(&mut app, KeyCode::Right);
     }
+    // the payload follows the action: it starts as the minimal valid one
+    let Mode::Form(f) = &mut app.mode else {
+        panic!("form");
+    };
+    assert_eq!(f.fields[1].input.text(), r#"{"type":"Hard"}"#);
+    assert!(f.fields[1].error.is_none());
+    // an emptied payload breaks the schema
+    f.fields[1].input = kirby_ocpp_tui::text::TextInput::new("{}");
     assert!(press(&mut app, KeyCode::Enter).is_empty());
     let Mode::Form(f) = &app.mode else {
         panic!("form stays open");
@@ -276,7 +288,7 @@ fn raw_form_reports_schema_errors_inline_and_sends_valid_payloads() {
 }
 
 #[test]
-fn raw_form_payload_starts_empty_and_an_empty_payload_is_an_empty_object() {
+fn raw_form_payload_starts_as_the_template_and_an_empty_payload_is_an_empty_object() {
     let mut app = loaded();
     press(&mut app, KeyCode::Char('w'));
     for _ in 0..20 {
@@ -292,7 +304,7 @@ fn raw_form_payload_starts_empty_and_an_empty_payload_is_an_empty_object() {
         panic!("form");
     };
     assert_eq!(f.fields[0].chosen(), Some("ClearCache"));
-    assert_eq!(f.fields[1].input.text(), "");
+    assert_eq!(f.fields[1].input.text(), "{}", "ClearCache has no members");
     assert!(f.fields[1].error.is_none());
     let (_, command) = only_send(press(&mut app, KeyCode::Enter));
     assert_eq!(
@@ -960,7 +972,9 @@ async fn run_loop_executes_a_hotkey_command_in_the_background() {
             press_key('C'); // ClearCache: sent without a form
         } else if stage == 1 && app.results.get("CP-K").is_some_and(|r| !r.is_empty()) {
             stage = 2;
+            // A station is connected: `q` asks first, `y` answers.
             press_key('q');
+            press_key('y');
         }
     };
     let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();

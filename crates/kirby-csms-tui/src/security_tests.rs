@@ -74,7 +74,7 @@ fn tabs(app: &mut App, n: usize) {
 fn get_log_builds_a_typed_request_and_validates_inline() {
     let mut app = loaded();
     press(&mut app, KeyCode::Char('l'));
-    assert_eq!(form_of(&app).title, "GetLog");
+    assert_eq!(form_of(&app).title, "Get log \u{2192} CP-1 (1.6)");
     // The location is required: the form stays open and focuses it.
     assert!(press(&mut app, KeyCode::Enter).is_empty());
     assert_eq!(form_of(&app).focus, 2);
@@ -115,7 +115,10 @@ fn get_log_builds_a_typed_request_and_validates_inline() {
 fn certificate_forms_rebuild_pasted_pem_and_check_it() {
     let mut app = loaded();
     press(&mut app, KeyCode::Char('I'));
-    assert_eq!(form_of(&app).title, "InstallCertificate");
+    assert_eq!(
+        form_of(&app).title,
+        "Install certificate \u{2192} CP-1 (1.6)"
+    );
     tabs(&mut app, 1);
     assert!(press(&mut app, KeyCode::Enter).is_empty());
     assert_eq!(form_of(&app).fields[1].error.as_deref(), Some("required"));

@@ -692,6 +692,13 @@ fn every_2_0_1_form_builds_a_schema_valid_request() {
                 "{}: action fixed",
                 spec.name
             );
+            // The form starts with the minimal valid payload: it sends as it is.
+            assert!(
+                form.clone().submit().is_some(),
+                "{}: the template must submit",
+                spec.name
+            );
+            form.fields[1].input = TextInput::new("{}");
             let needs_input = schemas.validate_request(spec.name, &json!({})).is_err();
             if needs_input {
                 assert!(
@@ -776,11 +783,23 @@ fn required_fields_block_submit_and_integers_are_integers() {
     let mut unlock = open(&mut app, "UnlockConnector");
     assert!(unlock.submit().is_none());
     let mut variables = open(&mut app, "GetVariables");
-    assert!(variables.submit().is_none());
-    let error = variables.fields[0].error.clone().unwrap();
     assert!(
-        error.contains("component"),
-        "the hint tells the shape: {error}"
+        variables.fields[0]
+            .input
+            .text()
+            .contains("HeartbeatInterval"),
+        "the field starts with a template"
+    );
+    assert!(
+        variables.clone().submit().is_some(),
+        "the template is valid"
+    );
+    variables.fields[0].input = TextInput::new("");
+    assert!(variables.submit().is_none());
+    assert_eq!(variables.fields[0].error.as_deref(), Some("required"));
+    assert!(
+        variables.fields[0].hint.contains("component"),
+        "the hint tells the shape"
     );
 }
 
@@ -1347,7 +1366,7 @@ fn reset_offers_resume_only_on_2_1() {
 }
 
 #[test]
-fn an_untouched_raw_form_shows_its_hint_and_the_error_comes_with_the_edit_or_submit() {
+fn a_raw_form_starts_with_a_valid_template_and_the_error_comes_with_the_edit() {
     let mut app = station21();
     let index = table21()
         .csms_actions
@@ -1361,6 +1380,12 @@ fn an_untouched_raw_form_shows_its_hint_and_the_error_comes_with_the_edit_or_sub
     };
     assert_eq!(form.fields[1].error, None);
     assert_eq!(form.fields[1].hint, "empty sends {}");
+    assert!(
+        form.fields[1].input.text().starts_with('{'),
+        "the payload starts with the members the schema requires"
+    );
+    assert!(form.clone().submit().is_some(), "the template is valid");
+    form.fields[1].input = TextInput::new("{}");
     assert!(form.submit().is_none(), "{{}} violates the schema");
     assert!(form.fields[1].error.is_some());
     // an edit shows the violation at once
@@ -1368,4 +1393,175 @@ fn an_untouched_raw_form_shows_its_hint_and_the_error_comes_with_the_edit_or_sub
     form.focus = 1;
     form.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE));
     assert!(form.fields[1].error.is_some());
+}
+
+// ---- palette order, form titles, templates and hints --------------------------------------
+
+/// The OCPP names (or labels, for local operations) of the palette rows without a query.
+fn palette_names(app: &mut App) -> Vec<String> {
+    app.open_palette();
+    let Mode::Palette(p) = &app.mode else {
+        panic!("palette");
+    };
+    let names = p
+        .rows()
+        .map(|d| d.ocpp.map_or_else(|| d.label().to_owned(), str::to_owned))
+        .collect();
+    app.mode = Mode::Normal;
+    names
+}
+
+#[test]
+fn the_palette_lists_common_actions_first_and_2_1_only_actions_last() {
+    let common = [
+        "RequestStartTransaction",
+        "RequestStopTransaction",
+        "Reset",
+        "TriggerMessage",
+        "ChangeAvailability",
+        "UnlockConnector",
+        "GetVariables",
+        "SetVariables",
+        "Inject fault",
+        "Set response rule",
+    ];
+    for mut app in [station201(), station21()] {
+        let names = palette_names(&mut app);
+        assert_eq!(names[..common.len()], common, "{names:?}");
+    }
+    let names = palette_names(&mut station21());
+    let first_2_1_only = names
+        .iter()
+        .position(|n| n == "AFRRSignal")
+        .expect("a 2.1 action");
+    let last_common = ["ChangeTransactionTariff", "InstallCertificate", "GetLog"]
+        .map(|want| names.iter().position(|n| n == want).expect(want));
+    assert!(last_common.iter().all(|i| *i < first_2_1_only), "{names:?}");
+    // The 2.1-only actions are one block at the end.
+    let block = &names[first_2_1_only..];
+    for n in ["SetDERControl", "UsePriorityCharging", "RequestBatterySwap"] {
+        assert!(block.iter().any(|b| b == n), "{n} is in the 2.1 block");
+    }
+    // OCPP 1.6 keeps its own start-first order.
+    let (mut app, _) = app_with(&["CP-1"]);
+    let names = palette_names(&mut app);
+    assert_eq!(
+        names[..4],
+        [
+            "RemoteStartTransaction",
+            "RemoteStopTransaction",
+            "Reset",
+            "TriggerMessage"
+        ]
+    );
+}
+
+#[test]
+fn a_form_title_names_the_action_the_station_and_its_version() {
+    let mut fx = Vec::new();
+    let mut app = station201();
+    let index = table201()
+        .csms_actions
+        .iter()
+        .position(|spec| spec.name == "SetVariables")
+        .expect("SetVariables");
+    app.run_action(ActionId::Call(index), &mut fx);
+    let Mode::Form(form) = &app.mode else {
+        panic!("SetVariables opened no form");
+    };
+    assert_eq!(form.title, "Set variables \u{2192} CP-1 (2.0.1)");
+    let (mut app, _) = app_with(&["CP-16"]);
+    app.run_action(ActionId::Reset, &mut fx);
+    let Mode::Form(form) = &app.mode else {
+        panic!("Reset opened no form");
+    };
+    assert_eq!(form.title, "Reset \u{2192} CP-16 (1.6)");
+}
+
+#[test]
+fn raw_json_forms_start_with_a_template_and_required_reads_as_a_hint() {
+    let mut app = station201();
+    let form = open(&mut app, "SetVariables");
+    let field = &form.fields[0];
+    assert_eq!(
+        field.input.text(),
+        r#"[{"component":{"name":"OCPPCommCtrlr"},"variable":{"name":"HeartbeatInterval"},"attributeValue":"60"}]"#
+    );
+    assert_eq!(field.error, None);
+    assert!(form.clone().submit().is_some(), "the template is valid");
+    // An untouched required field shows `required` as a hint; after a failed submit, an error.
+    let mut form = open(&mut app, "RequestStartTransaction");
+    let token = form
+        .fields
+        .iter()
+        .position(|f| f.label == "idToken")
+        .expect("idToken");
+    assert!(form.fields[token].is_quiet());
+    assert!(form.submit().is_none());
+    assert!(!form.fields[token].is_quiet());
+}
+
+#[test]
+fn single_value_selectors_are_hidden_and_focus_skips_them() {
+    let mut app = station21();
+    // A raw-payload action names itself in the title: its action selector has one value.
+    let mut form = open_21(&mut app, "SetDefaultTariff");
+    assert!(form.fields[0].is_hidden());
+    assert!(!form.fields[1].is_hidden());
+    // Focus starts on the payload and stays there.
+    assert_eq!(form.focus, 1);
+    form.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    assert_eq!(form.focus, 1);
+    // The raw call selects among all actions: shown.
+    let form = Form::raw_in("CP-1", V201, Some("Reset"));
+    assert!(form.fields[0].options.len() > 1);
+    assert!(!form.fields[0].is_hidden());
+}
+
+/// Runs the 2.1 table entry `name` and returns the form it opens.
+fn open_21(app: &mut App, name: &str) -> Form {
+    let index = table21()
+        .csms_actions
+        .iter()
+        .position(|spec| spec.name == name)
+        .unwrap_or_else(|| panic!("{name} is not in the table"));
+    let mut fx = Vec::new();
+    app.mode = Mode::Normal;
+    app.run_action(ActionId::Call(index), &mut fx);
+    match std::mem::replace(&mut app.mode, Mode::Normal) {
+        Mode::Form(form) => *form,
+        _ => panic!("{name} opened no form: {:?}", app.notice),
+    }
+}
+
+/// Every hint of every form of both tables is shown whole at 80x24 when its field has the
+/// focus.
+#[test]
+fn hints_fit_in_one_line_at_80x24() {
+    for (mut app, table) in [(station201(), table201()), (station21(), table21())] {
+        for (index, spec) in table.csms_actions.iter().enumerate() {
+            let mut fx = Vec::new();
+            app.mode = Mode::Normal;
+            app.run_action(ActionId::Call(index), &mut fx);
+            // An action without input is sent at once: no form, no hints.
+            let Mode::Form(form) = std::mem::replace(&mut app.mode, Mode::Normal) else {
+                continue;
+            };
+            for (i, field) in form.fields.iter().enumerate() {
+                if field.hint.is_empty() || field.is_hidden() {
+                    continue;
+                }
+                let mut shown = form.clone();
+                shown.focus = i;
+                app.mode = Mode::Form(shown);
+                let screen = crate::ui::tests::render(&app, 80, 24);
+                assert!(
+                    screen.contains(field.hint),
+                    "{}: hint of {:?} is cut:\n{screen}",
+                    spec.name,
+                    field.label
+                );
+            }
+        }
+    }
 }

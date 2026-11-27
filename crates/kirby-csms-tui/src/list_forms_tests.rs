@@ -254,18 +254,19 @@ fn form_of(app: &App) -> &Form {
 
 #[test]
 fn hotkeys_open_the_forms_and_send_typed_commands() {
-    let titles = [
-        ('K', "ClearChargingProfile"),
-        ('H', "GetCompositeSchedule"),
-        ('V', "ReserveNow"),
-        ('U', "UpdateFirmware"),
-        ('O', "GetDiagnostics"),
-        ('B', "SendLocalList"),
-    ];
-    for (key, title) in titles {
+    // A form is titled with the action, the station and its OCPP version.
+    for key in ['K', 'H', 'V', 'U', 'O', 'B'] {
         let mut app = loaded();
         press(&mut app, KeyCode::Char(key));
-        assert_eq!(form_of(&app).title, title, "key {key}");
+        let label = crate::actions::by_key(key)
+            .and_then(crate::actions::def_of)
+            .map(crate::actions::ActionDef::label)
+            .expect("hotkey of the catalog");
+        assert_eq!(
+            form_of(&app).title,
+            format!("{label} \u{2192} CP-1 (1.6)"),
+            "key {key}"
+        );
     }
     let mut app = loaded();
     press(&mut app, KeyCode::Char('B'));
@@ -293,7 +294,7 @@ fn forms_draw_their_labels() {
     terminal.draw(|f| draw(f, &app)).unwrap();
     let text = screen(terminal.backend());
     assert!(
-        text.contains("SendLocalList") && text.contains("listVersion"),
+        text.contains("\u{2192} CP-1 (1.6)") && text.contains("listVersion"),
         "{text}"
     );
     assert!(text.contains("idTag[:status]"), "{text}");

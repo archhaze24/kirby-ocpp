@@ -23,7 +23,7 @@ use ratatui::backend::TestBackend;
 use serde_json::json;
 use tokio::sync::mpsc;
 
-use crate::app::{App, Effect, Focus, LogView, Mode, Msg, update};
+use crate::app::{App, ConfirmAction, Effect, Focus, LogView, Mode, Msg, update};
 use crate::{TuiOptions, drive};
 
 /// Waits until the station itself has processed the accepted `BootNotification` answer. The
@@ -412,8 +412,30 @@ fn quit_help_view_and_pane_keys() {
     assert_eq!(app.focus, Focus::Log);
     press(&mut app, KeyCode::Left);
     assert_eq!(app.focus, Focus::Stations);
+    // A connected station: `q` asks first; `n` stays, `q` or `y` quits.
+    press(&mut app, KeyCode::Char('q'));
+    assert!(!app.quit);
+    assert!(
+        matches!(&app.mode, Mode::Confirm(c) if c.action == ConfirmAction::Quit),
+        "{:?}",
+        app.mode
+    );
+    press(&mut app, KeyCode::Char('n'));
+    assert!(!app.quit && matches!(app.mode, Mode::Normal));
+    press(&mut app, KeyCode::Char('q'));
+    press(&mut app, KeyCode::Esc);
+    assert!(!app.quit && matches!(app.mode, Mode::Normal));
+    press(&mut app, KeyCode::Char('q'));
     press(&mut app, KeyCode::Char('q'));
     assert!(app.quit);
+    let (mut app, _) = app_with(&["A"]);
+    press(&mut app, KeyCode::Char('q'));
+    press(&mut app, KeyCode::Char('y'));
+    assert!(app.quit);
+    // Nothing connected and nothing pending: `q` quits at once.
+    let mut idle = App::new("ws://0.0.0.0:9000", at(0));
+    press(&mut idle, KeyCode::Char('q'));
+    assert!(idle.quit);
     let (mut app, _) = app_with(&["A"]);
     update(
         &mut app,
@@ -515,10 +537,13 @@ async fn run_loop_shows_a_connecting_station() {
             .is_some_and(|b| b.registration == Some(RegistrationStatus::Accepted));
         if !sent && booted && app.station_log.len() >= 2 && app.info.is_some() {
             sent = true;
-            let _ = quit.send(Ok(TermEvent::Key(KeyEvent::new(
-                KeyCode::Char('q'),
-                KeyModifiers::NONE,
-            ))));
+            // A station is connected: `q` asks first, `y` answers.
+            for c in ['q', 'y'] {
+                let _ = quit.send(Ok(TermEvent::Key(KeyEvent::new(
+                    KeyCode::Char(c),
+                    KeyModifiers::NONE,
+                ))));
+            }
         }
     };
 
@@ -545,7 +570,9 @@ async fn run_loop_shows_a_connecting_station() {
 
     let screen = crate::ui::tests::screen(terminal.backend());
     assert!(screen.contains("CP-TUI"), "{screen}");
-    assert!(screen.contains("BootNotification"), "{screen}");
+    // The log follows the tail; the boot exchange has scrolled out of the short pane.
+    assert!(screen.contains("StatusNotification"), "{screen}");
+    assert!(screen.contains("booted"), "{screen}");
     assert!(screen.contains("1/1 connected"), "{screen}");
 
     drop(key_tx);

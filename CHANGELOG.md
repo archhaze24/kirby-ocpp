@@ -17,6 +17,10 @@ tag as the GitHub release notes.
 
 ### 🔧 Changed
 
+- CSMS terminal UI: at 80x24 the details pane gets most of the height and starts with a one-line summary (`1 EVSE · 1 tx · 7.2 kW · 2 security events`); every protocol shows the same connection, protocol, boot and heartbeat line first; cut panes show `▲`/`▼ N more`, and `Enter` acts only on a transaction row that is on screen. `z` zooms the focused pane (stations, details, log); `Esc` or `z` restores it.
+- CSMS terminal UI: the station list shows the protocol as `1.6`, `2.0.1` or `2.1`; log rows carry the key fields of the payload (`RequestStartTransaction remoteStartId=1 idToken=TAG1`), and the frame detail shows the request before the answer.
+- CSMS command forms: titles name the station and protocol (`Reset → CP-16 (1.6)`), single-value selectors are hidden, raw JSON fields start with the smallest valid payload from the schema, and `required` reads as a hint until the field is edited or a send is attempted. The palette lists common actions first and OCPP 2.1-only actions last; the empty prompt shows `type to filter`.
+- CSMS terminal UI: `q` asks `y/q quit, n/Esc stay` while stations are connected or commands are pending; `Ctrl-C` still quits at once.
 - `kirby-csms-core`: `CsmsEvent::Connected` carries the `remote_addr` and `subprotocol` of the connection it reports. Code that matches `Connected { station }` needs `Connected { station, .. }`.
 - Command palette of both UIs: without a query the entries are ordered by task (connect, plug, authorize and transactions, messages, faults, scenarios, configuration), the emulator palette shows each accelerator, and labels are short verb phrases (`Send BootNotification`, `Edit config keys...`, `Show pending calls...`, `Set response rule...`).
 - JSON popups (log row details, command answers) are as tall as their content instead of filling the screen; longer content scrolls.

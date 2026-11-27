@@ -113,15 +113,32 @@ pub struct Field {
     /// What each option stands for when it differs from its text (the transaction ids behind
     /// the options of `RequestStopTransaction`); empty when the options are the values.
     pub values: Vec<String>,
+    /// The field was edited (or the form was submitted): a problem is shown as an error. Until
+    /// then an empty required field reads as a hint.
+    pub touched: bool,
+    /// A selector with a single option stays visible (it names the target, for instance the
+    /// one running transaction); without this flag it is hidden and skipped.
+    pub keep_single: bool,
 }
 
 impl Field {
-    /// The payload of a raw call; empty means `{}`.
-    fn raw_payload() -> Self {
+    /// The payload of a raw call, starting with `template`; empty means `{}`.
+    fn raw_payload(template: &str) -> Self {
         Self {
             hint: "empty sends {}",
-            ..Self::new("payload (JSON)", FieldKind::RawJson, "")
+            ..Self::new("payload (JSON)", FieldKind::RawJson, template)
         }
+    }
+
+    /// A selector with a single option that names no target: nothing to choose, so the form
+    /// neither draws nor focuses it.
+    pub fn is_hidden(&self) -> bool {
+        self.kind == FieldKind::Select && self.options.len() == 1 && !self.keep_single
+    }
+
+    /// An empty field nobody edited yet: its problem (`required`) is shown as a hint.
+    pub fn is_quiet(&self) -> bool {
+        !self.touched && self.input.is_empty()
     }
 
     fn new(label: &'static str, kind: FieldKind, value: &str) -> Self {
@@ -136,6 +153,8 @@ impl Field {
             hint: "",
             spec: None,
             values: Vec::new(),
+            touched: false,
+            keep_single: false,
         }
     }
 
@@ -321,6 +340,9 @@ pub struct Form {
     /// Leading fields in front of the ones the kind describes: 1 in a rule or fault form that
     /// has a `protocol` select first, else 0.
     lead: usize,
+    /// The payload a `Raw` form last prefilled for its action (empty when none); another
+    /// action's template replaces it only while the payload still equals it.
+    template: String,
 }
 
 fn names<I, S>(items: I) -> Vec<String>
@@ -391,10 +413,31 @@ impl Form {
             protocol: Protocol::V16,
             spec: None,
             lead: 0,
+            template: String::new(),
         };
         form.validate_all();
         form.error = None;
+        form.focus = form.first_visible();
         form
+    }
+
+    /// The first field that is not hidden (0 when every field is).
+    fn first_visible(&self) -> usize {
+        self.fields.iter().position(|f| !f.is_hidden()).unwrap_or(0)
+    }
+
+    /// The visible field `step` places from the focus (forward when `step` is 1, backward
+    /// when it is -1), wrapping around.
+    fn next_visible(&self, step: isize) -> usize {
+        let n = self.fields.len().max(1);
+        let mut at = self.focus;
+        for _ in 0..n {
+            at = (at + n).wrapping_add_signed(step) % n;
+            if self.fields.get(at).is_some_and(|f| !f.is_hidden()) {
+                return at;
+            }
+        }
+        self.focus
     }
 
     pub fn remote_start(station: &str) -> Self {
@@ -436,6 +479,10 @@ impl Form {
             vec![Field::select("transaction", options)],
         );
         form.tx_ids = choices.iter().map(|c| c.id).collect();
+        // The one running transaction is the target: keep it on screen.
+        for field in &mut form.fields {
+            field.keep_single = true;
+        }
         form
     }
 
@@ -913,13 +960,19 @@ impl Form {
         if let Some(i) = initial_action.and_then(|a| action.options.iter().position(|o| o == a)) {
             action.option = i;
         }
-        Self::build(
+        let template = action
+            .chosen()
+            .map(|name| payload_template_text(protocol, name))
+            .unwrap_or_default();
+        let mut form = Self::build(
             FormKind::Raw,
             "Raw CALL",
             station,
-            vec![action, Field::raw_payload()],
+            vec![action, Field::raw_payload(&template)],
         )
-        .in_protocol(Protocol::from_token(protocol).unwrap_or(Protocol::V16))
+        .in_protocol(Protocol::from_token(protocol).unwrap_or(Protocol::V16));
+        form.template = template;
+        form
     }
 
     /// Checks the payload against the schemas of `protocol` from now on.
@@ -954,16 +1007,19 @@ impl Form {
         ctx: &SpecContext,
     ) -> Self {
         if spec.fields.is_empty() {
-            return Self::build(
+            let template = payload_template_text(ctx.protocol.token(), spec.name);
+            let mut form = Self::build(
                 FormKind::Raw,
                 spec.title,
                 station,
                 vec![
                     Field::select("action", vec![spec.name.to_owned()]),
-                    Field::raw_payload(),
+                    Field::raw_payload(&template),
                 ],
             )
             .in_protocol(ctx.protocol);
+            form.template = template;
+            return form;
         }
         let fields = spec.fields.iter().map(|f| spec_field(f, ctx)).collect();
         let mut form = Self::build(FormKind::Spec, spec.title, station, fields);
@@ -1163,6 +1219,10 @@ impl Form {
             .map(|_| None)
             .chain(scoped.iter().cloned().map(Some))
             .collect();
+        // The one rule is the target: keep it on screen.
+        for field in &mut form.fields {
+            field.keep_single = true;
+        }
         form
     }
 
@@ -1177,6 +1237,9 @@ impl Form {
     }
 
     fn touched(&mut self, i: usize) {
+        if let Some(f) = self.fields.get_mut(i) {
+            f.touched = true;
+        }
         self.validate_field(i);
         self.error = None;
         self.after_edit();
@@ -1184,12 +1247,11 @@ impl Form {
 
     pub fn handle_key(&mut self, key: KeyEvent) -> FormEvent {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let n = self.fields.len().max(1);
         match key.code {
             KeyCode::Esc => return FormEvent::Cancel,
             KeyCode::Enter => return FormEvent::Submit,
-            KeyCode::Tab | KeyCode::Down => self.focus = (self.focus + 1) % n,
-            KeyCode::BackTab | KeyCode::Up => self.focus = (self.focus + n - 1) % n,
+            KeyCode::Tab | KeyCode::Down => self.focus = self.next_visible(1),
+            KeyCode::BackTab | KeyCode::Up => self.focus = self.next_visible(-1),
             code => {
                 let i = self.focus;
                 let Some(f) = self.fields.get_mut(i) else {
@@ -1251,10 +1313,39 @@ impl Form {
             self.refresh_actions();
         }
         if self.focus == 0 {
+            self.swap_template();
             // Changing the action does not edit the payload.
             self.quiet_blank_payload();
         }
         self.check_request();
+    }
+
+    /// A raw form whose action changed starts the payload over with the template of the new
+    /// action, unless the payload was edited.
+    fn swap_template(&mut self) {
+        if self.kind != FormKind::Raw {
+            return;
+        }
+        let Some(action) = self
+            .fields
+            .first()
+            .and_then(Field::chosen)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let protocol = self.protocol.token();
+        let next = payload_template_text(protocol, &action);
+        let Some(payload) = self.fields.get_mut(1) else {
+            return;
+        };
+        let current = payload.input.text();
+        if next != self.template && (current.trim().is_empty() || current == self.template) {
+            payload.input = TextInput::new(next.clone());
+            payload.touched = false;
+            self.template = next;
+            self.validate_field(1);
+        }
     }
 
     pub fn validate_all(&mut self) -> bool {
@@ -1427,6 +1518,10 @@ impl Form {
     pub fn submit(&mut self) -> Option<Submitted> {
         self.error = None;
         if !self.validate_all() {
+            // A submit makes every missing value an error, not a hint.
+            for f in &mut self.fields {
+                f.touched = true;
+            }
             if let Some(i) = self.fields.iter().position(|f| f.error.is_some()) {
                 self.focus = i;
             }
@@ -1770,6 +1865,12 @@ fn truncate_key(k: &str) -> String {
     kirby_ocpp_tui::text::truncate(&kirby_ocpp_tui::text::sanitize(k), 20)
 }
 
+/// The minimal valid payload of `action` as the text a raw payload field starts with; empty
+/// when none can be derived.
+fn payload_template_text(protocol: &str, action: &str) -> String {
+    registry::payload_template(protocol, action).map_or_else(String::new, |v| v.to_string())
+}
+
 /// The payload of a raw call form: an empty field means `{}`.
 fn raw_payload_text(text: &str) -> &str {
     if text.trim().is_empty() { "{}" } else { text }
@@ -1863,13 +1964,7 @@ fn transaction_options(transactions: &[TxChoice]) -> (Vec<String>, Vec<String>) 
 fn spec_text_error(spec: &registry::FieldSpec, raw: &str) -> Option<String> {
     let text = raw.trim();
     if text.is_empty() {
-        return spec.required.then(|| {
-            if spec.ty == registry::FieldType::Json && !spec.hint.is_empty() {
-                format!("required: {}", spec.hint)
-            } else {
-                "required".to_owned()
-            }
-        });
+        return spec.required.then(|| "required".to_owned());
     }
     match spec.ty {
         registry::FieldType::Integer => (!matches!(text.parse::<i32>(), Ok(n) if n >= 0))
@@ -2145,13 +2240,15 @@ mod tests {
         let mut f = Form::raw("CP-1", Some("Reset"));
         assert_eq!(f.fields[0].options.len(), 26);
         assert_eq!(
-            f.fields[1].error, None,
-            "an untouched payload shows its hint"
+            f.fields[1].input.text(),
+            r#"{"type":"Hard"}"#,
+            "the payload starts as the minimal valid one"
         );
-        assert!(f.submit().is_none(), "{{}} lacks the type");
-        assert!(f.fields[1].error.is_some());
+        assert_eq!(f.fields[1].error, None);
         f.focus = 1;
         clear(&mut f);
+        assert!(f.submit().is_none(), "{{}} lacks the type");
+        assert!(f.fields[1].error.is_some());
         type_text(&mut f, r#"{"type":"Soft"}"#);
         assert_eq!(f.fields[1].error, None);
         assert!(matches!(

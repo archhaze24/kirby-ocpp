@@ -1,5 +1,8 @@
 //! Drawing. `draw` is a pure function of the [`App`]; it never mutates it.
 
+mod details;
+pub mod layout;
+mod logsum;
 mod overlays;
 mod panes;
 
@@ -10,18 +13,24 @@ use kirby_ocpp_tui::ui::{
     PendingRow, content_height, dim, hint_line_pinned, pending_list, visible_scroll,
 };
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::actions::ScopedRule;
-use crate::app::{App, Focus, Mode};
+use crate::app::{App, ConfirmAction, Focus, Mode};
 use crate::keys::{HELP, PALETTE_2X_HELP, PANES_2X_HELP};
 
-/// Width from which the list sits left of details and log.
-pub const WIDE: u16 = 100;
+pub use layout::WIDE;
 pub const MIN_SIZE: (u16, u16) = (24, 8);
+
+/// Rows of the transaction table that hold data in a terminal of `app.size`: `Enter` opens
+/// the selected transaction only when this is not zero (the row is on screen).
+pub fn visible_transaction_rows(app: &App) -> usize {
+    let body = layout::body_of(app.size);
+    details::transaction_rows(app, layout::panes(app, body).details)
+}
 
 pub fn draw(f: &mut Frame<'_>, app: &App) {
     draw_colored(f, app);
@@ -36,12 +45,7 @@ fn draw_colored(f: &mut Frame<'_>, app: &App) {
         kirby_ocpp_tui::ui::too_small(f, area, MIN_SIZE);
         return;
     }
-    let [header, body, footer] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(3),
-        Constraint::Length(2),
-    ])
-    .areas(area);
+    let [header, body, footer] = layout::screen(area);
     draw_header(f, app, header);
     draw_body(f, app, body);
     draw_footer(f, app, footer);
@@ -49,27 +53,17 @@ fn draw_colored(f: &mut Frame<'_>, app: &App) {
 }
 
 fn draw_body(f: &mut Frame<'_>, app: &App, area: Rect) {
-    if area.width >= WIDE {
-        let list_w = (area.width * 3 / 10).clamp(24, 44);
-        let [list, right] =
-            Layout::horizontal([Constraint::Length(list_w), Constraint::Min(10)]).areas(area);
-        let [details, log] =
-            Layout::vertical([Constraint::Percentage(55), Constraint::Min(3)]).areas(right);
-        panes::stations(f, app, list);
-        panes::details(f, app, details);
-        panes::log(f, app, log);
-    } else {
-        let list_h = (area.height / 4).clamp(3, 8);
-        let det_h = (area.height / 3).clamp(3, 14);
-        let [list, details, log] = Layout::vertical([
-            Constraint::Length(list_h),
-            Constraint::Length(det_h),
-            Constraint::Min(3),
-        ])
-        .areas(area);
-        panes::stations(f, app, list);
-        panes::details(f, app, details);
-        panes::log(f, app, log);
+    let panes = layout::panes(app, area);
+    // A pane that is not shown (another one is zoomed) has no area.
+    let shown = |r: Rect| r.width > 0 && r.height > 0;
+    if shown(panes.stations) {
+        panes::stations(f, app, panes.stations);
+    }
+    if shown(panes.details) {
+        details::details(f, app, panes.details);
+    }
+    if shown(panes.log) {
+        panes::log(f, app, panes.log);
     }
 }
 
@@ -233,6 +227,9 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     match &app.mode {
         Mode::Normal => {
             let mut v = Vec::new();
+            if app.zoom {
+                v.push(("z", "unzoom"));
+            }
             if !app.inflight.is_empty() {
                 v.push(("W", "pending"));
             }
@@ -266,6 +263,9 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("←→", "option"),
             ("Esc", "cancel"),
         ],
+        Mode::Confirm(c) if c.action == ConfirmAction::Quit => {
+            vec![("y/q", "quit"), ("n/Esc", "stay")]
+        }
         Mode::Confirm(_) => vec![("y", "yes"), ("any other key", "cancel")],
         Mode::Results(_) => vec![("Enter", "open"), ("↑↓", "choose"), ("Esc", "close")],
         Mode::Pending(_) => vec![("x", "cancel"), ("↑↓", "choose"), ("Esc", "close")],
@@ -394,3 +394,6 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod pane_tests;

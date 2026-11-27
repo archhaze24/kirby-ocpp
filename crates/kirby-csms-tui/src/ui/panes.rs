@@ -1,30 +1,46 @@
 use std::fmt::Write as _;
 
 use chrono::{DateTime, Utc};
-use kirby_csms_core::{StationInfo, StationState, TransactionStatus};
-use kirby_ocpp_core::ocpp::v2::types::WireEnum;
 use kirby_ocpp_core::station::{Direction, LogLevel};
 use kirby_ocpp_tui::logview::{FrameKind, LogEntry};
 use kirby_ocpp_tui::text::{sanitize, truncate, truncate_middle, width};
 use kirby_ocpp_tui::theme::{Level, level_mark};
 use kirby_ocpp_tui::ui::dim;
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Row, Table, Wrap};
+use ratatui::widgets::{Block, Paragraph};
 
 use crate::app::{App, Focus, LogView, Summary, filter_label};
 
-const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
+pub(super) const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
-fn block(title: String, focused: bool) -> Block<'static> {
-    Block::bordered()
+/// A bordered pane. `bottom` is the scroll marker on the lower border, when rows are cut.
+pub(super) fn block(title: String, bottom: Option<String>, focused: bool) -> Block<'static> {
+    let block = Block::bordered()
         .border_style(kirby_ocpp_tui::theme::border(focused))
-        .title(title)
+        .title(title);
+    match bottom {
+        Some(text) => block.title_bottom(Line::from(text).right_aligned()),
+        None => block,
+    }
 }
 
-fn status_color(status: &str) -> Color {
+/// `▲ 3 more`, `▼ 5 more` or both: what is cut above and below the rows shown. `None` when
+/// nothing is cut.
+pub(super) fn markers(above: usize, below: usize) -> Option<String> {
+    let mut parts = Vec::new();
+    if above > 0 {
+        parts.push(format!("\u{25b2} {above} more"));
+    }
+    if below > 0 {
+        parts.push(format!("\u{25bc} {below} more"));
+    }
+    (!parts.is_empty()).then(|| format!(" {} ", parts.join("  ")))
+}
+
+pub(super) fn status_color(status: &str) -> Color {
     match status {
         "Available" => Color::Green,
         "Charging" | "Occupied" => Color::Cyan,
@@ -45,7 +61,7 @@ pub fn age(now: DateTime<Utc>, then: DateTime<Utc>) -> String {
     }
 }
 
-fn clock(ts: DateTime<Utc>) -> String {
+pub(super) fn clock(ts: DateTime<Utc>) -> String {
     ts.format("%H:%M:%S").to_string()
 }
 
@@ -75,8 +91,9 @@ fn station_row(s: &Summary, inner_w: usize, selected: bool, mono: bool) -> Line<
         _ => String::new(),
     };
     let protocol = match s.protocol.as_deref() {
-        Some("ocpp2.0.1") => " v2",
-        Some("ocpp2.1") => " v2.1",
+        Some("ocpp1.6") => " 1.6",
+        Some("ocpp2.0.1") => " 2.0.1",
+        Some("ocpp2.1") => " 2.1",
         _ => "",
     };
     let id_w = inner_w
@@ -116,6 +133,7 @@ pub fn stations(f: &mut Frame<'_>, app: &App, area: Rect) {
                 .map(|s| station_row(s, inner_w, Some(row) == cursor && focused, app.mono))
         })
         .collect();
+    let shown = lines.len();
     let mut title = String::from("Stations");
     if !app.station_filter.is_empty() {
         let _ = write!(title, " /{}", sanitize(&app.station_filter));
@@ -133,14 +151,15 @@ pub fn stations(f: &mut Frame<'_>, app: &App, area: Rect) {
     } else {
         lines
     };
+    let bottom = markers(top, len.saturating_sub(top + shown));
     f.render_widget(
-        Paragraph::new(lines).block(block(truncate(&title, inner_w.max(1)), focused)),
+        Paragraph::new(lines).block(block(truncate(&title, inner_w.max(1)), bottom, focused)),
         area,
     );
 }
 
 /// What the details pane shows before any station has connected.
-fn empty_state(app: &App) -> Vec<Line<'static>> {
+pub(super) fn empty_state(app: &App) -> Vec<Line<'static>> {
     let url = sanitize(&app.url);
     let mut lines = vec![
         Line::raw(format!("Listening on {url}")),
@@ -163,422 +182,13 @@ fn empty_state(app: &App) -> Vec<Line<'static>> {
     lines
 }
 
-// ---- details --------------------------------------------------------------------------
-
-pub fn details(f: &mut Frame<'_>, app: &App, area: Rect) {
-    let Some(id) = app.selected.as_deref() else {
-        let lines = if app.stations.is_empty() {
-            empty_state(app)
-        } else {
-            vec![Line::styled("no station selected", dim())]
-        };
-        f.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .block(block("Station".to_owned(), false)),
-            area,
-        );
-        return;
-    };
-    let inner_w = usize::from(area.width.saturating_sub(2));
-    let outer = block(
-        truncate(&format!("Station {}", sanitize(id)), inner_w.max(1)),
-        app.focus == Focus::Details,
-    );
-    let inner = outer.inner(area);
-    f.render_widget(outer, area);
-    let lines = info_lines(app, app.info.as_ref(), app.state.as_ref(), inner_w);
-    let is_v2_protocol = |protocol: Option<&str>| matches!(protocol, Some("ocpp2.0.1" | "ocpp2.1"));
-    let is_v2 = is_v2_protocol(app.info.as_ref().and_then(|i| i.subprotocol.as_deref()))
-        || app
-            .stations
-            .iter()
-            .any(|s| s.id == id && is_v2_protocol(s.protocol.as_deref()));
-    let info_h = u16::try_from(lines.len())
-        .unwrap_or(u16::MAX)
-        .min(inner.height);
-    let [info, tables] =
-        Layout::vertical([Constraint::Length(info_h), Constraint::Min(0)]).areas(inner);
-    f.render_widget(Paragraph::new(lines), info);
-    let Some(state) = &app.state else {
-        return;
-    };
-    if is_v2 {
-        details_v2(f, app, state, tables);
-        return;
-    }
-    if tables.width >= 140 {
-        let [c, t] = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .areas(tables);
-        connectors(f, app, state, c);
-        transactions(f, app, state, t);
-    } else {
-        // Stacked: the connectors need a header and one row each. They keep at least a third
-        // of the room and may take more while the transactions keep a header and two rows.
-        let wanted = u16::try_from(state.connectors.len() + 1).unwrap_or(u16::MAX);
-        let cap = (tables.height / 3)
-            .max(tables.height.saturating_sub(3))
-            .max(2);
-        let conn_h = wanted.clamp(2, cap);
-        let [c, t] =
-            Layout::vertical([Constraint::Length(conn_h), Constraint::Min(0)]).areas(tables);
-        connectors(f, app, state, c);
-        transactions(f, app, state, t);
-    }
-}
-
-fn info_lines(
-    app: &App,
-    info: Option<&StationInfo>,
-    state: Option<&StationState>,
-    w: usize,
-) -> Vec<Line<'static>> {
-    let now = app.now;
-    let mut out: Vec<String> = Vec::new();
-    if let Some(i) = info {
-        let link = if i.connected {
-            let since = i
-                .connected_at
-                .map_or_else(String::new, |t| format!(" for {}", age(now, t)));
-            format!("connected{since}")
-        } else {
-            let since = i
-                .disconnected_at
-                .map_or_else(String::new, |t| format!(" {} ago", age(now, t)));
-            format!("disconnected{since}")
-        };
-        let addr = i
-            .remote_addr
-            .map_or_else(|| "-".to_owned(), |a| a.to_string());
-        let proto = i.subprotocol.as_deref().unwrap_or("none");
-        out.push(format!("{link}  remote {addr}  subprotocol {proto}"));
-    }
-    match state.and_then(|s| s.boot.as_ref()) {
-        Some(b) => {
-            let mut line = format!("boot {} {}", b.vendor, b.model);
-            if let Some(fw) = &b.firmware_version {
-                let _ = write!(line, "  fw {fw}");
-            }
-            if let Some(sn) = b
-                .charge_point_serial_number
-                .as_ref()
-                .or(b.charge_box_serial_number.as_ref())
-            {
-                let _ = write!(line, "  sn {sn}");
-            }
-            if let Some(r) = b.registration {
-                let _ = write!(line, "  answered {r}");
-            }
-            if let Some(iv) = b.interval {
-                let _ = write!(line, " every {iv}s");
-            }
-            out.push(line);
-        }
-        None => out.push("not booted".to_owned()),
-    }
-    if let Some(s) = state {
-        let hb = s
-            .last_heartbeat_at
-            .map_or_else(|| "none".to_owned(), |t| format!("{} ago", age(now, t)));
-        let mut line = format!("heartbeat {hb}");
-        if let Some(fw) = &s.firmware_status {
-            let _ = write!(line, "  firmware {} ({} ago)", fw.status, age(now, fw.at));
-        }
-        if let Some(d) = &s.diagnostics_status {
-            let _ = write!(line, "  diagnostics {} ({} ago)", d.status, age(now, d.at));
-        }
-        out.push(line);
-        let received = info.map_or(0, |i| i.received_calls);
-        if let Some(v2) = &s.v2 {
-            if let Some(reason) = v2.boot_reason {
-                out.push(format!("boot reason {}", reason.as_str()));
-            }
-            let c = &v2.counters;
-            out.push(format!(
-                "events {}  duplicates {}  rejected {}  meters {}  reports {}",
-                c.transaction_events,
-                c.duplicate_events,
-                c.rejected_events,
-                c.meter_values,
-                c.notify_reports
-            ));
-            if let Some(r) = &v2.last_report {
-                out.push(format!(
-                    "report #{} seqNo {} tbc {}",
-                    r.request_id, r.seq_no, r.tbc
-                ));
-            }
-        } else {
-            out.push(format!(
-                "calls received {received}  failed {}  unknown stops {}",
-                s.failed_calls, s.unknown_stops
-            ));
-        }
-        out.extend(security_lines(app, s));
-    }
-    out.into_iter()
-        .map(|l| Line::raw(truncate(&sanitize(&l), w)))
-        .collect()
-}
-
-fn details_v2(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
-    let Some(v2) = &state.v2 else { return };
-    let statuses = state.connector_statuses();
-    let (c, t) = if area.width >= 140 {
-        let [c, t] = Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-            .areas(area);
-        (c, t)
-    } else {
-        let wanted = u16::try_from(statuses.len() + 1).unwrap_or(u16::MAX);
-        let cap = (area.height / 3).max(area.height.saturating_sub(3)).max(2);
-        let [c, t] =
-            Layout::vertical([Constraint::Length(wanted.clamp(2, cap)), Constraint::Min(0)])
-                .areas(area);
-        (c, t)
-    };
-    let rows = statuses.iter().map(|(id, status)| {
-        let updated = v2
-            .evses
-            .iter()
-            .flat_map(|(e, ev)| {
-                ev.connectors
-                    .iter()
-                    .map(move |(c, s)| (format!("{e}/{c}"), s))
-            })
-            .find(|(key, _)| key == id)
-            .map_or_else(|| "-".to_owned(), |(_, s)| age(app.now, s.received_at));
-        Row::new(vec![
-            truncate(&sanitize(id), 10),
-            truncate(&sanitize(status), 12),
-            updated,
-        ])
-        .style(Style::new().fg(status_color(status)))
-    });
-    f.render_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Length(10),
-                Constraint::Length(12),
-                Constraint::Length(5),
-            ],
-        )
-        .header(Row::new(["EVSE/conn", "Status", "Upd"]).style(dim())),
-        c,
-    );
-    // The wire names of the charging state fit from this width; below it they would clip
-    // (two of them to the same text), so the short forms are used.
-    let short_states = t.width < 90;
-    let rows = v2.transactions.iter().rev().enumerate().map(|(index, tx)| {
-        let loc = format!(
-            "{}/{}",
-            tx.evse.map_or_else(|| "-".to_owned(), |v| v.to_string()),
-            tx.connector
-                .map_or_else(|| "-".to_owned(), |v| v.to_string())
-        );
-        let active = tx.status == TransactionStatus::Active;
-        let state = if active {
-            "active".to_owned()
-        } else {
-            format!("ended {}", tx.stopped_reason.map_or("-", |r| r.as_str()))
-        };
-        Row::new(vec![
-            truncate(&sanitize(&tx.id), 8),
-            loc,
-            truncate(&sanitize(tx.id_token.as_deref().unwrap_or("-")), 10),
-            tx.charging_state
-                .map_or("-", |s| charging_state_text(s.as_str(), short_states))
-                .to_owned(),
-            tx.energy_wh
-                .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}")),
-            tx.power_w
-                .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}")),
-            truncate(&sanitize(&state), 24),
-            clock(tx.started_at),
-        ])
-        .style(
-            if app.focus == Focus::Details && index == app.transaction_selection {
-                SELECTED
-            } else if active {
-                Style::new().fg(Color::Cyan)
-            } else {
-                dim()
-            },
-        )
-    });
-    f.render_widget(
-        Table::new(
-            rows,
-            [
-                Constraint::Length(8),
-                Constraint::Length(7),
-                Constraint::Length(10),
-                Constraint::Length(if short_states { 8 } else { 13 }),
-                Constraint::Length(7),
-                Constraint::Length(6),
-                Constraint::Length(24),
-                Constraint::Min(8),
-            ],
-        )
-        .header(
-            Row::new([
-                "Tx", "EVSE/C", "idToken", "Charging", "Wh", "W", "State", "Time",
-            ])
-            .style(dim()),
-        ),
-        t,
-    );
-}
-
-/// A charging state as the transaction table shows it: the wire name, or in a narrow table a
-/// short form (`EVConn`, `SuspEV`, `SuspEVSE`) that fits the 8-column state cell.
-fn charging_state_text(wire: &str, short: bool) -> &str {
-    if !short {
-        return wire;
-    }
-    match wire {
-        "EVConnected" => "EVConn",
-        "SuspendedEV" => "SuspEV",
-        "SuspendedEVSE" => "SuspEVSE",
-        other => other,
-    }
-}
-
-/// What the station reported under the Security Whitepaper: nothing when it reported nothing.
-fn security_lines(app: &App, s: &StationState) -> Vec<String> {
-    let mut parts = Vec::new();
-    if s.security_events_total > 0 {
-        parts.push(format!("security events {}", s.security_events_total));
-    }
-    if let Some(l) = &s.log_status {
-        let id = l.request_id.map_or_else(String::new, |i| format!(" #{i}"));
-        parts.push(format!("log {}{id} ({} ago)", l.status, age(app.now, l.at)));
-    }
-    if let Some(f) = &s.signed_firmware_status {
-        let id = f.request_id.map_or_else(String::new, |i| format!(" #{i}"));
-        parts.push(format!(
-            "signed firmware {}{id} ({} ago)",
-            f.status,
-            age(app.now, f.at)
-        ));
-    }
-    if let Some(r) = &s.certificate_request {
-        parts.push(format!(
-            "CSR received ({} ago)",
-            age(app.now, r.received_at)
-        ));
-    }
-    for (kind, c) in &s.installed_certificates {
-        let count = if c.total > c.certificates.len() {
-            format!("{} of {}", c.certificates.len(), c.total)
-        } else {
-            c.total.to_string()
-        };
-        parts.push(format!(
-            "installed {kind}: {count} ({}, {} ago)",
-            c.status,
-            age(app.now, c.at)
-        ));
-    }
-    let mut out = Vec::new();
-    if !parts.is_empty() {
-        out.push(parts.join("  "));
-    }
-    // The last three events, newest first (`e` lists them all).
-    for e in s.security_events.iter().rev().take(3) {
-        let info = e
-            .tech_info
-            .as_deref()
-            .map_or_else(String::new, |t| format!(" {t}"));
-        out.push(format!(
-            "  {} {}{info}",
-            e.received_at.format("%H:%M:%S"),
-            e.event_type
-        ));
-    }
-    out
-}
-
-fn connectors(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
-    let rows = usize::from(area.height.saturating_sub(1));
-    let table = Table::new(
-        state.connectors.iter().take(rows).map(|(id, c)| {
-            let status = c.status.to_string();
-            let color = status_color(&status);
-            let error = c.error_code.to_string();
-            Row::new(vec![
-                id.to_string(),
-                status,
-                error,
-                c.info.as_deref().map(sanitize).unwrap_or_default(),
-                age(app.now, c.received_at),
-            ])
-            .style(Style::new().fg(color))
-        }),
-        [
-            Constraint::Length(4),
-            Constraint::Length(13),
-            Constraint::Length(12),
-            Constraint::Min(4),
-            Constraint::Length(5),
-        ],
-    )
-    .header(Row::new(["#", "Status", "Error", "Info", "Upd"]).style(dim()));
-    f.render_widget(table, area);
-}
-
-fn transactions(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) {
-    let rows = usize::from(area.height.saturating_sub(1));
-    // Newest first: that is what one looks for.
-    let table = Table::new(
-        state.transactions.iter().rev().take(rows).map(|t| {
-            let active = t.status == TransactionStatus::Active;
-            let meters = match t.meter_stop {
-                Some(stop) => format!("{}→{stop}", t.meter_start),
-                None => t.meter_start.to_string(),
-            };
-            let wh = t
-                .energy_wh
-                .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}"));
-            let w = t
-                .power_w
-                .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}"));
-            let when = match t.stopped_at {
-                Some(stop) => format!("{}-{}", clock(t.started_at), clock(stop)),
-                None => format!("{} ({})", clock(t.started_at), age(app.now, t.started_at)),
-            };
-            Row::new(vec![
-                t.id.to_string(),
-                t.connector.to_string(),
-                sanitize(&t.id_tag),
-                meters,
-                wh,
-                w,
-                if active { "active" } else { "stopped" }.to_owned(),
-                when,
-            ])
-            .style(if active {
-                Style::new().fg(Color::Cyan)
-            } else {
-                dim()
-            })
-        }),
-        [
-            Constraint::Length(6),
-            Constraint::Length(3),
-            Constraint::Length(10),
-            Constraint::Length(12),
-            Constraint::Length(7),
-            Constraint::Length(6),
-            Constraint::Length(8),
-            Constraint::Min(8),
-        ],
-    )
-    .header(Row::new(["Tx", "C", "idTag", "Meter", "Wh", "W", "State", "Time"]).style(dim()));
-    f.render_widget(table, area);
-}
-
 // ---- log ------------------------------------------------------------------------------
+
+/// The summary of a frame row: the key fields of the payload, or the stored one when the frame
+/// has no object payload (an error, a frame kept as cut text).
+fn frame_summary(e: &LogEntry, frame: &serde_json::Value) -> String {
+    super::logsum::summarize(frame).unwrap_or_else(|| e.summary.clone())
+}
 
 fn row_line(app: &App, e: &LogEntry, inner_w: usize, selected: bool) -> Line<'static> {
     let mut spans = Vec::new();
@@ -615,7 +225,7 @@ fn row_line(app: &App, e: &LogEntry, inner_w: usize, selected: bool) -> Line<'st
                     "←"
                 },
                 color,
-                format!("{tag} {action} {}{rtt}", e.summary),
+                format!("{tag} {action} {}{rtt}", frame_summary(e, &fr.frame)),
             )
         }
         (_, Some(l)) => {
@@ -673,7 +283,7 @@ pub fn log(f: &mut Frame<'_>, app: &App, area: Rect) {
         (LogView::Station, Some(id)) => sanitize(id),
         (LogView::Station, None) => "-".to_owned(),
     };
-    let mut title = format!("Log {scope} [{}]", filter_label(log.filter));
+    let mut title = format!("Log: {scope} [filter: {}]", filter_label(log.filter));
     if !log.search.is_empty() {
         let _ = write!(title, " /{}", sanitize(&log.search));
     }
@@ -681,8 +291,9 @@ pub fn log(f: &mut Frame<'_>, app: &App, area: Rect) {
     if !log.follow {
         title.push_str(" PAUSED");
     }
+    let bottom = markers(top, visible.len().saturating_sub(top + lines.len()));
     f.render_widget(
-        Paragraph::new(lines).block(block(truncate(&title, inner_w.max(1)), focused)),
+        Paragraph::new(lines).block(block(truncate(&title, inner_w.max(1)), bottom, focused)),
         area,
     );
 }

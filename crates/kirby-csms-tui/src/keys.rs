@@ -6,7 +6,7 @@ use kirby_ocpp_tui::text::TextInput;
 
 use crate::actions::{self, ResultsList};
 use crate::app::{
-    App, Effect, Focus, Input, InputTarget, LogView, Mode, filter_label, next_filter,
+    App, ConfirmAction, Effect, Focus, Input, InputTarget, LogView, Mode, filter_label, next_filter,
 };
 use crate::form::{Form, FormEvent};
 
@@ -37,6 +37,7 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         Mode::Form(form) => form_mode(app, *form, key, fx),
         Mode::Confirm(c) => match key.code {
             KeyCode::Char('y' | 'Y') => app.confirmed(c.action, fx),
+            KeyCode::Char('q' | 'Q') if c.action == ConfirmAction::Quit => app.quit = true,
             _ => app.notify(NoticeLevel::Info, "cancelled"),
         },
         Mode::Results(list) => results_mode(app, list, key),
@@ -89,25 +90,25 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         return;
     }
     match key.code {
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => app.request_quit(),
         KeyCode::Char('?') => app.mode = Mode::Help,
         KeyCode::Char(':') => app.open_palette(),
         KeyCode::Char('/') => open_input(app, input_target_for_focus(app.focus)),
         KeyCode::Char('s') if app.focus == Focus::Log => open_input(app, InputTarget::LogSearch),
         KeyCode::Tab | KeyCode::Right => {
             app.focus = match app.focus {
-                Focus::Stations if app.state.as_ref().is_some_and(|s| s.v2.is_some()) => {
-                    Focus::Details
-                }
+                Focus::Stations if app.details_focusable() => Focus::Details,
                 _ => Focus::Log,
             }
         }
         KeyCode::BackTab | KeyCode::Left => {
             app.focus = match app.focus {
-                Focus::Log if app.state.as_ref().is_some_and(|s| s.v2.is_some()) => Focus::Details,
+                Focus::Log if app.details_focusable() => Focus::Details,
                 _ => Focus::Stations,
             }
         }
+        // The zoom follows the focus: another pane is zoomed once the focus moves to it.
+        KeyCode::Char('z') => app.zoom = !app.zoom,
         KeyCode::Up | KeyCode::Char('k') => step(app, -1, fx),
         KeyCode::Down | KeyCode::Char('j') => step(app, 1, fx),
         KeyCode::PageUp => step(app, -PAGE, fx),
@@ -156,7 +157,9 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
             }
         }
         KeyCode::Esc => {
-            if !app.log().search.is_empty() {
+            if app.zoom {
+                app.zoom = false;
+            } else if !app.log().search.is_empty() {
                 app.log_mut().search.clear();
                 app.notify(NoticeLevel::Info, "search cleared");
             } else if !app.station_filter.is_empty() {
@@ -165,6 +168,13 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
             }
         }
         KeyCode::Enter if app.focus == Focus::Log => app.open_detail(),
+        // Only a row that is on screen is acted on.
+        KeyCode::Enter if app.focus == Focus::Details && visible_transaction_rows(app) == 0 => {
+            app.notify(
+                NoticeLevel::Info,
+                "no room for the transactions: z zooms this pane",
+            );
+        }
         KeyCode::Enter if app.focus == Focus::Details => {
             app.open_transaction_detail(app.transaction_selection);
         }
@@ -204,10 +214,15 @@ fn step(app: &mut App, delta: isize, fx: &mut Vec<Effect>) {
 }
 
 fn transaction_count(app: &App) -> usize {
-    app.state
-        .as_ref()
-        .and_then(|s| s.v2.as_ref())
-        .map_or(0, |v| v.transactions.len())
+    app.state.as_ref().map_or(0, |s| match &s.v2 {
+        Some(v2) => v2.transactions.len(),
+        None => s.transactions.len(),
+    })
+}
+
+/// Rows of the transaction table that are on screen now.
+fn visible_transaction_rows(app: &App) -> usize {
+    crate::ui::visible_transaction_rows(app)
 }
 
 fn copy_row(app: &App, fx: &mut Vec<Effect>) {

@@ -316,6 +316,128 @@ pub fn def_of(id: ActionId) -> Option<&'static ActionDef> {
     CATALOG.iter().find(|a| a.id == id)
 }
 
+/// The palette order without a query, for every protocol: the common actions first (start,
+/// stop, reset, trigger, availability, unlock, configuration or variables, faults and rules),
+/// then the rest grouped by task (transactions, configuration, smart charging, tariffs,
+/// certificates, firmware and diagnostics, local operations), and the actions only OCPP 2.1
+/// has last. Names are OCPP actions; `@...` names are local operations. An entry that is not
+/// listed goes after the listed ones, in table order.
+const PALETTE_ORDER: &[&str] = &[
+    // Common.
+    "RemoteStartTransaction",
+    "RequestStartTransaction",
+    "RemoteStopTransaction",
+    "RequestStopTransaction",
+    "Reset",
+    "TriggerMessage",
+    "ChangeAvailability",
+    "UnlockConnector",
+    "GetConfiguration",
+    "ChangeConfiguration",
+    "GetVariables",
+    "SetVariables",
+    "@fault",
+    "@rule",
+    // Transactions.
+    "ReserveNow",
+    "CancelReservation",
+    "GetTransactionStatus",
+    "CostUpdated",
+    // Configuration.
+    "GetBaseReport",
+    "GetReport",
+    "ClearCache",
+    "GetLocalListVersion",
+    "SendLocalList",
+    "DataTransfer",
+    "SetNetworkProfile",
+    "GetMonitoringReport",
+    "SetMonitoringBase",
+    "SetMonitoringLevel",
+    "SetVariableMonitoring",
+    "ClearVariableMonitoring",
+    "SetDisplayMessage",
+    "GetDisplayMessages",
+    "ClearDisplayMessage",
+    "CustomerInformation",
+    // Smart charging.
+    "SetChargingProfile",
+    "ClearChargingProfile",
+    "GetChargingProfiles",
+    "GetCompositeSchedule",
+    // Tariffs.
+    "ChangeTransactionTariff",
+    "SetDefaultTariff",
+    "GetTariffs",
+    "ClearTariffs",
+    // Certificates.
+    "InstallCertificate",
+    "DeleteCertificate",
+    "GetInstalledCertificateIds",
+    "CertificateSigned",
+    "ExtendedTriggerMessage",
+    // Firmware and diagnostics.
+    "UpdateFirmware",
+    "SignedUpdateFirmware",
+    "PublishFirmware",
+    "UnpublishFirmware",
+    "GetDiagnostics",
+    "GetLog",
+    // Local operations.
+    "@results",
+    "@pending",
+    "@security",
+    "@raw",
+    "@remove-rule",
+    "@clear-rules",
+    "@copy",
+    "@forget",
+    // Only in OCPP 2.1.
+    "AFRRSignal",
+    "AdjustPeriodicEventStream",
+    "ClearDERControl",
+    "GetDERControl",
+    "GetPeriodicEventStream",
+    "NotifyAllowedEnergyTransfer",
+    "NotifyWebPaymentStarted",
+    "RequestBatterySwap",
+    "SetDERControl",
+    "UpdateDynamicSchedule",
+    "UsePriorityCharging",
+];
+
+/// The name of `a` in [`PALETTE_ORDER`].
+fn order_name(a: &ActionDef) -> &'static str {
+    if let Some(name) = a.ocpp {
+        return name;
+    }
+    match a.id {
+        ActionId::Fault => "@fault",
+        ActionId::Rule => "@rule",
+        ActionId::RemoveRule => "@remove-rule",
+        ActionId::ClearRules => "@clear-rules",
+        ActionId::SecurityEvents => "@security",
+        ActionId::Results => "@results",
+        ActionId::PendingCalls => "@pending",
+        ActionId::Raw => "@raw",
+        ActionId::CopyId => "@copy",
+        ActionId::Forget => "@forget",
+        _ => "",
+    }
+}
+
+/// `entries` in the order the palette lists them without a query (see [`PALETTE_ORDER`]).
+fn palette_order(mut entries: Vec<ActionDef>) -> Vec<ActionDef> {
+    entries.sort_by_key(|a| {
+        let name = order_name(a);
+        PALETTE_ORDER
+            .iter()
+            .position(|k| *k == name)
+            .unwrap_or(PALETTE_ORDER.len())
+    });
+    entries
+}
+
 /// Text the palette matches on.
 fn haystack(a: &ActionDef) -> String {
     format!("{} {}", a.label(), a.desc())
@@ -339,10 +461,11 @@ impl Palette {
         Self::with_entries(CATALOG.to_vec())
     }
 
+    /// A palette over `entries`, listed in task order while the query is empty.
     pub fn with_entries(entries: Vec<ActionDef>) -> Self {
         let mut p = Self {
             query: TextInput::default(),
-            entries,
+            entries: palette_order(entries),
             results: Vec::new(),
             selected: 0,
         };
@@ -855,6 +978,38 @@ impl App {
         }
         let station = self.selected.clone().unwrap_or_default();
         let st = station.as_str();
+        let title = self.form_title(id, st);
+        self.run_action_on(id, st, &station, fx);
+        // A form for a station names it and its protocol: `Reset → CP-16 (1.6)`.
+        if let Mode::Form(form) = &mut self.mode
+            && !form.station.is_empty()
+        {
+            form.title = title.unwrap_or_else(|| form.title.clone());
+        }
+    }
+
+    /// The title of the form of `id` for `station`: the action, the station and its OCPP
+    /// version.
+    fn form_title(&self, id: ActionId, station: &str) -> Option<String> {
+        let label = self
+            .catalog()
+            .iter()
+            .find(|d| d.id == id)
+            .or_else(|| def_of(id))
+            .map(ActionDef::label)?;
+        // The palette marks the Security Whitepaper actions; a title has the version instead.
+        let label = label.strip_suffix(" (security)").unwrap_or(label);
+        let protocol = self.protocol_name(station);
+        let version = protocol
+            .strip_prefix("ocpp")
+            .map_or_else(|| sanitize(protocol), sanitize);
+        Some(format!(
+            "{label} \u{2192} {} ({version})",
+            kirby_ocpp_tui::text::truncate_middle(&sanitize(station), 28)
+        ))
+    }
+
+    fn run_action_on(&mut self, id: ActionId, st: &str, station: &str, fx: &mut Vec<Effect>) {
         match id {
             ActionId::RemoteStart => self.mode = Mode::Form(Box::new(Form::remote_start(st))),
             ActionId::RemoteStop => {
@@ -924,7 +1079,7 @@ impl App {
             ActionId::SendLocalList => self.mode = Mode::Form(Box::new(Form::send_local_list(st))),
             ActionId::SecurityEvents => {
                 if let Some(state) = &self.state {
-                    self.mode = Mode::Detail(security_events_detail(&station, state));
+                    self.mode = Mode::Detail(security_events_detail(station, state));
                 }
             }
             ActionId::Raw => {
@@ -963,16 +1118,16 @@ impl App {
             ActionId::Forget => {
                 self.mode = Mode::Confirm(Confirm {
                     message: format!("Forget station {} and its state?", sanitize(st)),
-                    action: ConfirmAction::Forget(station.clone()),
+                    action: ConfirmAction::Forget(station.to_owned()),
                 });
             }
             ActionId::CopyId => fx.push(Effect::Copy {
-                text: station.clone(),
+                text: station.to_owned(),
                 what: "station id".to_owned(),
             }),
             ActionId::Results => {
                 self.mode = Mode::Results(ResultsList {
-                    station: station.clone(),
+                    station: station.to_owned(),
                     selected: 0,
                 });
             }
@@ -1099,6 +1254,7 @@ impl App {
                 fx.push(Effect::ClearRules);
                 self.notify(NoticeLevel::Success, "rules and faults cleared");
             }
+            ConfirmAction::Quit => self.quit = true,
         }
     }
 

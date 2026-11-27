@@ -69,12 +69,18 @@ pub struct Input {
 /// What a confirmed dialog does.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConfirmAction {
-    Send { station: String, command: Command },
+    Send {
+        station: String,
+        command: Command,
+    },
     Forget(String),
     ClearRules,
+    /// Stop the UI and the server; asked while stations are connected or commands pending.
+    Quit,
 }
 
-/// A yes/no question; `y` confirms, any other key cancels.
+/// A yes/no question; `y` confirms, any other key cancels (`q` also confirms the quit
+/// question).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Confirm {
     pub message: String,
@@ -223,6 +229,8 @@ pub struct App {
     pub state: Option<StationState>,
     pub transaction_selection: usize,
     pub focus: Focus,
+    /// The focused pane fills the body (`z`).
+    pub zoom: bool,
     pub mode: Mode,
     pub view: LogView,
     /// Frames of the selected station.
@@ -409,6 +417,7 @@ impl App {
             state: None,
             transaction_selection: 0,
             focus: Focus::Stations,
+            zoom: false,
             mode: Mode::Normal,
             view: LogView::Station,
             station_log: LogStore::new(LOG_CAPACITY),
@@ -485,6 +494,25 @@ impl App {
 
     pub fn connected_count(&self) -> usize {
         self.stations.iter().filter(|s| s.connected).count()
+    }
+
+    /// Quits at once, or asks first while stations are connected or commands are pending
+    /// (quitting stops the server).
+    pub fn request_quit(&mut self) {
+        let connected = self.connected_count();
+        let why = if connected > 0 {
+            let s = if connected == 1 { "" } else { "s" };
+            format!("{connected} station{s} connected, the server stops")
+        } else if self.pending > 0 {
+            "commands are pending".to_owned()
+        } else {
+            self.quit = true;
+            return;
+        };
+        self.mode = Mode::Confirm(Confirm {
+            message: format!("Quit? {why}"),
+            action: ConfirmAction::Quit,
+        });
     }
 
     // ---- station list -----------------------------------------------------------------
@@ -731,23 +759,37 @@ impl App {
 
     /// Opens the detail popup for a transaction, newest first.
     pub fn open_transaction_detail(&mut self, index: usize) {
-        let Some(tx) = self
-            .state
-            .as_ref()
-            .and_then(|s| s.v2.as_ref())
-            .and_then(|v| v.transactions.iter().rev().nth(index))
-        else {
+        let Some(state) = self.state.as_ref() else {
             return;
         };
-        let Ok(json) = serde_json::to_string_pretty(tx) else {
+        let opened = match &state.v2 {
+            Some(v2) => v2
+                .transactions
+                .iter()
+                .rev()
+                .nth(index)
+                .map(|tx| (serde_json::to_string_pretty(tx), tx.id.clone())),
+            None => state
+                .transactions
+                .iter()
+                .rev()
+                .nth(index)
+                .map(|tx| (serde_json::to_string_pretty(tx), tx.id.to_string())),
+        };
+        let Some((Ok(json), copy)) = opened else {
             return;
         };
         self.mode = Mode::Detail(Detail {
             title: "Transaction".to_owned(),
-            copy: tx.id.clone(),
+            copy,
             lines: json.lines().map(kirby_ocpp_tui::text::sanitize).collect(),
             scroll: 0,
         });
+    }
+
+    /// Whether the details pane can be focused: it has a selected station's state to show.
+    pub fn details_focusable(&self) -> bool {
+        self.state.is_some()
     }
 
     /// Opens the detail popup for the selected log row.
@@ -756,21 +798,30 @@ impl App {
         let Some(entry) = log.selected() else {
             return;
         };
-        let mut lines = vec![self.entry_header(entry)];
-        lines.push(String::new());
-        lines.extend(entry.pretty().lines().map(kirby_ocpp_tui::text::sanitize));
-        if let Some(peer) = entry.peer.and_then(|s| log.get(s)) {
-            lines.push(String::new());
-            lines.push(format!(
-                "--- {} ---",
-                if peer.seq > entry.seq {
-                    "answer"
-                } else {
-                    "request"
+        let mut lines = Vec::new();
+        let mut section = |label: Option<&str>, e: &LogEntry| {
+            if let Some(label) = label {
+                if !lines.is_empty() {
+                    lines.push(String::new());
                 }
-            ));
-            lines.push(self.entry_header(peer));
-            lines.extend(peer.pretty().lines().map(kirby_ocpp_tui::text::sanitize));
+                lines.push(format!("--- {label} ---"));
+            }
+            lines.push(self.entry_header(e));
+            lines.push(String::new());
+            lines.extend(e.pretty().lines().map(kirby_ocpp_tui::text::sanitize));
+        };
+        // The request comes first and the answer second, whichever of the two is selected.
+        match entry.peer.and_then(|s| log.get(s)) {
+            Some(peer) => {
+                let (request, answer) = if peer.seq < entry.seq {
+                    (peer, entry)
+                } else {
+                    (entry, peer)
+                };
+                section(Some("request"), request);
+                section(Some("answer"), answer);
+            }
+            None => section(None, entry),
         }
         let title = entry
             .frame()

@@ -21,6 +21,9 @@
 pub mod ocpp16;
 pub mod ocpp201;
 pub mod ocpp21;
+mod template;
+
+pub use template::payload_template;
 
 /// Where an action comes from, for grouping in menus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

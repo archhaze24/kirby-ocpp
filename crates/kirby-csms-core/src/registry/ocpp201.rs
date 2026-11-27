@@ -252,7 +252,7 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
                     PROFILE_PURPOSES,
                     false,
                 ),
-                "profiles of an external system are never cleared",
+                "external profiles are never cleared",
             ),
             number(
                 "chargingProfileCriteria.stackLevel",
@@ -276,7 +276,10 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
         "Cost updated",
         "CostUpdated with the running cost of a transaction",
         &[
-            with_hint(json("totalCost", "totalCost", true), "a number, e.g. 12.34"),
+            with_default(
+                with_hint(json("totalCost", "totalCost", true), "a number, e.g. 12.34"),
+                "0",
+            ),
             text("transactionId", "transactionId", true),
         ],
     ),
@@ -323,7 +326,7 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
             with_default(number("requestId", "requestId", true), "1"),
             with_hint(
                 number("evseId", "evse (optional)", false),
-                "0 for the profiles of the station itself; omit for all",
+                "0 = the station itself; omit for all",
             ),
             with_hint(
                 choice(
@@ -408,11 +411,11 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
             with_default(number("requestId", "requestId", true), "1"),
             with_hint(
                 json("componentCriteria", "componentCriteria (optional)", false),
-                "JSON array of Active, Available, Enabled, Problem",
+                "array of Active, Available, Enabled, Problem",
             ),
             with_hint(
                 json("componentVariable", "componentVariable (optional)", false),
-                "JSON array of {component:{name}, variable:{name}}",
+                "array of {component, variable}",
             ),
         ],
     ),
@@ -429,9 +432,12 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
         "GetVariables",
         "Get variables",
         "GetVariables for a list of component and variable pairs",
-        &[with_hint(
-            json("getVariableData", "getVariableData", true),
-            "JSON array of {component:{name}, variable:{name}}",
+        &[with_default(
+            with_hint(
+                json("getVariableData", "getVariableData", true),
+                "array of {component, variable}",
+            ),
+            r#"[{"component":{"name":"OCPPCommCtrlr"},"variable":{"name":"HeartbeatInterval"}}]"#,
         )],
     ),
     raw(
@@ -508,7 +514,7 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
                     "localAuthorizationList (optional)",
                     false,
                 ),
-                "JSON array of {idToken:{idToken, type}, idTokenInfo:{status}}",
+                "array of {idToken, idTokenInfo}",
             ),
         ],
     ),
@@ -518,9 +524,12 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
         "SetChargingProfile from JSON, checked against the schema",
         &[
             with_default(number("evseId", "evse (0 = station)", true), "0"),
-            with_hint(
-                json("chargingProfile", "chargingProfile (JSON)", true),
-                "{id, stackLevel, chargingProfilePurpose, chargingProfileKind, chargingSchedule:[...]}",
+            with_default(
+                with_hint(
+                    json("chargingProfile", "chargingProfile (JSON)", true),
+                    "JSON object, checked against the schema",
+                ),
+                r#"{"id":1,"stackLevel":0,"chargingProfilePurpose":"TxDefaultProfile","chargingProfileKind":"Absolute","chargingSchedule":[{"id":1,"chargingRateUnit":"A","chargingSchedulePeriod":[{"startPeriod":0,"limit":16}]}]}"#,
             ),
         ],
     ),
@@ -553,9 +562,12 @@ pub(super) const CSMS_ACTIONS: &[ActionSpec] = &[
         "SetVariables",
         "Set variables",
         "SetVariables for a list of component, variable and value triples",
-        &[with_hint(
-            json("setVariableData", "setVariableData", true),
-            "JSON array of {component:{name}, variable:{name}, attributeValue}",
+        &[with_default(
+            with_hint(
+                json("setVariableData", "setVariableData", true),
+                "array of {component, variable, attributeValue}",
+            ),
+            r#"[{"component":{"name":"OCPPCommCtrlr"},"variable":{"name":"HeartbeatInterval"},"attributeValue":"60"}]"#,
         )],
     ),
     action(

@@ -36,7 +36,7 @@ pub(crate) fn screen(backend: &TestBackend) -> String {
         .join("\n")
 }
 
-fn render(app: &App, w: u16, h: u16) -> String {
+pub(crate) fn render(app: &App, w: u16, h: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
     terminal.draw(|f| draw(f, app)).unwrap();
     screen(terminal.backend())
@@ -55,7 +55,7 @@ fn v2_before_first_message_renders_at_small_sizes() {
     }
 }
 
-fn tx2(id: &str, connector: Option<u32>, token: &str) -> kirby_csms_core::Tx2Record {
+pub(crate) fn tx2(id: &str, connector: Option<u32>, token: &str) -> kirby_csms_core::Tx2Record {
     use kirby_ocpp_core::ocpp::v2::messages::TriggerReason;
     kirby_csms_core::Tx2Record {
         id: id.into(),
@@ -88,12 +88,12 @@ fn tx2(id: &str, connector: Option<u32>, token: &str) -> kirby_csms_core::Tx2Rec
 
 /// A 2.0.1 station with one running and one ended transaction, a duplicate event and a
 /// report in progress; ids and tokens are hostile.
-fn app_v2() -> App {
+pub(crate) fn app_v2() -> App {
     app_v2_on("ocpp2.0.1")
 }
 
 /// The station of [`app_v2`] on the 2.x subprotocol `protocol`.
-fn app_v2_on(protocol: &str) -> App {
+pub(crate) fn app_v2_on(protocol: &str) -> App {
     use kirby_ocpp_core::ocpp::v2::messages::{BootReason, ConnectorStatus as Status2};
     use kirby_ocpp_core::ocpp::v2::types::{ChargingState, StopReason};
     let (mut app, _) = app_with(&["CP-1"]);
@@ -252,7 +252,7 @@ fn a_2_1_station_uses_the_v2_views_and_shows_its_protocol() {
     let app = app_v2_on("ocpp2.1");
     let screen = render(&app, 160, 40);
     for want in [
-        "v2.1",
+        " 2.1",
         "Occupied",
         "SuspendedEVSE",
         "ImmediateReset",
@@ -266,9 +266,10 @@ fn a_2_1_station_uses_the_v2_views_and_shows_its_protocol() {
     for unwanted in ["idTag", "Preparing", "\u{1b}", "\u{202e}"] {
         assert!(!screen.contains(unwanted), "found {unwanted:?}:\n{screen}");
     }
-    // The 2.0.1 station of the same fixture is marked `v2` only.
+    // The 2.0.1 station of the same fixture is marked `2.0.1`, not `2.1`.
     let older = render(&app_v2(), 160, 40);
-    assert!(!older.contains("v2.1"), "{older}");
+    assert!(older.contains(" 2.0.1"), "{older}");
+    assert!(!older.contains(" 2.1"), "{older}");
     for (w, h) in [(24, 8), (80, 24), (110, 30)] {
         assert!(!render(&app, w, h).contains('\u{1b}'));
     }
@@ -369,14 +370,15 @@ fn list_details_and_log_are_drawn() {
     );
     assert!(s.contains("● CP-2"), "{s}");
     assert!(
-        s.contains("boot Acme Charger9") && s.contains("fw 1.2.3") && s.contains("sn SN-77"),
+        s.contains("booted Acme Charger9") && s.contains("fw 1.2.3") && s.contains("sn SN-77"),
         "{s}"
     );
     assert!(
-        s.contains("remote 10.0.0.5:4242") && s.contains("subprotocol ocpp1.6"),
+        s.contains("remote 10.0.0.5:4242") && s.contains("OCPP 1.6"),
         "{s}"
     );
-    assert!(s.contains("heartbeat none"), "{s}");
+    assert!(s.contains("no heartbeat"), "{s}");
+    assert!(s.contains("1 connector \u{b7} 1 tx \u{b7} 7.2 kW"), "{s}");
     assert!(
         s.contains("failed 2") && s.contains("unknown stops 1"),
         "{s}"
@@ -615,6 +617,11 @@ mod commands {
         let untouched = render(&app, 100, 30);
         assert!(!untouched.contains("violates"), "{untouched}");
         assert!(untouched.contains("empty sends {}"), "{untouched}");
+        // Replace the template with a payload that breaks the schema.
+        update(
+            &mut app,
+            Msg::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+        );
         type_text(&mut app, r#"{"x":1}"#);
         for (w, h) in [(60, 30), (80, 30), (120, 40)] {
             let screen = render(&app, w, h);
@@ -658,7 +665,10 @@ mod commands {
         open(&mut app, 't');
         press(&mut app, KeyCode::Enter);
         let screen = render(&app, 100, 30);
-        assert!(screen.contains("RemoteStartTransaction"), "{screen}");
+        assert!(
+            screen.contains("Remote start transaction \u{2192} CP-1 (1.6)"),
+            "{screen}"
+        );
         assert!(screen.contains("idTag"));
         assert!(screen.contains("connector (optional)"));
         assert!(screen.contains("idTag is required"), "{screen}");
