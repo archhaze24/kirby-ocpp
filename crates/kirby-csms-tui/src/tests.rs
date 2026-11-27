@@ -535,7 +535,13 @@ async fn run_loop_shows_a_connecting_station() {
             .as_ref()
             .and_then(|s| s.boot.as_ref())
             .is_some_and(|b| b.registration == Some(RegistrationStatus::Accepted));
-        if !sent && booted && app.station_log.len() >= 2 && app.info.is_some() {
+        // The status after the boot is the last frame the screen is checked for.
+        let status_sent = app.station_log.all().any(|entry| {
+            entry
+                .frame()
+                .is_some_and(|f| f.action.as_deref() == Some("StatusNotification"))
+        });
+        if !sent && booted && status_sent && app.info.is_some() {
             sent = true;
             // A station is connected: `q` asks first, `y` answers.
             for c in ['q', 'y'] {
