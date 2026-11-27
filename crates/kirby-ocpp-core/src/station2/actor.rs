@@ -222,9 +222,14 @@ impl Station2Actor {
 
         self.settle_meters();
         loop {
+            // Connection events first: a CALL the CSMS sent before the answer to one of ours,
+            // or before a command that reacts to that answer, is handled before them (wire
+            // order). The connection task parses and validates every frame, so it cannot
+            // outpace the loop and starve the other sources.
             let wake = tokio::select! {
-                envelope = self.commands.recv() => Wake::Command(envelope),
+                biased;
                 event = next_link_event(&mut self.link.events) => Wake::Link(event),
+                envelope = self.commands.recv() => Wake::Command(envelope),
                 Some(internal) = self.internal_rx.recv() => Wake::Internal(internal),
                 Some(result) = self.calls.results.next() => Wake::Internal(result),
                 key = self.timers.next() => Wake::Timer(key),

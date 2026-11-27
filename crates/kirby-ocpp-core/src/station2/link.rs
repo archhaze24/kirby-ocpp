@@ -873,6 +873,88 @@ mod tests {
         assert!(actor.link.connecting.is_none());
     }
 
+    /// An inbound CALL the connection delivered before a command is handled before that
+    /// command, whatever else is ready: a scenario that saw the CALL and then clears its
+    /// scripted replies must find the reply used.
+    #[tokio::test]
+    async fn an_inbound_call_already_received_is_handled_before_the_next_command() {
+        use crate::ocpp::ErrorCode;
+        use crate::ocpp::responder::ReplyHandle;
+        use crate::station::scripted_reply::{ScriptedAnswer, ScriptedReply};
+        use crate::station2::command::Command2;
+        use crate::station2::handle::Envelope2;
+        use crate::ws::IncomingCall;
+
+        // The actor loop used to pick among ready sources at random: 32 rounds catch that.
+        for round in 0..32 {
+            let (commands_tx, commands) = mpsc::channel(4);
+            let (events, _observed) = broadcast::channel(1024);
+            let mut actor = Station2Actor::new(
+                StationConfig::new("ws://127.0.0.1:1/ocpp").without_persistence(),
+                Arc::new(crate::clock::SystemClock),
+                commands,
+                events,
+                None,
+            )
+            .0;
+            let (connection, _queued) = Connection::test_reply_channel();
+            let (link_tx, link_rx) = mpsc::channel(4);
+            actor.link.conn = Some(connection);
+            actor.link.events = Some(link_rx);
+            actor
+                .scripted_replies
+                .arm(ScriptedReply {
+                    tag: 1,
+                    action: "UnlockConnector".to_owned(),
+                    answer: ScriptedAnswer::Error {
+                        code: ErrorCode::NotSupported,
+                        description: "no lock".to_owned(),
+                        details: serde_json::json!({}),
+                    },
+                    remaining: 1,
+                    delay_ms: 0,
+                })
+                .expect("armed");
+            let (sink, mut answers) = mpsc::unbounded_channel();
+            link_tx
+                .try_send(ConnectionEvent::Call(IncomingCall {
+                    id: "in-1".to_owned(),
+                    action: "UnlockConnector".to_owned(),
+                    payload: serde_json::json!({"evseId": 1, "connectorId": 1}),
+                    reply: ReplyHandle::new("in-1", sink),
+                }))
+                .expect("room in the channel");
+            let (reply, outcome) = tokio::sync::oneshot::channel();
+            commands_tx
+                .try_send(Envelope2 {
+                    command: Command2::ClearScriptedReplies,
+                    reply,
+                })
+                .expect("room in the channel");
+
+            let running = tokio::spawn(actor.run());
+            let outcome = tokio::time::timeout(Duration::from_secs(10), outcome)
+                .await
+                .expect("the clear is answered")
+                .expect("the actor answers")
+                .expect("the clear succeeds");
+            running.abort();
+            let Outcome2::Response { payload } = outcome else {
+                panic!("round {round}: unexpected outcome {outcome:?}");
+            };
+            assert_eq!(
+                payload["unused"],
+                serde_json::json!([]),
+                "round {round}: the CALL received first must use the scripted reply"
+            );
+            assert!(
+                answers.try_recv().is_ok(),
+                "round {round}: the CALL is answered"
+            );
+            drop(link_tx);
+        }
+    }
+
     #[tokio::test]
     async fn disconnect_publishes_frames_already_received() {
         let (mut actor, mut observed, ids) = actor_with_buffered_events(5);

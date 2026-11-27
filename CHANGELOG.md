@@ -34,7 +34,7 @@ tag as the GitHub release notes.
 - `kirby-csms`: `power_w` of a transaction is cleared when it stops instead of keeping the last sample.
 - Refusals shown in the emulator status line no longer start with `invalid argument:`; the message stands alone (`EVSE 1 does not exist`).
 - Fleet terminal UI: the first station's boot events could be missing from the log when the stations connected before the UI subscribed to them.
-
+- Emulator: a CALL from the CSMS that arrived before the answer to a station CALL could be handled after that answer and after the commands that followed it, so a scenario could clear a scripted reply before the CALL it was meant for used it. CALLs from the CSMS are now handled in the order they arrive.
 - `kirby-csms`: a `connected` event (`--json`, the event stream, the event log) could show the address and protocol of a newer connection of the same station that replaced it before the event was printed. Each event now shows its own connection.
 
 ## [0.8.0] - 2026-11-22
