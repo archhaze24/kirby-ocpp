@@ -7,9 +7,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, TableState};
 
-use super::dim;
+use super::{count_of, dim, scrolled_text, window_start, with_markers, wrap_lines};
 use crate::actions::Tab;
 use crate::app::{App, Focus, StepState};
 use crate::logview::{FrameKind, LogEntry};
@@ -55,10 +55,21 @@ fn connector_cols(inner_w: u16) -> usize {
 
 pub fn connectors(f: &mut Frame<'_>, app: &App, area: Rect) {
     let n = connector_cols(area.width.saturating_sub(2));
+    let total = app.snapshot.connectors.len();
+    let selected = app
+        .snapshot
+        .connectors
+        .iter()
+        .position(|c| c.id == app.connector);
+    // Borders and the header row take three rows; the rest is the window over the list.
+    let room = usize::from(area.height.saturating_sub(3));
+    let start = window_start(selected.unwrap_or(0), room, total);
     let rows: Vec<Row<'_>> = app
         .snapshot
         .connectors
         .iter()
+        .skip(start)
+        .take(room)
         .map(|c| {
             let cells = vec![
                 Span::raw(c.id.to_string()),
@@ -84,16 +95,15 @@ pub fn connectors(f: &mut Frame<'_>, app: &App, area: Rect) {
     let table = Table::new(rows, widths)
         .header(Row::new(CONNECTOR_COLS.iter().take(n).map(|c| c.0)).style(dim()))
         .row_highlight_style(SELECTED)
-        .block(block(
-            "Connectors".to_owned(),
-            app.focus == Focus::Connectors,
+        .block(with_markers(
+            block(
+                format!("Connectors{}", count_of(selected.unwrap_or(0), room, total)),
+                app.focus == Focus::Connectors,
+            ),
+            start,
+            total.saturating_sub(start + room),
         ));
-    let mut state = TableState::default().with_selected(
-        app.snapshot
-            .connectors
-            .iter()
-            .position(|c| c.id == app.connector),
-    );
+    let mut state = TableState::default().with_selected(selected.map(|s| s - start));
     f.render_stateful_widget(table, area, &mut state);
 }
 
@@ -123,11 +133,14 @@ pub fn details(f: &mut Frame<'_>, app: &App, area: Rect) {
         Tab::Station | Tab::Maintenance | Tab::Data => "Station".to_owned(),
         _ => format!("Connector {}", app.connector),
     };
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(block(title, false)),
+    let lines = wrap_lines(lines, usize::from(area.width.saturating_sub(2)));
+    scrolled_text(
+        f,
         area,
+        block(title, app.focus == Focus::Details),
+        lines,
+        app.details.scroll,
+        &app.details.max,
     );
 }
 
@@ -348,8 +361,13 @@ fn scenario_lines(app: &App) -> Vec<Line<'static>> {
 
 pub fn actions(f: &mut Frame<'_>, app: &App, area: Rect) {
     let idx = app.tab_actions();
+    let room = usize::from(area.height.saturating_sub(2));
+    let selected = app.action_sel[app.tab.index()];
+    let start = window_start(selected, room, idx.len());
     let items: Vec<ListItem<'_>> = idx
         .iter()
+        .skip(start)
+        .take(room)
         .map(|&i| {
             let a = &app.catalog[i];
             let key = a.key.map_or_else(|| "  ".to_owned(), |k| format!("{k} "));
@@ -364,11 +382,21 @@ pub fn actions(f: &mut Frame<'_>, app: &App, area: Rect) {
             ]))
         })
         .collect();
-    let mut state = ListState::default().with_selected(Some(app.action_sel[app.tab.index()]));
-    let list = List::new(items).highlight_style(SELECTED).block(block(
-        format!("Actions: {}", app.tab.title()),
-        app.focus == Focus::Actions,
-    ));
+    let mut state = ListState::default().with_selected(Some(selected.saturating_sub(start)));
+    let list = List::new(items)
+        .highlight_style(SELECTED)
+        .block(with_markers(
+            block(
+                format!(
+                    "Actions: {}{}",
+                    app.tab.title(),
+                    count_of(selected, room, idx.len())
+                ),
+                app.focus == Focus::Actions,
+            ),
+            start,
+            idx.len().saturating_sub(start + room),
+        ));
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -476,9 +504,10 @@ pub fn log(f: &mut Frame<'_>, app: &App, area: Rect) {
         title.push_str(" PAUSED");
     }
     f.render_widget(
-        Paragraph::new(lines).block(block(
-            truncate(&title, inner_w.max(1)),
-            app.focus == Focus::Log,
+        Paragraph::new(lines).block(with_markers(
+            block(truncate(&title, inner_w.max(1)), app.focus == Focus::Log),
+            top,
+            visible.len().saturating_sub(top + h),
         )),
         area,
     );

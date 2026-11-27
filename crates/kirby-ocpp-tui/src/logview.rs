@@ -444,6 +444,19 @@ impl LogStore {
     }
 }
 
+/// The station's own line `<Action> accepted` that follows every answered CALL. The RES row
+/// already shows the answer, and the line can overtake it, so the emulator UI leaves it out.
+#[must_use]
+pub fn is_acceptance_line(event: &Event) -> bool {
+    let Event::Log(l) = event else {
+        return false;
+    };
+    l.level == LogLevel::Success
+        && l.text
+            .strip_suffix(" accepted")
+            .is_some_and(|action| !action.is_empty() && action.chars().all(char::is_alphanumeric))
+}
+
 fn frame_kind(frame: &Value) -> FrameKind {
     match frame.get(0).and_then(Value::as_u64) {
         Some(2) => FrameKind::Call,
@@ -474,22 +487,25 @@ fn scalar_fields(payload: &Value) -> String {
     let Some(map) = payload.as_object() else {
         return sanitize(&payload.to_string());
     };
-    // `status` first: it is what one looks for in a response.
+    // `status` first: it is what one looks for in a response. An answer that nests it
+    // (`idTagInfo`, `idTokenInfo`) is lifted so the row still shows the verdict.
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort_by_key(|k| k.as_str() != "status");
-    let parts: Vec<String> = keys
-        .into_iter()
-        .filter_map(|k| {
-            let v = &map[k];
-            let shown = match v {
-                Value::String(s) => s.clone(),
-                Value::Number(_) | Value::Bool(_) => v.to_string(),
-                _ => return None,
-            };
-            Some(sanitize(&format!("{k}={shown}")))
-        })
-        .take(4)
-        .collect();
+    let nested = ["idTagInfo", "idTokenInfo"]
+        .iter()
+        .find_map(|k| map.get(*k)?.get("status")?.as_str())
+        .filter(|_| !map.contains_key("status"))
+        .map(|s| sanitize(&format!("status={s}")));
+    let scalars = keys.into_iter().filter_map(|k| {
+        let v = &map[k];
+        let shown = match v {
+            Value::String(s) => s.clone(),
+            Value::Number(_) | Value::Bool(_) => v.to_string(),
+            _ => return None,
+        };
+        Some(sanitize(&format!("{k}={shown}")))
+    });
+    let parts: Vec<String> = nested.into_iter().chain(scalars).take(4).collect();
     parts.join(" ")
 }
 

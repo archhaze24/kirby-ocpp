@@ -34,24 +34,41 @@ The station connects at startup in every mode (`--print-config`, `version`, `com
 
 ## Terminal UI
 
-Seven tabs, switched with `1`-`7` or `Tab`/`Shift-Tab`: Station, Connector, Transaction, Maintenance, Data, Logs, Scenarios. Three panes: connectors, actions, log; `Left`/`Right` moves the focus.
+Seven tabs, switched with `1`-`7` or `Tab`/`Shift-Tab`: Station, Connector, Transaction, Data, Logs, Scenarios, Maintenance. OCPP 2.x has the same numbers up to Scenarios (`6`) and no Maintenance tab. Four panes: connectors (or EVSEs), details, actions, log; `Left`/`Right` moves the focus.
 
 | Key | Action |
 | --- | --- |
-| `Up/Down`, `j/k`, `PageUp/PageDown`, `Home/End` | Move in the focused pane; `Home`/`End` jump to the first / last row (log: oldest row / follow the newest) |
+| `Up/Down`, `j/k`, `PageUp/PageDown`, `Home/End` | Move in the focused pane; `Home`/`End` jump to the first / last row (log: oldest row / follow the newest). In the details pane they scroll |
 | `[` `]` | Previous / next connector |
 | `Enter` | Run the selected action / open the selected log row |
 | letters | Accelerator of an action of the current tab (shown in the list) |
-| `:` or `Ctrl-P` | Command palette (fuzzy search over all actions). Without a query it lists connection, plug, authorization and transaction actions first, then messages, faults, scenarios and the rest; each row shows its accelerator (valid on the tab named in the row) |
+| `:` or `Ctrl-P` | Command palette (search over all actions). Without a query it lists the actions of the current tab first, in task order, then the rest by task (connection, plug, authorization, transaction, messages, faults, scenarios); a row shows an accelerator letter only when it works on the current tab. The empty prompt shows a dim `type to filter`. A query matches word starts, initials and contiguous text; scattered letters that only happen to appear in order do not match (`tariff` does not list `Get variables`) |
 | `/` | Search where the screen has a search (the log pane on the Logs tab, the data browser); anywhere else it opens the command palette |
 | `W` | Pending commands with their elapsed time; `x` or `Delete` cancels the selected one, `Esc` closes (see below) |
-| `Esc` | Close a dialog; in the main view, clear the log search |
-| `?` | Help (`Esc`, `?`, `q` or `Enter` closes it) |
+| `z` | Zoom the focused pane to the whole body; `z` or `Esc` restores the layout. The footer shows `z/Esc back` while zoomed |
+| `Esc` | Close a dialog; zoomed, restore the layout; in the main view, clear the log search |
+| `?` | Help (see below; `Esc` or `?` closes it) |
 | `q`, `Ctrl-C` | Quit. Asks first (default No) while a scenario is running, a connector has an active transaction, or the fleet has more than one station; a second `Ctrl-C` while the question is open quits at once. In a form, the data browser or another view, `Ctrl-C` asks the same way and a "no" brings the view back; during another confirmation it quits at once |
 
-Confirmations (quit, clear log, clear list, ...) accept only `y`/`Y`; any other key cancels. The quit question also accepts `q`.
+Confirmations (quit, clear log, clear list, ...) accept only `y`/`Y`; any other key cancels. The quit question reads `y/q quit, n/Esc stay`.
 
-The footer always ends with the `? help` and `: palette` hints, even in a narrow terminal; other hints are dropped first. The hints list only keys that work in the current pane: the log letters (`y`, `f`, `s`, `p`) are accelerators of the Logs tab, so on other tabs a focused log pane hints `Enter detail` and `6 log keys`. While a command that waits for the CSMS is in flight (from a key, the palette or a form), the footer shows `waiting... <action> <elapsed>` until the result arrives and a `W pending` hint; a notice takes that line while it is shown, and the marker is dropped when the connection goes down.
+#### Help
+
+`?` opens a help popup with titled sections. The first, `This tab`, lists the actions and keys of the current tab (the Transaction tab starts with the flow `p plug → a authorize → t start/present → m meter → e stop`); `Everywhere` lists the keys that work on every tab, including `<` `>` in a fleet. `Left`/`Right` switch the section, `Up/Down` or `j/k`, `PageUp/PageDown` and `Home/End` scroll, the bottom row shows `▲ N more` / `▼ N more` for the text that is cut, and `Esc` or `?` closes. The popup also fits a 24x8 terminal.
+
+#### Cut-off panes
+
+A pane whose content does not fit says so on its border: `▲ N more` at the top right for rows above, `▼ N more` at the bottom right for rows below. The Actions and Connectors (EVSEs) titles show the selected position as `n/N` while the list is cut, and the details pane scrolls with the arrow keys when it has the focus. At 80x24 the actions and details panes get more rows than the list of connectors, which keeps the selected row and shows the rest as a count; `z` shows one pane in full.
+
+#### Status line
+
+A finished command is reported in plain words: `Plugged in connector 1`, `Sent meter values (+120 Wh)`, `Fault ConnectorLockFailure on connector 1`. A fault that ends a running transaction says so: `Fault ConnectorLockFailure on connector 1. Transaction 42 ended by the fault`. The log shows the answer of a CALL on its `RES` row; the line `<Action> accepted` that only repeats it is not added.
+
+#### Forms
+
+The first printable key typed into a prefilled text field replaces the value (a pasted text does too); after an arrow key, `Home`, `End` or `Backspace` the value is edited as usual. A long prefilled value opens at its start. The focus starts on the first required field that is empty. Selectors take typing: a digit picks the n-th value (`12` in a row picks the value 12), letters jump to the first value that starts with them. The Authorize and Start forms (1.6) and the Authorize and Present token forms (2.x) open with the idTag or idToken used last on that station.
+
+The footer always ends with the `? help` and `: palette` hints, even in a narrow terminal; other hints are dropped first. The hints list only keys that work in the current pane: the log letters (`y`, `f`, `s`, `p`) are accelerators of the Logs tab, so on other tabs a focused log pane hints `Enter detail` and `5 log keys`. While a command that waits for the CSMS is in flight (from a key, the palette or a form), the footer shows `waiting... <action> <elapsed>` until the result arrives and a `W pending` hint; a notice takes that line while it is shown, and the marker is dropped when the connection goes down.
 
 #### Pending commands
 
@@ -61,7 +78,7 @@ The footer always ends with the `? help` and `: palette` hints, even in a narrow
 
 Color is never the only cue. `--color never`, or a non-empty `NO_COLOR` (`--color always` wins over it), draws the UI without color: the connection chips, the active tab and selections are reverse video, errors and warnings are bold, and log lines and notices start with a marker (`i` info, `+` success, `!` warning, `x` error) instead of `●`. Frame rows already carry `CALL`/`RES`/`ERR` and `→`/`←`. `--time utc|local|none` sets the clock in front of log rows (default `utc`); copy and export always use UTC.
 
-First steps: the station connects and boots at startup, and the header shows the connection state, the registration state and the protocol (`OCPP 1.6`). On the Station tab `x` disconnects and `c` connects again (pressing `c` while connected says so). Press `:` and type an action name (BootNotification, Heartbeat, StartTransaction) to run it, or open the Scenarios tab (`7`). Every frame lands in the log. The help popup (`?`) opens with the same hints; it wraps to the terminal width.
+First steps: the station connects and boots at startup, and the header shows the connection state, the registration state and the protocol (`OCPP 1.6`). On the Station tab `x` disconnects and `c` connects again (pressing `c` while connected says so). Press `:` and type an action name (BootNotification, Heartbeat, StartTransaction) to run it, or open the Scenarios tab (`6`). Every frame lands in the log. The help popup (`?`) lists the keys of the current tab first; it wraps to the terminal width.
 
 The UI needs at least 24 columns by 8 rows (9 rows for a fleet, which adds the selector row; the CSMS UI needs 24 by 8); a smaller terminal shows `need 24x8, have WxH` until it is resized. Forms and popups use the full width of a narrow terminal, and long station ids are shortened in the middle so the connection state stays visible. The value of an `AuthorizationKey` is drawn as `*` while you type it (paste and editing work as usual). The log filter `errors` shows ERROR frames and error-level lines only.
 
@@ -72,12 +89,12 @@ The UI needs at least 24 columns by 8 rows (9 rows for a fleet, which adds the s
 | Station | BootNotification `b`, Heartbeat `h`, Reconnect `r`, Disconnect `x`, Connect `c`, add connector `a`, response rule `m`, clear response rules `M`, config keys `K`, local auth list `L`, charging profiles `P`, certificates `Y`, request certificate `C`, security event `S` |
 | Connector | plug / unplug `p`, cycle status `s`, set status `t`, StatusNotification `n`, fault / clear fault `f` |
 | Transaction | Authorize `a`, StartTransaction `t`, StopTransaction with reason `e`, MeterValues +120 Wh `m`, MeterValues custom `c` |
-| Maintenance | diagnostics outcome `d`, firmware outcome `u`, DiagnosticsStatusNotification `i`, FirmwareStatusNotification `f` |
 | Data | DataTransfer `d`, vendor ping `v`, raw CALL `r` |
 | Logs | see [Log view](#log-view) |
 | Scenarios | see [Scenarios tab](#scenarios-tab) |
+| Maintenance | diagnostics outcome `d`, firmware outcome `u`, DiagnosticsStatusNotification `i`, FirmwareStatusNotification `f` |
 
-Keys `q j k ? / : [ ] 1`-`7` are never accelerators. The Station pane shows the active response rules, the security profile, the certificate count, queued security events, a pending CSR, and the last log-upload and signed-firmware status with their request ids.
+Keys `q j k W z ? / : [ ] 1`-`7` are never accelerators. The Station pane shows the active response rules, the security profile, the certificate count, queued security events, a pending CSR, and the last log-upload and signed-firmware status with their request ids.
 
 Security Whitepaper actions: `C` creates a key pair and a CSR and sends `SignCertificate`; `S` reports a security event (pick one of the 21 whitepaper event types, optional `techInfo`); `Y` opens the certificate browser.
 
@@ -324,7 +341,7 @@ kirby-ocpp --url ws://localhost:9000/ocpp --id 'CP-{n}' --count 20 run --scenari
 * **`run --scenario`.** The scenario runs on every station at the same time and prints one report per station (tagged), then one aggregate line. `--timeout` covers the whole fleet, stagger included. Report files: see [scenarios.md](scenarios.md#fleet-runs).
 * **`--print-config`** with `--count` above 1 prints `{"fleet": {...}, "config": {...}}`, where `config` is the first station.
 
-The UI shows a selector row on top (`1 CP-001+* 2 CP-002- ...`: index, id, connection glyph `+` connected, `~` connecting or retrying, `-` offline, `*` a transaction is running) and the selected station below. The footer hints `< > station` (in a narrow terminal the connector or EVSE hint `[ ]` makes room for it). Everything else (status, log, actions, browsers, forms, scenarios) works on the selected station only. Each station keeps its own log, dialogs and scenario progress, and events of the other stations are still recorded. The log keeps 500 rows per station for up to 40 stations, then fewer (minimum 50). Quit stops the whole fleet. With `--count 1` there is no selector and no extra keys.
+The UI shows a selector row on top (`CP-001 ● CP-002 ○ ...`: id and connection marker, `●` connected, `◐` connecting or retrying, `○` offline, `*` a transaction is running; digits are left to the tab numbers) followed by a legend of the markers in use (`● connected  ○ offline`), which drops out when the strip needs the room, and the selected station below. `‹` and `›` at the ends mean more stations are out of view. The footer hints `< > station` (in a narrow terminal the connector or EVSE hint `[ ]` makes room for it) and the help lists the selector keys. Everything else (status, log, actions, browsers, forms, scenarios) works on the selected station only. Each station keeps its own log, dialogs and scenario progress, and events of the other stations are still recorded. The log keeps 500 rows per station for up to 40 stations, then fewer (minimum 50). Quit stops the whole fleet. With `--count 1` there is no selector and no extra keys.
 
 | Fleet key | Action |
 | --- | --- |

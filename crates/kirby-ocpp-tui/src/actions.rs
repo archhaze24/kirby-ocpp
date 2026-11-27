@@ -10,10 +10,11 @@ pub enum Tab {
     Station,
     Connector,
     Transaction,
-    Maintenance,
     Data,
     Logs,
     Scenarios,
+    /// Last, so Logs and Scenarios keep the numbers they have for OCPP 2.x.
+    Maintenance,
 }
 
 impl Tab {
@@ -21,10 +22,10 @@ impl Tab {
         Self::Station,
         Self::Connector,
         Self::Transaction,
-        Self::Maintenance,
         Self::Data,
         Self::Logs,
         Self::Scenarios,
+        Self::Maintenance,
     ];
 
     pub fn title(self) -> &'static str {
@@ -116,7 +117,7 @@ pub struct ActionDef {
 
 /// Keys that mean the same everywhere and so can never be accelerators.
 pub const RESERVED_KEYS: &[char] = &[
-    'q', 'j', 'k', 'W', '?', '/', ':', '[', ']', '1', '2', '3', '4', '5', '6', '7',
+    'q', 'j', 'k', 'W', 'z', '?', '/', ':', '[', ']', '1', '2', '3', '4', '5', '6', '7',
 ];
 
 const SCENARIO_KEYS: [char; 4] = ['o', 'w', 's', 'i'];
@@ -576,7 +577,26 @@ mod tests {
 
     #[test]
     fn tab_navigation_wraps() {
-        assert_eq!(Tab::Scenarios.next(), Tab::Station);
-        assert_eq!(Tab::Station.prev(), Tab::Scenarios);
+        assert_eq!(Tab::Maintenance.next(), Tab::Station);
+        assert_eq!(Tab::Station.prev(), Tab::Maintenance);
+    }
+
+    #[test]
+    fn tab_numbers_match_the_ocpp_2x_tabs_up_to_scenarios() {
+        let titles: Vec<&str> = Tab::ALL.iter().map(|t| t.title()).collect();
+        assert_eq!(
+            titles,
+            [
+                "Station",
+                "Connector",
+                "Transaction",
+                "Data",
+                "Logs",
+                "Scenarios",
+                "Maintenance"
+            ]
+        );
+        assert_eq!(Tab::Logs.index() + 1, 5);
+        assert_eq!(Tab::Scenarios.index() + 1, 6);
     }
 }

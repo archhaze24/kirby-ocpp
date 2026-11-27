@@ -5,10 +5,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph};
 
 use super::{dim, popup_width};
+use crate::actions::Tab;
 use crate::app::{App, ConfirmAction, Detail, Mode};
 use crate::forms::{Choice, Field, FieldKind, Form, SECRET_HINT};
+use crate::help::{HelpSection, row};
 use crate::palette::Palette;
-use crate::text::{sanitize, truncate, width, wrap_help, wrap_text};
+use crate::text::{sanitize, truncate, width, wrap_text};
 
 pub(crate) const SELECTED: Style = Style::new().add_modifier(Modifier::REVERSED);
 
@@ -43,15 +45,17 @@ pub fn draw(f: &mut Frame<'_>, app: &App, area: Rect) {
         Mode::Normal => {}
         Mode::Palette(p) => palette(f, p, area, |i| {
             let a = &app.catalog[i];
+            // A letter works on its own tab only, so other rows show none.
+            let key = if a.tab == app.tab { a.key } else { None };
             (
-                format!("{}{}: {}", key_column(a.key), a.tab.title(), a.label),
+                format!("{}{}: {}", key_column(key), a.tab.title(), a.label),
                 app.reason_for(a.id).is_some(),
             )
         }),
         Mode::Form(form) => self::form(f, form, area),
         Mode::Choice(c) => choice(f, c, area),
-        Mode::Help => help(f, &help_lines(app.in_fleet), area),
-        Mode::Detail(d) => detail(f, d, area),
+        Mode::Help(state) => crate::help::draw(f, area, &help_sections(app), state),
+        Mode::Detail(d) => detail(f, d, area, &app.details.popup_max),
         Mode::Confirm(c) => confirm(f, &c.message, c.action == ConfirmAction::Quit, area),
         Mode::Browser(b) => super::browser::draw(f, app, b, area),
         Mode::Pending(sel) => {
@@ -134,11 +138,15 @@ pub(crate) fn palette(
     }
     let w = usize::from(inner.width);
     let (shown, col) = p.query.window(w.saturating_sub(3));
+    let mut prompt = vec![
+        Span::styled("/ ", Style::new().fg(Color::Cyan)),
+        Span::raw(shown),
+    ];
+    if p.query.is_empty() {
+        prompt.push(Span::styled("type to filter", dim()));
+    }
     f.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("/ ", Style::new().fg(Color::Cyan)),
-            Span::raw(shown),
-        ])),
+        Paragraph::new(Line::from(prompt)),
         Rect { height: 1, ..inner },
     );
     f.set_cursor_position(Position::new(
@@ -194,12 +202,18 @@ fn field_value(fl: &Field, w: usize, focused: bool) -> (String, Option<usize>) {
             )
         }
         _ => {
-            let (shown, col) = if fl.secret {
-                fl.input.masked().window(w)
+            let mut input = if fl.secret {
+                fl.input.masked()
             } else {
-                fl.input.window(w)
+                fl.input.clone()
             };
-            (shown, focused.then_some(col))
+            if fl.fresh {
+                // An untouched prefill opens at its start: a long value shows its beginning.
+                input.home();
+            }
+            let (shown, col) = input.window(w);
+            // The next key replaces a fresh value, so it has no cursor to show.
+            (shown, (focused && !fl.fresh).then_some(col))
         }
     }
 }
@@ -254,9 +268,15 @@ pub(crate) fn form(f: &mut Frame<'_>, form: &Form, area: Rect) {
             dim()
         };
         let label = truncate(fl.label, label_w.saturating_sub(2));
+        // A prefilled value that the next key replaces is drawn as selected.
+        let value_style = if fl.fresh && focused && fl.is_text() && !value.is_empty() {
+            SELECTED
+        } else {
+            Style::new()
+        };
         let line = Line::from(vec![
             Span::styled(format!("{label:<label_w$}"), label_style),
-            Span::raw(sanitize(&value)),
+            Span::styled(sanitize(&value), value_style),
         ]);
         f.render_widget(Paragraph::new(line), Rect::new(inner.x, y, inner.width, 1));
         if let Some(col) = cursor {
@@ -306,71 +326,119 @@ pub(crate) fn choice(f: &mut Frame<'_>, c: &Choice, area: Rect) {
     );
 }
 
-const HELP: &[&str] = &[
-    "First steps: the station connects and boots at startup (the header shows the state; on the",
-    "     Station tab x disconnects and c connects again). Press : and type a name",
-    "     (BootNotification, Heartbeat, StartTransaction) to run it; tab 7 runs scenarios.",
-    "     Everything lands in the log.",
-    "",
-    "1-7 / Tab / Shift-Tab   switch tab",
-    "Up Down j k             move in the focused pane",
-    "PgUp PgDn Home End      page / first / last (log: oldest / newest)",
-    "Left Right              change focused pane (connectors, actions, log)",
-    "[ ]                     previous / next connector",
-    "Enter                   run action / open log row",
-    "letters                 accelerators of the CURRENT tab only (shown in the list)",
-    ":  or Ctrl-P            command palette (every action, fuzzy search)",
-    "/                       search where there is a search (log pane of the Logs tab, data",
-    "                        browser), otherwise the command palette",
-    "W                       pending commands with their elapsed time (x cancels, Esc closes)",
-    "Esc                     close dialog / clear log search",
-    "?                       this help",
-    "q or Ctrl-C             quit (asks while a scenario or transaction runs, or in a fleet)",
-    "",
-    "Station tab: K config keys, L local auth list, P charging profiles, Y certificates",
-    "     (data browser: Tab/1-4 page, / filter, Enter edit; a add, i install, d delete,",
-    "     c clear); C request certificate, S security event",
-    "",
-    "Log pane: Enter opens the detail of the selected row on every tab. On the Logs tab (6):",
-    "     y copy row, Y copy visible, f filter, s search, p pause/follow, G newest,",
-    "     e export JSONL, c clear (asks first)",
-    "",
-    "Without color (--color never or NO_COLOR): chips and selections are reverse video, errors",
-    "     bold, and log lines start with a marker: i info, + success, ! warning, x error.",
-];
-
-pub(crate) const FLEET_HELP: &[&str] = &[
-    "",
-    "Fleet (several stations; everything else acts on the SELECTED station):",
-    "< >                     previous / next station",
-    "Alt-1 .. Alt-9          jump to station 1..9",
-    "Alt-c / Alt-d           connect / disconnect ALL stations",
-    "selector row: id, + connected, ~ connecting, - offline, * transaction running",
-];
-
-pub fn help_lines(fleet: bool) -> Vec<&'static str> {
-    let mut lines = HELP.to_vec();
+/// The "Everywhere" section of the emulator help. `tabs` is the range of tab digits, `item`
+/// what the left list holds (`connector`, `EVSE`), `logs` the tab number of the Logs tab.
+pub(crate) fn help_everywhere(tabs: &str, item: &str, logs: usize, fleet: bool) -> HelpSection {
+    let mut lines = vec![
+        row(tabs, "Switch tab (Tab and Shift-Tab step through them)"),
+        row(
+            "←/→",
+            &format!("Move between the panes: {item}s, details, actions, log"),
+        ),
+        row("↑/↓ j/k", "Move, or scroll the details"),
+        row(
+            "PgUp/PgDn",
+            "A page up or down; Home and End jump to the first and last row",
+        ),
+        row("[ ]", &format!("Previous or next {item}")),
+        row(
+            "Enter",
+            "Run the selected action, or open the selected log row",
+        ),
+        row(": Ctrl-P", "Command palette: every action, type to filter"),
+        row("W", "Commands waiting for the CSMS; x cancels one"),
+        row(
+            "/",
+            &format!(
+                "Search in the log of the Logs tab ({logs}) and in the data browsers; elsewhere it opens the palette"
+            ),
+        ),
+        row(
+            "z",
+            "Zoom the focused pane to the whole body; z or Esc goes back",
+        ),
+        row("?", "This help"),
+        row(
+            "q",
+            "Quit; it asks first while a scenario or a transaction runs, or in a fleet",
+        ),
+    ];
     if fleet {
-        lines.extend(FLEET_HELP);
+        lines.extend([
+            row("< >", "Previous or next station"),
+            row("Alt-1..9", "Jump to a station"),
+            row("Alt-c/d", "Connect or disconnect every station"),
+            row(
+                "",
+                "Strip markers: ● connected, ◐ connecting, ○ offline, * a transaction runs",
+            ),
+        ]);
     }
-    lines
+    lines.push(row(
+        "",
+        "Without color (--color never or NO_COLOR): reverse video and bold, and log lines start with i info, + success, ! warning, x error.",
+    ));
+    HelpSection::new("Everywhere", lines)
 }
 
-/// The help popup over `text` (one entry per line; long lines are wrapped).
-pub(crate) fn help(f: &mut Frame<'_>, text: &[&str], area: Rect) {
-    let rect_w = popup_width(area.width, 96);
-    let mut lines = wrap_help(text, usize::from(rect_w.saturating_sub(2)));
-    if lines.len() + 2 > usize::from(area.height) {
-        // A short terminal: drop the spacer lines so more of the help fits.
-        lines.retain(|l| !l.is_empty());
+/// Rows `key  label` of the actions of one tab, from the catalogue.
+pub(crate) fn tab_rows<'a>(actions: impl Iterator<Item = (Option<char>, &'a str)>) -> Vec<String> {
+    actions
+        // An action without a letter is run from the list or the palette; the pending list
+        // is `W`, which the "Everywhere" section names.
+        .filter_map(|(key, label)| Some(row(&key?.to_string(), &sanitize(label))))
+        .collect()
+}
+
+/// The sections of the emulator help for OCPP 1.6: the current tab first.
+pub fn help_sections(app: &App) -> Vec<HelpSection> {
+    let mut lines = Vec::new();
+    match app.tab {
+        Tab::Station => lines.push(row(
+            "",
+            "The station connects and boots at startup; the header shows the state.",
+        )),
+        Tab::Connector => lines.push(row(
+            "",
+            "Plug, status and faults of the selected connector ([ ] picks another).",
+        )),
+        Tab::Transaction => lines.push(row(
+            "Flow",
+            "p plug → a authorize → t start/present → m meter → e stop (p is on the Connector tab)",
+        )),
+        Tab::Maintenance => lines.push(row(
+            "",
+            "Choose how the next diagnostics upload or firmware update ends, or send their status.",
+        )),
+        Tab::Data => lines.push(row(
+            "",
+            "Vendor messages and raw CALLs checked against the OCPP schema.",
+        )),
+        Tab::Logs => lines.push(row(
+            "",
+            "The log pane has the keys; Enter opens the detail of the selected row.",
+        )),
+        Tab::Scenarios => lines.push(row(
+            "",
+            "Run a built-in scenario or a scenario file; the Scenario pane shows the steps.",
+        )),
     }
-    let h = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
-    let rect = centered(area, rect_w, h);
-    let inner = popup(f, rect, "Help");
-    f.render_widget(
-        Paragraph::new(lines.into_iter().map(Line::raw).collect::<Vec<_>>()),
-        inner,
-    );
+    lines.extend(tab_rows(
+        app.catalog
+            .iter()
+            .filter(|a| a.tab == app.tab)
+            .map(|a| (a.key, a.label.as_str())),
+    ));
+    if app.tab == Tab::Station {
+        lines.push(row(
+            "",
+            "The K, L, P and Y browsers: Tab or 1-4 changes the page, / filters, Enter edits; a add, i install, d delete, c clear.",
+        ));
+    }
+    vec![
+        HelpSection::new("This tab", lines),
+        help_everywhere("1-7", "connector", Tab::Logs.index() + 1, app.in_fleet),
+    ]
 }
 
 /// Height of a popup that shows `lines` rows: the content plus borders, at most the free
@@ -386,10 +454,16 @@ pub fn visible_scroll(scroll: usize, lines: usize, rows: u16) -> usize {
     scroll.min(lines.saturating_sub(usize::from(rows)))
 }
 
-pub(crate) fn detail(f: &mut Frame<'_>, d: &Detail, area: Rect) {
+pub(crate) fn detail(
+    f: &mut Frame<'_>,
+    d: &Detail,
+    area: Rect,
+    max_scroll: &std::cell::Cell<usize>,
+) {
     let w = area.width.saturating_sub(2);
     let rect = centered(area, w, content_height(area.height, d.lines.len()));
     let inner = popup(f, rect, &sanitize(&d.title));
+    max_scroll.set(d.lines.len().saturating_sub(usize::from(inner.height)));
     let start = visible_scroll(d.scroll, d.lines.len(), inner.height);
     let lines: Vec<Line<'_>> = d
         .lines

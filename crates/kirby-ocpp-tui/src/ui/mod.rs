@@ -5,14 +5,14 @@ pub(crate) mod overlays;
 pub(crate) mod panes;
 
 pub use overlays::{
-    PendingRow, content_height, help_lines, pending_line, pending_list, visible_scroll,
+    PendingRow, content_height, help_sections, pending_line, pending_list, visible_scroll,
 };
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::Paragraph;
+use ratatui::widgets::{Block, Paragraph};
 
 use crate::actions::Tab;
 use crate::app::{App, ConfirmAction, Mode, NoticeLevel};
@@ -73,33 +73,56 @@ pub(crate) fn split_selector(f: &mut Frame<'_>) -> Option<[Rect; 2]> {
     Some(Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(f.area()))
 }
 
-/// `n:id<glyph>[*]` per station (id, glyph, transaction running), windowed around the selected
-/// one, count on the right. The ids are sanitized here.
+/// How the selector draws a connection glyph of the fleet model: the shape tells the state
+/// without the color.
+fn selector_glyph(glyph: char) -> (char, Color, &'static str) {
+    match glyph {
+        '+' => ('●', Color::Green, "connected"),
+        '~' => ('◐', Color::Yellow, "connecting"),
+        _ => ('○', Color::Red, "offline"),
+    }
+}
+
+/// `id<glyph>[*]` per station (id, glyph, transaction running), windowed around the selected
+/// one, then the position and a legend of the markers in use. The ids are sanitized here.
 pub(crate) fn draw_selector<'a>(
     f: &mut Frame<'_>,
     stations: impl ExactSizeIterator<Item = (&'a str, char, bool)>,
     selected: usize,
     area: Rect,
 ) {
+    let stations: Vec<(&str, char, bool)> = stations.collect();
     let total = stations.len();
     let count = format!(" {}/{total}", selected + 1);
-    let avail = usize::from(area.width).saturating_sub(width(&count) + 4);
+    let mut legend: Vec<String> = Vec::new();
+    for g in ['+', '~', '-'] {
+        let (shape, _, name) = selector_glyph(g);
+        if stations.iter().any(|s| selector_glyph(s.1).0 == shape) {
+            legend.push(format!("{shape} {name}"));
+        }
+    }
+    if stations.iter().any(|s| s.2) {
+        legend.push("* transaction".to_owned());
+    }
+    let mut legend = format!("  {}", legend.join("  "));
+    let total_w = usize::from(area.width);
+    // The legend gives way when it would squeeze the stations.
+    if total_w < width(&legend) + width(&count) + 28 {
+        legend.clear();
+    }
+    let avail = total_w.saturating_sub(width(&count) + width(&legend) + 4);
     let labels: Vec<(String, Color)> = stations
-        .enumerate()
-        .map(|(i, (id, glyph, tx))| {
-            let color = match glyph {
-                '+' => Color::Green,
-                '~' => Color::Yellow,
-                _ => Color::Red,
-            };
+        .iter()
+        .map(|&(id, glyph, tx)| {
+            let (shape, color, _) = selector_glyph(glyph);
             let tx = if tx { "*" } else { "" };
             let id = crate::text::sanitize(id);
-            (format!(" {} {id}{glyph}{tx} ", i + 1), color)
+            (format!(" {id} {shape}{tx} "), color)
         })
         .collect();
     let widths: Vec<usize> = labels.iter().map(|(l, _)| width(l)).collect();
     let (start, end) = visible_range(&widths, selected, avail);
-    let mut spans = vec![Span::styled(if start > 0 { "< " } else { "  " }, dim())];
+    let mut spans = vec![Span::styled(if start > 0 { "‹ " } else { "  " }, dim())];
     for (i, (label, color)) in labels.iter().enumerate().take(end).skip(start) {
         let style = if i == selected {
             Style::new().fg(Color::Black).bg(*color)
@@ -110,10 +133,111 @@ pub(crate) fn draw_selector<'a>(
         spans.push(Span::raw(" "));
     }
     if end < total {
-        spans.push(Span::styled("> ", dim()));
+        spans.push(Span::styled("› ", dim()));
     }
     spans.push(Span::styled(count, dim()));
+    spans.push(Span::styled(legend, dim()));
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// The marker for rows that are cut off above a pane.
+#[must_use]
+pub fn more_above(n: usize) -> String {
+    format!("▲ {n} more")
+}
+
+/// The marker for rows that are cut off below a pane.
+#[must_use]
+pub fn more_below(n: usize) -> String {
+    format!("▼ {n} more")
+}
+
+/// Puts the cut-off markers on the border of a pane: `▲ N more` top right, `▼ N more` bottom
+/// right. Nothing is added for a count of zero.
+pub(crate) fn with_markers(block: Block<'static>, above: usize, below: usize) -> Block<'static> {
+    let mark = |n: usize, text: String| (n > 0).then(|| Line::styled(text, dim()).right_aligned());
+    let mut block = block;
+    if let Some(line) = mark(above, more_above(above)) {
+        block = block.title_top(line);
+    }
+    if let Some(line) = mark(below, more_below(below)) {
+        block = block.title_bottom(line);
+    }
+    block
+}
+
+/// The first row of a window of `rows` rows over `len` rows that keeps `selected` in view,
+/// roughly in the middle.
+#[must_use]
+pub fn window_start(selected: usize, rows: usize, len: usize) -> usize {
+    if rows == 0 || len <= rows {
+        return 0;
+    }
+    selected.saturating_sub(rows / 2).min(len - rows)
+}
+
+/// ` n/N` for a pane title when a list of `len` rows is cut to `rows`; empty otherwise.
+#[must_use]
+pub fn count_of(selected: usize, rows: usize, len: usize) -> String {
+    if len > rows {
+        format!(" {}/{len}", selected + 1)
+    } else {
+        String::new()
+    }
+}
+
+/// Wraps styled lines to `w` cells by breaking them at the cell edge, keeping the styles.
+/// A pane that scrolls needs the number of rows its text takes, which a word-wrapping
+/// widget does not tell.
+#[must_use]
+pub fn wrap_lines(lines: Vec<Line<'static>>, w: usize) -> Vec<Line<'static>> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let w = w.max(1);
+    let mut out = Vec::new();
+    for line in lines {
+        let mut row: Vec<Span<'static>> = Vec::new();
+        let mut used = 0;
+        for span in line.spans {
+            let mut piece = String::new();
+            for g in span.content.graphemes(true) {
+                let gw = width(g);
+                if used + gw > w && used > 0 {
+                    row.push(Span::styled(std::mem::take(&mut piece), span.style));
+                    out.push(Line::from(std::mem::take(&mut row)).style(line.style));
+                    used = 0;
+                }
+                piece.push_str(g);
+                used += gw;
+            }
+            if !piece.is_empty() {
+                row.push(Span::styled(piece, span.style));
+            }
+        }
+        out.push(Line::from(row).style(line.style));
+    }
+    out
+}
+
+/// Draws `lines` (already wrapped) in a pane from row `scroll`, with the cut-off markers on
+/// the border. `max_scroll` is set to the largest useful `scroll`.
+pub(crate) fn scrolled_text(
+    f: &mut Frame<'_>,
+    area: Rect,
+    block: Block<'static>,
+    lines: Vec<Line<'static>>,
+    scroll: usize,
+    max_scroll: &std::cell::Cell<usize>,
+) {
+    let rows = usize::from(area.height.saturating_sub(2));
+    let max = lines.len().saturating_sub(rows);
+    max_scroll.set(max);
+    let start = scroll.min(max);
+    let shown: Vec<Line<'static>> = lines.into_iter().skip(start).take(rows).collect();
+    let below = max - start;
+    f.render_widget(
+        Paragraph::new(shown).block(with_markers(block, start, below)),
+        area,
+    );
 }
 
 /// Popup width: `want` cells, or the whole width when the terminal is barely wider, so the
@@ -156,7 +280,31 @@ fn draw_in(f: &mut Frame<'_>, app: &App, area: Rect) {
     overlays::draw(f, app, area);
 }
 
+/// Rows of the left-hand list at a narrow width: its rows and header, borders included, but
+/// never more than `cap`; the actions and details panes get the rest.
+pub(crate) fn list_height(rows: usize, area_height: u16, cap: u16) -> u16 {
+    let want = u16::try_from(rows + 3).unwrap_or(u16::MAX);
+    // A short body keeps the header and about two rows.
+    let cap = if area_height < 24 { cap.min(5) } else { cap };
+    want.min(cap).min(area_height / 3).max(3)
+}
+
+/// Rows of the actions and details band below the list at a narrow width: a little more than
+/// half of what the list leaves.
+pub(crate) fn band_height(area_height: u16, list: u16) -> u16 {
+    (area_height.saturating_sub(list) * 11 / 20).clamp(3, 16)
+}
+
 fn draw_body(f: &mut Frame<'_>, app: &App, area: Rect) {
+    if app.zoom {
+        match app.focus {
+            crate::app::Focus::Connectors => panes::connectors(f, app, area),
+            crate::app::Focus::Details => panes::details(f, app, area),
+            crate::app::Focus::Actions => panes::actions(f, app, area),
+            crate::app::Focus::Log => panes::log(f, app, area),
+        }
+        return;
+    }
     if area.width >= WIDE {
         let [conn, mid, log] = Layout::horizontal([
             Constraint::Percentage(25),
@@ -172,8 +320,8 @@ fn draw_body(f: &mut Frame<'_>, app: &App, area: Rect) {
         panes::log(f, app, log);
     } else {
         let rows = u16::try_from(app.snapshot.connectors.len()).unwrap_or(u16::MAX);
-        let conn_h = (rows + 3).min(7).min(area.height / 3).max(3);
-        let mid_h = (area.height / 3).clamp(3, 12);
+        let conn_h = list_height(usize::from(rows), area.height, 7);
+        let mid_h = band_height(area.height, conn_h);
         let [conn, mid, log] = Layout::vertical([
             Constraint::Length(conn_h),
             Constraint::Length(mid_h),
@@ -187,6 +335,9 @@ fn draw_body(f: &mut Frame<'_>, app: &App, area: Rect) {
                     .areas(mid);
             panes::details(f, app, details);
             panes::actions(f, app, actions);
+        } else if app.focus == crate::app::Focus::Details {
+            // No room for both: the pane that has the keys takes the place.
+            panes::details(f, app, mid);
         } else {
             panes::actions(f, app, mid);
         }
@@ -367,11 +518,14 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                         ("p", "pause"),
                     ]);
                 } else {
-                    v.push(("6", "log keys"));
+                    v.push(("5", "log keys"));
                 }
             } else if app.focus == Focus::Actions {
                 // Enter on the connector list does nothing, so it is not hinted there.
                 v.push(("Enter", "run"));
+            }
+            if app.zoom {
+                v.insert(0, ("z/Esc", "back"));
             }
             v.extend([("↑↓", "move"), ("←→", "pane"), ("1-7", "tab")]);
             if app.in_fleet {
@@ -379,6 +533,9 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
                 v.extend([("< >", "station"), ("q", "quit"), ("[ ]", "connector")]);
             } else {
                 v.extend([("[ ]", "connector"), ("q", "quit")]);
+            }
+            if !app.zoom {
+                v.push(("z", "zoom"));
             }
             v
         }
@@ -391,7 +548,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("←→", "choose/move"),
         ],
         Mode::Choice(_) => vec![("Enter", "select"), ("Esc", "cancel"), ("↑↓", "move")],
-        Mode::Help => vec![("Esc", "close")],
+        Mode::Help(_) => vec![("←→", "section"), ("↑↓", "scroll"), ("Esc", "close")],
         Mode::Detail(_) => vec![("Esc", "close"), ("↑↓", "scroll"), ("c", "copy")],
         Mode::Confirm(c) if c.action == ConfirmAction::Quit => {
             vec![("y/q", "quit"), ("n/Esc", "stay")]

@@ -159,8 +159,8 @@ async fn boot_plug_authorize_start_stop_are_reflected_in_the_model() {
     assert!(answer.rtt_ms.is_some(), "round trip is correlated");
 
     // Start a transaction on the selected connector.
+    // The form opens on the idTag, prefilled with the tag used before; typing replaces it.
     d.keys("t").await;
-    d.key(KeyCode::Down).await;
     d.keys("TAG1").await;
     d.key(KeyCode::Enter).await;
     d.until("active transaction", |a| {
@@ -201,7 +201,7 @@ async fn boot_plug_authorize_start_stop_are_reflected_in_the_model() {
     }
 
     // The raw composer sends a schema-validated Heartbeat and shows the response.
-    d.keys("5r").await;
+    d.keys("4r").await;
     d.key(KeyCode::Enter).await;
     let Mode::Detail(detail) = &d.app.mode else {
         panic!("{:?}", d.app.mode)

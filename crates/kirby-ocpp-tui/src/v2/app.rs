@@ -12,8 +12,9 @@ use kirby_ocpp_core::timefmt::TimeMode;
 
 use super::actions::{ActionDef2, ActionId2, Context2, Tab2, catalog2, disabled_reason2};
 use super::browser::DeviceBrowser;
-use crate::app::{Detail, Focus, Notice, NoticeLevel, PendingCall, ScenarioView};
+use crate::app::{Detail, DetailsView, Focus, Notice, NoticeLevel, PendingCall, ScenarioView};
 use crate::forms::{Choice, Form};
+use crate::help::HelpState;
 use crate::logview::LogStore;
 use crate::palette::Palette;
 
@@ -39,7 +40,8 @@ pub enum Mode2 {
     Palette(Palette),
     Form(Form),
     Choice(Choice),
-    Help,
+    /// The help popup: open section and scroll.
+    Help(HelpState),
     Detail(Detail),
     Confirm(Confirm2),
     DeviceModel(DeviceBrowser),
@@ -54,7 +56,7 @@ impl Mode2 {
             Self::Palette(_) => "palette",
             Self::Form(_) => "form",
             Self::Choice(_) => "choice",
-            Self::Help => "help",
+            Self::Help(_) => "help",
             Self::Detail(_) => "detail",
             Self::Confirm(_) => "confirm",
             Self::DeviceModel(_) => "device model",
@@ -163,6 +165,12 @@ pub struct App2 {
     /// Outbound `SecurityEventNotification` frames since the UI started (the snapshot has no
     /// list of them).
     pub security_events_sent: u64,
+    /// The idToken last used in the Authorize or Present token forms; they open with it.
+    pub last_token: String,
+    /// The focused pane fills the whole body (`z`).
+    pub zoom: bool,
+    /// Scroll of the details pane.
+    pub details: DetailsView,
 }
 
 impl App2 {
@@ -212,6 +220,9 @@ impl App2 {
             in_fleet: false,
             time: TimeMode::Utc,
             security_events_sent: 0,
+            last_token: String::new(),
+            zoom: false,
+            details: DetailsView::new(),
         }
     }
 
@@ -284,6 +295,7 @@ impl App2 {
 
     pub fn set_tab(&mut self, tab: Tab2) {
         self.tab = tab;
+        self.details.scroll = 0;
         self.focus = if tab == Tab2::Logs {
             Focus::Log
         } else {

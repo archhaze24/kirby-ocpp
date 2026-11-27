@@ -145,7 +145,7 @@ impl Field {
         Self {
             label,
             kind,
-            input: TextInput::new(value),
+            input: prefill_input(value),
             options: Vec::new(),
             option: 0,
             error: None,
@@ -1341,7 +1341,7 @@ impl Form {
         };
         let current = payload.input.text();
         if next != self.template && (current.trim().is_empty() || current == self.template) {
-            payload.input = TextInput::new(next.clone());
+            payload.input = prefill_input(&next);
             payload.touched = false;
             self.template = next;
             self.validate_field(1);
@@ -1907,6 +1907,17 @@ fn validate_request(protocol: Protocol, text: &str, action: &str) -> Option<Stri
 }
 
 /// The input of one registry field: a select for a choice, else a typed text input.
+/// The input of a prefilled field. A JSON template is wider than most fields, so its cursor
+/// starts at the beginning and the start of the template is the part that shows; other
+/// prefills keep the cursor at the end, where typing continues.
+fn prefill_input(value: &str) -> TextInput {
+    let mut input = TextInput::new(value);
+    if value.starts_with(['{', '[']) {
+        input.home();
+    }
+    input
+}
+
 fn spec_field(spec: &'static registry::FieldSpec, ctx: &SpecContext) -> Field {
     let mut field = if spec.ty == registry::FieldType::Choice {
         let (mut options, mut values) = if spec.choices.is_empty() {

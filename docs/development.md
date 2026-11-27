@@ -93,7 +93,8 @@ Start from the table in [Architecture](architecture.md#where-each-concern-lives)
 1. Define the action and its availability in `kirby-ocpp-tui/src/actions.rs`; the command palette picks it up from there.
 2. If it needs input, add a form in `forms.rs`; add a key in `keys.rs` if it has an accelerator.
 3. Handle the `Msg` in the pure `update` and return an `Effect` that sends the `Command`.
-4. Add `update` and `TestBackend` tests; update the keys table in [Emulator](emulator.md). For the CSMS UI the files are `kirby-csms-tui/src/{form,keys,actions}.rs` and [CSMS](csms.md).
+4. The help popup reads the catalogue (the "This tab" section lists the actions of the open tab); a key that is not an action goes into `help_everywhere` (`kirby-ocpp-tui/src/ui/overlays.rs`) or, for the CSMS, `kirby-csms-tui/src/help.rs`.
+5. Add `update` and `TestBackend` tests; update the keys table in [Emulator](emulator.md). For the CSMS UI the files are `kirby-csms-tui/src/{form,keys,actions}.rs` and [CSMS](csms.md).
 
 ### Add a CSMS action
 

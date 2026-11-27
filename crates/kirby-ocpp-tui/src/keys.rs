@@ -11,6 +11,7 @@ use crate::actions::{ActionId, Tab};
 use crate::app::{App, Confirm, ConfirmAction, Detail, Effect, Focus, Mode, NoticeLevel};
 use crate::browser::{Browser, Page};
 use crate::forms::{Choice, ChoiceKind, Form, FormEvent};
+use crate::help::{HelpEvent, HelpState};
 use crate::palette::Palette;
 
 pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
@@ -40,12 +41,10 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         Mode::Palette(p) => palette(app, p, key, fx),
         Mode::Form(f) => form(app, f, key, fx),
         Mode::Choice(c) => choice(app, c, key, fx),
-        Mode::Help => {
-            if !matches!(
-                key.code,
-                KeyCode::Esc | KeyCode::Char('?' | 'q') | KeyCode::Enter
-            ) {
-                app.mode = Mode::Help;
+        Mode::Help(mut state) => {
+            let sections = crate::ui::help_sections(app).len();
+            if state.handle_key(key, sections) == HelpEvent::Stay {
+                app.mode = Mode::Help(state);
             }
         }
         Mode::Detail(d) => detail(app, d, key, fx),
@@ -287,7 +286,7 @@ fn profile_detail(p: &ProfileSummary) -> Detail {
 }
 
 fn open_palette(app: &mut App) {
-    app.mode = Mode::Palette(Palette::new(&app.catalog));
+    app.mode = Mode::Palette(Palette::new(&app.catalog, app.tab.title()));
 }
 
 fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
@@ -297,7 +296,8 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         KeyCode::Char('p') if ctrl => open_palette(app),
         _ if ctrl || alt => {}
         KeyCode::Char('q') => app.request_quit(),
-        KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char('?') => app.mode = Mode::Help(HelpState::default()),
+        KeyCode::Char('z') => app.zoom = !app.zoom,
         KeyCode::Char('W') => app.mode = Mode::Pending(0),
         KeyCode::Char(':') => open_palette(app),
         KeyCode::Char('/') => {
@@ -314,8 +314,8 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         KeyCode::BackTab => app.set_tab(app.tab.prev()),
         KeyCode::Char('[') => app.move_connector(-1),
         KeyCode::Char(']') => app.move_connector(1),
-        KeyCode::Left => app.focus = shift_focus(app.focus, -1),
-        KeyCode::Right => app.focus = shift_focus(app.focus, 1),
+        KeyCode::Left => app.focus = app.focus.shifted(-1),
+        KeyCode::Right => app.focus = app.focus.shifted(1),
         KeyCode::Up | KeyCode::Char('k') => step(app, -1),
         KeyCode::Down | KeyCode::Char('j') => step(app, 1),
         KeyCode::PageUp => step(app, -10),
@@ -323,7 +323,9 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
         KeyCode::Home => jump(app, false),
         KeyCode::End => jump(app, true),
         KeyCode::Esc => {
-            if !app.log.search.is_empty() {
+            if app.zoom {
+                app.zoom = false;
+            } else if !app.log.search.is_empty() {
                 app.log.search.clear();
                 app.notify(NoticeLevel::Info, "search cleared");
             }
@@ -335,7 +337,7 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
                 }
             }
             Focus::Log => app.open_detail(),
-            Focus::Connectors => {}
+            Focus::Connectors | Focus::Details => {}
         },
         KeyCode::Char(c) => {
             // Accelerators exist only for the active tab's own actions.
@@ -352,17 +354,12 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
     }
 }
 
-fn shift_focus(f: Focus, d: isize) -> Focus {
-    const ORDER: [Focus; 3] = [Focus::Connectors, Focus::Actions, Focus::Log];
-    let i = ORDER.iter().position(|x| *x == f).unwrap_or(1);
-    ORDER[i.saturating_add_signed(d).min(2)]
-}
-
 /// `Home` / `End`: the first / last row of the focused pane (the log: oldest row / follow the
 /// newest).
 fn jump(app: &mut App, last: bool) {
     match app.focus {
         Focus::Connectors => app.move_connector(if last { isize::MAX } else { isize::MIN }),
+        Focus::Details => app.details.edge(last),
         Focus::Actions => app.select_action_edge(last),
         Focus::Log if last => app.log.follow_tail(),
         Focus::Log => app.log.select_first(),
@@ -372,6 +369,7 @@ fn jump(app: &mut App, last: bool) {
 fn step(app: &mut App, d: isize) {
     match app.focus {
         Focus::Connectors => app.move_connector(d),
+        Focus::Details => app.details.scroll_by(d),
         Focus::Actions => app.move_action(d.signum()),
         Focus::Log => app.log.move_selection(d),
     }
@@ -436,7 +434,11 @@ fn choice(app: &mut App, mut c: Choice, key: KeyEvent, fx: &mut Vec<Effect>) {
         KeyCode::End => c.selected = c.items.len().saturating_sub(1),
         KeyCode::Enter => {
             if let Some(command) = choice_command(&c) {
-                let label = format!("{}: {}", command.name(), c.items[c.selected]);
+                let label = format!(
+                    "{}: {}",
+                    command.name().replace('_', " "),
+                    c.items[c.selected]
+                );
                 fx.push(Effect::Send {
                     label,
                     command,
@@ -490,7 +492,13 @@ fn choice_command(c: &Choice) -> Option<Command> {
 }
 
 fn detail(app: &mut App, mut d: Detail, key: KeyEvent, fx: &mut Vec<Effect>) {
-    let max = d.lines.len().saturating_sub(1);
+    // The popup records how far it can scroll; `Down` stops there, so `Up` answers at once.
+    let max = d
+        .lines
+        .len()
+        .saturating_sub(1)
+        .min(app.details.popup_max.get());
+    d.scroll = d.scroll.min(max);
     match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => return,
         KeyCode::Up | KeyCode::Char('k') => d.scroll = d.scroll.saturating_sub(1),

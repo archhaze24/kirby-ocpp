@@ -218,7 +218,7 @@ async fn boot_plug_present_token_meter_stop_are_reflected_in_the_model() {
     // Transaction tab: present a token (the target EVSE is the selected one).
     d.keys("3t").await;
     assert!(matches!(d.app.mode, Mode2::Form(_)));
-    d.key(KeyCode::Down).await;
+    // The form opens on the idToken field.
     d.keys("TAG1").await;
     d.key(KeyCode::Enter).await;
     assert!(matches!(d.app.mode, Mode2::Normal), "{:?}", d.app.mode);

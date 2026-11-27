@@ -19,6 +19,7 @@ mod actions;
 pub mod app;
 pub mod command;
 pub mod form;
+mod help;
 mod keys;
 pub mod ui;
 

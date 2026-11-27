@@ -516,7 +516,7 @@ mod tests {
         let mut fleet = fleet_of(2);
         update_fleet2(&mut fleet, chr('>'));
         update_fleet2(&mut fleet, chr('?'));
-        assert!(matches!(fleet.apps[1].mode, Mode2::Help));
+        assert!(matches!(fleet.apps[1].mode, Mode2::Help(_)));
         assert!(matches!(fleet.apps[0].mode, Mode2::Normal));
         // Help is a dialog: the selector key does not switch away.
         update_fleet2(&mut fleet, chr('<'));
@@ -585,10 +585,23 @@ mod tests {
         fleet.apps[2].snapshot.evses = vec![evse(Some("tx-1"))];
         let text = render(&fleet, 100, 30);
         let first = text.lines().next().unwrap();
-        assert!(first.contains("1 CP-001-"), "{first}");
-        assert!(first.contains("2 CP-002+"), "{first}");
-        assert!(first.contains("3 CP-003-*"), "{first}");
-        assert!(first.ends_with("1/3"), "{first}");
+        assert!(first.contains("CP-001 ○"), "{first}");
+        assert!(first.contains("CP-002 ●"), "{first}");
+        assert!(first.contains("CP-003 ○*"), "{first}");
+        assert!(
+            !first.contains("1 CP-001"),
+            "no digits in the strip: {first}"
+        );
+        assert!(first.contains(" 1/3"), "{first}");
+        // The legend names the markers in use, and only those.
+        assert!(
+            first.contains("● connected") && first.contains("○ offline"),
+            "{first}"
+        );
+        assert!(
+            first.contains("* transaction") && !first.contains("◐"),
+            "{first}"
+        );
         assert!(text.contains("CP-001"));
     }
 
@@ -607,9 +620,9 @@ mod tests {
         fleet.select(30);
         let text = render(&fleet, 60, 20);
         let first = text.lines().next().unwrap();
-        assert!(first.contains("31 CP-031"), "{first}");
-        assert!(first.starts_with('<') && first.contains('>'), "{first}");
-        assert!(first.ends_with("31/40"), "{first}");
+        assert!(first.contains("CP-031"), "{first}");
+        assert!(first.starts_with('‹') && first.contains('›'), "{first}");
+        assert!(first.contains("31/40"), "{first}");
     }
 
     #[test]
@@ -625,11 +638,13 @@ mod tests {
 
     #[test]
     fn fleet_help_lists_the_selector_keys() {
-        use super::super::ui::help_lines2_for;
-        use kirby_ocpp_core::ocpp::Protocol;
-        let has = |fleet| {
-            help_lines2_for(Protocol::V21, fleet)
+        use super::super::ui::help_sections2;
+        let has = |fleet: bool| {
+            let mut app = fleet_of(1).apps.remove(0);
+            app.in_fleet = fleet;
+            help_sections2(&app)
                 .iter()
+                .flat_map(|s| s.lines.iter())
                 .any(|l| l.contains("Alt-1"))
         };
         assert!(has(true));

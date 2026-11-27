@@ -518,7 +518,7 @@ fn present_token_with_and_without_an_evse() {
     plugged(&mut app, 1);
     press(&mut app, "3t");
     assert_eq!(form_of(&app).title, "Present token");
-    press_code(&mut app, KeyCode::Tab);
+    assert_eq!(form_of(&app).focus, 1, "the form opens on the idToken");
     press(&mut app, "CARD");
     let fx = press_code(&mut app, KeyCode::Enter);
     assert_eq!(
@@ -537,8 +537,12 @@ fn present_token_with_and_without_an_evse() {
     press(&mut app, "3");
     press(&mut app, "]");
     press(&mut app, "t");
+    // The token used last is prefilled and the form opens on it.
+    assert_eq!(form_of(&app).fields[1].input.text(), "CARD");
+    assert_eq!(form_of(&app).focus, 1);
+    press_code(&mut app, KeyCode::Up);
     press_code(&mut app, KeyCode::Right);
-    press_code(&mut app, KeyCode::Tab);
+    press_code(&mut app, KeyCode::Down);
     press(&mut app, "CARD");
     let fx = press_code(&mut app, KeyCode::Enter);
     assert_eq!(
@@ -982,6 +986,8 @@ fn data_transfer_sends_any_json_value() {
 fn data_transfer_limits_vendor_and_message_ids() {
     let mut app = app();
     press(&mut app, "4d");
+    // The vendor is prefilled and selected; End keeps it for editing.
+    press_code(&mut app, KeyCode::End);
     press(&mut app, &"v".repeat(250));
     assert!(
         press_code(&mut app, KeyCode::Enter).is_empty(),
@@ -1241,7 +1247,7 @@ fn pending_commands_are_listed_and_cancelled() {
     assert!(app.pending.is_empty());
     assert_eq!(
         notice(&app),
-        ("heartbeat: ok".to_owned(), NoticeLevel::Success)
+        ("Sent Heartbeat".to_owned(), NoticeLevel::Success)
     );
 }
 
@@ -1295,7 +1301,7 @@ fn results_are_reported_in_wire_words() {
     assert_eq!(
         notice(&app),
         (
-            "transaction tx-1 started on EVSE 2".to_owned(),
+            "Transaction tx-1 started on EVSE 2".to_owned(),
             NoticeLevel::Success
         )
     );
@@ -1579,9 +1585,9 @@ fn enter_runs_the_selected_action_and_arrows_move_the_selection() {
 fn help_closes_with_escape_and_hides_nothing_else() {
     let mut app = app();
     press(&mut app, "?");
-    assert!(matches!(app.mode, Mode2::Help));
+    assert!(matches!(app.mode, Mode2::Help(_)));
     press(&mut app, "b");
-    assert!(matches!(app.mode, Mode2::Help), "other keys do nothing");
+    assert!(matches!(app.mode, Mode2::Help(_)), "other keys do nothing");
     press_code(&mut app, KeyCode::Esc);
     assert!(matches!(app.mode, Mode2::Normal));
 }
@@ -1612,6 +1618,7 @@ fn home_and_end_jump_in_every_pane() {
     press_code(&mut app, KeyCode::Home);
     assert_eq!(app.action_sel[0], 0);
     press_code(&mut app, KeyCode::Left);
+    press_code(&mut app, KeyCode::Left);
     press_code(&mut app, KeyCode::End);
     let last = app.snapshot.evses.last().unwrap().id;
     assert_eq!(app.evse, last);
@@ -1623,10 +1630,40 @@ fn home_and_end_jump_in_every_pane() {
 fn unfiltered_palette_orders_by_task() {
     let app = app();
     let rows = palette_rows(&app.catalog);
-    let order = crate::palette::rank_rows(&rows, "");
+    // No tab is current: the pure task order.
+    let order = crate::palette::rank_rows(&rows, "", "");
     let pos = |id: ActionId2| order.iter().position(|&i| app.catalog[i].id == id).unwrap();
     assert!(pos(ActionId2::Connect) < pos(ActionId2::PlugToggle));
     assert!(pos(ActionId2::PlugToggle) < pos(ActionId2::Authorize));
     assert!(pos(ActionId2::StopTransaction) < pos(ActionId2::FaultToggle));
     assert!(pos(ActionId2::FaultToggle) < pos(ActionId2::DeviceModel));
+}
+
+#[test]
+fn the_palette_opens_with_the_current_tab_first() {
+    let mut app = app();
+    press(&mut app, "3");
+    press(&mut app, ":");
+    let Mode2::Palette(p) = &app.mode else {
+        panic!("palette");
+    };
+    let tabs: Vec<Tab2> = app.catalog.iter().map(|a| a.tab).collect();
+    let own = tabs.iter().filter(|t| **t == Tab2::Transaction).count();
+    assert!(
+        p.results[..own]
+            .iter()
+            .all(|&i| tabs[i] == Tab2::Transaction)
+    );
+    assert!(
+        p.results[own..]
+            .iter()
+            .all(|&i| tabs[i] != Tab2::Transaction)
+    );
+    // Typing and deleting the query ranks for the same tab again.
+    press(&mut app, "x");
+    press_code(&mut app, KeyCode::Backspace);
+    let Mode2::Palette(p) = &app.mode else {
+        panic!("palette");
+    };
+    assert_eq!(tabs[p.results[0]], Tab2::Transaction);
 }

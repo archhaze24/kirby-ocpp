@@ -137,6 +137,12 @@ pub struct Field {
     pub secret: bool,
     /// Most characters the value may have; longer input is an error on the field.
     pub max_chars: Option<usize>,
+    /// The value was prefilled and not touched yet: the first printable key (or a paste)
+    /// replaces it, any cursor key or Backspace keeps it for editing. Drawn as selected.
+    pub fresh: bool,
+    /// What was typed on a `Select` field since another key last ended the run: the value
+    /// that starts with it is picked.
+    pub typed: String,
 }
 
 impl std::fmt::Debug for Field {
@@ -154,6 +160,8 @@ impl std::fmt::Debug for Field {
             .field("capped", &self.capped)
             .field("secret", &self.secret)
             .field("max_chars", &self.max_chars)
+            .field("fresh", &self.fresh)
+            .field("typed", &self.typed)
             .finish()
     }
 }
@@ -179,6 +187,54 @@ impl Field {
             capped: false,
             secret: false,
             max_chars: None,
+            fresh: !value.is_empty() && !matches!(kind, FieldKind::Select | FieldKind::Multi),
+            typed: String::new(),
+        }
+    }
+
+    /// Whether a form cannot be submitted while this field is empty (focus starts on the
+    /// first such field).
+    fn needs_value(&self) -> bool {
+        self.is_text()
+            && !matches!(
+                self.kind,
+                FieldKind::OptionalText
+                    | FieldKind::OptionalIdTag
+                    | FieldKind::Expiry
+                    | FieldKind::JsonValue
+            )
+            && self.input.text().trim().is_empty()
+    }
+
+    /// Replaces the value of a text field with `value`, as untouched prefill.
+    fn prefill(&mut self, value: &str) {
+        self.input = TextInput::new(value);
+        self.fresh = !value.is_empty();
+    }
+
+    /// Typing on a `Select` field. A run of characters picks the first value that starts
+    /// with it (`12` in a list of numbers, `Rej` in a list of statuses); when no value
+    /// does, the character alone picks the next value that starts with it, so repeating a
+    /// letter cycles. A digit that starts no value picks the n-th one.
+    fn type_into_select(&mut self, c: char) {
+        let starts =
+            |option: &str, prefix: &str| option.to_lowercase().starts_with(&prefix.to_lowercase());
+        self.typed.push(c);
+        if let Some(i) = self.options.iter().position(|o| starts(o, &self.typed)) {
+            self.option = i;
+            return;
+        }
+        self.typed = c.to_string();
+        let n = self.options.len();
+        if let Some(i) = (1..=n)
+            .map(|d| (self.option + d) % n)
+            .find(|&i| starts(&self.options[i], &self.typed))
+        {
+            self.option = i;
+        } else if let Some(nth) = c.to_digit(10).and_then(|d| usize::try_from(d).ok())
+            && (1..=n).contains(&nth)
+        {
+            self.option = nth - 1;
         }
     }
 
@@ -552,20 +608,39 @@ impl Form {
     }
 
     fn build(kind: FormKind, title: &str, fields: Vec<Field>, max_connector: u32) -> Self {
+        // Focus starts on the first field that still needs a value.
+        let focus = fields.iter().position(Field::needs_value).unwrap_or(0);
         Self {
             kind,
             title: title.to_owned(),
             fields,
-            focus: 0,
+            focus,
             max_connector,
             context: String::new(),
             checker: None,
         }
     }
 
+    /// Prefills field `index` (a text field) with `value` and starts the focus there. An empty
+    /// value changes nothing.
+    #[must_use]
+    pub fn prefilled(mut self, index: usize, value: &str) -> Self {
+        if !value.is_empty()
+            && let Some(f) = self.fields.get_mut(index)
+            && f.is_text()
+        {
+            f.prefill(value);
+            self.focus = index;
+        }
+        self
+    }
+
     pub fn paste(&mut self, text: &str) {
         let f = &mut self.fields[self.focus];
         if f.is_text() {
+            if std::mem::take(&mut f.fresh) {
+                f.input = TextInput::default();
+            }
             f.capped |= insert_str_capped(&mut f.input, text);
             self.validate_field(self.focus);
             self.after_edit();
@@ -583,6 +658,11 @@ impl Form {
             }
             code => {
                 let f = &mut self.fields[self.focus];
+                if !matches!(code, KeyCode::Char(_)) || ctrl {
+                    // Cursor keys and editing keys end a typing run and keep the prefill.
+                    f.typed.clear();
+                    f.fresh = false;
+                }
                 match (f.kind, code) {
                     (FieldKind::Select | FieldKind::Multi, KeyCode::Left) => {
                         step(&mut f.option, f.options.len(), -1);
@@ -590,18 +670,7 @@ impl Form {
                     (FieldKind::Select | FieldKind::Multi, KeyCode::Right) => {
                         step(&mut f.option, f.options.len(), 1);
                     }
-                    (FieldKind::Select, KeyCode::Char(c)) if !ctrl => {
-                        let lc = c.to_ascii_lowercase();
-                        let n = f.options.len();
-                        if let Some(i) = (1..=n).map(|d| (f.option + d) % n).find(|&i| {
-                            f.options[i]
-                                .chars()
-                                .next()
-                                .is_some_and(|o| o.to_ascii_lowercase() == lc)
-                        }) {
-                            f.option = i;
-                        }
-                    }
+                    (FieldKind::Select, KeyCode::Char(c)) if !ctrl => f.type_into_select(c),
                     (FieldKind::Multi, KeyCode::Char(' ')) => {
                         let i = f.option;
                         f.checked[i] = !f.checked[i];
@@ -624,6 +693,9 @@ impl Form {
                     (_, KeyCode::Char(c))
                         if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                     {
+                        if std::mem::take(&mut f.fresh) {
+                            f.input = TextInput::default();
+                        }
                         f.capped |= insert_char_capped(&mut f.input, c);
                     }
                     _ => {}
@@ -1147,6 +1219,109 @@ mod tests {
             panic!("expected data transfer");
         };
         assert_eq!(vendor_id, "Acme");
+    }
+
+    #[test]
+    fn the_first_printable_key_replaces_a_prefilled_value() {
+        let mut f = Form::start_tx(ConnectorId::new(1), 2);
+        f.focus = 0;
+        assert!(f.fields[0].fresh);
+        type_text(&mut f, "2");
+        assert_eq!(f.fields[0].input.text(), "2", "replaced, not `12`");
+        type_text(&mut f, "3");
+        assert_eq!(f.fields[0].input.text(), "23", "later keys append");
+    }
+
+    #[test]
+    fn cursor_keys_and_backspace_keep_the_prefill_for_editing() {
+        for edit in [
+            KeyCode::Left,
+            KeyCode::End,
+            KeyCode::Home,
+            KeyCode::Backspace,
+        ] {
+            let mut f = Form::data_transfer("Acme");
+            f.handle_key(key(edit));
+            assert!(!f.fields[0].fresh, "{edit:?}");
+        }
+        let mut f = Form::data_transfer("Acme");
+        f.handle_key(key(KeyCode::End));
+        type_text(&mut f, "X");
+        assert_eq!(f.fields[0].input.text(), "AcmeX");
+        let mut f = Form::data_transfer("Acme");
+        f.handle_key(key(KeyCode::Backspace));
+        type_text(&mut f, "e");
+        assert_eq!(f.fields[0].input.text(), "Acme");
+    }
+
+    #[test]
+    fn a_paste_replaces_a_prefilled_value_once() {
+        let mut f = Form::export("./a.jsonl");
+        f.paste("./b.jsonl");
+        assert_eq!(f.fields[0].input.text(), "./b.jsonl");
+        f.paste("x");
+        assert_eq!(f.fields[0].input.text(), "./b.jsonlx");
+    }
+
+    #[test]
+    fn focus_starts_on_the_first_empty_required_field() {
+        assert_eq!(
+            Form::start_tx(ConnectorId::new(1), 2).focus,
+            1,
+            "idTag is empty"
+        );
+        assert_eq!(Form::authorize().focus, 0);
+        assert_eq!(
+            Form::data_transfer("Acme").focus,
+            0,
+            "vendor is filled, rest optional"
+        );
+        assert_eq!(Form::data_transfer("").focus, 0);
+        let mut f = Form::start_tx(ConnectorId::new(1), 2).prefilled(1, "OLD");
+        assert_eq!(f.focus, 1, "a remembered tag keeps the focus on the tag");
+        type_text(&mut f, "NEW");
+        assert_eq!(f.fields[1].input.text(), "NEW");
+        assert_eq!(f.fields[0].input.text(), "1", "the connector is untouched");
+        assert_eq!(
+            Form::authorize().prefilled(0, "").focus,
+            0,
+            "empty prefill changes nothing"
+        );
+    }
+
+    #[test]
+    fn selectors_take_typed_values_and_digits() {
+        let numbers = |n: usize| {
+            Field::new("EVSE", FieldKind::Select, "")
+                .with_options((1..=n).map(|i| i.to_string()).collect())
+        };
+        let mut form = Form::generic("t", "T", vec![numbers(12)], 1);
+        type_text(&mut form, "3");
+        assert_eq!(form.fields[0].option, 2, "the value `3`");
+        form.handle_key(key(KeyCode::Left));
+        type_text(&mut form, "12");
+        assert_eq!(form.fields[0].option, 11, "`12` as one run");
+
+        let words = Field::new("kind", FieldKind::Select, "").with_options(
+            ["Accepted", "Rejected", "Reserved", "Removed"]
+                .map(str::to_owned)
+                .to_vec(),
+        );
+        let mut form = Form::generic("t", "T", vec![words], 1);
+        type_text(&mut form, "r");
+        assert_eq!(form.fields[0].option, 1, "first value starting with r");
+        form.handle_key(key(KeyCode::Left));
+        type_text(&mut form, "res");
+        assert_eq!(form.fields[0].option, 2, "a longer prefix narrows it");
+        form.handle_key(key(KeyCode::Left));
+        type_text(&mut form, "rr");
+        assert_eq!(
+            form.fields[0].option, 2,
+            "repeating a letter cycles to the next one"
+        );
+        // A digit that starts no value picks the n-th one.
+        type_text(&mut form, "4");
+        assert_eq!(form.fields[0].option, 3);
     }
 
     #[test]

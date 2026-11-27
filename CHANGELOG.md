@@ -27,6 +27,13 @@ tag as the GitHub release notes.
 - Emulator terminal UI: the Scenarios tab shows the selected scenario's description wrapped in the details pane instead of cutting it off at 80 columns.
 - Emulator terminal UI (OCPP 2.x): the token type of the Authorize and Present token forms defaults to `ISO14443`, matching the `kirby-csms` forms.
 - OCPP 2.x emulator: a token that matches a reservation by value but has another type is refused with a message that names the reserved token and both types.
+- Terminal UIs: `?` opens a help popup in sections that scrolls and fits 80x24 (and 24x8). The first section follows the current tab (emulator) or the focused pane (CSMS), then come the keys that work everywhere; `Left`/`Right` switch sections.
+- Emulator terminal UI: `z` zooms the focused pane; `z` or `Esc` restores it. Cut panes show `▲ N more` / `▼ N more`, the Actions and Connectors (EVSEs) titles show `n/N`, and at 80x24 the actions and details panes get more rows.
+- Emulator terminal UI (OCPP 1.6): the Maintenance tab moves to the end (`7`), so the tabs have the same numbers in every protocol (Logs `5`, Scenarios `6`).
+- Emulator command palette: without a query the current tab's actions come first, and an accelerator letter is shown only where it works. Both palettes match word starts, initials and contiguous text only (`tariff` no longer lists `Get variables`).
+- Forms: the first key typed into a prefilled field replaces the value, the focus starts on the first empty required field, and emulator selectors accept typing. The emulator Authorize, Start and Present token forms open with the token used last on that station. Long prefilled values, such as JSON templates in `kirby-csms`, open at their start.
+- Fleet terminal UI: the station strip shows ids and connection markers without digits, with a legend of the markers; `<` `>` are listed in the footer and the help.
+- Emulator terminal UI: the status line reports results in plain words (`Plugged in connector 1`, `Sent meter values (+120 Wh)`), and a fault that ends a transaction says so. The log no longer adds an `<Action> accepted` row that repeats the `RES` row.
 
 ### 🐛 Fixed
 
@@ -34,6 +41,7 @@ tag as the GitHub release notes.
 - `kirby-csms`: `power_w` of a transaction is cleared when it stops instead of keeping the last sample.
 - Refusals shown in the emulator status line no longer start with `invalid argument:`; the message stands alone (`EVSE 1 does not exist`).
 - Fleet terminal UI: the first station's boot events could be missing from the log when the stations connected before the UI subscribed to them.
+- Emulator terminal UI: the detail and JSON popups no longer scroll past their last page.
 - Emulator: a CALL from the CSMS that arrived before the answer to a station CALL could be handled after that answer and after the commands that followed it, so a scenario could clear a scripted reply before the CALL it was meant for used it. CALLs from the CSMS are now handled in the order they arrive.
 - `kirby-csms`: a `connected` event (`--json`, the event stream, the event log) could show the address and protocol of a newer connection of the same station that replaced it before the event was printed. Each event now shows its own connection.
 

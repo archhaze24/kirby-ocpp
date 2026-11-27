@@ -455,7 +455,7 @@ mod tests {
         let mut fleet = fleet_of(2);
         update_fleet(&mut fleet, chr('?'));
         assert!(matches!(fleet.apps[1].mode, Mode::Normal));
-        assert!(matches!(fleet.current().mode, Mode::Help));
+        assert!(matches!(fleet.current().mode, Mode::Help(_)));
         // Help is a dialog: the selector key does not switch away.
         update_fleet(&mut fleet, chr('>'));
         assert_eq!(fleet.selected, 0);
@@ -552,10 +552,23 @@ mod tests {
         fleet.apps[1].snapshot.connection = ConnectionState::Connected;
         let text = render(&fleet, 100, 30);
         let first = text.lines().next().unwrap();
-        assert!(first.contains("1 CP-001-"), "{first}");
-        assert!(first.contains("2 CP-002+"), "{first}");
-        assert!(first.contains("3 CP-003-"), "{first}");
-        assert!(first.ends_with("1/3"), "{first}");
+        assert!(first.contains("CP-001 ○"), "{first}");
+        assert!(first.contains("CP-002 ●"), "{first}");
+        assert!(first.contains("CP-003 ○"), "{first}");
+        assert!(
+            !first.contains("1 CP-001"),
+            "no digits in the strip: {first}"
+        );
+        assert!(first.contains(" 1/3"), "{first}");
+        // The legend names the markers in use, and only those.
+        assert!(
+            first.contains("● connected") && first.contains("○ offline"),
+            "{first}"
+        );
+        assert!(
+            !first.contains("◐") && !first.contains("transaction"),
+            "{first}"
+        );
         // The body is the selected station's.
         assert!(text.contains("CP-001"));
     }
@@ -566,10 +579,10 @@ mod tests {
         fleet.select(30);
         let text = render(&fleet, 60, 20);
         let first = text.lines().next().unwrap();
-        assert!(first.contains("31 CP-031"), "{first}");
-        assert!(first.starts_with('<') && first.contains('>'), "{first}");
-        assert!(!first.contains(" 1 CP-001"), "{first}");
-        assert!(first.ends_with("31/40"), "{first}");
+        assert!(first.contains("CP-031"), "{first}");
+        assert!(first.starts_with('‹') && first.contains('›'), "{first}");
+        assert!(!first.contains("CP-001"), "{first}");
+        assert!(first.contains("31/40"), "{first}");
     }
 
     #[test]
@@ -584,15 +597,15 @@ mod tests {
 
     #[test]
     fn fleet_help_lists_the_selector_keys() {
-        assert!(
-            crate::ui::help_lines(true)
+        let has = |in_fleet: bool| {
+            let mut app = fleet_of(1).apps.remove(0);
+            app.in_fleet = in_fleet;
+            crate::ui::help_sections(&app)
                 .iter()
+                .flat_map(|s| s.lines.iter())
                 .any(|l| l.contains("Alt-1"))
-        );
-        assert!(
-            !crate::ui::help_lines(false)
-                .iter()
-                .any(|l| l.contains("Alt-1"))
-        );
+        };
+        assert!(has(true));
+        assert!(!has(false));
     }
 }

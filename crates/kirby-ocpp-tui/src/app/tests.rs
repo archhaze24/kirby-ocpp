@@ -28,6 +28,7 @@ fn pending_call(label: &str, action: Option<&str>, secs_ago: u64) -> PendingCall
         since: Instant::now()
             .checked_sub(Duration::from_secs(secs_ago))
             .unwrap_or_else(Instant::now),
+        done: None,
     }
 }
 
@@ -82,12 +83,14 @@ fn tab_keys_switch_tabs_and_reset_focus() {
     press(&mut a, "3");
     assert_eq!(a.tab, Tab::Transaction);
     code(&mut a, KeyCode::Tab);
-    assert_eq!(a.tab, Tab::Maintenance);
+    assert_eq!(a.tab, Tab::Data);
     code(&mut a, KeyCode::BackTab);
     code(&mut a, KeyCode::BackTab);
     assert_eq!(a.tab, Tab::Connector);
-    press(&mut a, "6");
+    press(&mut a, "5");
     assert_eq!((a.tab, a.focus), (Tab::Logs, Focus::Log));
+    press(&mut a, "7");
+    assert_eq!(a.tab, Tab::Maintenance, "Maintenance is the last tab");
     press(&mut a, "1");
     assert_eq!(a.focus, Focus::Actions);
 }
@@ -101,6 +104,8 @@ fn up_down_move_in_the_focused_pane() {
     code(&mut a, KeyCode::Up);
     assert_eq!(a.action_sel[0], 1);
     code(&mut a, KeyCode::Left);
+    assert_eq!(a.focus, Focus::Details);
+    code(&mut a, KeyCode::Left);
     assert_eq!(a.focus, Focus::Connectors);
     code(&mut a, KeyCode::Down);
     assert_eq!(a.connector.get(), 2);
@@ -108,6 +113,7 @@ fn up_down_move_in_the_focused_pane() {
     assert_eq!(a.connector.get(), 2, "stops at the last connector");
     press(&mut a, "[");
     assert_eq!(a.connector.get(), 1);
+    code(&mut a, KeyCode::Right);
     code(&mut a, KeyCode::Right);
     code(&mut a, KeyCode::Right);
     assert_eq!(a.focus, Focus::Log);
@@ -120,6 +126,7 @@ fn home_and_end_jump_in_every_pane() {
     assert!(a.action_sel[0] > 0, "End selects the last action");
     code(&mut a, KeyCode::Home);
     assert_eq!(a.action_sel[0], 0);
+    code(&mut a, KeyCode::Left);
     code(&mut a, KeyCode::Left);
     code(&mut a, KeyCode::End);
     assert_eq!(a.connector.get(), 2, "End selects the last connector");
@@ -175,7 +182,7 @@ fn accelerators_work_only_inside_their_own_tab() {
 fn clearing_the_log_needs_confirmation() {
     let mut a = app();
     update(&mut a, Msg::Event(frame_event(1)));
-    press(&mut a, "6");
+    press(&mut a, "5");
     press(&mut a, "c");
     assert!(matches!(a.mode, Mode::Confirm(_)));
     press(&mut a, "n");
@@ -222,9 +229,9 @@ fn palette_runs_disabled_actions_into_a_reason_and_escape_closes() {
 fn modes_own_their_keys() {
     let mut a = app();
     press(&mut a, "?");
-    assert!(matches!(a.mode, Mode::Help));
+    assert!(matches!(a.mode, Mode::Help(_)));
     press(&mut a, "3x5");
-    assert!(matches!(a.mode, Mode::Help), "help swallows other keys");
+    assert!(matches!(a.mode, Mode::Help(_)), "help swallows other keys");
     assert_eq!(a.tab, Tab::Station);
     assert!(!a.quit);
     code(&mut a, KeyCode::Esc);
@@ -299,7 +306,7 @@ fn stop_reason_choice_sends_stop() {
 fn log_filter_search_and_pause_do_not_touch_the_log_itself() {
     let mut a = app();
     update(&mut a, Msg::Event(frame_event(1)));
-    press(&mut a, "6");
+    press(&mut a, "5");
     let before = a.log.len();
     press(&mut a, "f");
     assert_eq!(a.log.filter.label(), "calls");
@@ -321,7 +328,7 @@ fn log_filter_search_and_pause_do_not_touch_the_log_itself() {
 fn enter_on_a_log_row_opens_the_detail_view() {
     let mut a = app();
     update(&mut a, Msg::Event(frame_event(1)));
-    press(&mut a, "6");
+    press(&mut a, "5");
     code(&mut a, KeyCode::Enter);
     let Mode::Detail(d) = &a.mode else { panic!() };
     assert_eq!(d.title, "Heartbeat");
@@ -336,7 +343,7 @@ fn enter_on_a_log_row_opens_the_detail_view() {
 fn export_uses_a_default_path_and_writes_jsonl() {
     let mut a = app();
     update(&mut a, Msg::Event(frame_event(1)));
-    press(&mut a, "6e");
+    press(&mut a, "5e");
     let Mode::Form(f) = &a.mode else { panic!() };
     assert!(f.fields[0].input.text().starts_with("./kirby-ocpp-"));
     let fx = code(&mut a, KeyCode::Enter);
@@ -353,7 +360,7 @@ fn export_uses_a_default_path_and_writes_jsonl() {
 fn raw_call_form_sends_validated_payload() {
     let mut a = app();
     connected(&mut a);
-    press(&mut a, "5r");
+    press(&mut a, "4r");
     let Mode::Form(f) = &a.mode else { panic!() };
     assert_eq!(f.kind, FormKind::Raw);
     let fx = code(&mut a, KeyCode::Enter);
@@ -366,7 +373,7 @@ fn raw_call_form_sends_validated_payload() {
 #[test]
 fn scenario_runs_one_at_a_time_and_reports_failures() {
     let mut a = app();
-    press(&mut a, "7");
+    press(&mut a, "6");
     let fx = press(&mut a, "o");
     assert!(matches!(&fx[..], [Effect::RunScenario(s)] if s.name == "charge-session"));
     assert!(a.scenario.running);

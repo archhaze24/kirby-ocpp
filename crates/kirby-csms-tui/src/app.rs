@@ -92,7 +92,8 @@ pub struct Confirm {
 pub enum Mode {
     Normal,
     Input(Input),
-    Help,
+    /// The help popup: open section and scroll.
+    Help(kirby_ocpp_tui::help::HelpState),
     Detail(Detail),
     Palette(Palette),
     Form(Box<Form>),

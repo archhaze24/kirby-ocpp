@@ -399,9 +399,9 @@ fn lag_resyncs_and_says_so() {
 fn quit_help_view_and_pane_keys() {
     let (mut app, _) = app_with(&["A"]);
     press(&mut app, KeyCode::Char('?'));
-    assert!(matches!(app.mode, Mode::Help));
+    assert!(matches!(app.mode, Mode::Help(_)));
     press(&mut app, KeyCode::Char('x'));
-    assert!(matches!(app.mode, Mode::Help));
+    assert!(matches!(app.mode, Mode::Help(_)));
     press(&mut app, KeyCode::Esc);
     assert!(matches!(app.mode, Mode::Normal));
     press(&mut app, KeyCode::Char('a'));

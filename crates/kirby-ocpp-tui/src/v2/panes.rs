@@ -13,7 +13,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph, Row, Table, TableState};
 
 use super::actions::Tab2;
 use super::app::App2;
@@ -21,8 +21,8 @@ use crate::app::{Focus, StepState};
 use crate::logview::{FrameKind, LogEntry};
 use crate::text::{sanitize, truncate};
 use crate::theme::{Level, level_mark};
-use crate::ui::dim;
 use crate::ui::overlays::SELECTED;
+use crate::ui::{count_of, dim, scrolled_text, window_start, with_markers, wrap_lines};
 
 /// Characters of a transaction id that the list row shows.
 const SHORT_TX: usize = 8;
@@ -151,15 +151,41 @@ fn evse_rows(app: &App2, n: usize) -> (Vec<Row<'static>>, Option<usize>) {
 pub(super) fn evses(f: &mut Frame<'_>, app: &App2, area: Rect) {
     let n = evse_cols(area.width.saturating_sub(2));
     let (rows, selected) = evse_rows(app, n);
+    let total = rows.len();
+    // Borders and the header row take three rows; the rest is the window over the list.
+    let room = usize::from(area.height.saturating_sub(3));
+    let start = window_start(selected.unwrap_or(0), room, total);
+    let rows: Vec<Row<'static>> = rows.into_iter().skip(start).take(room).collect();
     let widths = EVSE_COLS
         .iter()
         .take(n)
         .map(|&(_, w)| Constraint::Length(w));
+    let evse_no = app
+        .snapshot
+        .evses
+        .iter()
+        .position(|e| e.id == app.evse)
+        .unwrap_or(0);
     let table = Table::new(rows, widths)
         .header(Row::new(EVSE_COLS.iter().take(n).map(|c| c.0)).style(dim()))
         .row_highlight_style(SELECTED)
-        .block(block("EVSEs".to_owned(), app.focus == Focus::Connectors));
-    let mut state = TableState::default().with_selected(selected);
+        .block(with_markers(
+            block(
+                // The count is of EVSEs; the rows can be more (one per extra connector).
+                format!(
+                    "EVSEs{}",
+                    if total > room {
+                        format!(" {}/{}", evse_no + 1, app.snapshot.evses.len())
+                    } else {
+                        String::new()
+                    }
+                ),
+                app.focus == Focus::Connectors,
+            ),
+            start,
+            total.saturating_sub(start + room),
+        ));
+    let mut state = TableState::default().with_selected(selected.map(|s| s - start));
     f.render_stateful_widget(table, area, &mut state);
 }
 
@@ -181,11 +207,14 @@ pub(super) fn details(f: &mut Frame<'_>, app: &App2, area: Rect) {
         Tab2::Evse => (format!("EVSE {}", app.evse), evse_lines(app, false)),
         Tab2::Transaction => (format!("EVSE {}", app.evse), evse_lines(app, true)),
     };
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(block(title, false)),
+    let lines = wrap_lines(lines, usize::from(area.width.saturating_sub(2)));
+    scrolled_text(
+        f,
         area,
+        block(title, app.focus == Focus::Details),
+        lines,
+        app.details.scroll,
+        &app.details.max,
     );
 }
 
@@ -401,9 +430,14 @@ fn scenario_lines(app: &App2) -> Vec<Line<'static>> {
 }
 
 pub(super) fn actions(f: &mut Frame<'_>, app: &App2, area: Rect) {
-    let items: Vec<ListItem<'_>> = app
-        .tab_actions()
+    let idx = app.tab_actions();
+    let room = usize::from(area.height.saturating_sub(2));
+    let selected = app.action_sel[app.tab.index()];
+    let start = window_start(selected, room, idx.len());
+    let items: Vec<ListItem<'_>> = idx
         .iter()
+        .skip(start)
+        .take(room)
         .map(|&i| {
             let a = &app.catalog[i];
             let key = a.key.map_or_else(|| "  ".to_owned(), |k| format!("{k} "));
@@ -418,11 +452,21 @@ pub(super) fn actions(f: &mut Frame<'_>, app: &App2, area: Rect) {
             ]))
         })
         .collect();
-    let mut state = ListState::default().with_selected(Some(app.action_sel[app.tab.index()]));
-    let list = List::new(items).highlight_style(SELECTED).block(block(
-        format!("Actions: {}", app.tab.title()),
-        app.focus == Focus::Actions,
-    ));
+    let mut state = ListState::default().with_selected(Some(selected.saturating_sub(start)));
+    let list = List::new(items)
+        .highlight_style(SELECTED)
+        .block(with_markers(
+            block(
+                format!(
+                    "Actions: {}{}",
+                    app.tab.title(),
+                    count_of(selected, room, idx.len())
+                ),
+                app.focus == Focus::Actions,
+            ),
+            start,
+            idx.len().saturating_sub(start + room),
+        ));
     f.render_stateful_widget(list, area, &mut state);
 }
 
@@ -529,9 +573,10 @@ pub(super) fn log(f: &mut Frame<'_>, app: &App2, area: Rect) {
         title.push_str(" PAUSED");
     }
     f.render_widget(
-        Paragraph::new(lines).block(block(
-            truncate(&title, inner_w.max(1)),
-            app.focus == Focus::Log,
+        Paragraph::new(lines).block(with_markers(
+            block(truncate(&title, inner_w.max(1)), app.focus == Focus::Log),
+            top,
+            visible.len().saturating_sub(top + h),
         )),
         area,
     );

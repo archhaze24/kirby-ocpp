@@ -1,7 +1,6 @@
 //! Drawing of the OCPP 2.x UI. `draw2` is a pure function of the [`App2`]; it never mutates
 //! it.
 
-use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::v2::types::WireEnum;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -13,9 +12,10 @@ use super::actions::Tab2;
 use super::app::{App2, ConfirmAction2, Mode2};
 use super::{browser, panes};
 use crate::app::{Focus, NoticeLevel};
+use crate::help::{HelpSection, row};
 use crate::text::{sanitize, truncate, truncate_middle, width};
 use crate::theme::{Level, level_mark};
-use crate::ui::overlays::{self, PendingRow};
+use crate::ui::overlays::{self, PendingRow, help_everywhere, tab_rows};
 use crate::ui::{MIN_SIZE, WIDE, chip, dim, hint_line, hint_line_pinned, too_small};
 
 /// Draws the whole UI: header, panes, footer and the overlay of the current mode.
@@ -46,6 +46,15 @@ pub(crate) fn draw_in(f: &mut Frame<'_>, app: &App2, area: Rect) {
 }
 
 fn draw_body(f: &mut Frame<'_>, app: &App2, area: Rect) {
+    if app.zoom {
+        match app.focus {
+            Focus::Connectors => panes::evses(f, app, area),
+            Focus::Details => panes::details(f, app, area),
+            Focus::Actions => panes::actions(f, app, area),
+            Focus::Log => panes::log(f, app, area),
+        }
+        return;
+    }
     if area.width >= WIDE {
         let [evses, mid, log] = Layout::horizontal([
             Constraint::Percentage(28),
@@ -67,8 +76,8 @@ fn draw_body(f: &mut Frame<'_>, app: &App2, area: Rect) {
             .map(|e| e.connectors.len().max(1))
             .sum();
         let rows = u16::try_from(rows).unwrap_or(u16::MAX);
-        let list_h = (rows + 3).min(7).min(area.height / 3).max(3);
-        let mid_h = (area.height * 2 / 5).clamp(3, 14);
+        let list_h = crate::ui::list_height(usize::from(rows), area.height, 7);
+        let mid_h = crate::ui::band_height(area.height, list_h);
         let [evses, mid, log] = Layout::vertical([
             Constraint::Length(list_h),
             Constraint::Length(mid_h),
@@ -82,6 +91,9 @@ fn draw_body(f: &mut Frame<'_>, app: &App2, area: Rect) {
                     .areas(mid);
             panes::details(f, app, details);
             panes::actions(f, app, actions);
+        } else if app.focus == Focus::Details {
+            // No room for both: the pane that has the keys takes the place.
+            panes::details(f, app, mid);
         } else {
             panes::actions(f, app, mid);
         }
@@ -277,12 +289,18 @@ fn hints(app: &App2) -> Vec<(&'static str, &'static str)> {
             } else if app.focus == Focus::Actions {
                 v.push(("Enter", "run"));
             }
+            if app.zoom {
+                v.insert(0, ("z/Esc", "back"));
+            }
             v.extend([("↑↓", "move"), ("←→", "pane"), ("1-6", "tab")]);
             if app.in_fleet {
                 // `[ ]` goes last: at 80 columns the line has room for one hint less.
                 v.extend([("< >", "station"), ("q", "quit"), ("[ ]", "EVSE")]);
             } else {
                 v.extend([("[ ]", "EVSE"), ("q", "quit")]);
+            }
+            if !app.zoom {
+                v.push(("z", "zoom"));
             }
             v
         }
@@ -295,7 +313,7 @@ fn hints(app: &App2) -> Vec<(&'static str, &'static str)> {
             ("←→", "choose/move"),
         ],
         Mode2::Choice(_) => vec![("Enter", "select"), ("Esc", "cancel"), ("↑↓", "move")],
-        Mode2::Help => vec![("Esc", "close")],
+        Mode2::Help(_) => vec![("←→", "section"), ("↑↓", "scroll"), ("Esc", "close")],
         Mode2::Detail(_) => vec![("Esc", "close"), ("↑↓", "scroll"), ("c", "copy")],
         Mode2::Confirm(c) if c.action == ConfirmAction2::Quit => {
             vec![("y/q", "quit"), ("n/Esc", "stay")]
@@ -320,10 +338,12 @@ fn draw_overlay(f: &mut Frame<'_>, app: &App2, area: Rect) {
             app.catalog.get(i).map_or_else(
                 || (String::new(), true),
                 |a| {
+                    // A letter works on its own tab only, so other rows show none.
+                    let key = if a.tab == app.tab { a.key } else { None };
                     (
                         format!(
                             "{}{}: {}",
-                            overlays::key_column(a.key),
+                            overlays::key_column(key),
                             a.tab.title(),
                             a.label
                         ),
@@ -334,16 +354,8 @@ fn draw_overlay(f: &mut Frame<'_>, app: &App2, area: Rect) {
         }),
         Mode2::Form(form) => overlays::form(f, form, area),
         Mode2::Choice(c) => overlays::choice(f, c, area),
-        Mode2::Help => {
-            let lines = if app.in_fleet {
-                help_lines2_for(app.protocol, true)
-            } else {
-                help_lines2(app.protocol)
-            };
-            let lines: Vec<&str> = lines.iter().map(String::as_str).collect();
-            overlays::help(f, &lines, area);
-        }
-        Mode2::Detail(d) => overlays::detail(f, d, area),
+        Mode2::Help(state) => crate::help::draw(f, area, &help_sections2(app), state),
+        Mode2::Detail(d) => overlays::detail(f, d, area, &app.details.popup_max),
         Mode2::Confirm(c) => {
             overlays::confirm(f, &c.message, c.action == ConfirmAction2::Quit, area);
         }
@@ -363,80 +375,49 @@ fn draw_overlay(f: &mut Frame<'_>, app: &App2, area: Rect) {
     }
 }
 
-const HELP2: &[&str] = &[
-    "First steps: the station connects and boots at startup (the header shows the state; on the",
-    "     Station tab x disconnects and c connects again). Press : and type a name",
-    "     (BootNotification, Heartbeat, Present token) to run it; tab 6 runs scenarios.",
-    "     Everything lands in the log.",
-    "",
-    "1-6 / Tab / Shift-Tab   switch tab",
-    "Up Down j k             move in the focused pane",
-    "PgUp PgDn Home End      page / first / last (log: oldest / newest)",
-    "Left Right              change focused pane (EVSEs, actions, log)",
-    "[ ]                     previous / next EVSE",
-    "Enter                   run action / open log row",
-    "letters                 accelerators of the CURRENT tab only (shown in the list)",
-    ":  or Ctrl-P            command palette (every action, fuzzy search)",
-    "/                       search where there is a search (log pane of the Logs tab, device",
-    "                        model), otherwise the command palette",
-    "W                       commands waiting for the CSMS, with their elapsed time",
-    "Esc                     close dialog / clear log search",
-    "?                       this help",
-    "q or Ctrl-C             quit (asks while a scenario or transaction runs)",
-    "",
-    "Station tab: b BootNotification, h Heartbeat, r reconnect, x disconnect, c connect,",
-    "     K device model (station-level variables: / filters, Enter edits a writable one),",
-    "     S security event (type and optional techInfo)",
-    "EVSE tab: p plug / unplug, f fault / clear fault, n StatusNotification. The connector",
-    "     status is derived from the EVSE state and cannot be set by hand.",
-    "Transaction tab: a Authorize, t present token (what it starts depends on TxStartPoint),",
-    "     e stop transaction with a reason, m meter +120 Wh, c meter custom, g charging state,",
-    "     i transaction limit (2.1), P priority charging on / off (2.1)",
-    "Data tab: d DataTransfer, v vendor ping, r raw CALL (checked against the schema)",
-    "",
-    "Log pane: Enter opens the detail of the selected row on every tab. On the Logs tab (5):",
-    "     y copy row, Y copy visible, f filter, s search, p pause/follow, G newest,",
-    "     e export JSONL, c clear (asks first)",
-    "Scenarios tab (6): o w s i run the first scenarios, l load a file, x cancel",
-    "",
-    "Not available for OCPP 2.0.1: setting a connector status, rules, configuration keys (the",
-    "     device model replaces them), certificates, diagnostics, and firmware.",
-    "Not in the terminal UI: browsers for the local authorization list and charging",
-    "     profiles (the Station tab shows their counts).",
-    "",
-    "Without color (--color never or NO_COLOR): chips and selections are reverse video, errors",
-    "     bold, and log lines start with a marker: i info, + success, ! warning, x error.",
-];
-
-/// The lines of the help popup.
-pub fn help_lines2(protocol: Protocol) -> Vec<String> {
-    help_lines2_for(protocol, false)
-}
-
-/// The lines of the help popup; `fleet` adds the selector keys of a fleet.
-pub fn help_lines2_for(protocol: Protocol, fleet: bool) -> Vec<String> {
-    let mut lines: Vec<String> = HELP2
-        .iter()
-        // The 2.1 keys have no entry on a 2.0.1 station.
-        .filter(|line| protocol == Protocol::V21 || !line.contains("transaction limit (2.1)"))
-        .map(|line| {
-            if protocol != Protocol::V21 && line.ends_with("g charging state,") {
-                return line.trim_end_matches(',').to_owned() + ".";
-            }
-            let line = if fleet && line.starts_with("q or Ctrl-C ") {
-                "q or Ctrl-C             quit (asks while a scenario or transaction runs, or in a fleet)"
-            } else {
-                line
-            };
-            if protocol == Protocol::V21 {
-                line.replace("OCPP 2.0.1", "OCPP 2.1")
-            } else {
-                line.to_owned()
-            }
-        })
-        .collect();
-    if fleet {
-        lines.extend(overlays::FLEET_HELP.iter().map(|l| (*l).to_owned()));
+/// The sections of the help popup of an OCPP 2.x station: the current tab first.
+pub fn help_sections2(app: &App2) -> Vec<HelpSection> {
+    let mut lines = Vec::new();
+    match app.tab {
+        Tab2::Station => lines.push(row(
+            "",
+            "The station connects and boots at startup; the header shows the state.",
+        )),
+        Tab2::Evse => lines.push(row(
+            "",
+            "Plug and faults of the selected EVSE ([ ] picks another). The connector status follows the EVSE state and cannot be set by hand.",
+        )),
+        Tab2::Transaction => lines.push(row(
+            "Flow",
+            "p plug → a authorize → t start/present → m meter → e stop (p is on the EVSE tab; t acts as TxStartPoint says)",
+        )),
+        Tab2::Data => lines.push(row(
+            "",
+            "Vendor messages and raw CALLs checked against the OCPP schema.",
+        )),
+        Tab2::Logs => lines.push(row(
+            "",
+            "The log pane has the keys; Enter opens the detail of the selected row.",
+        )),
+        Tab2::Scenarios => lines.push(row(
+            "",
+            "Run a built-in scenario or a scenario file; the Scenario pane shows the steps.",
+        )),
     }
-    lines
+    lines.extend(tab_rows(
+        app.catalog
+            .iter()
+            .filter(|a| a.tab == app.tab)
+            .map(|a| (a.key, a.label.as_str())),
+    ));
+    if app.tab == Tab2::Station {
+        lines.push(row(
+            "",
+            "In the device model, / filters and Enter edits a writable variable.",
+        ));
+    }
+    vec![
+        HelpSection::new("This tab", lines),
+        help_everywhere("1-6", "EVSE", Tab2::Logs.index() + 1, app.in_fleet),
+    ]
 }

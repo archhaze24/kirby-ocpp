@@ -17,17 +17,71 @@ use kirby_ocpp_core::ws::ConnectionState;
 use crate::actions::{self, ActionDef, ActionId, Context, Tab};
 use crate::browser::{Browser, Page};
 use crate::forms::{Choice, ChoiceKind, Form, Submitted};
+use crate::help::HelpState;
 use crate::logview::{LogEntry, LogStore};
 use crate::palette::Palette;
 
 /// Notices stay for this many ticks (about three seconds at 30 fps).
 const NOTICE_TICKS: u32 = 100;
 
+/// The pane that takes the keys. `Connectors` stands for the connector (or EVSE) list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     Connectors,
+    Details,
     Actions,
     Log,
+}
+
+impl Focus {
+    /// The panes in the order `←` `→` walk them.
+    pub const ORDER: [Self; 4] = [Self::Connectors, Self::Details, Self::Actions, Self::Log];
+
+    /// The pane `d` steps from this one, stopping at the ends.
+    #[must_use]
+    pub fn shifted(self, d: isize) -> Self {
+        let i = Self::ORDER.iter().position(|x| *x == self).unwrap_or(2);
+        Self::ORDER[i.saturating_add_signed(d).min(Self::ORDER.len() - 1)]
+    }
+}
+
+/// How far the details pane is scrolled. The draw records how far scrolling is useful, so the
+/// keys can stop there.
+#[derive(Debug)]
+pub struct DetailsView {
+    pub scroll: usize,
+    /// Largest useful `scroll`, as of the last draw (`usize::MAX` before the first).
+    pub max: std::cell::Cell<usize>,
+    /// The same for the detail popup (a log row, a response), which scrolls with its own keys.
+    pub popup_max: std::cell::Cell<usize>,
+}
+
+impl Default for DetailsView {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DetailsView {
+    pub fn new() -> Self {
+        Self {
+            scroll: 0,
+            max: std::cell::Cell::new(usize::MAX),
+            popup_max: std::cell::Cell::new(usize::MAX),
+        }
+    }
+
+    pub fn scroll_by(&mut self, d: isize) {
+        self.scroll = self
+            .scroll
+            .min(self.max.get())
+            .saturating_add_signed(d)
+            .min(self.max.get());
+    }
+
+    pub fn edge(&mut self, last: bool) {
+        self.scroll = if last { self.max.get() } else { 0 };
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +150,8 @@ pub enum Mode {
     Palette(Palette),
     Form(Form),
     Choice(Choice),
-    Help,
+    /// The help popup: open section and scroll.
+    Help(HelpState),
     Detail(Detail),
     Confirm(Confirm),
     /// Configuration keys, local list and charging profiles (see [`crate::browser`]).
@@ -116,6 +171,9 @@ pub struct PendingCall {
     pub action: Option<String>,
     /// When the command was sent.
     pub since: Instant,
+    /// What the status line says when the command succeeds (see [`crate::done`]); `None`
+    /// leaves the generic text.
+    pub done: Option<String>,
 }
 
 /// The action of the CALL a command waits for, when the command is one that may be cancelled.
@@ -155,7 +213,7 @@ impl Mode {
             Self::Palette(_) => "palette",
             Self::Form(_) => "form",
             Self::Choice(_) => "choice",
-            Self::Help => "help",
+            Self::Help(_) => "help",
             Self::Detail(_) => "detail",
             Self::Confirm(_) => "confirm",
             Self::Browser(_) => "browser",
@@ -268,6 +326,12 @@ pub struct App {
     pub mono: bool,
     /// Clock of the log rows.
     pub time: TimeMode,
+    /// The idTag last used in the Authorize or Start forms; the forms open with it.
+    pub last_id_tag: String,
+    /// The focused pane fills the whole body (`z`).
+    pub zoom: bool,
+    /// Scroll of the details pane.
+    pub details: DetailsView,
 }
 
 impl App {
@@ -301,6 +365,9 @@ impl App {
             now: Instant::now(),
             mono: false,
             time: TimeMode::Utc,
+            last_id_tag: String::new(),
+            zoom: false,
+            details: DetailsView::new(),
         }
     }
 
@@ -392,6 +459,7 @@ impl App {
 
     pub fn set_tab(&mut self, tab: Tab) {
         self.tab = tab;
+        self.details.scroll = 0;
         self.focus = if tab == Tab::Logs {
             Focus::Log
         } else {
@@ -443,7 +511,7 @@ impl App {
         let c = self.connector;
         let snap_conn = self.snapshot.connector(c).cloned();
         let send = |fx: &mut Vec<Effect>, command: Command| {
-            let label = command.name().to_owned();
+            let label = command.name().replace('_', " ");
             fx.push(Effect::Send {
                 label,
                 command,
@@ -489,9 +557,13 @@ impl App {
                     self.mode = Mode::Choice(Choice::new(ChoiceKind::Fault, c));
                 }
             }
-            ActionId::Authorize => self.mode = Mode::Form(Form::authorize()),
+            ActionId::Authorize => {
+                self.mode = Mode::Form(Form::authorize().prefilled(0, &self.last_id_tag));
+            }
             ActionId::StartTx => {
-                self.mode = Mode::Form(Form::start_tx(c, self.max_connector()));
+                self.mode = Mode::Form(
+                    Form::start_tx(c, self.max_connector()).prefilled(1, &self.last_id_tag),
+                );
             }
             ActionId::StopTx => self.mode = Mode::Choice(Choice::new(ChoiceKind::StopReason, c)),
             ActionId::Meter120 => send(
@@ -601,7 +673,7 @@ impl App {
     /// Applies a validated form.
     pub fn apply_form(&mut self, done: Submitted, fx: &mut Vec<Effect>) {
         let send = |fx: &mut Vec<Effect>, command: Command, show_response: bool| {
-            let label = command.name().to_owned();
+            let label = command.name().replace('_', " ");
             fx.push(Effect::Send {
                 label,
                 command,
@@ -609,8 +681,12 @@ impl App {
             });
         };
         match done {
-            Submitted::Authorize { id_tag } => send(fx, Command::Authorize { id_tag }, false),
+            Submitted::Authorize { id_tag } => {
+                self.last_id_tag = id_tag.to_string();
+                send(fx, Command::Authorize { id_tag }, false);
+            }
             Submitted::StartTx { connector, id_tag } => {
+                self.last_id_tag = id_tag.to_string();
                 send(fx, Command::StartTransaction { connector, id_tag }, false);
             }
             Submitted::Meter {
@@ -789,7 +865,7 @@ pub fn event_line(e: &LogEntry) -> String {
     serde_json::to_string(&e.event).unwrap_or_default()
 }
 
-fn capitalize(s: &str) -> String {
+pub(crate) fn capitalize(s: &str) -> String {
     let mut c = s.chars();
     c.next()
         .map(|f| f.to_uppercase().chain(c).collect())
@@ -849,7 +925,11 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 app.connector = first.id;
             }
         }
-        Msg::Event(ev) => app.log.push(ev),
+        Msg::Event(ev) => {
+            if !crate::logview::is_acceptance_line(&ev) {
+                app.log.push(ev);
+            }
+        }
         Msg::Scenario(p) => apply_progress(&mut app.scenario, *p),
         Msg::ScenarioDone(report) => {
             app.scenario.running = false;
@@ -891,13 +971,15 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
             show_response,
             result,
         } => {
-            if let Some(i) = app.pending.iter().position(|p| p.label == label) {
-                app.pending.remove(i);
-            }
+            let done = app
+                .pending
+                .iter()
+                .position(|p| p.label == label)
+                .and_then(|i| app.pending.remove(i).done);
             if let Mode::Pending(sel) = &mut app.mode {
                 *sel = (*sel).min(app.pending.len().saturating_sub(1));
             }
-            command_done(app, &label, show_response, result);
+            command_done(app, &label, show_response, result, done);
         }
         Msg::Notice(level, text) => app.notify(level, text),
         Msg::Signal => app.quit = true,
@@ -908,6 +990,7 @@ pub fn update(app: &mut App, msg: Msg) -> Vec<Effect> {
                 label: label.clone(),
                 action: cancellable_action(command),
                 since: Instant::now(),
+                done: crate::done::done_text(command, &app.snapshot),
             });
         }
     }
@@ -962,7 +1045,13 @@ fn apply_progress(view: &mut ScenarioView, p: ScenarioProgress) {
     }
 }
 
-fn command_done(app: &mut App, label: &str, show_response: bool, result: Result<Outcome, String>) {
+fn command_done(
+    app: &mut App,
+    label: &str,
+    show_response: bool,
+    result: Result<Outcome, String>,
+    done: Option<String>,
+) {
     match result {
         Err(e) => app.notify(NoticeLevel::Error, format!("{label}: {e}")),
         Ok(Outcome::Response { payload }) if show_response => {
@@ -986,16 +1075,19 @@ fn command_done(app: &mut App, label: &str, show_response: bool, result: Result<
         Ok(Outcome::TransactionStarted { connector, tx_id }) => {
             app.notify(
                 NoticeLevel::Success,
-                format!("transaction {tx_id} started on connector {connector}"),
+                format!("Transaction {tx_id} started on connector {connector}"),
             );
         }
         Ok(Outcome::TransactionRejected { status }) => {
-            app.notify(NoticeLevel::Error, format!("start rejected: {status}"));
+            app.notify(NoticeLevel::Error, format!("Start rejected: {status}"));
         }
         Ok(Outcome::ConnectorAdded { connector }) => {
-            app.notify(NoticeLevel::Success, format!("connector {connector} added"));
+            app.notify(NoticeLevel::Success, format!("Added connector {connector}"));
         }
-        Ok(_) => app.notify(NoticeLevel::Success, format!("{label}: ok")),
+        Ok(_) => {
+            let text = done.unwrap_or_else(|| format!("{}: done", capitalize(label)));
+            app.notify(NoticeLevel::Success, text);
+        }
     }
 }
 

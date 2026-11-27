@@ -20,7 +20,6 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 
 use crate::actions::ScopedRule;
 use crate::app::{App, ConfirmAction, Focus, Mode};
-use crate::keys::{HELP, PALETTE_2X_HELP, PANES_2X_HELP};
 
 pub use layout::WIDE;
 pub const MIN_SIZE: (u16, u16) = (24, 8);
@@ -254,7 +253,7 @@ fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             v
         }
         Mode::Input(_) => vec![("Enter", "keep"), ("Esc", "clear")],
-        Mode::Help => vec![("Esc", "close")],
+        Mode::Help(_) => vec![("←→", "section"), ("↑↓", "scroll"), ("Esc", "close")],
         Mode::Detail(_) => vec![("Esc", "close"), ("↑↓", "scroll"), ("c", "copy")],
         Mode::Palette(_) => vec![("Enter", "run"), ("↑↓", "choose"), ("Esc", "close")],
         Mode::Form(_) => vec![
@@ -310,50 +309,8 @@ fn overlay(f: &mut Frame<'_>, app: &App, area: Rect) {
             let x = inner.x + u16::try_from(cursor).unwrap_or(0);
             f.set_cursor_position((x.min(inner.right().saturating_sub(1)), inner.y));
         }
-        Mode::Help => {
-            let rect_w = kirby_ocpp_tui::ui::popup_width(area.width, 96);
-            let catalog = app.catalog();
-            let dynamic = catalog
-                .iter()
-                .any(|a| a.protocol == "ocpp2.0.1" || a.protocol == "ocpp2.1");
-            let action_lines: Vec<String> = catalog
-                .iter()
-                .filter_map(|a| a.key.map(|key| format!("{key}  {}", a.label())))
-                .collect();
-            // The 2.x help ends its common part with the heading of the action list, which
-            // the table-driven action lines then follow.
-            let mut lines: Vec<&str> = if dynamic {
-                HELP[..14]
-                    .iter()
-                    .map(|l| {
-                        if l.starts_with("Left Right Tab") {
-                            PANES_2X_HELP
-                        } else {
-                            l
-                        }
-                    })
-                    .collect()
-            } else {
-                HELP.to_vec()
-            };
-            if dynamic {
-                lines.extend(action_lines.iter().map(String::as_str));
-                lines.push(PALETTE_2X_HELP);
-                lines.push("Log pane: Enter detail, s search, y copy, f filter, p pause/follow");
-                lines.push("Details pane: Up/Down select transaction, Enter opens it");
-            }
-            let wrapped =
-                kirby_ocpp_tui::text::wrap_help(&lines, usize::from(rect_w.saturating_sub(2)));
-            let mut wrapped = wrapped;
-            if wrapped.len() + 2 > usize::from(area.height) {
-                // A short terminal: drop the spacer lines so more of the help fits.
-                wrapped.retain(|l| !l.is_empty());
-            }
-            let h = u16::try_from(wrapped.len() + 2).unwrap_or(u16::MAX);
-            let rect = centered(area, rect_w, h.min(area.height));
-            let inner = popup(f, rect, "Help");
-            let lines: Vec<Line<'_>> = wrapped.into_iter().map(Line::from).collect();
-            f.render_widget(Paragraph::new(lines), inner);
+        Mode::Help(state) => {
+            kirby_ocpp_tui::help::draw(f, area, &crate::help::sections(app), state);
         }
         Mode::Detail(d) => {
             let rect = centered(

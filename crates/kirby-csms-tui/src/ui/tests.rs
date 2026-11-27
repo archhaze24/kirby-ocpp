@@ -214,37 +214,112 @@ fn suspended_charging_states_stay_apart_at_every_width() {
     }
 }
 
+fn help_text(app: &App) -> String {
+    crate::help::sections(app)
+        .iter()
+        .flat_map(|s| s.lines.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn open_help(app: &mut App) {
+    app.mode = crate::app::Mode::Help(kirby_ocpp_tui::help::HelpState::default());
+}
+
 #[test]
-fn the_2_x_help_has_one_actions_heading_three_panes_and_the_palette_line() {
-    let mut app = app_v2();
-    app.mode = crate::app::Mode::Help;
-    let screen = render(&app, 140, 70);
-    assert_eq!(
-        screen.matches("Actions on the selected station").count(),
-        1,
+fn the_help_opens_on_the_focused_pane_then_tasks_then_general() {
+    let mut app = loaded();
+    let titles = |app: &App| -> Vec<String> {
+        crate::help::sections(app)
+            .into_iter()
+            .map(|s| s.title)
+            .collect()
+    };
+    assert_eq!(titles(&app), ["Stations", "Common tasks", "General"]);
+    app.focus = crate::app::Focus::Details;
+    assert_eq!(titles(&app)[0], "Details");
+    app.focus = crate::app::Focus::Log;
+    assert_eq!(titles(&app)[0], "Log");
+    open_help(&mut app);
+    let screen = render(&app, 100, 30);
+    assert!(
+        screen.contains("Help") && screen.contains("Common tasks"),
         "{screen}"
     );
     assert!(
-        screen.contains("s searches when the log is focused"),
-        "{screen}"
+        !screen.contains("First steps"),
+        "no intro paragraph: {screen}"
     );
-    assert!(
-        screen.contains("change focused pane (stations, details, log)"),
-        "{screen}"
-    );
-    assert!(
-        screen.contains("OCPP 2.x commands without a hotkey are in the palette (:)"),
-        "{screen}"
-    );
-    // The 1.6 help keeps its two panes.
-    let mut old = loaded();
-    old.mode = crate::app::Mode::Help;
-    let screen = render(&old, 140, 70);
-    assert!(
-        screen.contains("change focused pane (stations, log)"),
-        "{screen}"
-    );
-    assert!(!screen.contains("in the palette (:)"), "{screen}");
+}
+
+#[test]
+fn the_common_tasks_show_the_keys_of_the_selected_stations_protocol() {
+    let task_keys = |app: &App| -> Vec<char> {
+        let sections = crate::help::sections(app);
+        let tasks = sections.iter().find(|s| s.title == "Common tasks").unwrap();
+        tasks
+            .lines
+            .iter()
+            .filter_map(|l| l.chars().next().filter(|c| c.is_alphabetic()))
+            .collect()
+    };
+    for key in ['t', 'x', 'R', 'T', 'A', 'u', 'c', 'm'] {
+        assert!(task_keys(&loaded()).contains(&key), "1.6: {key}");
+    }
+    let v2 = app_v2();
+    for key in ['t', 'x', 'R', 'T', 'A', 'u', 'c', 'm'] {
+        assert!(task_keys(&v2).contains(&key), "2.x: {key}");
+    }
+    // The text names what the 2.x pair does.
+    assert!(help_text(&v2).contains("Change / read the variables"));
+    assert!(help_text(&loaded()).contains("Change / read the configuration"));
+}
+
+#[test]
+fn every_key_the_help_lists_does_something() {
+    let app = loaded();
+    for line in crate::help::sections(&app)[1..]
+        .iter()
+        .flat_map(|s| s.lines.iter())
+    {
+        // Rows are `key  text` with the keys padded to eleven cells; notes have no key.
+        let keys = line.get(..11).unwrap_or("").trim();
+        if keys.is_empty() || line.as_bytes().get(11) != Some(&b' ') {
+            continue;
+        }
+        for key in keys.split(' ').filter(|k| k.chars().count() == 1) {
+            let c = key.chars().next().unwrap();
+            let handled =
+                app.action_for_key(c).is_some() || matches!(c, '?' | 'q' | 'z' | 'a' | ':');
+            assert!(handled, "the help lists `{c}` but no action has it: {line}");
+        }
+    }
+}
+
+#[test]
+fn the_help_scrolls_and_fits_a_small_terminal() {
+    let mut app = loaded();
+    open_help(&mut app);
+    for (w, h) in [(80, 24), (24, 8)] {
+        let screen = render(&app, w, h);
+        assert!(screen.contains("Help"), "{w}x{h}\n{screen}");
+        for line in screen.lines() {
+            assert!(
+                kirby_ocpp_tui::text::width(line) <= usize::from(w),
+                "{line}"
+            );
+        }
+    }
+    // Down walks to the last row of the section and stops there.
+    for _ in 0..50 {
+        crate::tests::press(&mut app, crossterm::event::KeyCode::Down);
+    }
+    let screen = render(&app, 80, 10);
+    assert!(screen.contains('▲'), "{screen}");
+    assert!(!screen.contains('▼'), "{screen}");
+    crate::tests::press(&mut app, crossterm::event::KeyCode::Right);
+    let screen = render(&app, 80, 24);
+    assert!(screen.contains("Start a transaction"), "{screen}");
 }
 
 #[test]
@@ -452,9 +527,9 @@ fn filter_input_help_and_detail_overlays() {
         text: kirby_ocpp_tui::text::TextInput::new("cp-2"),
     });
     assert!(render(&app, 100, 30).contains("Filter stations"));
-    app.mode = Mode::Help;
+    open_help(&mut app);
     let s = render(&app, 100, 30);
-    assert!(s.contains("Help") && s.contains("all stations"), "{s}");
+    assert!(s.contains("Help") && s.contains("Common tasks"), "{s}");
     app.mode = Mode::Normal;
     app.focus = Focus::Log;
     app.open_detail();
@@ -490,7 +565,10 @@ fn hostile_station_ids_cannot_inject_escapes() {
 #[test]
 fn tiny_and_narrow_terminals_do_not_panic() {
     let mut app = loaded();
-    for mode in [Mode::Normal, Mode::Help] {
+    for mode in [
+        Mode::Normal,
+        Mode::Help(kirby_ocpp_tui::help::HelpState::default()),
+    ] {
         app.mode = mode;
         for (w, h) in [
             (0, 0),
@@ -678,9 +756,16 @@ mod commands {
         open(&mut app, 'P');
         let screen = render(&app, 120, 30);
         assert!(screen.contains("csChargingProfiles (JSON)"), "{screen}");
-        assert!(screen.contains("chargingSchedulePeriod"), "{screen}");
+        // A long template opens at its start, at 80x24 too.
+        assert!(screen.contains("{\"chargingProfileId\":1"), "{screen}");
+        let small = render(&app, 80, 24);
+        assert!(small.contains("{\"chargingProfileId\":1"), "{small}");
         press(&mut app, KeyCode::Tab);
         press(&mut app, KeyCode::End);
+        assert!(
+            render(&app, 120, 30).contains("chargingSchedulePeriod"),
+            "End shows the end of the template"
+        );
         press(&mut app, KeyCode::Backspace);
         let screen = render(&app, 120, 30);
         assert!(screen.contains("invalid JSON"), "{screen}");
@@ -783,6 +868,8 @@ mod commands {
     fn help_lists_the_action_keys() {
         let mut app = loaded();
         open(&mut app, '?');
+        // The tasks section, then the general one, on a wide and a narrow terminal.
+        press(&mut app, KeyCode::Right);
         for (w, h) in [(100, 50), (80, 40)] {
             let screen = render(&app, w, h);
             // Wrapped text: compare the words, not the line breaks and borders.
@@ -791,12 +878,18 @@ mod commands {
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
-            assert!(words.contains("command palette"), "{w}x{h}\n{screen}");
-            assert!(words.contains("t remote start"), "{w}x{h}\n{screen}");
-            assert!(words.contains("m response rule"), "{w}x{h}\n{screen}");
-            assert!(words.contains("n copy station id"), "{w}x{h}\n{screen}");
+            assert!(words.contains("Command palette"), "{w}x{h}\n{screen}");
+            assert!(words.contains("t Start a transaction"), "{w}x{h}\n{screen}");
+            assert!(
+                words.contains("m i M Scripted behavior"),
+                "{w}x{h}\n{screen}"
+            );
             assert!(screen.lines().all(|l| l.chars().count() <= usize::from(w)));
         }
+        press(&mut app, KeyCode::Right);
+        let screen = render(&app, 100, 40);
+        assert!(screen.contains("Copy the station id"), "{screen}");
+        assert!(screen.contains("Forget a disconnected station"), "{screen}");
     }
 
     #[test]
@@ -908,11 +1001,6 @@ fn footer_keeps_help_and_palette_hints_in_narrow_terminals() {
     }
 }
 
-#[test]
-fn help_starts_with_first_steps() {
-    assert!(crate::keys::HELP[0].starts_with("First steps"));
-}
-
 /// The keys a footer hint stands for.
 fn hint_codes(hint: &str) -> Vec<crossterm::event::KeyCode> {
     use crossterm::event::KeyCode;
@@ -978,14 +1066,24 @@ fn the_slash_hint_names_the_station_filter_only_on_the_station_list() {
 }
 
 #[test]
-fn every_hotkey_of_the_action_table_is_in_the_help() {
-    let help = crate::keys::HELP.join("\n");
-    for action in crate::actions::CATALOG {
-        let Some(key) = action.key else { continue };
-        assert!(
-            help.contains(&format!("{key} ")),
-            "the help does not mention the key {key} ({})",
-            action.label()
-        );
-    }
+fn a_palette_query_drops_weak_scattered_matches() {
+    let mut app = app_v2();
+    crate::tests::press(&mut app, crossterm::event::KeyCode::Char(':'));
+    crate::tests::type_text(&mut app, "tariff");
+    let screen = render(&app, 120, 40);
+    assert!(
+        screen.contains("tariff") || screen.contains("Tariff"),
+        "{screen}"
+    );
+    assert!(!screen.contains("Get variables"), "{screen}");
+}
+
+#[test]
+fn the_help_names_the_station_setup_for_a_new_charge_point() {
+    let app = loaded();
+    assert!(
+        help_text(&app).contains("ws://<host>:<port>/<prefix>/<station id>"),
+        "{}",
+        help_text(&app)
+    );
 }

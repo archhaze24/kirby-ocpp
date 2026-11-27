@@ -73,7 +73,9 @@ pub fn update2(app: &mut App2, msg: Msg2) -> Vec<Effect2> {
         }
         Msg2::Event(ev) => {
             count_security_event(app, &ev);
-            app.log.push(ev);
+            if !crate::logview::is_acceptance_line(&ev) {
+                app.log.push(ev);
+            }
         }
         Msg2::Scenario(p) => apply_progress(&mut app.scenario, *p),
         Msg2::ScenarioDone(report) => scenario_done(app, *report),
@@ -86,13 +88,15 @@ pub fn update2(app: &mut App2, msg: Msg2) -> Vec<Effect2> {
             show_response,
             result,
         } => {
-            if let Some(i) = app.pending.iter().position(|p| p.label == label) {
-                app.pending.remove(i);
-            }
+            let done = app
+                .pending
+                .iter()
+                .position(|p| p.label == label)
+                .and_then(|i| app.pending.remove(i).done);
             if let Mode2::Pending(sel) = &mut app.mode {
                 *sel = (*sel).min(app.pending.len().saturating_sub(1));
             }
-            command_done(app, &label, show_response, result);
+            command_done(app, &label, show_response, result, done);
         }
         Msg2::Notice(level, text) => app.notify(level, text),
         Msg2::Signal => app.quit = true,
@@ -119,6 +123,7 @@ pub fn update2(app: &mut App2, msg: Msg2) -> Vec<Effect2> {
                     _ => None,
                 }),
                 since: Instant::now(),
+                done: crate::done::done_text2(commands, &app.snapshot),
             });
         }
     }
@@ -221,6 +226,7 @@ fn command_done(
     label: &str,
     show_response: bool,
     result: Result<Outcome2, String>,
+    done: Option<String>,
 ) {
     match result {
         Err(e) => app.notify(NoticeLevel::Error, format!("{label}: {e}")),
@@ -257,9 +263,12 @@ fn command_done(
             transaction_id,
         }) => app.notify(
             NoticeLevel::Success,
-            format!("transaction {transaction_id} started on EVSE {evse}"),
+            format!("Transaction {transaction_id} started on EVSE {evse}"),
         ),
-        Ok(_) => app.notify(NoticeLevel::Success, format!("{label}: ok")),
+        Ok(_) => {
+            let text = done.unwrap_or_else(|| format!("{}: done", crate::app::capitalize(label)));
+            app.notify(NoticeLevel::Success, text);
+        }
     }
 }
 
@@ -342,9 +351,11 @@ impl App2 {
                 let activate = !self.selected_evse().is_some_and(|e| e.priority_charging);
                 plain(fx, Command2::SetPriorityCharging { evse, activate });
             }
-            ActionId2::Authorize => self.mode = Mode2::Form(authorize_form(self.protocol)),
+            ActionId2::Authorize => {
+                self.mode = Mode2::Form(authorize_form(self.protocol, &self.last_token));
+            }
             ActionId2::PresentToken => {
-                self.mode = Mode2::Form(present_token_form(evse, self.protocol));
+                self.mode = Mode2::Form(present_token_form(evse, self.protocol, &self.last_token));
             }
             ActionId2::StopTransaction => {
                 self.mode = Mode2::Choice(stop_reason_choice(evse, self.protocol));

@@ -22,9 +22,19 @@ use ratatui::buffer::Buffer;
 use serde_json::json;
 
 use super::super::browser::{BrowserEvent, DeviceBrowser, row_text};
-use super::super::ui::help_lines2;
+use super::super::ui::help_sections2;
 use super::super::{App2, Mode2, Tab2, draw2};
 use crate::app::{NoticeLevel, PendingCall};
+use crate::help::HelpState;
+
+/// Every help line of every section of `a`, as one text.
+fn help_text(a: &App2) -> String {
+    help_sections2(a)
+        .iter()
+        .flat_map(|s| s.lines.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 use crate::palette::Palette;
 
 const TX: &str = "0b9c1f3a-5d2e-4a77-9c61-7e8d2f4a1b30";
@@ -404,12 +414,13 @@ fn every_tab_is_free_of_1_6_words_at_every_size() {
     }
     // The overlays too.
     let mut a = app();
-    a.mode = Mode2::Help;
+    a.mode = Mode2::Help(HelpState::default());
     assert_no_16_words(&render(&a, 110, 60), "help");
-    assert_no_16_words(&help_lines2(Protocol::V201).join("\n"), "help text");
-    a.mode = Mode2::Palette(Palette::from_rows(&super::super::actions::palette_rows(
-        &a.catalog,
-    )));
+    assert_no_16_words(&help_text(&a), "help text");
+    a.mode = Mode2::Palette(Palette::from_rows(
+        &super::super::actions::palette_rows(&a.catalog),
+        a.tab.title(),
+    ));
     assert_no_16_words(&render(&a, 110, 60), "palette");
 }
 
@@ -428,8 +439,14 @@ fn small_and_narrow_terminals_do_not_panic() {
             let mut a = app();
             a.set_tab(tab);
             let _ = render(&a, w, h);
-            a.mode = Mode2::Help;
+            a.mode = Mode2::Help(HelpState::default());
             let _ = render(&a, w, h);
+            a.zoom = true;
+            for focus in crate::app::Focus::ORDER {
+                a.focus = focus;
+                let _ = render(&a, w, h);
+            }
+            a.zoom = false;
             a.mode = Mode2::DeviceModel(DeviceBrowser::new());
             let _ = render(&a, w, h);
             a.mode = Mode2::Pending(0);
@@ -488,6 +505,7 @@ fn hostile_station_and_csms_text_cannot_inject_escapes() {
         label: evil.to_owned(),
         action: None,
         since: std::time::Instant::now(),
+        done: None,
     });
     for tab in Tab2::ALL {
         a.set_tab(tab);
@@ -569,20 +587,25 @@ fn scenarios_tab_lists_the_built_in_scenarios() {
 
 #[test]
 fn the_2_1_actions_are_listed_and_in_the_help_only_for_2_1() {
-    let a = app();
+    let mut a = app();
+    a.set_tab(Tab2::Transaction);
     assert_eq!(a.protocol, Protocol::V201);
     assert!(
         a.catalog
             .iter()
             .all(|d| d.label != "Transaction limit..." && d.label != "Priority charging")
     );
-    let help = help_lines2(Protocol::V201).join("\n");
-    assert!(!help.contains("transaction limit"), "{help}");
-    assert!(!help.contains("priority"), "{help}");
-    assert!(help.contains("g charging state."), "{help}");
-    let help = help_lines2(Protocol::V21).join("\n");
-    assert!(help.contains("i transaction limit (2.1)"), "{help}");
-    assert!(help.contains("P priority charging"), "{help}");
+    let help = help_text(&a);
+    assert!(!help.contains("ransaction limit"), "{help}");
+    assert!(!help.to_lowercase().contains("priority"), "{help}");
+    assert!(help.contains("g  "), "{help}");
+    let mut snapshot = app().snapshot;
+    snapshot.protocol = "ocpp2.1".to_owned();
+    let mut v21 = App2::new(snapshot, "ws://csms.example/ocpp", "Acme");
+    v21.set_tab(Tab2::Transaction);
+    let help = help_text(&v21);
+    assert!(help.contains("Transaction limit"), "{help}");
+    assert!(help.contains("Priority charging"), "{help}");
 }
 
 #[test]
@@ -613,14 +636,9 @@ fn a_2_1_station_shows_the_2_1_version_where_2_0_1_shows_its_own() {
     assert_eq!(a.protocol, Protocol::V21);
     let text = render(&a, 110, 30);
     assert!(text.contains("OCPP 2.1"), "{text}");
-    a.mode = Mode2::Help;
+    a.mode = Mode2::Help(HelpState::default());
     let text = render(&a, 110, 60);
-    assert!(text.contains("Not available for OCPP 2.1"), "{text}");
-    assert!(
-        text.contains("browsers for the local authorization list"),
-        "{text}"
-    );
-    assert!(!text.contains("replaces them), local"), "{text}");
+    assert!(text.contains("This tab"), "{text}");
     assert!(!text.contains("2.0.1"), "{text}");
     for def in &a.catalog {
         assert!(!def.desc.contains("2.0.1"), "{}: {}", def.label, def.desc);
@@ -643,21 +661,21 @@ fn a_2_1_station_shows_the_2_1_version_where_2_0_1_shows_its_own() {
 #[test]
 fn overlays_draw_for_each_mode() {
     let mut a = app();
-    a.mode = Mode2::Help;
+    a.mode = Mode2::Help(HelpState::default());
     let text = render(&a, 110, 60);
-    assert!(text.contains("Not available for OCPP 2.0.1"), "{text}");
-    assert!(
-        text.contains("browsers for the local authorization list"),
-        "{text}"
-    );
-    assert!(text.contains("their counts)"), "{text}");
-    assert!(text.contains("d DataTransfer"), "{text}");
-    assert!(text.contains("r raw CALL"), "{text}");
-    assert!(text.contains("K device"), "{text}");
+    assert!(text.contains("This tab"), "{text}");
+    assert!(text.contains("Send BootNotification"), "{text}");
+    assert!(text.contains("Edit device model"), "{text}");
+    a.set_tab(Tab2::Data);
+    a.mode = Mode2::Help(HelpState::default());
+    let text = render(&a, 110, 60);
+    assert!(text.contains("d            Send DataTransfer"), "{text}");
+    assert!(text.contains("r            Send raw CALL"), "{text}");
 
-    a.mode = Mode2::Palette(Palette::from_rows(&super::super::actions::palette_rows(
-        &a.catalog,
-    )));
+    a.mode = Mode2::Palette(Palette::from_rows(
+        &super::super::actions::palette_rows(&a.catalog),
+        a.tab.title(),
+    ));
     let text = render(&a, 110, 40);
     assert!(text.contains("Command palette"), "{text}");
     assert!(text.contains("Station: Send BootNotification"), "{text}");
@@ -666,6 +684,7 @@ fn overlays_draw_for_each_mode() {
         label: "boot notification".to_owned(),
         action: Some("BootNotification".to_owned()),
         since: std::time::Instant::now(),
+        done: None,
     });
     a.mode = Mode2::Pending(0);
     let text = render(&a, 110, 30);
@@ -865,4 +884,91 @@ fn an_empty_transaction_limit_form_shows_why_it_stays_open() {
     let text = render(&a, 110, 40);
     assert!(text.contains("Transaction limit"), "{text}");
     assert!(text.contains("enter at least one limit"), "{text}");
+}
+
+#[test]
+fn palette_rows_show_a_letter_only_for_the_current_tab_and_hint_at_typing() {
+    use super::super::{Msg2, update2};
+    let mut a = app();
+    for code in [KeyCode::Char('3'), KeyCode::Char(':')] {
+        update2(&mut a, Msg2::Key(press(code)));
+    }
+    let text = render(&a, 110, 40);
+    assert!(text.contains("type to filter"), "{text}");
+    assert!(text.contains("a  Transaction: Authorize token"), "{text}");
+    assert!(text.contains("   Station: Send BootNotification"), "{text}");
+    assert!(
+        !text.contains("b  Station: Send BootNotification"),
+        "{text}"
+    );
+    // The current tab's actions are on top.
+    let authorize = text.find("Transaction: Authorize token").unwrap();
+    let boot = text.find("Station: Send BootNotification").unwrap();
+    assert!(authorize < boot, "{text}");
+    update2(&mut a, Msg2::Key(press(KeyCode::Char('h'))));
+    assert!(!render(&a, 110, 40).contains("type to filter"));
+}
+
+#[test]
+fn zoom_fills_the_body_and_escape_restores_it() {
+    use super::super::{Msg2, update2};
+    let mut a = app();
+    let keys = |a: &mut App2, codes: &[KeyCode]| {
+        for c in codes {
+            update2(a, Msg2::Key(press(*c)));
+        }
+    };
+    keys(&mut a, &[KeyCode::Char('z')]);
+    assert!(a.zoom);
+    let text = render(&a, 80, 24);
+    assert!(text.contains("z/Esc back"), "{text}");
+    assert!(!text.contains("EVSEs") || !text.contains("Log ["), "{text}");
+    keys(&mut a, &[KeyCode::Esc]);
+    assert!(!a.zoom);
+    let text = render(&a, 200, 50);
+    assert!(text.contains("EVSEs"), "{text}");
+    // The zoom follows the focus.
+    keys(&mut a, &[KeyCode::Char('z'), KeyCode::Right]);
+    assert!(a.zoom);
+    keys(&mut a, &[KeyCode::Char('z')]);
+    assert!(!a.zoom);
+}
+
+#[test]
+fn a_cut_actions_pane_counts_its_rows_and_marks_the_rest() {
+    let a = app();
+    let small = render(&a, 80, 24);
+    let title = small
+        .lines()
+        .find(|l| l.contains("Actions: Station"))
+        .unwrap_or_else(|| panic!("{small}"));
+    assert!(title.contains(" 1/"), "{title}");
+    assert!(small.contains("▼ ") && small.contains(" more"), "{small}");
+    let wide = render(&a, 200, 50);
+    let title = wide
+        .lines()
+        .find(|l| l.contains("Actions: Station"))
+        .unwrap_or_else(|| panic!("{wide}"));
+    assert!(!title.contains("1/") && !title.contains('▼'), "{title}");
+}
+
+#[test]
+fn the_token_forms_open_with_the_last_token_and_a_long_value_shows_its_start() {
+    use super::super::forms::{authorize_form, present_token_form};
+    let f = authorize_form(Protocol::V201, "");
+    assert_eq!(f.focus, 0);
+    assert_eq!(f.fields[0].input.text(), "");
+    let f = authorize_form(Protocol::V201, "TOKEN-7");
+    assert_eq!(f.fields[0].input.text(), "TOKEN-7");
+    assert!(f.fields[0].fresh, "the next key replaces it");
+    let f = present_token_form(1, Protocol::V201, "TOKEN-7");
+    assert_eq!(f.fields[f.focus].input.text(), "TOKEN-7");
+    // A value wider than the field opens at its start.
+    let long = format!("START-{}", "x".repeat(60));
+    let mut a = app();
+    a.mode = Mode2::Form(authorize_form(Protocol::V201, &long));
+    for (w, h) in [(80, 24), (200, 50)] {
+        let text = render(&a, w, h);
+        assert!(text.contains("START-"), "{w}x{h}\n{text}");
+    }
 }

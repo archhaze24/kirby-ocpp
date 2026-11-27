@@ -108,19 +108,20 @@ fn id_token_field(protocol: Protocol) -> Field {
     }
 }
 
-/// `Authorize`: an `idToken` and its type.
-pub(super) fn authorize_form(protocol: Protocol) -> Form {
+/// `Authorize`: an `idToken` and its type. `last` is the token used last (`""` for none).
+pub(super) fn authorize_form(protocol: Protocol, last: &str) -> Form {
     Form::generic(
         AUTHORIZE,
         "Authorize",
         vec![id_token_field(protocol), token_type_field()],
         1,
     )
+    .prefilled(0, last)
 }
 
 /// Present a token: at the selected EVSE, or at the one the station picks (the first with an
-/// EV plugged in and no transaction).
-pub(super) fn present_token_form(evse: u32, protocol: Protocol) -> Form {
+/// EV plugged in and no transaction). `last` is the token used last (`""` for none).
+pub(super) fn present_token_form(evse: u32, protocol: Protocol, last: &str) -> Form {
     let mut target = Field::new("EVSE", FieldKind::Select, "").with_options(vec![
         format!("EVSE {evse} (selected)"),
         "any (the station picks one)".to_owned(),
@@ -134,6 +135,7 @@ pub(super) fn present_token_form(evse: u32, protocol: Protocol) -> Form {
         vec![target, id_token_field(protocol), token_type_field()],
         1,
     )
+    .prefilled(1, last)
 }
 
 /// Advance the meter of an EVSE, with or without a sample.
@@ -633,11 +635,19 @@ fn plan(
 pub(super) fn apply_form(app: &mut App2, mut form: Form, done: Submitted, fx: &mut Vec<Effect2>) {
     match done {
         Submitted::Generic { kind, values } => match plan(kind, &values, app.evse, app.protocol) {
-            Ok(p) => fx.push(Effect2::Send {
-                label: p.label,
-                commands: p.commands,
-                show_response: p.show_response,
-            }),
+            Ok(p) => {
+                // The token forms open with the token that was used last.
+                match kind {
+                    AUTHORIZE => text(&values, 0).clone_into(&mut app.last_token),
+                    PRESENT_TOKEN => text(&values, 1).clone_into(&mut app.last_token),
+                    _ => {}
+                }
+                fx.push(Effect2::Send {
+                    label: p.label,
+                    commands: p.commands,
+                    show_response: p.show_response,
+                });
+            }
             Err((i, why)) => {
                 if let Some(field) = form.fields.get_mut(i) {
                     field.error = Some(why);

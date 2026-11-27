@@ -2,6 +2,7 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use kirby_ocpp_tui::app::{Detail, NoticeLevel};
+use kirby_ocpp_tui::help::{HelpEvent, HelpState};
 use kirby_ocpp_tui::text::TextInput;
 
 use crate::actions::{self, ResultsList};
@@ -21,12 +22,10 @@ pub fn handle(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
     match std::mem::replace(&mut app.mode, Mode::Normal) {
         Mode::Normal => normal(app, key, fx),
         Mode::Input(input) => text_input(app, input, key, fx),
-        Mode::Help => {
-            if !matches!(
-                key.code,
-                KeyCode::Esc | KeyCode::Char('?' | 'q') | KeyCode::Enter
-            ) {
-                app.mode = Mode::Help;
+        Mode::Help(mut state) => {
+            let sections = crate::help::sections(app).len();
+            if state.handle_key(key, sections) == HelpEvent::Stay {
+                app.mode = Mode::Help(state);
             }
         }
         Mode::Detail(detail) => detail_mode(app, detail, key, fx),
@@ -91,7 +90,7 @@ fn normal(app: &mut App, key: KeyEvent, fx: &mut Vec<Effect>) {
     }
     match key.code {
         KeyCode::Char('q') => app.request_quit(),
-        KeyCode::Char('?') => app.mode = Mode::Help,
+        KeyCode::Char('?') => app.mode = Mode::Help(HelpState::default()),
         KeyCode::Char(':') => app.open_palette(),
         KeyCode::Char('/') => open_input(app, input_target_for_focus(app.focus)),
         KeyCode::Char('s') if app.focus == Focus::Log => open_input(app, InputTarget::LogSearch),
@@ -345,37 +344,3 @@ fn results_mode(app: &mut App, mut list: ResultsList, key: KeyEvent) {
     }
     app.mode = Mode::Results(list);
 }
-
-/// The pane-focus line of the help of an OCPP 2.x station, which has a details pane between
-/// the stations and the log; it replaces the line of [`HELP`] that starts with the same keys.
-pub const PANES_2X_HELP: &str =
-    "Left Right Tab          change focused pane (stations, details, log)";
-
-/// Ends the action list of the help of an OCPP 2.x station.
-pub const PALETTE_2X_HELP: &str = "OCPP 2.x commands without a hotkey are in the palette (:)";
-
-/// The key reference shown by `?`.
-pub const HELP: &[&str] = &[
-    "First steps: point a charge point at ws://<host>:<port>/<prefix>/<station id> (the prefix is optional, the last path segment is the station id; the header shows the listen address). Stations appear in the list on connect; select one and press : to act.",
-    "",
-    "Up Down j k             move in the focused pane",
-    "PgUp PgDn Home End      page / first / last (log: oldest / newest)",
-    "Left Right Tab          change focused pane (stations, log)",
-    "/                       narrow the focused pane: filter stations by id, or search the log",
-    "Esc                     clear the log search, then the station filter",
-    "W                       pending commands with their elapsed time (x cancels the selected one, Esc closes)",
-    "a                       log of the selected station <-> all stations",
-    ": (colon)               command palette: every action below, fuzzy search",
-    "?                       this help",
-    "q or Ctrl-C             quit the UI and stop the server",
-    "",
-    "Actions on the selected station (a form opens; Enter sends, Esc cancels, Tab next field, Left/Right or a letter picks an option; s searches when the log is focused); answers show up in the status line:",
-    "     t remote start   x remote stop   R reset (asks)   c change config   g get config   T trigger message   u unlock   A availability   C clear cache   P charging profile   D data transfer   w raw call (any action, JSON payload)   r last results (Enter opens)   F forget a disconnected station (asks)   n copy station id",
-    "Security Whitepaper (selected station): l get log   I install certificate   d delete certificate   L installed certificates   E extended trigger   S signed firmware update   X certificate signed   e security events the station reported (certificates: paste the PEM; line breaks become spaces and are rebuilt on submit)",
-    "More actions (selected station): K clear charging profile   H composite schedule   V reserve now   U update firmware   O get diagnostics   B send local list",
-    "Scripted behaviour (every station, or one when the station field is set): m response rule, i inject fault (call_error, silence, close, invalid_payload), M clear every rule and fault; remove one rule from the palette",
-    "",
-    "Log pane: Enter detail (scroll, c copies), y copy row, Y copy visible rows, f filter (all, calls, errors, from stations), s search, p pause/follow, G newest",
-    "",
-    "List: ● connected, ○ disconnected, yellow ● replaced by a newer connection (◐ without color); tx = active transactions. Color is never the only cue: --color never or NO_COLOR draws with reverse video, bold and markers (+ ok, ! warning, x error) instead",
-];

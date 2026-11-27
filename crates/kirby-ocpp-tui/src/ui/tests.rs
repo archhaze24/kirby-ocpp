@@ -9,6 +9,7 @@ use serde_json::json;
 
 use super::*;
 use crate::app::{Msg, PendingCall, update};
+use crate::help::HelpState;
 
 fn app() -> App {
     let config = StationConfig::new("ws://csms.example/ocpp")
@@ -98,7 +99,7 @@ fn keys(app: &mut App, s: &str) {
 
 #[test]
 fn wide_layout_shows_three_columns() {
-    let text = render(&app(), 130, 30);
+    let text = render(&app(), 150, 30);
     let row = text.lines().find(|l| l.contains("Connectors")).unwrap();
     let (c, a, l) = (
         row.find("Connectors"),
@@ -190,11 +191,11 @@ fn overlays_render_at_several_sizes() {
         assert!(render(&a, w, h).contains("Help"));
 
         let mut a = app();
-        keys(&mut a, "4d");
+        keys(&mut a, "7d");
         assert!(render(&a, w, h).contains("iagnostics"), "{w}x{h}");
 
         let mut a = app();
-        keys(&mut a, "6c");
+        keys(&mut a, "5c");
         assert!(render(&a, w, h).contains("[y/N]"));
     }
 }
@@ -202,7 +203,7 @@ fn overlays_render_at_several_sizes() {
 #[test]
 fn log_detail_shows_pretty_json_and_the_correlated_answer() {
     let mut a = app();
-    keys(&mut a, "6");
+    keys(&mut a, "5");
     key(&mut a, KeyCode::Up);
     key(&mut a, KeyCode::Up);
     key(&mut a, KeyCode::Enter);
@@ -228,7 +229,7 @@ fn form_shows_errors_inline_and_a_wide_char_cursor() {
 #[test]
 fn raw_form_shows_schema_error_for_the_payload() {
     let mut a = app();
-    keys(&mut a, "5r");
+    keys(&mut a, "4r");
     key(&mut a, KeyCode::Tab);
     let t = render(&a, 100, 24);
     assert!(t.contains("Raw CALL") && t.contains("Heartbeat"), "{t}");
@@ -236,11 +237,11 @@ fn raw_form_shows_schema_error_for_the_payload() {
 
 #[test]
 fn tiny_and_odd_sizes_never_panic_in_any_mode() {
-    let setups: [&str; 9] = ["", "?", "/a", "3t", "3a", "5r", "6c", "4d", "6"];
+    let setups: [&str; 9] = ["", "?", "/a", "3t", "3a", "4r", "5c", "7d", "5"];
     for setup in setups {
         let mut a = app();
         keys(&mut a, setup);
-        if setup == "6" {
+        if setup == "5" {
             key(&mut a, KeyCode::Enter);
         }
         for w in [0, 1, 2, 5, 10, 23, 24, 25, 40, 79, 109, 110, 111, 200] {
@@ -298,19 +299,124 @@ fn long_form_errors_wrap_instead_of_being_cut() {
 }
 
 #[test]
-fn help_wraps_to_the_popup_and_shows_the_connected_start() {
+fn help_opens_on_the_current_tab_and_fits_every_size() {
     use crate::app::Mode;
     let mut a = app();
-    a.mode = Mode::Help;
+    a.mode = Mode::Help(HelpState::default());
     for (w, h) in [(80, 24), (120, 36), (24, 8)] {
         let t = render(&a, w, h);
+        assert!(t.contains("Help") && t.contains("This tab"), "{w}x{h}\n{t}");
         if w >= 80 {
             assert!(t.contains("connects and boots at startup"), "{w}x{h}\n{t}");
-            assert!(t.contains("Everything lands in the log."), "{w}x{h}\n{t}");
+            assert!(t.contains("Everywhere"), "{w}x{h}\n{t}");
         }
-        assert!(!t.contains("starts offline"));
         assert!(t.lines().all(|l| l.chars().count() <= usize::from(w)));
     }
+}
+
+#[test]
+fn help_has_no_intro_and_two_sections() {
+    let sections = help_sections(&app());
+    let titles: Vec<&str> = sections.iter().map(|s| s.title.as_str()).collect();
+    assert_eq!(titles, ["This tab", "Everywhere"]);
+    for s in &sections {
+        assert!(!s.lines[0].starts_with("First steps"), "{}", s.title);
+    }
+    assert_eq!(help_sections(&fleet_app()).len(), 2);
+}
+
+fn fleet_app() -> App {
+    let mut a = app();
+    a.in_fleet = true;
+    a
+}
+
+fn help_text(a: &App) -> String {
+    help_sections(a)
+        .iter()
+        .flat_map(|s| s.lines.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn help_this_tab_follows_the_open_tab() {
+    let mut a = app();
+    let flow = "p plug → a authorize → t start/present → m meter → e stop";
+    for (tab, needle) in [
+        (Tab::Station, "Send BootNotification"),
+        (Tab::Connector, "Plug / unplug"),
+        (Tab::Transaction, flow),
+        (Tab::Maintenance, "Set diagnostics outcome"),
+        (Tab::Data, "Send raw CALL"),
+        (Tab::Logs, "Copy selected row"),
+        (Tab::Scenarios, "Cancel scenario"),
+    ] {
+        a.tab = tab;
+        let first = help_sections(&a).remove(0);
+        let text = first.lines.join("\n");
+        assert!(text.contains(needle), "{tab:?}\n{text}");
+        assert_eq!(first.title, "This tab");
+    }
+    // The keys come from the real catalogue: every action of the tab is listed with its letter.
+    a.tab = Tab::Transaction;
+    let text = help_text(&a);
+    for action in a.catalog.iter().filter(|x| x.tab == Tab::Transaction) {
+        let line = crate::help::row(&action.key.unwrap().to_string(), &action.label);
+        assert!(text.contains(&line), "{line}\n{text}");
+    }
+}
+
+#[test]
+fn help_everywhere_names_the_real_keys() {
+    let a = app();
+    let text = help_text(&a);
+    for needle in [
+        "1-7",
+        "←/→",
+        "↑/↓ j/k",
+        "PgUp/PgDn",
+        "Home and End",
+        "[ ]",
+        "Ctrl-P",
+        "W ",
+        "/ ",
+        "z ",
+        "?",
+        "q ",
+        "asks first",
+    ] {
+        assert!(text.contains(needle), "{needle}\n{text}");
+    }
+    assert!(!text.contains("< >"), "no fleet keys outside a fleet");
+    let fleet = help_text(&fleet_app());
+    assert!(fleet.contains("< >") && fleet.contains("Alt-1..9") && fleet.contains("● connected"));
+}
+
+#[test]
+fn help_scrolls_and_switches_sections() {
+    let mut a = app();
+    keys(&mut a, "?");
+    let first = render(&a, 80, 24);
+    assert!(
+        first.contains("This tab") && first.contains("Everywhere"),
+        "{first}"
+    );
+    key(&mut a, KeyCode::Right);
+    let second = render(&a, 80, 24);
+    assert!(second.contains("Command palette"), "{second}");
+    assert!(!second.contains("Send BootNotification"), "{second}");
+    // At 24x8 the section does not fit: scrolling reveals the rest.
+    let top = render(&a, 24, 8);
+    assert!(top.contains('▼'), "{top}");
+    for _ in 0..200 {
+        key(&mut a, KeyCode::Down);
+        let _ = render(&a, 24, 8);
+    }
+    let end = render(&a, 24, 8);
+    assert!(end.contains('▲') && !end.contains('▼'), "{end}");
+    key(&mut a, KeyCode::Esc);
+    assert!(matches!(a.mode, crate::app::Mode::Normal));
 }
 
 #[test]
@@ -562,17 +668,12 @@ fn pending_command_shows_waiting_marker() {
         label: "Heartbeat".into(),
         action: Some("Heartbeat".into()),
         since: a.now,
+        done: None,
     });
     let text = render(&a, 100, 30);
     assert!(text.contains("waiting... Heartbeat"), "{text}");
     a.pending.clear();
     assert!(!render(&a, 100, 30).contains("waiting..."));
-}
-
-#[test]
-fn help_has_first_steps() {
-    let lines = help_lines(false);
-    assert!(lines[0].starts_with("First steps"));
 }
 
 #[test]
@@ -585,6 +686,7 @@ fn the_pending_list_shows_elapsed_time_and_the_cancel_key() {
             .now
             .checked_sub(std::time::Duration::from_secs(7))
             .unwrap(),
+        done: None,
     });
     a.pending.push(PendingCall {
         label: "start tx".into(),
@@ -593,6 +695,7 @@ fn the_pending_list_shows_elapsed_time_and_the_cancel_key() {
             .now
             .checked_sub(std::time::Duration::from_secs(65))
             .unwrap(),
+        done: None,
     });
     keys(&mut a, "W");
     let text = render(&a, 100, 30);
@@ -674,7 +777,9 @@ fn hint_codes(hint: &str) -> Vec<KeyCode> {
 /// What a key can change in the model, for "did the key do anything".
 fn fingerprint(a: &App) -> String {
     format!(
-        "{:?} {:?} {:?} {} {:?} {:?} {} {:?} {} {}",
+        "{} {} {:?} {:?} {:?} {} {:?} {:?} {} {:?} {} {}",
+        a.zoom,
+        a.details.scroll,
         a.tab,
         a.focus,
         a.connector,
@@ -700,11 +805,12 @@ fn every_footer_hint_key_does_what_its_label_says() {
             label: "Heartbeat".into(),
             action: Some("Heartbeat".into()),
             since: a.now,
+            done: None,
         });
         a
     };
     for tab in Tab::ALL {
-        for focus in [Focus::Connectors, Focus::Actions, Focus::Log] {
+        for focus in Focus::ORDER {
             for (k, label) in hints(&fresh(tab, focus)) {
                 let did_something = hint_codes(k).into_iter().any(|code| {
                     let mut a = fresh(tab, focus);
@@ -743,8 +849,9 @@ fn the_log_letters_are_hinted_only_where_they_work() {
 
 #[test]
 fn every_catalog_accelerator_of_the_logs_tab_is_in_the_help() {
-    let a = app();
-    let help = help_lines(false).join("\n");
+    let mut a = app();
+    a.tab = Tab::Logs;
+    let help = help_text(&a);
     for action in a
         .catalog
         .iter()
@@ -780,7 +887,7 @@ fn time_none_drops_the_clock_of_log_rows() {
 #[test]
 fn scenarios_tab_wraps_the_description_instead_of_clipping_it() {
     let mut a = app();
-    keys(&mut a, "7");
+    keys(&mut a, "6");
     let text = render(&a, 80, 24);
     // The full description is in the details pane, split over lines.
     assert!(text.contains("Run: charge-session"), "{text}");
@@ -824,8 +931,9 @@ fn detail_popup_is_as_tall_as_its_content() {
 
 #[test]
 fn unfiltered_palette_orders_by_task_and_shows_keys() {
+    // Opened on the Scenarios tab, which owns none of the actions compared here.
     let mut a = app();
-    keys(&mut a, ":");
+    keys(&mut a, "6:");
     let text = render(&a, 100, 60);
     let at = |needle: &str| {
         text.find(needle)
@@ -835,5 +943,170 @@ fn unfiltered_palette_orders_by_task_and_shows_keys() {
     assert!(at("Connector: Plug / unplug") < at("Transaction: Authorize token..."));
     assert!(at("Transaction: Authorize token...") < at("Connector: Inject or clear fault"));
     assert!(at("Connector: Inject or clear fault") < at("Station: Edit config keys..."));
-    assert!(text.contains("c  Station: Connect"), "{text}");
+    assert!(at("Scenarios: Run: charge-session") < at("Station: Connect"));
+    // A letter is shown only where it works: on the current tab.
+    assert!(text.contains("o  Scenarios: Run: charge-session"), "{text}");
+    assert!(text.contains("   Station: Connect"), "{text}");
+    assert!(!text.contains("c  Station: Connect"), "{text}");
+    assert!(text.contains("type to filter"), "{text}");
+}
+
+#[test]
+fn the_palette_lists_the_current_tabs_actions_first_with_their_letters() {
+    let mut a = app();
+    keys(&mut a, "3:");
+    let text = render(&a, 100, 60);
+    let at = |needle: &str| {
+        text.find(needle)
+            .unwrap_or_else(|| panic!("{needle}\n{text}"))
+    };
+    assert!(
+        text.contains("a  Transaction: Authorize token..."),
+        "{text}"
+    );
+    assert!(at("Transaction: Send custom meter values") < at("Station: Connect"));
+    assert!(
+        !text.contains("b  Station: Send BootNotification"),
+        "{text}"
+    );
+}
+
+#[test]
+fn zoom_gives_the_focused_pane_the_whole_body_and_escape_restores_it() {
+    let mut a = app();
+    assert_eq!(a.focus, crate::app::Focus::Actions);
+    keys(&mut a, "z");
+    let zoomed = render(&a, 80, 24);
+    assert!(zoomed.contains("Actions: Station"), "{zoomed}");
+    assert!(
+        !zoomed.contains("Connectors") && !zoomed.contains("Log"),
+        "{zoomed}"
+    );
+    assert!(zoomed.contains("z/Esc back"), "{zoomed}");
+    // 15 actions fit into the zoomed pane: no cut-off marker.
+    assert!(!zoomed.contains("more"), "{zoomed}");
+    key(&mut a, KeyCode::Esc);
+    assert!(!a.zoom);
+    let normal = render(&a, 80, 24);
+    assert!(
+        normal.contains("Connectors") && normal.contains("Log"),
+        "{normal}"
+    );
+    // The footer hint needs room that 80 columns do not have; the help names `z`.
+    assert!(render(&a, 120, 24).contains(" z zoom"));
+    // The zoom follows the focus: another pane is zoomed once the focus moves.
+    keys(&mut a, "z");
+    key(&mut a, KeyCode::Right);
+    let log = render(&a, 80, 24);
+    assert!(log.contains("Log") && !log.contains("Actions"), "{log}");
+    keys(&mut a, "z");
+    assert!(!a.zoom);
+}
+
+#[test]
+fn cut_panes_say_how_much_is_hidden_and_the_title_counts_the_rows() {
+    let a = app();
+    let small = render(&a, 80, 24);
+    let actions = small
+        .lines()
+        .find(|l| l.contains("Actions: Station"))
+        .unwrap_or_else(|| panic!("{small}"));
+    assert!(actions.contains(" 1/"), "{actions}");
+    assert!(small.contains("▼ ") && small.contains(" more"), "{small}");
+    // A wide terminal shows every action: no counter, no marker in the pane.
+    let wide = render(&a, 200, 50);
+    let actions = wide
+        .lines()
+        .find(|l| l.contains("Actions: Station"))
+        .unwrap_or_else(|| panic!("{wide}"));
+    assert!(
+        !actions.contains("1/") && !actions.contains('▼'),
+        "{actions}"
+    );
+    // The log pane marks what is above when the newest row is followed.
+    let mut busy = app();
+    for i in 0..40 {
+        busy.log.push(Event::Log(LogRecord {
+            ts: Utc.timestamp_millis_opt(1_700_000_001_000 + i).unwrap(),
+            level: LogLevel::Info,
+            text: format!("row {i}"),
+        }));
+    }
+    let text = render(&busy, 80, 24);
+    assert!(text.contains("▲ ") && text.contains("more"), "{text}");
+}
+
+#[test]
+fn the_detail_popup_stops_scrolling_at_its_last_page() {
+    let mut a = app();
+    a.mode = crate::app::Mode::Detail(crate::app::Detail {
+        title: "Row".to_owned(),
+        lines: (0..40).map(|i| format!("line {i}")).collect(),
+        scroll: 0,
+        copy: String::new(),
+    });
+    let _ = render(&a, 80, 24);
+    for _ in 0..100 {
+        key(&mut a, KeyCode::Down);
+        let _ = render(&a, 80, 24);
+    }
+    let crate::app::Mode::Detail(d) = &a.mode else {
+        panic!("the popup closed");
+    };
+    let at_end = d.scroll;
+    assert!(
+        at_end < 40 - 1,
+        "scroll ran to the last line, not the last page: {at_end}"
+    );
+    key(&mut a, KeyCode::Up);
+    let crate::app::Mode::Detail(d) = &a.mode else {
+        panic!("the popup closed");
+    };
+    assert_eq!(d.scroll, at_end - 1, "one Up moves at once");
+}
+
+#[test]
+fn a_long_prefill_opens_at_its_start() {
+    let path = format!("/very/long/directory/{}/log.jsonl", "nested/".repeat(20));
+    let mut a = app();
+    a.mode = crate::app::Mode::Form(crate::forms::Form::export(&path));
+    for (w, h) in [(80, 24), (200, 50)] {
+        let text = render(&a, w, h);
+        assert!(text.contains("/very/long/directory/"), "{w}x{h}\n{text}");
+    }
+    // Editing starts from the end, where the value is cut.
+    key(&mut a, KeyCode::End);
+    assert!(!render(&a, 80, 24).contains("/very/long/directory/"));
+}
+
+#[test]
+fn the_start_and_authorize_forms_open_with_the_last_id_tag() {
+    let mut a = app();
+    let mut fx = Vec::new();
+    a.run_action(crate::actions::ActionId::StartTx, &mut fx);
+    let crate::app::Mode::Form(f) = &a.mode else {
+        panic!("no form");
+    };
+    assert_eq!(f.fields[1].input.text(), "", "nothing used yet");
+    a.mode = crate::app::Mode::Normal;
+    a.apply_form(
+        crate::forms::Submitted::Authorize {
+            id_tag: kirby_ocpp_core::ids::IdTag::new("TAG9").unwrap(),
+        },
+        &mut fx,
+    );
+    for id in [
+        crate::actions::ActionId::StartTx,
+        crate::actions::ActionId::Authorize,
+    ] {
+        a.run_action(id, &mut fx);
+        let crate::app::Mode::Form(f) = &a.mode else {
+            panic!("no form");
+        };
+        assert!(f.fields.iter().any(|x| x.input.text() == "TAG9"), "{id:?}");
+        // Typing replaces the remembered tag.
+        let focused = &f.fields[f.focus];
+        assert!(focused.fresh && focused.input.text() == "TAG9");
+        a.mode = crate::app::Mode::Normal;
+    }
 }
