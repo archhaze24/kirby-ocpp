@@ -61,6 +61,8 @@ const MAX_EVENT_TYPE_LEN: usize = 50;
 const MAX_TECH_INFO_LEN: usize = 255;
 const MAX_TARIFF_ID_LEN: usize = 60;
 const MAX_CURRENCY_LEN: usize = 3;
+/// `NotifyPriorityCharging` notices kept for transactions that have not started yet.
+const MAX_PENDING_PRIORITY: usize = 64;
 
 /// The OCPP 2.0.1 part of a station's state. See the module docs.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -425,12 +427,24 @@ impl Tx2Record {
             &mut self.seq.tariff_id_at,
             req.seq_no,
         );
-        merge_by_seq(
-            &mut self.transaction_limit,
-            transaction_limit,
-            &mut self.seq.transaction_limit_at,
-            req.seq_no,
-        );
+        if let Some(update) = transaction_limit {
+            let stored = self.transaction_limit.get_or_insert(TxLimit {
+                max_cost: None,
+                max_energy: None,
+                max_time: None,
+                max_soc: None,
+            });
+            let [cost_at, energy_at, time_at, soc_at] = &mut self.seq.transaction_limit_at;
+            merge_by_seq(&mut stored.max_cost, update.max_cost, cost_at, req.seq_no);
+            merge_by_seq(
+                &mut stored.max_energy,
+                update.max_energy,
+                energy_at,
+                req.seq_no,
+            );
+            merge_by_seq(&mut stored.max_time, update.max_time, time_at, req.seq_no);
+            merge_by_seq(&mut stored.max_soc, update.max_soc, soc_at, req.seq_no);
+        }
         merge_by_seq(&mut self.cost, cost, &mut self.seq.cost_at, req.seq_no);
         if let Some(evse) = req.evse
             && let Some(evse_id) = positive(evse.id)
@@ -506,8 +520,10 @@ pub struct SeqTracker {
     // These fields can be reported independently, with gaps in their event sequences.
     #[serde(skip)]
     tariff_id_at: Option<i32>,
+    /// The limit fields are partial (E16.FR.01): each one keeps its own `seqNo`, in the order
+    /// cost, energy, time, state of charge.
     #[serde(skip)]
-    transaction_limit_at: Option<i32>,
+    transaction_limit_at: [Option<i32>; 4],
     #[serde(skip)]
     cost_at: Option<i32>,
 }
@@ -747,9 +763,24 @@ fn transaction_limit(value: &Value) -> Option<TxLimit> {
     Some(TxLimit {
         max_cost: limit.get("maxCost").and_then(Value::as_f64),
         max_energy: limit.get("maxEnergy").and_then(Value::as_f64),
-        max_time: limit.get("maxTime").and_then(Value::as_i64),
-        max_soc: limit.get("maxSoC").and_then(Value::as_i64),
+        max_time: limit.get("maxTime").and_then(json_integer),
+        max_soc: limit.get("maxSoC").and_then(json_integer),
     })
+}
+
+/// A JSON number that is an integer by value: `900` and `900.0` both count.
+fn json_integer(value: &Value) -> Option<i64> {
+    // Every integer up to 2^53 is exact in an f64.
+    const LIMIT: f64 = 9_007_199_254_740_992.0;
+    if let Some(int) = value.as_i64() {
+        return Some(int);
+    }
+    let float = value.as_f64()?;
+    if !float.is_finite() || float.fract() != 0.0 || float.abs() > LIMIT {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Some(float as i64)
 }
 
 fn transaction_cost(value: &Value) -> Option<TxCost> {
@@ -922,6 +953,12 @@ impl StationState {
                     .as_deref_mut()
                     .and_then(|v2| v2.transactions.iter_mut().find(|tx| tx.id == id))
                 else {
+                    // The transaction is not known yet: keep the newest notice for it.
+                    self.pending_priority.retain(|(pending, _)| *pending != id);
+                    if self.pending_priority.len() >= MAX_PENDING_PRIORITY {
+                        self.pending_priority.pop_front();
+                    }
+                    self.pending_priority.push_back((id, activated));
                     return false;
                 };
                 let changed = tx.priority_charging != activated;
@@ -1010,8 +1047,25 @@ impl StationState {
         } else {
             MAX_ID_TOKEN_LEN
         };
-        self.v2_mut()
-            .fold_transaction_event(call, history_cap, max_token_len)
+        let id = call.request.transaction_info.transaction_id.clone();
+        let known = self
+            .v2
+            .as_deref()
+            .is_some_and(|v2| v2.transactions.iter().any(|tx| tx.id == id));
+        let changed = self
+            .v2_mut()
+            .fold_transaction_event(call, history_cap, max_token_len);
+        if !known
+            && let Some(position) = self.pending_priority.iter().position(|(p, _)| *p == id)
+            && let Some((_, activated)) = self.pending_priority.remove(position)
+            && let Some(tx) = self
+                .v2
+                .as_deref_mut()
+                .and_then(|v2| v2.transactions.iter_mut().find(|tx| tx.id == id))
+        {
+            tx.priority_charging = activated;
+        }
+        changed
     }
 
     /// `MeterValues` outside a transaction: latest energy and power per EVSE.
@@ -2209,7 +2263,7 @@ mod tests {
                 assert_eq!(json["tariff_id"], "new");
                 assert_eq!(
                     json["transaction_limit"],
-                    json!({"max_cost": null, "max_energy": null, "max_time": 500, "max_soc": null})
+                    json!({"max_cost": 9.5, "max_energy": 123.5, "max_time": 500, "max_soc": 80})
                 );
                 assert_eq!(
                     json["cost"],
@@ -2264,6 +2318,142 @@ mod tests {
         assert!(!notify(&mut state, Protocol::V21, "tx-1", json!(true)));
         assert!(notify(&mut state, Protocol::V21, "tx-1", json!(false)));
         assert!(!first_tx(&state).priority_charging);
+    }
+
+    fn limits_after(updates: &[(i32, Value)]) -> Value {
+        let mut state = StationState::default();
+        assert!(state.apply_v2(
+            Protocol::V21,
+            "TransactionEvent",
+            &event("Started", 0, 10, &json!({})),
+            &json!({}),
+            now(),
+            100
+        ));
+        for (seq, limit) in updates {
+            state.apply_v2(
+                Protocol::V21,
+                "TransactionEvent",
+                &event(
+                    "Updated",
+                    *seq,
+                    10,
+                    &json!({"transactionInfo": {"transactionLimit": limit}}),
+                ),
+                &json!({}),
+                now(),
+                100,
+            );
+        }
+        serde_json::to_value(first_tx(&state)).unwrap()["transaction_limit"].clone()
+    }
+
+    #[test]
+    fn transaction_limits_merge_per_field_in_either_order() {
+        let energy = (1, json!({"maxEnergy": 20000}));
+        let time = (2, json!({"maxTime": 900}));
+        let both =
+            json!({"max_cost": null, "max_energy": 20000.0, "max_time": 900, "max_soc": null});
+        assert_eq!(limits_after(&[energy.clone(), time.clone()]), both);
+        assert_eq!(limits_after(&[time, energy]), both);
+    }
+
+    #[test]
+    fn a_newer_limit_field_does_not_block_an_older_one_of_another_field() {
+        let newer = (5, json!({"maxEnergy": 30000}));
+        let older = (3, json!({"maxTime": 600}));
+        let stale = (4, json!({"maxEnergy": 1}));
+        assert_eq!(
+            limits_after(&[newer, older, stale]),
+            json!({"max_cost": null, "max_energy": 30000.0, "max_time": 600, "max_soc": null})
+        );
+    }
+
+    #[test]
+    fn integral_json_decimals_are_integer_limits() {
+        assert_eq!(
+            limits_after(&[(
+                1,
+                json!({"maxTime": 900.0, "maxSoC": 80.0, "maxEnergy": 5.5})
+            )]),
+            json!({"max_cost": null, "max_energy": 5.5, "max_time": 900, "max_soc": 80})
+        );
+        for bad in [json!(20.5), json!(1e300), json!(-0.5), json!("90")] {
+            assert_eq!(
+                limits_after(&[(1, json!({"maxTime": bad}))]),
+                json!({"max_cost": null, "max_energy": null, "max_time": null, "max_soc": null})
+            );
+        }
+    }
+
+    #[test]
+    fn priority_charging_before_the_transaction_is_applied_when_it_starts() {
+        let mut state = StationState::default();
+        let notify = |state: &mut StationState, id: &str, activated: bool| {
+            state.apply_v2(
+                Protocol::V21,
+                "NotifyPriorityCharging",
+                &json!({"transactionId": id, "activated": activated}),
+                &json!({}),
+                now(),
+                100,
+            )
+        };
+        assert!(!notify(&mut state, "tx-b", true));
+        assert!(state.apply_v2(
+            Protocol::V21,
+            "TransactionEvent",
+            &event_for("tx-b", "Started", 0, 10, &json!({})),
+            &json!({}),
+            now(),
+            100
+        ));
+        assert!(first_tx(&state).priority_charging);
+        // Applied once: a later deactivation is not undone by the older notice.
+        assert!(notify(&mut state, "tx-b", false));
+        assert!(state.apply_v2(
+            Protocol::V21,
+            "TransactionEvent",
+            &event_for("tx-b", "Updated", 1, 11, &json!({})),
+            &json!({}),
+            now(),
+            100
+        ));
+        assert!(!first_tx(&state).priority_charging);
+    }
+
+    #[test]
+    fn pending_priority_notices_are_bounded_and_the_oldest_goes_first() {
+        let mut state = StationState::default();
+        for n in 0..65 {
+            state.apply_v2(
+                Protocol::V21,
+                "NotifyPriorityCharging",
+                &json!({"transactionId": format!("tx-{n}"), "activated": true}),
+                &json!({}),
+                now(),
+                100,
+            );
+        }
+        for (id, expected) in [("tx-0", false), ("tx-64", true)] {
+            state.apply_v2(
+                Protocol::V21,
+                "TransactionEvent",
+                &event_for(id, "Started", 0, 10, &json!({})),
+                &json!({}),
+                now(),
+                100,
+            );
+            let tx = state
+                .v2
+                .as_ref()
+                .unwrap()
+                .transactions
+                .iter()
+                .find(|tx| tx.id == id)
+                .unwrap();
+            assert_eq!(tx.priority_charging, expected, "{id}");
+        }
     }
 
     /// One sample of `value` in a `MeterValue` at second 10 of the day.

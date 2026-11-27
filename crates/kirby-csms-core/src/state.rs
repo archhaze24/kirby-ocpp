@@ -89,6 +89,9 @@ pub struct StationState {
     /// the station's protocol: the shared fields above are filled for both.
     #[serde(default)]
     pub v2: Option<Box<StationState2>>,
+    /// 2.1 `NotifyPriorityCharging` notices for transactions not seen yet, oldest first.
+    #[serde(skip)]
+    pub pending_priority: VecDeque<(String, bool)>,
 }
 
 /// An answered `GetInstalledCertificateIds`.

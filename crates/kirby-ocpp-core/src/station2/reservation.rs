@@ -40,6 +40,7 @@ use super::actor::{Station2Actor, TimerKey2};
 use super::evse::Evse;
 use super::snapshot::ReservationView2;
 use super::types::{IdTokenRef, Origin2};
+use crate::error::CallError;
 use crate::ocpp::Protocol;
 use crate::ocpp::action::Action;
 use crate::ocpp::responder::Responder;
@@ -102,8 +103,9 @@ pub(crate) struct ReservationState {
     /// Reservations used by an authorization whose first transaction event is still to be
     /// built, by EVSE.
     claims: BTreeMap<u32, Reservation>,
-    /// Consumed reservation IDs whose timeout reports are waiting to be sent.
-    pending_no_transaction: VecDeque<i32>,
+    /// Reservation reports waiting to be sent: consumed reservations that timed out, and any
+    /// report whose CALL was lost with the connection.
+    pending_reports: VecDeque<(i32, ReservationUpdateStatus)>,
 }
 
 /// What a `ReserveNow` sees on one EVSE.
@@ -256,11 +258,24 @@ impl Station2Actor {
     /// presented value matches a reservation of another type, else "another token".
     pub(super) fn reserved_for(&self, evse: u32, token: &IdTokenRef, verb: &str) -> String {
         let now = self.clock.now_utc();
-        let same_value = self.reservations.list.iter().find(|reservation| {
-            !reservation.lost
-                && reservation.expires_at > now
-                && reservation.evse.is_none_or(|held| held == evse)
-                && reservation.id_token.id_token == token.id_token
+        let live = || {
+            self.reservations
+                .list
+                .iter()
+                .filter(|reservation| !reservation.lost && reservation.expires_at > now)
+        };
+        // Mirror `reservation_blocks`: a hold on this EVSE decides alone; otherwise the
+        // any-EVSE reservations of other tokens do, those with the presented value first.
+        let same_value = match live().find(|reservation| reservation.evse == Some(evse)) {
+            Some(held) => Some(held),
+            None => live()
+                .filter(|reservation| {
+                    reservation.evse.is_none() && !reservation.matches(token, None)
+                })
+                .min_by_key(|reservation| reservation.id_token.id_token != token.id_token),
+        }
+        .filter(|reservation| {
+            reservation.id_token.id_token == token.id_token
                 && reservation.id_token.kind != token.kind
         });
         match same_value {
@@ -357,11 +372,11 @@ impl Station2Actor {
             return;
         }
         if let Some(id) = self.take_reservation_claim(evse) {
-            let pending = &mut self.reservations.pending_no_transaction;
+            let pending = &mut self.reservations.pending_reports;
             if pending.len() == MAX_PENDING_NO_TRANSACTION {
                 pending.pop_front();
             }
-            pending.push_back(id);
+            pending.push_back((id, ReservationUpdateStatus::NoTransaction));
             self.notify_status_changes();
         }
     }
@@ -433,8 +448,8 @@ impl Station2Actor {
             for &(id, status) in &ended {
                 self.report_reservation_end(id, status);
             }
-            for id in std::mem::take(&mut self.reservations.pending_no_transaction) {
-                self.report_reservation_end(id, ReservationUpdateStatus::NoTransaction);
+            for (id, status) in std::mem::take(&mut self.reservations.pending_reports) {
+                self.report_reservation_end(id, status);
             }
         }
         let flags_changed = self.reservation_sync_flags();
@@ -463,6 +478,14 @@ impl Station2Actor {
                     LogLevel::Warn,
                     format!("ReservationStatusUpdate for {id} failed: {error}"),
                 );
+                // A lost link keeps the report for the next registration; an answer, even a
+                // CALLERROR, settles it.
+                if matches!(error, CallError::NotConnected | CallError::Closed { .. }) {
+                    let pending = &mut actor.reservations.pending_reports;
+                    if pending.len() < MAX_PENDING_NO_TRANSACTION {
+                        pending.push_front((id, status));
+                    }
+                }
             }
         });
     }

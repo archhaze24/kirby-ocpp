@@ -26,6 +26,7 @@ tag as the GitHub release notes.
 
 ### 🐛 Fixed
 
+- OCPP 2.x emulator: a `ReservationStatusUpdate` (`Expired`, `Removed`, `NoTransaction`) whose connection closed before it was answered is sent again after the next registration instead of being lost.
 - `kirby-csms`: `power_w` of a transaction is cleared when it stops instead of keeping the last sample.
 - Refusals shown in the emulator status line no longer start with `invalid argument:`; the message stands alone (`EVSE 1 does not exist`).
 - Fleet terminal UI: the first station's boot events could be missing from the log when the stations connected before the UI subscribed to them.

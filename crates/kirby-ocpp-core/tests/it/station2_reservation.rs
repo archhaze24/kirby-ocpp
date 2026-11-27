@@ -16,7 +16,7 @@ use kirby_ocpp_core::station::Event;
 use kirby_ocpp_core::station2::{IdTokenRef, Reservation, ReservationPersist};
 use kirby_ocpp_core::store::{FileKind, LoadOutcome2, PersistedStation2, StationStore};
 use kirby_ocpp_core::{Command2, ManualClock, Outcome2, Station2, Station2Handle, StationConfig};
-use kirby_ocpp_testkit::{CsmsOptions, MockCsms, Reply, SubprotocolPolicy};
+use kirby_ocpp_testkit::{CsmsOptions, Fault, MockCsms, Reply, SubprotocolPolicy};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
@@ -404,6 +404,35 @@ async fn a_token_of_another_type_is_refused_with_the_reserved_type_named() {
             "EVSE 1 is reserved for token A of type Central (presented as ISO14443)"
         );
         super::station2_transactions::stop(&station, task).await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn the_refusal_names_the_reservation_that_blocks_not_an_any_evse_one() {
+    timeout(STEP * 3, async {
+        let rig = Rig::new().await;
+        assert_eq!(rig.reserve(1, None, "A").await, "Accepted");
+        assert_eq!(rig.reserve(2, Some(1), "B").await, "Accepted");
+        let mut events = rig.station.subscribe();
+        let outcome = rig
+            .send(Command2::PresentToken {
+                evse: Some(1),
+                id_token: "A".to_owned(),
+                token_type: IdTokenType::Iso14443,
+            })
+            .await;
+        assert_eq!(authorized_status(&outcome), "NotAtThisLocation");
+        let text = loop {
+            if let Event::Log(record) = events.recv().await.unwrap()
+                && record.text.contains("is reserved for")
+            {
+                break record.text;
+            }
+        };
+        assert_eq!(text, "EVSE 1 is reserved for another token");
+        rig.stop().await;
     })
     .await
     .expect("scenario completes");
@@ -818,6 +847,53 @@ async fn consumed_reservation_connection_timeout_is_reported_after_reconnect() {
         assert_eq!(rig.calls("ReservationStatusUpdate"), Vec::<Value>::new());
         rig.send(Command2::Connect).await;
         assert_reported_without_transaction(&rig).await;
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn a_no_transaction_report_lost_to_a_closed_link_is_sent_again() {
+    timeout(STEP * 4, async {
+        let (rig, mut events) = use_reservation_before_connection(Protocol::V21).await;
+        rig.send(Command2::Disconnect).await;
+        wait_authorization_timeout(&mut events, 1).await;
+        // The central system drops the link instead of answering the report.
+        rig.csms.inject(Fault::close("ReservationStatusUpdate"));
+        rig.send(Command2::Connect).await;
+        // The first CALL dies with the socket; the next registration sends it again.
+        rig.wait_calls("ReservationStatusUpdate", 2).await;
+        rig.send(Command2::Heartbeat).await;
+        rig.wait_calls("Heartbeat", 1).await;
+        let sent = rig.calls("ReservationStatusUpdate");
+        let report = json!({"reservationId": 62, "reservationUpdateStatus": "NoTransaction"});
+        assert_eq!(sent, [report.clone(), report]);
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn an_expired_report_lost_to_a_closed_link_is_sent_again() {
+    timeout(STEP * 4, async {
+        let rig = Rig::start_with_mock(v21_csms().await, Protocol::V21, "Accepted", |_| {}).await;
+        let expiry = rig.in_future(Duration::milliseconds(200));
+        let reply = rig
+            .status_of("ReserveNow", reserve_body(3, Some(1), "A", &expiry))
+            .await;
+        assert_eq!(reply, "Accepted");
+        rig.csms.inject(Fault::close("ReservationStatusUpdate"));
+        rig.clock.advance(Duration::seconds(1));
+        rig.wait_calls("ReservationStatusUpdate", 2).await;
+        rig.send(Command2::Heartbeat).await;
+        rig.wait_calls("Heartbeat", 1).await;
+        let report = json!({"reservationId": 3, "reservationUpdateStatus": "Expired"});
+        assert_eq!(
+            rig.calls("ReservationStatusUpdate"),
+            [report.clone(), report]
+        );
         rig.stop().await;
     })
     .await
