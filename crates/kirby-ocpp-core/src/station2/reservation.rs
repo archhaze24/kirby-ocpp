@@ -19,7 +19,9 @@
 //!   `reservationId` (H01.FR.15). Another token gets the status `NotAtThisLocation`, or a
 //!   rejected remote start.
 //! * A reservation ends with `ReservationStatusUpdate` `Expired` at its expiry (H04.FR.01) and
-//!   `Removed` when its EVSE becomes `Faulted` or `Unavailable` (H01.FR.16/17). Both are only
+//!   `Removed` when its EVSE becomes `Faulted` or `Unavailable` (H01.FR.16/17). In OCPP 2.1,
+//!   a used reservation ends with `NoTransaction` if its authorization expires before the
+//!   transaction starts (H03.FR.11). These updates are only
 //!   reported while the station is registered: an end that happens offline is reported after
 //!   the next accepted boot or reconnect, together with the statuses.
 //! * `ReservationCtrlr.Enabled` set to `false` keeps the entries but ignores them: nothing is
@@ -28,7 +30,7 @@
 //! Expiry uses the station clock. One timer waits for the earliest expiry; every change of a
 //! connector status also checks the list.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -38,6 +40,8 @@ use super::actor::{Station2Actor, TimerKey2};
 use super::evse::Evse;
 use super::snapshot::ReservationView2;
 use super::types::{IdTokenRef, Origin2};
+use crate::ocpp::Protocol;
+use crate::ocpp::action::Action;
 use crate::ocpp::responder::Responder;
 use crate::ocpp::v2::messages::{
     CancelReservation, CancelReservationRequest, CancelReservationResponse,
@@ -52,6 +56,9 @@ pub(super) const COMPONENT: &str = "ReservationCtrlr";
 
 /// The type of every connector of the station (`Connector.ConnectorType`).
 const CONNECTOR_TYPE: &str = "cType2";
+
+/// Limits reports queued while the link is down or registration is pending.
+const MAX_PENDING_NO_TRANSACTION: usize = 128;
 
 /// A reservation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,6 +102,8 @@ pub(crate) struct ReservationState {
     /// Reservations used by an authorization whose first transaction event is still to be
     /// built, by EVSE.
     claims: BTreeMap<u32, Reservation>,
+    /// Consumed reservation IDs whose timeout reports are waiting to be sent.
+    pending_no_transaction: VecDeque<i32>,
 }
 
 /// What a `ReserveNow` sees on one EVSE.
@@ -319,6 +328,22 @@ impl Station2Actor {
             .map(|reservation| reservation.id)
     }
 
+    /// H03.FR.11: in 2.1 the reservation stays consumed after the connection timeout.
+    pub(super) fn reservation_authorization_timed_out(&mut self, evse: u32) {
+        if self.protocol() != Protocol::V21 {
+            self.reservation_release_claim(evse);
+            return;
+        }
+        if let Some(id) = self.take_reservation_claim(evse) {
+            let pending = &mut self.reservations.pending_no_transaction;
+            if pending.len() == MAX_PENDING_NO_TRANSACTION {
+                pending.pop_front();
+            }
+            pending.push_back(id);
+            self.notify_status_changes();
+        }
+    }
+
     pub(super) fn reservation_claim_on(&self, evse: u32) -> Option<&Reservation> {
         self.reservations.claims.get(&evse)
     }
@@ -331,7 +356,7 @@ impl Station2Actor {
         let now = self.clock.now_utc();
         let reportable = self.link.conn.is_some()
             && self
-                .may_send("ReservationStatusUpdate", Origin2::Station)
+                .may_send(ReservationStatusUpdate::NAME, Origin2::Station)
                 .is_ok();
         let mut newly_lost = false;
         if self.reservations_enabled()
@@ -383,9 +408,12 @@ impl Station2Actor {
             self.reservations
                 .list
                 .retain(|reservation| !ended.iter().any(|(id, _)| *id == reservation.id));
-        }
-        for (id, status) in &ended {
-            self.report_reservation_end(*id, *status);
+            for &(id, status) in &ended {
+                self.report_reservation_end(id, status);
+            }
+            for id in std::mem::take(&mut self.reservations.pending_no_transaction) {
+                self.report_reservation_end(id, ReservationUpdateStatus::NoTransaction);
+            }
         }
         let flags_changed = self.reservation_sync_flags();
         if newly_lost || !ended.is_empty() {

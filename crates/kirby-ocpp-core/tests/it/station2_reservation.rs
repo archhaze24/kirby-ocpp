@@ -12,16 +12,19 @@ use kirby_ocpp_core::config::ReconnectConfig;
 use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::ocpp::frame::Frame;
 use kirby_ocpp_core::ocpp::v2::types::{ChargingState, IdTokenType, StopReason};
+use kirby_ocpp_core::station::Event;
 use kirby_ocpp_core::station2::{IdTokenRef, Reservation, ReservationPersist};
 use kirby_ocpp_core::store::{FileKind, LoadOutcome2, PersistedStation2, StationStore};
 use kirby_ocpp_core::{Command2, ManualClock, Outcome2, Station2, Station2Handle, StationConfig};
 use kirby_ocpp_testkit::{CsmsOptions, MockCsms, Reply, SubprotocolPolicy};
 use serde_json::{Value, json};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::station2_remote::Rig;
 use super::station2_support::{STEP, v201_csms, wait_booted, wait_snapshot};
+use super::station21::v21_csms;
 
 fn central(id: &str) -> Value {
     json!({"idToken": id, "type": "Central"})
@@ -699,6 +702,111 @@ async fn a_reservation_for_any_evse_keeps_one_free_for_its_token() {
     );
     assert_eq!(rig.cancel(9).await, "Rejected");
     rig.stop().await;
+}
+
+async fn use_reservation_before_connection(
+    protocol: Protocol,
+) -> (Rig, broadcast::Receiver<Event>) {
+    let rig = if protocol == Protocol::V21 {
+        Rig::start_with_mock(v21_csms().await, protocol, "Accepted", |_| {}).await
+    } else {
+        Rig::new().await
+    };
+    rig.set_variable("TxCtrlr", "EVConnectionTimeOut", "1")
+        .await;
+    assert_eq!(rig.reserve(62, Some(1), "A").await, "Accepted");
+    let events = rig.station.subscribe();
+    assert_eq!(
+        authorized_status(&rig.present_central(Some(1), "A").await),
+        "Accepted"
+    );
+    (rig, events)
+}
+
+async fn wait_authorization_timeout(events: &mut broadcast::Receiver<Event>, evse: u32) {
+    let message = format!("EV did not connect to EVSE {evse} in time: authorization dropped");
+    timeout(STEP, async {
+        loop {
+            if matches!(events.recv().await.expect("station event"), Event::Log(log) if log.text == message)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("authorization expires");
+}
+
+async fn assert_reported_without_transaction(rig: &Rig) {
+    rig.wait_update(62, "NoTransaction").await;
+    assert_eq!(rig.cancel(62).await, "Rejected");
+    rig.send(Command2::Heartbeat).await;
+    assert_eq!(
+        rig.calls("ReservationStatusUpdate"),
+        [json!({"reservationId": 62, "reservationUpdateStatus": "NoTransaction"})]
+    );
+    assert_eq!(rig.events_of("Started"), Vec::<Value>::new());
+}
+
+#[tokio::test]
+async fn consumed_reservation_connection_timeout_is_reported_in_21() {
+    timeout(STEP * 3, async {
+        let (rig, _) = use_reservation_before_connection(Protocol::V21).await;
+        assert_reported_without_transaction(&rig).await;
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn consumed_reservation_connection_timeout_is_reported_after_reconnect() {
+    timeout(STEP * 3, async {
+        let (rig, mut events) = use_reservation_before_connection(Protocol::V21).await;
+        rig.send(Command2::Disconnect).await;
+        wait_authorization_timeout(&mut events, 1).await;
+        assert_eq!(rig.calls("ReservationStatusUpdate"), Vec::<Value>::new());
+        rig.send(Command2::Connect).await;
+        assert_reported_without_transaction(&rig).await;
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn consumed_reservation_connection_timeout_is_not_reported_in_201() {
+    timeout(STEP * 3, async {
+        let (rig, mut events) = use_reservation_before_connection(Protocol::V201).await;
+        wait_authorization_timeout(&mut events, 1).await;
+        assert_eq!(rig.cancel(62).await, "Accepted");
+        rig.send(Command2::Heartbeat).await;
+        assert_eq!(rig.calls("ReservationStatusUpdate"), Vec::<Value>::new());
+        assert_eq!(rig.events_of("Started"), Vec::<Value>::new());
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
+}
+
+#[tokio::test]
+async fn consumed_reservation_connection_timeout_is_not_reported_after_transaction_start() {
+    timeout(STEP * 3, async {
+        let (rig, mut events) = use_reservation_before_connection(Protocol::V21).await;
+        rig.send(Command2::PlugIn { evse: 1 }).await;
+        assert_eq!(rig.wait_event("Started").await["reservationId"], 62);
+        // Let another authorization time out after the first one's deadline.
+        assert_eq!(
+            authorized_status(&rig.present_central(Some(2), "B").await),
+            "Accepted"
+        );
+        wait_authorization_timeout(&mut events, 2).await;
+        rig.send(Command2::Heartbeat).await;
+        assert_eq!(rig.calls("ReservationStatusUpdate"), Vec::<Value>::new());
+        rig.stop().await;
+    })
+    .await
+    .expect("scenario completes");
 }
 
 // ---- H04: the end ------------------------------------------------------------------------

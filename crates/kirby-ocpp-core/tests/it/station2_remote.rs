@@ -51,7 +51,15 @@ impl Rig {
 
     /// A station whose boot is answered with `status`; waits for the boot to be answered.
     pub async fn start(status: &str, tweak: impl FnOnce(&mut StationConfig)) -> Self {
-        let csms = v201_csms().await;
+        Self::start_with_mock(v201_csms().await, Protocol::V201, status, tweak).await
+    }
+
+    pub async fn start_with_mock(
+        csms: MockCsms,
+        protocol: Protocol,
+        status: &str,
+        tweak: impl FnOnce(&mut StationConfig),
+    ) -> Self {
         let answer = status.to_owned();
         csms.respond("BootNotification", move |_| boot_reply(&answer));
         let clock = ManualClock::new(Utc::now());
@@ -67,10 +75,8 @@ impl Rig {
             })
             .without_persistence();
         config.ws_ping_interval_secs = 0;
-        Protocol::V201
-            .token()
-            .clone_into(&mut config.ws_subprotocol);
-        config.protocol = Protocol::V201;
+        protocol.token().clone_into(&mut config.ws_subprotocol);
+        config.protocol = protocol;
         tweak(&mut config);
         let (station, task) = Station2::spawn(config, Arc::new(clock.clone()));
         station.connect().await.expect("connect");

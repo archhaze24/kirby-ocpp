@@ -7,6 +7,10 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### ✨ Added
+
+- OCPP 2.1 emulator: a used reservation whose EV does not connect within `EVConnectionTimeOut` ends with `ReservationStatusUpdate` `NoTransaction` (H03.FR.11) instead of returning to the EVSE.
+
 ### 🔧 Changed
 
 - `kirby-csms-core`: `CsmsEvent::Connected` carries the `remote_addr` and `subprotocol` of the connection it reports. Code that matches `Connected { station }` needs `Connected { station, .. }`.

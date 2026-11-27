@@ -1385,7 +1385,7 @@ impl Station2Actor {
                 None,
             );
         } else if self.drop_pending_authorization(evse) {
-            self.reservation_release_claim(evse);
+            self.reservation_authorization_timed_out(evse);
             self.log(
                 LogLevel::Info,
                 format!("EV did not connect to EVSE {evse} in time: authorization dropped"),
