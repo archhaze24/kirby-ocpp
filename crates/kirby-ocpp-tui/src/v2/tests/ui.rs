@@ -377,6 +377,45 @@ fn evse_details_show_the_transaction_limit_cost_tariff_and_priority() {
 }
 
 #[test]
+fn evse_costs_carry_the_currency_when_it_is_known() {
+    use kirby_ocpp_core::station2::TransactionLimit2;
+    let mut a = app();
+    a.set_tab(Tab2::Evse);
+    let evse = &mut a.snapshot.evses[0];
+    evse.total_cost = Some(1.234);
+    evse.tariff_id = Some("T-1".to_owned());
+    evse.transaction_limit = Some(TransactionLimit2 {
+        max_energy_wh: None,
+        max_time_s: None,
+        max_cost: Some(5.0),
+    });
+    let text = render(&a, 110, 40);
+    assert!(
+        text.contains("cost             1.23 \u{b7} tariff T-1"),
+        "{text}"
+    );
+    assert!(text.contains("max cost         5.00 "), "{text}");
+    assert!(!text.contains("5.00 EUR"), "{text}");
+    for (w, h) in [(80, 24), (200, 60)] {
+        assert_clean(&render(&a, w, h));
+    }
+    let evse = &mut a.snapshot.evses[0];
+    evse.cost_currency = Some("EUR".to_owned());
+    let text = render(&a, 110, 40);
+    assert!(
+        text.contains("cost             1.23 EUR \u{b7} tariff T-1"),
+        "{text}"
+    );
+    assert!(text.contains("max cost         5.00 EUR"), "{text}");
+    let evse = &mut a.snapshot.evses[0];
+    evse.tariff_id = None;
+    evse.cost_currency = Some("E\u{1b}UR".to_owned());
+    let text = render(&a, 110, 40);
+    assert!(text.contains("1.23 E\u{b7}UR"), "{text}");
+    assert_clean(&text);
+}
+
+#[test]
 fn station_tab_shows_the_local_list_and_the_profiles() {
     let mut a = app();
     a.snapshot.local_list_version = 4;

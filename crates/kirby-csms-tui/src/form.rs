@@ -24,7 +24,7 @@ use kirby_ocpp_core::ocpp::types::{
 };
 use kirby_ocpp_tui::forms::{
     CAP_NOTICE, INPUT_CAP, PROFILE_TEMPLATE, data_transfer_error, insert_char_capped,
-    insert_str_capped, is_secret_config_key, schemas,
+    insert_str_capped, is_secret_config_key, pick_option, schemas,
 };
 use kirby_ocpp_tui::text::TextInput;
 use serde_json::Value;
@@ -97,6 +97,10 @@ pub enum FieldKind {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent per-field flags, like the emulator's Field"
+)]
 pub struct Field {
     pub label: &'static str,
     pub kind: FieldKind,
@@ -119,6 +123,12 @@ pub struct Field {
     /// A selector with a single option stays visible (it names the target, for instance the
     /// one running transaction); without this flag it is hidden and skipped.
     pub keep_single: bool,
+    /// A plain text field holds a prefilled value nobody touched: the first printable key (or
+    /// a paste) replaces it; a cursor key or Backspace keeps it for editing. Never set for a
+    /// JSON payload, whose template stays.
+    pub fresh: bool,
+    /// What was typed on a selector since another key last ended the run.
+    pub typed: String,
 }
 
 impl Field {
@@ -155,6 +165,8 @@ impl Field {
             values: Vec::new(),
             touched: false,
             keep_single: false,
+            fresh: replaces_on_typing(kind, value),
+            typed: String::new(),
         }
     }
 
@@ -1231,6 +1243,9 @@ impl Form {
         if let Some(f) = self.fields.get_mut(i)
             && f.is_text()
         {
+            if std::mem::take(&mut f.fresh) {
+                f.input = TextInput::default();
+            }
             f.capped |= insert_str_capped(&mut f.input, text);
             self.touched(i);
         }
@@ -1257,21 +1272,16 @@ impl Form {
                 let Some(f) = self.fields.get_mut(i) else {
                     return FormEvent::None;
                 };
+                if !matches!(code, KeyCode::Char(_)) || ctrl {
+                    // Cursor and editing keys end a typing run and keep the prefill.
+                    f.typed.clear();
+                    f.fresh = false;
+                }
                 match (f.kind, code) {
                     (FieldKind::Select, KeyCode::Left) => step(&mut f.option, f.options.len(), -1),
                     (FieldKind::Select, KeyCode::Right) => step(&mut f.option, f.options.len(), 1),
                     (FieldKind::Select, KeyCode::Char(c)) if !ctrl => {
-                        let lc = c.to_ascii_lowercase();
-                        let len = f.options.len();
-                        if let Some(next) = (1..=len).map(|d| (f.option + d) % len).find(|&k| {
-                            f.options.get(k).is_some_and(|o| {
-                                o.chars()
-                                    .next()
-                                    .is_some_and(|c| c.to_ascii_lowercase() == lc)
-                            })
-                        }) {
-                            f.option = next;
-                        }
+                        f.option = pick_option(&f.options, f.option, &mut f.typed, c);
                     }
                     (FieldKind::Select, _) => {}
                     (_, KeyCode::Left) => f.input.left(),
@@ -1286,6 +1296,9 @@ impl Form {
                     (_, KeyCode::Char(c))
                         if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                     {
+                        if std::mem::take(&mut f.fresh) {
+                            f.input = TextInput::default();
+                        }
                         f.capped |= insert_char_capped(&mut f.input, c);
                     }
                     _ => {}
@@ -1910,6 +1923,22 @@ fn validate_request(protocol: Protocol, text: &str, action: &str) -> Option<Stri
 /// The input of a prefilled field. A JSON template is wider than most fields, so its cursor
 /// starts at the beginning and the start of the template is the part that shows; other
 /// prefills keep the cursor at the end, where typing continues.
+/// Whether the first key typed into a field prefilled with `value` replaces it: a plain text
+/// value does, a selector and a JSON payload or template do not.
+fn replaces_on_typing(kind: FieldKind, value: &str) -> bool {
+    !value.is_empty()
+        && !value.starts_with(['{', '['])
+        && !matches!(
+            kind,
+            FieldKind::Select
+                | FieldKind::Json
+                | FieldKind::RawJson
+                | FieldKind::ProfileJson
+                | FieldKind::FaultJson
+                | FieldKind::Pem { .. }
+        )
+}
+
 fn prefill_input(value: &str) -> TextInput {
     let mut input = TextInput::new(value);
     if value.starts_with(['{', '[']) {
@@ -2419,5 +2448,111 @@ mod tests {
         f.handle_key(key(KeyCode::Tab));
         f.paste(&"x".repeat(INPUT_CAP + 1));
         assert_eq!(f.fields[1].error.as_deref(), Some(CAP_NOTICE));
+    }
+
+    fn reserve() -> Form {
+        Form::reserve_now("CP-1", 7, Utc::now())
+    }
+
+    #[test]
+    fn the_first_printable_key_replaces_a_prefilled_plain_value() {
+        let mut f = reserve();
+        assert_eq!(f.fields[0].input.text(), "1");
+        assert!(f.fields[0].fresh);
+        type_text(&mut f, "23");
+        assert_eq!(
+            f.fields[0].input.text(),
+            "23",
+            "only the first key replaces"
+        );
+        assert!(!f.fields[0].fresh);
+        // The prefilled reservation id is replaced the same way.
+        let id = f.fields.len() - 1;
+        assert_eq!(f.fields[id].input.text(), "7");
+        f.focus = id;
+        type_text(&mut f, "9");
+        assert_eq!(f.fields[id].input.text(), "9");
+    }
+
+    #[test]
+    fn cursor_keys_and_backspace_keep_the_prefill_for_editing() {
+        for code in [KeyCode::End, KeyCode::Home, KeyCode::Left, KeyCode::Right] {
+            let mut f = reserve();
+            f.handle_key(key(code));
+            assert!(!f.fields[0].fresh, "{code:?}");
+            type_text(&mut f, "2");
+            assert_eq!(
+                f.fields[0].input.text().len(),
+                2,
+                "{code:?} keeps the value: {}",
+                f.fields[0].input.text()
+            );
+        }
+        let mut f = reserve();
+        f.handle_key(key(KeyCode::Backspace));
+        assert_eq!(f.fields[0].input.text(), "");
+        type_text(&mut f, "4");
+        assert_eq!(f.fields[0].input.text(), "4");
+        // A timestamp keeps its text for editing after a cursor key.
+        let mut f = reserve();
+        f.focus = 1;
+        let stamp = f.fields[1].input.text().to_owned();
+        f.handle_key(key(KeyCode::End));
+        type_text(&mut f, "Z");
+        assert_eq!(f.fields[1].input.text(), format!("{stamp}Z"));
+    }
+
+    #[test]
+    fn a_paste_replaces_a_prefilled_value_once() {
+        let mut f = reserve();
+        f.paste("5");
+        assert_eq!(f.fields[0].input.text(), "5");
+        f.paste("6");
+        assert_eq!(f.fields[0].input.text(), "56");
+    }
+
+    #[test]
+    fn a_json_payload_keeps_its_template_when_typing() {
+        let mut f = Form::raw_in("CP-1", "ocpp2.0.1", Some("Reset"));
+        let template = f.fields[1].input.text().to_owned();
+        assert!(template.starts_with('{'), "{template}");
+        assert!(!f.fields[1].fresh);
+        f.focus = 1;
+        type_text(&mut f, "x");
+        let text = f.fields[1].input.text();
+        assert!(text.ends_with(&template), "{text}");
+        assert_eq!(text.len(), template.len() + 1, "{text}");
+        f.paste("y");
+        assert!(f.fields[1].input.text().ends_with(&template));
+        // A set-charging-profile payload keeps its template too.
+        let mut f = Form::set_profile("CP-1");
+        let profile = f.fields[1].input.text().to_owned();
+        f.focus = 1;
+        type_text(&mut f, "x");
+        assert!(f.fields[1].input.text().ends_with(&profile));
+    }
+
+    #[test]
+    fn selectors_take_typed_values_and_digits() {
+        let mut f = Form::reset("CP-1");
+        let options = f.fields[0].options.clone();
+        assert!(options.len() >= 2, "{options:?}");
+        let chosen = |f: &Form| f.fields[0].chosen().unwrap().to_owned();
+        type_text(&mut f, "h");
+        assert!(chosen(&f).to_lowercase().starts_with('h'), "{}", chosen(&f));
+        type_text(&mut f, "s");
+        assert!(chosen(&f).to_lowercase().starts_with('s'), "{}", chosen(&f));
+        // A run of letters picks the first value that starts with it.
+        f.handle_key(key(KeyCode::Left));
+        let prefix: String = options[1].chars().take(3).collect();
+        type_text(&mut f, &prefix);
+        assert_eq!(chosen(&f), options[1]);
+        // A digit that starts no value picks the n-th one.
+        f.handle_key(key(KeyCode::Left));
+        type_text(&mut f, "2");
+        assert_eq!(chosen(&f), options[1]);
+        f.handle_key(key(KeyCode::Left));
+        type_text(&mut f, "1");
+        assert_eq!(chosen(&f), options[0]);
     }
 }

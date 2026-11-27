@@ -764,26 +764,31 @@ impl App {
             return;
         };
         let opened = match &state.v2 {
-            Some(v2) => v2
-                .transactions
-                .iter()
-                .rev()
-                .nth(index)
-                .map(|tx| (serde_json::to_string_pretty(tx), tx.id.clone())),
-            None => state
-                .transactions
-                .iter()
-                .rev()
-                .nth(index)
-                .map(|tx| (serde_json::to_string_pretty(tx), tx.id.to_string())),
+            Some(v2) => v2.transactions.iter().rev().nth(index).map(|tx| {
+                (
+                    serde_json::to_string_pretty(tx),
+                    tx.id.clone(),
+                    crate::txview::summary_2x(tx),
+                )
+            }),
+            None => state.transactions.iter().rev().nth(index).map(|tx| {
+                (
+                    serde_json::to_string_pretty(tx),
+                    tx.id.to_string(),
+                    crate::txview::summary_1x(tx),
+                )
+            }),
         };
-        let Some((Ok(json), copy)) = opened else {
+        let Some((Ok(json), copy, mut lines)) = opened else {
             return;
         };
+        lines.push(String::new());
+        lines.push("--- record ---".to_owned());
+        lines.extend(json.lines().map(kirby_ocpp_tui::text::sanitize));
         self.mode = Mode::Detail(Detail {
             title: "Transaction".to_owned(),
             copy,
-            lines: json.lines().map(kirby_ocpp_tui::text::sanitize).collect(),
+            lines,
             scroll: 0,
         });
     }

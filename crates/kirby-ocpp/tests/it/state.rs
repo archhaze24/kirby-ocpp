@@ -614,6 +614,170 @@ fn v201_show_prints_the_energy_of_an_active_transaction_in_whole_wh() {
     assert!(!printed.contains("744."), "{printed}");
 }
 
+/// A 2.1 state with a local list, a reservation, a default tariff and a charging profile.
+fn write_v21_with_settings(dir: &Path, id: &str) {
+    use kirby_ocpp_core::store::{FileKind, PersistedStation2, StationStore};
+    let store = StationStore::new_for(FileKind::V2, dir, id);
+    let mut state = PersistedStation2::new(id);
+    "ocpp2.1".clone_into(&mut state.protocol);
+    state.auth_cache.local_list.version = 3;
+    state.auth_cache.local_list.entries.insert(
+        "ISO14443|TOKEN-A".to_owned(),
+        serde_json::from_value(serde_json::json!({"status": "Accepted", "expires_at": null}))
+            .unwrap(),
+    );
+    state.reservations.reservations.push(
+        serde_json::from_value(serde_json::json!({
+            "id": 5,
+            "expires_at": "2030-01-01T10:00:00Z",
+            "evse": 1,
+            "connector_type": "cCCS2",
+            "id_token": {"id_token": "TOK\u{202e}EN", "kind": "Central"},
+            "group_id_token": "GROUP-1",
+            "lost": true
+        }))
+        .unwrap(),
+    );
+    state.reservations.reservations.push(
+        serde_json::from_value(serde_json::json!({
+            "id": 6,
+            "expires_at": "2030-01-01T11:00:00Z",
+            "evse": null,
+            "connector_type": null,
+            "id_token": {"id_token": "TOKEN-B", "kind": "ISO14443"},
+            "group_id_token": null
+        }))
+        .unwrap(),
+    );
+    state.default_tariffs.push(serde_json::json!({
+        "evseId": 0,
+        "tariff": {"tariffId": "T-1", "currency": "EUR", "energy": {"prices": [{"priceKwh": 0.3}]}},
+        "validFrom": "2030-02-01T00:00:00Z"
+    }));
+    state.charging_profiles.profiles.push(
+        serde_json::from_value(serde_json::json!({
+            "evse": 1,
+            "profile": {
+                "id": 7,
+                "stackLevel": 2,
+                "chargingProfilePurpose": "TxDefaultProfile",
+                "chargingProfileKind": "Absolute",
+                "validTo": "2031-01-01T00:00:00Z",
+                "chargingSchedule": []
+            },
+            "transaction_id": null,
+            "installed_at": "2026-01-01T00:00:00Z",
+            "source": "CSO"
+        }))
+        .unwrap(),
+    );
+    store.save2(&state).unwrap();
+}
+
+#[test]
+fn v21_show_lists_reservations_tariffs_profiles_and_the_local_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = dir.path().to_str().unwrap();
+    write_v21_with_settings(dir.path(), "CP-9");
+    let base = [
+        "state",
+        "show",
+        "--state-dir",
+        state,
+        "--id",
+        "CP-9",
+        "--protocol",
+        "ocpp2.1",
+    ];
+    let output = run(&base);
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    let printed = text(&output.stdout);
+    assert!(
+        printed.contains("Local list:     version 3, 1 entries"),
+        "{printed}"
+    );
+    assert!(printed.contains("Reservations:   2\n"), "{printed}");
+    assert!(
+        printed.contains(
+            "  EVSE 1  id 5, expires 2030-01-01T10:00:00Z, idToken TOK·EN (Central), group GROUP-1, connector cCCS2, report lost\n"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "  any EVSE  id 6, expires 2030-01-01T11:00:00Z, idToken TOKEN-B (ISO14443)\n"
+        ),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("Tariffs:        1 default tariffs\n"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("  all EVSEs  id T-1, EUR, valid from 2030-02-01T00:00:00Z\n"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains("Profiles:       1 charging profiles\n"),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(
+            "  EVSE 1  id 7, stack 2, TxDefaultProfile, Absolute, source CSO, valid to 2031-01-01T00:00:00Z\n"
+        ),
+        "{printed}"
+    );
+    assert!(!printed.contains('\u{202e}'), "{printed}");
+
+    let value = json(&run(&[&base[..], &["--json"]].concat()));
+    let state = &value["state"];
+    assert_eq!(state["local_authorization_list"]["version"], 3);
+    assert_eq!(state["local_authorization_list"]["entries"], 1);
+    assert_eq!(state["reservations"][0]["id"], 5);
+    assert_eq!(state["reservations"][0]["evse"], 1);
+    assert_eq!(state["reservations"][0]["id_token_type"], "Central");
+    assert_eq!(state["reservations"][0]["lost"], true);
+    assert!(state["reservations"][1]["evse"].is_null());
+    assert_eq!(state["default_tariffs"][0]["evse"], 0);
+    assert_eq!(state["default_tariffs"][0]["tariff_id"], "T-1");
+    assert_eq!(state["default_tariffs"][0]["currency"], "EUR");
+    assert_eq!(state["charging_profiles"][0]["id"], 7);
+    assert_eq!(state["charging_profiles"][0]["purpose"], "TxDefaultProfile");
+    assert_eq!(state["charging_profiles"][0]["source"], "CSO");
+    assert_eq!(state["charging_profiles"][0]["profile"]["stackLevel"], 2);
+}
+
+#[test]
+fn v201_show_prints_empty_sections_and_no_tariffs_line() {
+    let dir = tempfile::tempdir().unwrap();
+    write_v201(dir.path(), "CP-9");
+    let args = [
+        "state",
+        "show",
+        "--state-dir",
+        dir.path().to_str().unwrap(),
+        "--id",
+        "CP-9",
+        "--protocol",
+        "ocpp2.0.1",
+    ];
+    let printed = text(&run(&args).stdout);
+    assert!(
+        printed.contains("Local list:     version 0, 0 entries"),
+        "{printed}"
+    );
+    assert!(printed.contains("Reservations:   0\n"), "{printed}");
+    assert!(
+        printed.contains("Profiles:       0 charging profiles\n"),
+        "{printed}"
+    );
+    assert!(!printed.contains("Tariffs:"), "{printed}");
+    let value = json(&run(&[&args[..], &["--json"]].concat()));
+    assert_eq!(value["state"]["reservations"], serde_json::json!([]));
+    assert_eq!(value["state"]["default_tariffs"], serde_json::json!([]));
+    assert_eq!(value["state"]["charging_profiles"], serde_json::json!([]));
+}
+
 #[test]
 fn v201_show_and_reset_never_touch_the_1_6_file() {
     let dir = tempfile::tempdir().unwrap();

@@ -21,6 +21,7 @@ pub mod command;
 pub mod form;
 mod help;
 mod keys;
+mod txview;
 pub mod ui;
 
 use std::future::Future;

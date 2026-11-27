@@ -292,6 +292,16 @@ fn transaction_lines(tx: &TransactionSnapshot) -> Vec<Line<'static>> {
 /// The OCPP 2.1 limit, cost, tariff and priority rows of an EVSE; each only with content.
 fn evse_extra_lines(evse: &EvseSnapshot) -> Vec<Line<'static>> {
     let mut v = Vec::new();
+    // The currency of the tariff in force, shown after every cost; none known: the number alone.
+    let currency = evse
+        .cost_currency
+        .as_deref()
+        .map(|c| truncate(&sanitize(c.trim()), 8))
+        .filter(|c| !c.is_empty());
+    let money = |value: f64| match &currency {
+        Some(c) => format!("{value:.2} {c}"),
+        None => format!("{value:.2}"),
+    };
     // One line per limit kind: the details pane is narrow and does not wrap.
     if let Some(limit) = &evse.transaction_limit {
         if let Some(wh) = limit.max_energy_wh {
@@ -306,7 +316,7 @@ fn evse_extra_lines(evse: &EvseSnapshot) -> Vec<Line<'static>> {
             v.push(kv("max time", time));
         }
         if let Some(cost) = limit.max_cost {
-            v.push(kv("max cost", format!("{cost:.2}")));
+            v.push(kv("max cost", money(cost)));
         }
         if let Some(reached) = &evse.limit_reached {
             v.push(Line::from(vec![
@@ -317,8 +327,8 @@ fn evse_extra_lines(evse: &EvseSnapshot) -> Vec<Line<'static>> {
     }
     let tariff = evse.tariff_id.as_deref().map(sanitize);
     match (evse.total_cost, &tariff) {
-        (Some(cost), Some(id)) => v.push(kv("cost", format!("{cost:.2} \u{b7} tariff {id}"))),
-        (Some(cost), None) => v.push(kv("cost", format!("{cost:.2}"))),
+        (Some(cost), Some(id)) => v.push(kv("cost", format!("{} \u{b7} tariff {id}", money(cost)))),
+        (Some(cost), None) => v.push(kv("cost", money(cost))),
         (None, Some(id)) => v.push(kv("tariff", id.clone())),
         (None, None) => {}
     }

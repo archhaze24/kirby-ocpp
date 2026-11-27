@@ -13,6 +13,7 @@ use std::process::ExitCode;
 use kirby_ocpp_core::config::default_state_dir;
 use kirby_ocpp_core::ocpp::Protocol;
 use kirby_ocpp_core::scenario::SCHEMA_VERSION;
+use kirby_ocpp_core::station2::{Reservation, StoredProfile2};
 use kirby_ocpp_core::store::{
     FileKind, Inspection, Inspection2, PersistedConnector, PersistedStation, PersistedStation2,
     STORE_VERSION, STORE2_VERSION, StationStore, StoreError,
@@ -274,7 +275,72 @@ fn state2_json(state: &PersistedStation2) -> Value {
         "stopped_transaction_ids": state.tx.stopped_ids.len(),
         "queued_events": state.queue.events.len(),
         "authorization_cache_entries": state.auth_cache.entries.len(),
+        "local_authorization_list": {
+            "version": state.auth_cache.local_list.version,
+            "entries": state.auth_cache.local_list.entries.len(),
+        },
+        "reservations": state.reservations.reservations.iter().map(reservation_json).collect::<Vec<_>>(),
+        "default_tariffs": state.default_tariffs.iter().map(tariff_json).collect::<Vec<_>>(),
+        "charging_profiles": state.charging_profiles.profiles.iter().map(profile_json).collect::<Vec<_>>(),
         "device_model": device_model,
+    })
+}
+
+/// A timestamp as the station writes it: UTC, whole seconds.
+fn time_text(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn text_field<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
+    value.get(key).and_then(Value::as_str)
+}
+
+/// The identifier of a stored charging profile or tariff, as text.
+fn id_field(value: &Value, key: &str) -> Option<String> {
+    match value.get(key)? {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        _ => None,
+    }
+}
+
+fn reservation_json(r: &Reservation) -> Value {
+    json!({
+        "id": r.id,
+        "evse": r.evse,
+        "expires_at": r.expires_at,
+        "connector_type": r.connector_type,
+        "id_token": r.id_token.id_token,
+        "id_token_type": enum_text(serde_json::to_value(&r.id_token.kind)),
+        "group_id_token": r.group_id_token,
+        "lost": r.lost,
+    })
+}
+
+fn tariff_json(entry: &Value) -> Value {
+    let tariff = entry.get("tariff").unwrap_or(&Value::Null);
+    json!({
+        "evse": entry.get("evseId").and_then(Value::as_u64),
+        "tariff_id": text_field(tariff, "tariffId"),
+        "currency": text_field(tariff, "currency"),
+        "valid_from": entry.get("validFrom"),
+        "tariff": tariff,
+    })
+}
+
+fn profile_json(p: &StoredProfile2) -> Value {
+    json!({
+        "evse": p.evse,
+        "id": p.profile.get("id"),
+        "stack_level": p.profile.get("stackLevel"),
+        "purpose": text_field(&p.profile, "chargingProfilePurpose"),
+        "kind": text_field(&p.profile, "chargingProfileKind"),
+        "source": p.source,
+        "transaction_id": p.transaction_id,
+        "valid_from": p.profile.get("validFrom"),
+        "valid_to": p.profile.get("validTo"),
+        "installed_at": p.installed_at,
+        "profile": p.profile,
     })
 }
 
@@ -284,6 +350,121 @@ fn whole_wh(wh: f64) -> f64 {
         wh.floor()
     } else {
         0.0
+    }
+}
+
+fn evse_text(evse: Option<u64>) -> String {
+    match evse {
+        None => "any EVSE".to_owned(),
+        Some(0) => "station".to_owned(),
+        Some(n) => format!("EVSE {n}"),
+    }
+}
+
+fn reservation_line(r: &Reservation) -> String {
+    let token = format!(
+        "{} ({})",
+        kirby_ocpp_tui::text::sanitize(&r.id_token.id_token),
+        enum_text(serde_json::to_value(&r.id_token.kind))
+    );
+    let mut line = format!(
+        "{}  id {}, expires {}, idToken {token}",
+        evse_text(r.evse.map(u64::from)),
+        r.id,
+        time_text(r.expires_at)
+    );
+    if let Some(group) = &r.group_id_token {
+        let _ = write!(line, ", group {}", kirby_ocpp_tui::text::sanitize(group));
+    }
+    if let Some(kind) = &r.connector_type {
+        let _ = write!(line, ", connector {}", kirby_ocpp_tui::text::sanitize(kind));
+    }
+    if r.lost {
+        line.push_str(", report lost");
+    }
+    line
+}
+
+fn tariff_line(entry: &Value) -> String {
+    let tariff = entry.get("tariff").unwrap_or(&Value::Null);
+    let evse = match entry.get("evseId").and_then(Value::as_u64) {
+        Some(0) | None => "all EVSEs".to_owned(),
+        Some(n) => format!("EVSE {n}"),
+    };
+    let mut line = format!(
+        "{evse}  id {}, {}",
+        kirby_ocpp_tui::text::sanitize(&id_field(tariff, "tariffId").unwrap_or_else(|| "-".into())),
+        kirby_ocpp_tui::text::sanitize(text_field(tariff, "currency").unwrap_or("no currency"))
+    );
+    if let Some(from) = entry.get("validFrom").and_then(Value::as_str) {
+        let _ = write!(
+            line,
+            ", valid from {}",
+            kirby_ocpp_tui::text::sanitize(from)
+        );
+    }
+    line
+}
+
+fn profile_line(p: &StoredProfile2) -> String {
+    let field =
+        |key: &str| kirby_ocpp_tui::text::sanitize(text_field(&p.profile, key).unwrap_or("-"));
+    let mut line = format!(
+        "{}  id {}, stack {}, {}, {}, source {}",
+        evse_text(Some(u64::from(p.evse))),
+        kirby_ocpp_tui::text::sanitize(&id_field(&p.profile, "id").unwrap_or_else(|| "-".into())),
+        kirby_ocpp_tui::text::sanitize(
+            &id_field(&p.profile, "stackLevel").unwrap_or_else(|| "-".into())
+        ),
+        field("chargingProfilePurpose"),
+        field("chargingProfileKind"),
+        kirby_ocpp_tui::text::sanitize(&p.source)
+    );
+    if let Some(tx) = &p.transaction_id {
+        let _ = write!(line, ", transaction {}", kirby_ocpp_tui::text::sanitize(tx));
+    }
+    for (label, key) in [("valid from", "validFrom"), ("valid to", "validTo")] {
+        if let Some(at) = text_field(&p.profile, key) {
+            let _ = write!(line, ", {label} {}", kirby_ocpp_tui::text::sanitize(at));
+        }
+    }
+    line
+}
+
+/// The local list, reservations, default tariffs and charging profiles of a 2.x state: a count
+/// and one line per item. The tariffs section is left out of a 2.0.1 file that holds none.
+fn write_settings2(out: &mut String, state: &PersistedStation2) {
+    let _ = writeln!(
+        out,
+        "Local list:     version {}, {} entries",
+        state.auth_cache.local_list.version,
+        state.auth_cache.local_list.entries.len()
+    );
+    let _ = writeln!(
+        out,
+        "Reservations:   {}",
+        state.reservations.reservations.len()
+    );
+    for r in &state.reservations.reservations {
+        let _ = writeln!(out, "  {}", reservation_line(r));
+    }
+    if !state.default_tariffs.is_empty() || state.protocol == Protocol::V21.token() {
+        let _ = writeln!(
+            out,
+            "Tariffs:        {} default tariffs",
+            state.default_tariffs.len()
+        );
+        for entry in &state.default_tariffs {
+            let _ = writeln!(out, "  {}", tariff_line(entry));
+        }
+    }
+    let _ = writeln!(
+        out,
+        "Profiles:       {} charging profiles",
+        state.charging_profiles.profiles.len()
+    );
+    for p in &state.charging_profiles.profiles {
+        let _ = writeln!(out, "  {}", profile_line(p));
     }
 }
 
@@ -363,6 +544,7 @@ fn state2_text(id: &str, file: &str, secrets: bool, state: &PersistedStation2) -
         "Auth cache:     {} entries",
         state.auth_cache.entries.len()
     );
+    write_settings2(&mut out, state);
     let _ = writeln!(
         out,
         "Device model:   {} values",

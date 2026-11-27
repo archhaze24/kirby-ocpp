@@ -463,7 +463,7 @@ fn list_details_and_log_are_drawn() {
         "{s}"
     );
     assert!(
-        s.contains("4242") && s.contains("TAG-XYZ") && s.contains("1500") && s.contains("7200"),
+        s.contains("4242") && s.contains("TAG-XYZ") && s.contains("1400") && s.contains("7200"),
         "{s}"
     );
     assert!(s.contains("CALL Authorize idTag=ABC"), "{s}");

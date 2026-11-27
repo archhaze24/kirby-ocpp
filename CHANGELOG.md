@@ -14,6 +14,8 @@ tag as the GitHub release notes.
 - OCPP 2.x emulator: the EVSE snapshot carries `cost_currency` next to `total_cost`. The 2.x state file is format version 3; files of version 1 and 2 still load.
 - Terminal UIs: `Home` and `End` jump to the first and last row in every pane of the emulator (connectors/EVSEs, actions, log; `End` follows the newest log row), as they already did in `kirby-csms`.
 - Emulator terminal UI: the OCPP 1.6 header shows the protocol (`OCPP 1.6`), like the 2.x header (`OCPP 2.0.1`, `OCPP 2.1`).
+- `kirby-ocpp state show` for OCPP 2.x state files lists the local authorization list, reservations, default tariffs and charging profiles; `--json` adds `local_authorization_list`, `reservations`, `default_tariffs` and `charging_profiles` to `state`.
+- CSMS terminal UI: the transaction popup starts with a readable summary (state, times, delivered energy, power) and, for OCPP 2.1, the tariff, transaction limits, cost (running or final, with currency) and priority charging; the full record follows.
 
 ### 🔧 Changed
 
@@ -32,6 +34,9 @@ tag as the GitHub release notes.
 - Emulator terminal UI (OCPP 1.6): the Maintenance tab moves to the end (`7`), so the tabs have the same numbers in every protocol (Logs `5`, Scenarios `6`).
 - Emulator command palette: without a query the current tab's actions come first, and an accelerator letter is shown only where it works. Both palettes match word starts, initials and contiguous text only (`tariff` no longer lists `Get variables`).
 - Forms: the first key typed into a prefilled field replaces the value, the focus starts on the first empty required field, and emulator selectors accept typing. The emulator Authorize, Start and Present token forms open with the token used last on that station. Long prefilled values, such as JSON templates in `kirby-csms`, open at their start.
+- CSMS terminal UI: the `Wh` column shows the energy delivered (meter register minus the start reading; `*` marks a register shown because the start reading is unknown), and `W` shows `-` for an ended transaction.
+- Costs show their currency in the CSMS terminal UI and in the emulator's OCPP 2.x EVSE details.
+- CSMS command forms: typing into a prefilled text field replaces the value (raw JSON templates are kept), and selectors accept typed digits and letters, as in the emulator forms.
 - Fleet terminal UI: the station strip shows ids and connection markers without digits, with a legend of the markers; `<` `>` are listed in the footer and the help.
 - Emulator terminal UI: the status line reports results in plain words (`Plugged in connector 1`, `Sent meter values (+120 Wh)`), and a fault that ends a transaction says so. The log no longer adds an `<Action> accepted` row that repeats the `RES` row.
 

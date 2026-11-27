@@ -174,6 +174,35 @@ pub fn is_secret_config_key(key: &str) -> bool {
 /// Shown under a hidden field.
 pub const SECRET_HINT: &str = "hidden while typing; paste works";
 
+/// The option a selector shows after the character `c` was typed on it (`current` is the
+/// option shown before, `typed` the characters typed since another key ended the run). A run
+/// of characters picks the first option that starts with it (`12` in a list of numbers, `Rej`
+/// in a list of statuses); when none does, the character alone picks the next option that
+/// starts with it, so repeating a letter cycles. A digit that starts no option picks the n-th
+/// one. No match keeps `current`.
+pub fn pick_option(options: &[String], current: usize, typed: &mut String, c: char) -> usize {
+    let starts =
+        |option: &str, prefix: &str| option.to_lowercase().starts_with(&prefix.to_lowercase());
+    typed.push(c);
+    if let Some(i) = options.iter().position(|o| starts(o, typed)) {
+        return i;
+    }
+    *typed = c.to_string();
+    let n = options.len();
+    if let Some(i) = (1..=n)
+        .map(|d| (current + d) % n)
+        .find(|&i| options.get(i).is_some_and(|o| starts(o, typed)))
+    {
+        i
+    } else if let Some(nth) = c.to_digit(10).and_then(|d| usize::try_from(d).ok())
+        && (1..=n).contains(&nth)
+    {
+        nth - 1
+    } else {
+        current
+    }
+}
+
 impl Field {
     pub fn new(label: &'static str, kind: FieldKind, value: &str) -> Self {
         Self {
@@ -217,25 +246,7 @@ impl Field {
     /// does, the character alone picks the next value that starts with it, so repeating a
     /// letter cycles. A digit that starts no value picks the n-th one.
     fn type_into_select(&mut self, c: char) {
-        let starts =
-            |option: &str, prefix: &str| option.to_lowercase().starts_with(&prefix.to_lowercase());
-        self.typed.push(c);
-        if let Some(i) = self.options.iter().position(|o| starts(o, &self.typed)) {
-            self.option = i;
-            return;
-        }
-        self.typed = c.to_string();
-        let n = self.options.len();
-        if let Some(i) = (1..=n)
-            .map(|d| (self.option + d) % n)
-            .find(|&i| starts(&self.options[i], &self.typed))
-        {
-            self.option = i;
-        } else if let Some(nth) = c.to_digit(10).and_then(|d| usize::try_from(d).ok())
-            && (1..=n).contains(&nth)
-        {
-            self.option = nth - 1;
-        }
+        self.option = pick_option(&self.options, self.option, &mut self.typed, c);
     }
 
     /// The options of a `Select` or `Multi` field.

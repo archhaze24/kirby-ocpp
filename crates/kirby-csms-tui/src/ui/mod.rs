@@ -354,3 +354,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod pane_tests;
+
+#[cfg(test)]
+mod tx_tests;

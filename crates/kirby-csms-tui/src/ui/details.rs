@@ -17,6 +17,7 @@ use ratatui::widgets::{Paragraph, Row, Table, Wrap};
 use super::layout::{self, Content, window_start};
 use super::panes::{SELECTED, age, block, clock, empty_state, markers, status_color};
 use crate::app::{App, Focus};
+use crate::txview;
 
 /// Width from which the connector and transaction tables sit side by side.
 const SIDE_BY_SIDE: u16 = 140;
@@ -173,6 +174,16 @@ fn summary(s: &StationState) -> String {
     parts.push(format!("{} tx", s.active_transaction_count()));
     if let Some(watts) = active_power(s) {
         parts.push(format!("{:.1} kW", watts / 1000.0));
+    }
+    if let Some(v2) = &s.v2 {
+        let running = v2
+            .transactions
+            .iter()
+            .filter(|t| t.status == TransactionStatus::Active)
+            .filter_map(|t| t.cost.as_ref());
+        if let Some(cost) = txview::running_cost(running) {
+            parts.push(format!("cost {cost}"));
+        }
     }
     if s.security_events_total > 0 {
         let n = usize::try_from(s.security_events_total).unwrap_or(usize::MAX);
@@ -524,12 +535,8 @@ fn transactions(f: &mut Frame<'_>, app: &App, state: &StationState, area: Rect) 
                 Some(stop) => format!("{}→{stop}", t.meter_start),
                 None => t.meter_start.to_string(),
             };
-            let wh = t
-                .energy_wh
-                .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}"));
-            let w = t
-                .power_w
-                .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}"));
+            let wh = txview::wh_cell(&txview::energy_of_1x(t));
+            let w = txview::w_cell(t.power_w, !active);
             let when = match t.stopped_at {
                 Some(stop) => format!("{}-{}", clock(t.started_at), clock(stop)),
                 None => format!("{} ({})", clock(t.started_at), age(app.now, t.started_at)),
@@ -589,11 +596,6 @@ fn transactions_v2(f: &mut Frame<'_>, app: &App, v2: &StationState2, area: Rect)
                     .map_or_else(|| "-".to_owned(), |v| v.to_string())
             );
             let active = tx.status == TransactionStatus::Active;
-            let state = if active {
-                "active".to_owned()
-            } else {
-                format!("ended {}", tx.stopped_reason.map_or("-", |r| r.as_str()))
-            };
             Row::new(vec![
                 truncate(&sanitize(&tx.id), 8),
                 loc,
@@ -601,11 +603,9 @@ fn transactions_v2(f: &mut Frame<'_>, app: &App, v2: &StationState2, area: Rect)
                 tx.charging_state
                     .map_or("-", |s| charging_state_text(s.as_str(), short_states))
                     .to_owned(),
-                tx.energy_wh
-                    .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}")),
-                tx.power_w
-                    .map_or_else(|| "-".to_owned(), |v| format!("{v:.0}")),
-                truncate(&sanitize(&state), 24),
+                txview::wh_cell(&txview::energy_of_2x(tx)),
+                txview::w_cell(tx.power_w, !active),
+                txview::state_cell_2x(tx, 24),
                 clock(tx.started_at),
             ])
             .style(tx_style(app, index, selected, active))
