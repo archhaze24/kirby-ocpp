@@ -321,6 +321,8 @@ fn connection_events_update_flags_and_lines() {
         &mut app,
         Msg::Event(CsmsEvent::Connected {
             station: "A".to_owned(),
+            remote_addr: None,
+            subprotocol: None,
         }),
     );
     assert!(app.stations[0].connected && app.stations[0].replaced);
@@ -338,6 +340,8 @@ fn connection_events_update_flags_and_lines() {
         &mut app,
         Msg::Event(CsmsEvent::Connected {
             station: "0".to_owned(),
+            remote_addr: None,
+            subprotocol: None,
         }),
     );
     assert!(fx.contains(&Effect::Refresh {

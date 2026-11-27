@@ -74,7 +74,7 @@ impl Client {
                 .await
                 .expect("connected in time")
             {
-                Ok(CsmsEvent::Connected { station }) if station == id => break,
+                Ok(CsmsEvent::Connected { station, .. }) if station == id => break,
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => panic!("events closed"),
             }

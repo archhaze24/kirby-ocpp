@@ -101,7 +101,7 @@ async fn wait_event(
 }
 
 fn connected(id: &str) -> impl FnMut(&CsmsEvent) -> bool + '_ {
-    move |e| matches!(e, CsmsEvent::Connected { station } if station == id)
+    move |e| matches!(e, CsmsEvent::Connected { station, .. } if station == id)
 }
 
 fn result_payload(frame: Frame) -> Value {
@@ -210,7 +210,7 @@ async fn three_stations_connect_at_once_and_are_listed() {
     // Connection order is arbitrary: collect until all three were announced.
     let mut announced = std::collections::BTreeSet::new();
     while announced.len() < 3 {
-        if let CsmsEvent::Connected { station } = wait_event(&mut events, "connects", |e| {
+        if let CsmsEvent::Connected { station, .. } = wait_event(&mut events, "connects", |e| {
             matches!(e, CsmsEvent::Connected { .. })
         })
         .await
@@ -296,6 +296,39 @@ async fn duplicate_id_replaces_the_old_connection() {
 
     second.stop().await;
     csms.shutdown().await;
+}
+
+#[tokio::test]
+async fn queued_connected_event_keeps_its_session_metadata() {
+    use crate::v201_support::{Client, start};
+
+    let csms = timeout(STEP, start(|_| {})).await.unwrap();
+    let mut queued = csms.subscribe();
+    let id = "CP-DUP-PROTOCOL";
+    let _first = timeout(STEP, Client::connect(&csms, id, "ocpp1.6"))
+        .await
+        .unwrap();
+    let first_addr = csms.station(id).unwrap().remote_addr.unwrap();
+    let _second = timeout(STEP, Client::connect(&csms, id, "ocpp2.0.1"))
+        .await
+        .unwrap();
+    let current = csms.station(id).unwrap();
+    assert_eq!(current.subprotocol.as_deref(), Some("ocpp2.0.1"));
+    assert_ne!(current.remote_addr, Some(first_addr));
+
+    let event = timeout(STEP, queued.recv()).await.unwrap().unwrap();
+    let CsmsEvent::Connected {
+        station,
+        remote_addr,
+        subprotocol,
+    } = event
+    else {
+        panic!("expected the first connected event, got {event:?}");
+    };
+    assert_eq!(station, id);
+    assert_eq!(remote_addr, Some(first_addr));
+    assert_eq!(subprotocol.as_deref(), Some("ocpp1.6"));
+    timeout(STEP, csms.shutdown()).await.unwrap();
 }
 
 #[tokio::test]
@@ -705,12 +738,10 @@ async fn events_arrive_in_order_connected_frames_disconnected() {
             break;
         }
     }
-    assert_eq!(
+    assert!(matches!(
         collected.first(),
-        Some(&CsmsEvent::Connected {
-            station: "CP-EV".into()
-        })
-    );
+        Some(CsmsEvent::Connected { station, .. }) if station == "CP-EV"
+    ));
     assert_eq!(
         collected.last(),
         Some(&CsmsEvent::Disconnected {

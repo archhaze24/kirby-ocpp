@@ -71,7 +71,7 @@ async fn call_error_code(socket: &mut Raw, text: &str) -> ErrorCode {
 async fn wait_connected(events: &mut broadcast::Receiver<CsmsEvent>, id: &str) {
     loop {
         match timeout(STEP, events.recv()).await.expect("event in time") {
-            Ok(CsmsEvent::Connected { station }) if station == id => return,
+            Ok(CsmsEvent::Connected { station, .. }) if station == id => return,
             Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
             Err(broadcast::error::RecvError::Closed) => panic!("events closed"),
         }

@@ -29,6 +29,8 @@ fn with_lines() -> App {
     for event in [
         CsmsEvent::Connected {
             station: "CP-1".to_owned(),
+            remote_addr: None,
+            subprotocol: None,
         },
         CsmsEvent::Disconnected {
             station: "CP-1".to_owned(),

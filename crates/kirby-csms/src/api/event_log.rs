@@ -229,7 +229,7 @@ impl EventLog {
 /// The station id of an event, if it names one.
 pub(super) fn event_station(event: &CsmsEvent) -> Option<&str> {
     match event {
-        CsmsEvent::Connected { station }
+        CsmsEvent::Connected { station, .. }
         | CsmsEvent::Disconnected { station, .. }
         | CsmsEvent::Frame { station, .. }
         | CsmsEvent::Malformed { station, .. }

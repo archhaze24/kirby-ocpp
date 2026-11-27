@@ -271,25 +271,24 @@ impl Renderer {
         let clock = time_mode().prefix(ts);
         let stamp = ts.to_rfc3339_opts(SecondsFormat::Millis, true);
         match event {
-            CsmsEvent::Connected { station } => {
-                // The registry still holds this connection's data unless another connection
-                // or a forget raced in; then the fields describe that newer state.
-                let info = self.handle.station(station);
-                let remote = info.as_ref().and_then(|info| info.remote_addr);
-                let protocol = info.and_then(|info| info.subprotocol);
+            CsmsEvent::Connected {
+                station,
+                remote_addr,
+                subprotocol,
+            } => {
                 let profile = self.handle.security_profile().number();
                 self.push(
                     &json!({
                         "type": "connected", "ts": stamp, "station": station,
-                        "remote_addr": remote.map(|addr| addr.to_string()),
-                        "protocol": protocol,
+                        "remote_addr": remote_addr.map(|addr| addr.to_string()),
+                        "protocol": subprotocol,
                     }),
                     &format!(
                         "{clock}{} connected from {} ({}, profile {profile})",
                         sanitize(station),
-                        remote
+                        remote_addr
                             .map_or_else(|| "unknown address".to_owned(), |addr| addr.to_string()),
-                        protocol
+                        subprotocol
                             .as_deref()
                             .map_or_else(|| "no subprotocol".to_owned(), sanitize),
                     ),
@@ -472,6 +471,48 @@ pub fn frame_json(frame: &Frame) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn connected_json_uses_event_metadata_without_a_registry_entry() {
+        use kirby_csms_core::{CsmsConfig, CsmsServer};
+        use tokio::time::timeout;
+
+        let deadline = Duration::from_secs(5);
+        let handle = timeout(
+            deadline,
+            CsmsServer::start(CsmsConfig::new("127.0.0.1:0".parse().unwrap())),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let event = CsmsEvent::Connected {
+            station: "CP-EARLIER".to_owned(),
+            remote_addr: Some("127.0.0.1:4242".parse().unwrap()),
+            subprotocol: Some("ocpp1.6".to_owned()),
+        };
+        let mut rendered = Renderer::new(&handle).render(&event);
+        timeout(deadline, handle.shutdown()).await.unwrap();
+
+        assert_eq!(rendered.len(), 1);
+        let (mut value, _) = rendered.pop().unwrap();
+        assert!(
+            value
+                .as_object_mut()
+                .unwrap()
+                .remove("ts")
+                .unwrap()
+                .is_string()
+        );
+        assert_eq!(
+            value,
+            json!({
+                "type": "connected",
+                "station": "CP-EARLIER",
+                "remote_addr": "127.0.0.1:4242",
+                "protocol": "ocpp1.6",
+            })
+        );
+    }
 
     #[test]
     fn control_characters_are_neutralised() {

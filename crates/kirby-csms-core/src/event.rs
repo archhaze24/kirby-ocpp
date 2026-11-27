@@ -46,7 +46,13 @@ pub enum DisconnectReason {
 #[non_exhaustive]
 pub enum CsmsEvent {
     /// A station connected (also emitted when it replaces an older connection).
-    Connected { station: String },
+    Connected {
+        station: String,
+        /// Peer address of this connection.
+        remote_addr: Option<SocketAddr>,
+        /// Negotiated subprotocol of this connection (for example `ocpp1.6`).
+        subprotocol: Option<String>,
+    },
     /// A station's connection ended.
     Disconnected {
         station: String,

@@ -969,7 +969,7 @@ fn tick(app: &mut App, now: DateTime<Utc>, fx: &mut Vec<Effect>) {
 
 fn on_event(app: &mut App, event: CsmsEvent, fx: &mut Vec<Effect>) {
     match event {
-        CsmsEvent::Connected { station } => {
+        CsmsEvent::Connected { station, .. } => {
             fx.push(Effect::Refresh {
                 states: Vec::new(),
                 info: Some(station.clone()),

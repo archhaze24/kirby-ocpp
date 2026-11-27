@@ -7,6 +7,14 @@ tag as the GitHub release notes.
 
 ## [Unreleased]
 
+### 🔧 Changed
+
+- `kirby-csms-core`: `CsmsEvent::Connected` carries the `remote_addr` and `subprotocol` of the connection it reports. Code that matches `Connected { station }` needs `Connected { station, .. }`.
+
+### 🐛 Fixed
+
+- `kirby-csms`: a `connected` event (`--json`, the event stream, the event log) could show the address and protocol of a newer connection of the same station that replaced it before the event was printed. Each event now shows its own connection.
+
 ## [0.8.0] - 2026-11-22
 
 **The OCPP 2.1 release: both tools speak OCPP 2.1 next to 2.0.1 and 1.6J. The 2.x emulator gains the Local Authorization List, reservations, master pass, smart charging with priority and dynamic profiles, transaction limits, resumable transactions, local cost calculation with tariffs and fleets, plus fixes.**

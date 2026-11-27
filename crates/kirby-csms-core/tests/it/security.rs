@@ -184,7 +184,7 @@ async fn wait_event<T>(
 
 async fn wait_connected(rx: &mut broadcast::Receiver<CsmsEvent>, id: &str) {
     wait_event(rx, |e| {
-        matches!(e, CsmsEvent::Connected { station } if station == id).then_some(())
+        matches!(e, CsmsEvent::Connected { station, .. } if station == id).then_some(())
     })
     .await;
 }

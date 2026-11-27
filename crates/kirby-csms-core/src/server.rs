@@ -104,7 +104,7 @@ const CLOSE_CODE_ERROR: u16 = 1011;
 /// csms.inject(Fault::call_error("StartTransaction").times(2));
 ///
 /// let mut events = csms.subscribe();
-/// let _ = events.recv().await; // CsmsEvent::Connected { station: "CP-1" } ...
+/// let _ = events.recv().await; // CsmsEvent::Connected { station, .. }
 ///
 /// let reply = csms
 ///     .call("CP-1", "GetConfiguration", json!({ "key": ["HeartbeatInterval"] }))
@@ -1265,6 +1265,8 @@ impl Inner {
         });
         self.emit(CsmsEvent::Connected {
             station: id.to_owned(),
+            remote_addr: rec.info.remote_addr,
+            subprotocol: rec.info.subprotocol.clone(),
         });
         if protocol_changed {
             self.emit(CsmsEvent::StateChanged {

@@ -30,7 +30,7 @@ use serde_json::json;
 let csms = CsmsServer::start(CsmsConfig::new("0.0.0.0:9000".parse().unwrap())).await?;
 let mut events = csms.subscribe();
 while let Ok(event) = events.recv().await {
-    if let CsmsEvent::Connected { station } = event {
+    if let CsmsEvent::Connected { station, .. } = event {
         let reply = csms
             .call(&station, "ChangeConfiguration", json!({ "key": "HeartbeatInterval", "value": "60" }))
             .await?;

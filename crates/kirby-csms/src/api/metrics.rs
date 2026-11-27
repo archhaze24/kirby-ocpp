@@ -339,6 +339,8 @@ mod tests {
         metrics.count_event(&call(Direction::Out, "Reset"));
         metrics.count_event(&CsmsEvent::Connected {
             station: "CP-1".to_owned(),
+            remote_addr: None,
+            subprotocol: None,
         });
         metrics.add_events_dropped(2);
         metrics.add_stream_events_dropped(3);

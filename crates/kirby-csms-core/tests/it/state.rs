@@ -132,7 +132,7 @@ async fn wait_event(
 }
 
 fn connected(id: &str) -> impl FnMut(&CsmsEvent) -> bool + '_ {
-    move |e| matches!(e, CsmsEvent::Connected { station } if station == id)
+    move |e| matches!(e, CsmsEvent::Connected { station, .. } if station == id)
 }
 
 fn result_payload(frame: Frame) -> Value {
