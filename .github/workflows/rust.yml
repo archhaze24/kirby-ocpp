@@ -108,3 +108,53 @@ jobs:
 
       - name: Clippy (wasm32)
         run: cargo clippy -p kirby-ocpp-core --target wasm32-unknown-unknown -- -D warnings
+
+  # The web UI is a separate workspace (crates/kirby-csms-web, own lockfile) that builds for
+  # wasm32 only; the jobs above never compile it.
+  web:
+    name: web UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: crates/kirby-csms-web
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+          components: clippy, rustfmt
+
+      - name: Cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          workspaces: crates/kirby-csms-web
+
+      - name: Install trunk
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: trunk
+
+      - name: Format
+        run: cargo fmt --check
+
+      - name: Clippy (wasm32)
+        run: cargo clippy --locked --target wasm32-unknown-unknown -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --locked
+
+      - name: Build
+        run: trunk build --release --locked
+
+      # Everything the binary embeds comes from this directory.
+      - name: Check the output
+        run: |
+          ls -l ../kirby-csms/web/dist
+          test -f ../kirby-csms/web/dist/index.html
+          test -f ../kirby-csms/web/dist/kirby-csms-web_bg.wasm
+          ! grep -q '<script[^>]*>[^<]' ../kirby-csms/web/dist/index.html

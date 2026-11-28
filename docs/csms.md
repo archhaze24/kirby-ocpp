@@ -214,6 +214,22 @@ Rules:
 
 `--web` serves a browser UI on the API listener, next to the terminal UI or headless mode. Without `--api-listen` it listens on `127.0.0.1:9100`; the server prints `web UI on http://127.0.0.1:9100/` and the terminal UI shows the address while no station is selected. The page uses the same API: with an API token it asks for the token, without one it is accepted from its own address only. Security details: [api.md](api.md#web-ui).
 
+The UI is part of the release archives, the npm packages and the container image. A binary built from source includes it only after `trunk build --release` in `crates/kirby-csms-web` ([development.md](development.md#web-ui)); otherwise `/` shows a "Web UI not built" page and the API works as usual.
+
+**Token.** With `--api-token` or `--api-token-file` the page opens a dialog and asks for the token. It sends the token as a bearer on every request, keeps it in the browser's session storage (gone when the tab closes) and asks again when the server answers `401`. Without a token nothing is asked. Use `--api-tls-cert` and `--api-tls-key` when the page is reached over a network, since the token travels with every request.
+
+**Layout.** The header shows the version, the number of stations (and how many are connected), the state of the live event stream (`Live`, `Connecting`, `Reconnecting`) and a theme switch. The theme follows the system setting until the switch is used; the choice is remembered in the browser. The stream reconnects with a growing delay and resumes after the last event it saw. The station list at the left shows a status dot, the id, the protocol version, vendor and model, and the number of running transactions; the filter above it matches id, vendor, model and protocol. On narrow screens the list opens from the menu button.
+
+**Station screens.** Select a station to open its page; a disconnected station has a `Forget` button.
+- *Overview*: connection facts, boot data, a grid of connectors (or EVSEs and their connectors for OCPP 2.x, with the latest energy and power), and the transactions of the station with delivered energy, power and, for OCPP 2.1 stations that report it, the cost.
+- *Log*: the frames of the station, live and loaded from the history when the tab opens. Filter by direction, kind and action (a reply matches the action of its CALL), pause the list, let it follow the newest frame, clear it, and click a frame to read it as JSON. `Escape` closes the detail.
+- *Commands*: the actions the server can send in the station's protocol, searchable and grouped, from `GET /v1/actions`. Each action opens a form built from its fields (text, numbers, choices, booleans, times that start at the current time, PEM text, a picker of the running transactions that is disabled while none runs). The rules are those of the terminal UI forms: an empty optional field is left out, a dotted field name builds a nested object, and numbers, times and JSON are checked before sending. Actions without a form take raw JSON, prefilled with a template; actions without input send with one click; `Custom call` sends any action name with any JSON payload. Each answer (`result`, `call_error`, `timeout`, or the API error when the call was not delivered) is listed below the form. `Ctrl+Enter` sends from a JSON editor.
+- *Rules and faults*: the station's response rules and the global rules (set, list, clear), and the stored faults with a form to inject one for this station or for every station ([Response rules and fault injection](#response-rules-and-fault-injection)).
+
+**Transactions.** The `Transactions` button in the header lists the transactions of every station (newest first), filtered by state and station, and `Download CSV` saves the rows on screen as a file: the columns of the API's CSV export plus delivered energy and cost.
+
+**Keyboard.** `/` focuses the station filter, `Escape` closes the station list on narrow screens and the frame detail, `Enter` sends a form. All text that comes from stations is shown as text, never as HTML.
+
 ## Response rules and fault injection
 
 Both apply to CALLs sent by stations (not to commands sent by the CSMS). By default they apply to all stations, not to the selected one; a rule or fault can be limited to one station (exact id), to one protocol (`ocpp1.6`) or to both.

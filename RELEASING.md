@@ -35,6 +35,15 @@ If a build fails, fix it, delete the tag (`git push origin :refs/tags/vX.Y.Z && 
 
 ## 3. crates.io
 
+Build the web UI first: the `kirby-csms` crate embeds `crates/kirby-csms/web/dist/` and packages it only when it exists, so a crate published without it serves a "Web UI not built" page. Use the same build as the release (`trunk` and the `wasm32-unknown-unknown` target installed), then check that the files are in the package:
+
+```
+(cd crates/kirby-csms-web && trunk build --release --locked)
+cargo package --list -p kirby-csms --allow-dirty | grep web/dist
+```
+
+Then publish, `kirby-csms` last:
+
 ```
 cargo publish -p kirby-ocpp-core
 # wait ~1 minute until it appears in the index, then:

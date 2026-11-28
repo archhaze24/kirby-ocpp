@@ -2,13 +2,13 @@
 
 Toolchain, commands, conventions and recipes for changing the code. Read [Architecture](architecture.md) first for the crate map and contracts.
 
-Contents: [Toolchain](#toolchain) · [Build and test](#build-and-test) · [Definition of done](#definition-of-done) · [Code conventions](#code-conventions) · [Commits](#commits) · [Store version](#store-version) · [Recipes](#recipes) · [Keeping docs in step with code](#keeping-docs-in-step-with-code) · [Related pages](#related-pages)
+Contents: [Toolchain](#toolchain) · [Build and test](#build-and-test) · [Web UI](#web-ui) · [Definition of done](#definition-of-done) · [Code conventions](#code-conventions) · [Commits](#commits) · [Store version](#store-version) · [Recipes](#recipes) · [Keeping docs in step with code](#keeping-docs-in-step-with-code) · [Related pages](#related-pages)
 
 ## Toolchain
 
 * Rust edition 2024. MSRV: `rust-version = "1.88"` in `Cargo.toml`; do not use newer language or std features without raising it.
 * `rust-toolchain.toml` pins `stable` with `clippy` and `rustfmt`.
-* Workspace: 7 crates under `crates/` (see [Architecture](architecture.md#crate-map)); `kirby-ocpp-testkit` is not in `default-members` and is not published.
+* Workspace: 7 crates under `crates/` (see [Architecture](architecture.md#crate-map)); `kirby-ocpp-testkit` is not in `default-members` and is not published. The web UI crate `kirby-csms-web` is outside this workspace, see [Web UI](#web-ui).
 * Dependency updates: Dependabot (`.github/dependabot.yml`) opens weekly pull requests for Cargo crates, GitHub Actions and the Docker base images; minor and patch updates are grouped per ecosystem. Check that a crate update keeps the MSRV before merging it.
 
 ## Build and test
@@ -25,6 +25,26 @@ cargo test --workspace                                          # what CI runs
 * Set `CARGO_TARGET_DIR` to a directory outside the source tree if you build several checkouts, and `CARGO_INCREMENTAL=0` to save disk.
 * Details of test layout and rules: [Testing](testing.md).
 * Manual pages come from the clap commands (`clap_mangen`). Regenerate them with `KIRBY_OCPP_MAN_DIR=man/man1 KIRBY_CSMS_MAN_DIR=man/man1 cargo test -p kirby-ocpp -p kirby-csms --bin kirby-ocpp --bin kirby-csms man_page`, then `man -l man/man1/kirby-ocpp.1`. The same tests fail when a visible flag or subcommand is missing from a page; the release workflow uses them to build the pages that go into the archives.
+
+## Web UI
+
+The browser UI of `kirby-csms --web` is the crate `crates/kirby-csms-web`: Leptos (client-side rendered, Rust compiled to WebAssembly). It is a separate cargo workspace with its own `Cargo.lock`, excluded from the main one, so `cargo build`, `cargo clippy --workspace` and the MSRV job never see it and a plain build needs no wasm tools. Without a built UI `kirby-csms --web` serves a "Web UI not built" page at `/`; the `/v1` API is unaffected.
+
+One-time setup: `rustup target add wasm32-unknown-unknown` and `cargo install --locked trunk` (or `brew install trunk`; trunk downloads `wasm-bindgen` and `wasm-opt` itself).
+
+```bash
+cd crates/kirby-csms-web
+trunk build --release                  # writes crates/kirby-csms/web/dist/ (git-ignored)
+cargo build -p kirby-csms              # build.rs embeds dist/ into the binary
+cargo run -p kirby-csms -- --web       # http://127.0.0.1:9100/
+```
+
+* The binary embeds `dist/` at compile time. After a UI change run `trunk build` (a debug build without `--release` is faster and bigger), then `cargo build -p kirby-csms`, restart the server and reload the page. `trunk serve` is not set up: the API only accepts the page from the origin that served it.
+* Checks for the web crate, run in `crates/kirby-csms-web`: `cargo fmt --check`, `cargo clippy --target wasm32-unknown-unknown -- -D warnings`, `cargo test` (the pure logic runs on the host) and `trunk build --release`. CI runs them in the `web UI` job.
+* Layout: one module per screen (`stations/`, `log/`, `commands/`, `rules/`, `transactions/`), `api.rs` (the `/v1` shapes, fetch helpers and the event stream over `fetch`), `store.rs` (state shared by the screens: stations, frame ring, token, reconnecting stream) and `ui/` (shared components). Styles sit next to the screens and are listed in `index.html`; trunk copies each into `dist/`.
+* The page is served with a strict CSP (`script-src 'self' 'wasm-unsafe-eval'`, `style-src 'self'`): no inline script, no `style` attribute, no external resource. `Trunk.toml` turns script injection off and `boot.js` loads the module. Use CSS classes, never `style=` attributes; show everything that comes from a station as text.
+* The forms of the Commands tab are generated from `GET /v1/actions` and follow the rules of the terminal UI forms (`commands/form.rs`): a dotted field name is a nested key, an empty optional field is left out, timestamps go out as UTC whole seconds. A new field type in the action table needs a branch in `field_value` and in the field component.
+* Release builds make `dist/` once and every binary build downloads it, see [RELEASING.md](../RELEASING.md).
 
 ## Definition of done
 

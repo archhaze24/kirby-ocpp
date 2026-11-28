@@ -1,0 +1,41 @@
+/* Rules and faults tab. */
+
+.rules .intro {
+  margin-bottom: 12px;
+  max-width: 78ch;
+}
+
+.rows {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.row-body {
+  flex: 1 1 200px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inline-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(190px, 100%), 1fr));
+  gap: 0 var(--gap);
+  align-items: end;
+}
+
+.inline-form .field.wide,
+.inline-form .form-actions {
+  grid-column: 1 / -1;
+}

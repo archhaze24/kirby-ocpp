@@ -274,6 +274,10 @@ jq -r '.scenarios[] | select(.status != "passed") | .name as $n
 
 For a scenario with `status` `error`, print its `error` text instead (`jq -r '.scenarios[] | select(.status=="error") | "\(.name): \(.error)"' suite.json`). The same data is in the JUnit file: a failed case has a `<failure>` with the reason, `action:`, `params:`, `expected:` and `actual:` lines, and a station that never booted is one errored `setup` case. For the wire-level view, read the frames in the `--log-file` of the CSMS or run the emulator with `-v`.
 
+### Look at a run in the browser
+
+To reproduce a failure by hand, start the same central system locally with the web UI (`kirby-csms --listen 127.0.0.1:9000 --web`, then open `http://127.0.0.1:9100/`), point the station or firmware at it and watch the frames of the Log tab. The web UI is part of the release archives, npm packages and the container image; a binary built from source without the UI shows a "Web UI not built" page, see [Web UI](csms.md#web-ui). It needs no CI step and the CI examples above do not start it.
+
 ## Avoid flaky runs
 
 * Wait for readiness, not for time: the `listening on` line for `kirby-csms`, an accepted BootNotification for the station (`run` and `suite` do this for you).

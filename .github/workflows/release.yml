@@ -90,9 +90,38 @@ jobs:
           path: docs/kirby-csms-openapi.json
           if-no-files-found: error
 
+  # The web UI is built once (wasm32, trunk); every binary embeds the same files, so archives,
+  # npm, Homebrew, Scoop and the container image carry it.
+  web:
+    name: web UI
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
+        with:
+          tool: trunk
+
+      - name: Build
+        working-directory: crates/kirby-csms-web
+        run: trunk build --release --locked
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-dist
+          path: crates/kirby-csms/web/dist
+          if-no-files-found: error
+
   build:
     name: ${{ matrix.target }}
-    needs: [version, man]
+    needs: [version, man, web]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -130,6 +159,12 @@ jobs:
         with:
           name: openapi
           path: openapi
+
+      # `kirby-csms` embeds this directory at compile time (crates/kirby-csms/build.rs).
+      - uses: actions/download-artifact@v8
+        with:
+          name: web-dist
+          path: crates/kirby-csms/web/dist
 
       - name: Build
         shell: bash

@@ -1,0 +1,122 @@
+/* Log tab. */
+
+.log {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.count-note {
+  padding-bottom: 6px;
+  font-size: 12.5px;
+}
+
+.log-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap);
+  min-height: 0;
+}
+
+.log-body.with-detail {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 40%);
+}
+
+.log-list {
+  height: min(62vh, 640px);
+  min-height: 220px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.frame {
+  display: grid;
+  grid-template-columns: 92px 18px 92px minmax(0, 190px) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 10px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  text-align: left;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.frame:hover {
+  background: var(--surface-2);
+}
+
+.frame.selected {
+  background: var(--accent-soft);
+}
+
+.frame-time {
+  color: var(--muted);
+}
+
+.frame-dir {
+  color: var(--muted);
+  text-align: center;
+}
+
+.kind {
+  font-weight: 600;
+}
+
+.kind-call,
+.kind-send {
+  color: var(--info);
+}
+
+.kind-result {
+  color: var(--ok);
+}
+
+.kind-error,
+.kind-result_error {
+  color: var(--bad);
+}
+
+.frame-action {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.frame-summary {
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-detail {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.log-detail pre.json {
+  max-height: min(62vh, 640px);
+}
+
+@media (max-width: 860px) {
+  .log-body.with-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .frame {
+    grid-template-columns: 82px 14px 70px minmax(0, 1fr);
+  }
+
+  .frame-summary {
+    grid-column: 1 / -1;
+  }
+}

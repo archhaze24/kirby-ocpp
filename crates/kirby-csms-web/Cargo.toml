@@ -1,0 +1,72 @@
+[package]
+name = "kirby-csms-web"
+description = "Web UI of kirby-csms (Leptos, client-side rendered, built to WebAssembly with trunk)"
+version = "0.9.0-dev"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/archhaze24/kirby-ocpp"
+publish = false
+
+# A workspace of its own: the host gate (`cargo clippy --workspace`), the MSRV job and the
+# main lockfile never see this crate. It builds for `wasm32-unknown-unknown` only.
+[workspace]
+
+[dependencies]
+leptos = { version = "0.8.23", features = ["csr"] }
+js-sys = "0.3.107"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+web-sys = { version = "0.3.107", features = [
+    "AbortController",
+    "AbortSignal",
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "DomTokenList",
+    "Element",
+    "Event",
+    "EventTarget",
+    "Headers",
+    "HtmlAnchorElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "HtmlTextAreaElement",
+    "KeyboardEvent",
+    "Location",
+    "MediaQueryList",
+    "ReadableStream",
+    "ReadableStreamDefaultReader",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Storage",
+    "Url",
+    "Window",
+] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unused_must_use = "deny"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+todo = "deny"
+dbg_macro = "deny"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+doc_markdown = "allow"
+must_use_candidate = "allow"
+return_self_not_must_use = "allow"
+# Leptos components take their props by value and describe a whole view in one function.
+needless_pass_by_value = "allow"
+too_many_lines = "allow"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"

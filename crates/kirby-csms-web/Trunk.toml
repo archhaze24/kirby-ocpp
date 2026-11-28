@@ -1,0 +1,9 @@
+[build]
+target = "index.html"
+dist = "../kirby-csms/web/dist"
+public_url = "/"
+filehash = false
+no_sri = true
+minify = "on_release"
+# The page loads the module through the static `boot.js`: the CSP allows no inline script.
+inject_scripts = false

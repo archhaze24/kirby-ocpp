@@ -11,6 +11,7 @@ kirby-ocpp (bin)   ---> kirby-ocpp-tui ---> kirby-ocpp-core
 kirby-csms (bin)   ---> kirby-csms-tui ---> kirby-csms-core ---> kirby-ocpp-core
                         kirby-csms-tui ---> kirby-ocpp-tui   (shared terminal pieces only)
 kirby-ocpp-testkit (dev only, publish = false) ---> kirby-csms-core, kirby-ocpp-core
+kirby-csms-web (wasm, separate workspace, publish = false) --- trunk ---> kirby-csms/web/dist/ --- build.rs ---> kirby-csms (bin)
 ```
 
 Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms-core` reuses the OCPP types, schemas and WebSocket framing of `kirby-ocpp-core`.
@@ -24,6 +25,9 @@ Dependency rule: UI crates depend on core crates, never the reverse. `kirby-csms
 | `kirby-csms-tui` | CSMS terminal UI: station list, details, log, command forms, rules | yes |
 | `kirby-csms` | CSMS binary: TUI on a TTY, otherwise headless (JSON lines, stdin commands, TOML scripts) | yes |
 | `kirby-ocpp-testkit` | Scripted mock CSMS for integration tests (plain and TLS); reuses canned replies and faults from `kirby-csms-core` | no |
+| `kirby-csms-web` | Browser UI of `kirby-csms --web`: Leptos (client-side rendered) compiled to WebAssembly with `trunk`. It talks to the `/v1` API only and shares no Rust code with the other crates. Its own cargo workspace and lock file (listed under `exclude` in the root `Cargo.toml`), so the host gate and the MSRV job never build it. Output: `crates/kirby-csms/web/dist/` | no |
+
+The web UI reaches the binary through files: `trunk build --release` in `crates/kirby-csms-web` writes `crates/kirby-csms/web/dist/` (git-ignored); `crates/kirby-csms/build.rs` lists that directory into a table of served path and bytes (`include_bytes!`, no runtime dependency), and `api/web.rs` serves the table. Without a built `dist/` the table is empty and `/` answers with a built-in "Web UI not built" page. `kirby-csms` packages `web/dist/**` for crates.io (`include` in its `Cargo.toml`); release builds produce `dist/` once and every binary build downloads it. See [development.md](development.md#web-ui).
 
 ### `kirby-ocpp-core` modules (`crates/kirby-ocpp-core/src`)
 
@@ -50,7 +54,7 @@ The core compiles for `wasm32-unknown-unknown` in CI, with networking, TLS, cert
 ### Binaries
 
 * `kirby-ocpp/src`: `cli.rs` (flags and env, CLI > env > default, strict booleans), `main.rs` (config, spawn, choose UI or headless, the `run` scenario runner, reports, exit codes), `headless.rs` (event printer, stdout and log-file helpers), `fleet.rs` (`--count`, fleet runs), `suite.rs` (`kirby-ocpp suite`: sources, fresh station per scenario, summary report), `record.rs` (`--record`: opens the recording around a run, reports an incomplete one) and `replay.rs` (`replay` and `scenarios from-recording`).
-* `kirby-csms/src`: `cli.rs`, `settings.rs` (configuration file schema and merge into the command line), `main.rs`, `headless.rs` (event printer, stdout/log-file helper threads), `record.rs` (`--record`: opens the recording around a run, checks the path against the other outputs), `automation.rs` (configured calls: scheduled commands and connection hooks), `ctl/` (`kirby-csms ctl`, the command-line client of the HTTP API), `stdin_cmd.rs` (JSON-lines commands), `commands.rs` (call execution, result objects and the in-flight limit shared by stdin and the API), `api/` (HTTP control API on `axum`: `mod.rs` router and server start, `server.rs` connection layer, `limits.rs`, `auth.rs`, `meta.rs` route table, `error.rs`/`json.rs` helpers, `routes_stations.rs`, `routes_calls.rs`, `routes_rules.rs` for rules and faults, `routes_history.rs`, `event_log.rs`, `export.rs`, `metrics.rs`, `sse.rs`, `routes_actions.rs` for the action tables of `GET /v1/actions`, `web.rs` for the four static files of the web UI that `--web` serves from `crates/kirby-csms/web/`, embedded in the binary and outside `/v1`), `script.rs` (TOML scripts, report, JUnit), `replay/` (`--replay`: `plan.rs` validates a recording and ties stops to starts, `run.rs` sends the CALLs and follows the live stations).
+* `kirby-csms/src`: `cli.rs`, `settings.rs` (configuration file schema and merge into the command line), `main.rs`, `headless.rs` (event printer, stdout/log-file helper threads), `record.rs` (`--record`: opens the recording around a run, checks the path against the other outputs), `automation.rs` (configured calls: scheduled commands and connection hooks), `ctl/` (`kirby-csms ctl`, the command-line client of the HTTP API), `stdin_cmd.rs` (JSON-lines commands), `commands.rs` (call execution, result objects and the in-flight limit shared by stdin and the API), `api/` (HTTP control API on `axum`: `mod.rs` router and server start, `server.rs` connection layer, `limits.rs`, `auth.rs`, `meta.rs` route table, `error.rs`/`json.rs` helpers, `routes_stations.rs`, `routes_calls.rs`, `routes_rules.rs` for rules and faults, `routes_history.rs`, `event_log.rs`, `export.rs`, `metrics.rs`, `sse.rs`, `routes_actions.rs` for the action tables of `GET /v1/actions`, `web.rs` for the files of the web UI that `--web` serves, embedded from `crates/kirby-csms/web/dist/` by `build.rs` and outside `/v1`), `script.rs` (TOML scripts, report, JUnit), `replay/` (`--replay`: `plan.rs` validates a recording and ties stops to starts, `run.rs` sends the CALLs and follows the live stations).
 
 ## Layer contracts
 

@@ -1,0 +1,11 @@
+/* Transactions view: the table itself uses the shared .table styles. */
+
+.transactions {
+  min-width: 0;
+}
+
+.transactions .table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}

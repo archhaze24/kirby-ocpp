@@ -10,6 +10,16 @@ homepage.workspace = true
 readme = "../../README.md"
 keywords = ["ocpp", "ev-charging", "csms", "websocket"]
 categories = ["command-line-utilities", "development-tools::testing", "network-programming"]
+# `web/dist/` is the built web UI (git-ignored); it is packaged when it exists.
+include = [
+    "src/**",
+    "tests/**",
+    "build.rs",
+    "web/.gitignore",
+    "web/dist/**",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
+]
 
 [[bin]]
 name = "kirby-csms"

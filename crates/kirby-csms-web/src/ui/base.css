@@ -1,0 +1,373 @@
+/* Tokens, reset and the page frame. Light by default, dark from the system setting, and
+   either one when the toggle sets data-theme on <html>. */
+
+:root {
+  color-scheme: light;
+  --bg: #f5f6f8;
+  --surface: #ffffff;
+  --surface-2: #eef0f4;
+  --border: #d9dde4;
+  --border-strong: #bcc2cd;
+  --text: #1b1f27;
+  --muted: #5d6676;
+  --accent: #0f766e;
+  --accent-text: #ffffff;
+  --accent-soft: #d8f0ed;
+  --ok: #15803d;
+  --ok-soft: #dcf5e4;
+  --busy: #b45309;
+  --busy-soft: #fdecc8;
+  --info: #1d4ed8;
+  --info-soft: #dce7fd;
+  --bad: #b91c1c;
+  --bad-soft: #fde0e0;
+  --off: #8a93a3;
+  --off-soft: #e6e9ee;
+  --focus: #2563eb;
+  --shadow: 0 8px 28px rgb(15 23 42 / 18%);
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --topbar: 48px;
+  --radius: 6px;
+  --gap: 12px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #12151b;
+    --surface: #1a1e26;
+    --surface-2: #232834;
+    --border: #2d3340;
+    --border-strong: #434b5c;
+    --text: #e4e7ee;
+    --muted: #9aa3b5;
+    --accent: #2dd4bf;
+    --accent-text: #06201d;
+    --accent-soft: #11332f;
+    --ok: #4ade80;
+    --ok-soft: #12301e;
+    --busy: #fbbf24;
+    --busy-soft: #38290c;
+    --info: #7ea6ff;
+    --info-soft: #172545;
+    --bad: #f87171;
+    --bad-soft: #3b1717;
+    --off: #7b8497;
+    --off-soft: #262b36;
+    --focus: #6ea0ff;
+    --shadow: 0 8px 28px rgb(0 0 0 / 55%);
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #12151b;
+  --surface: #1a1e26;
+  --surface-2: #232834;
+  --border: #2d3340;
+  --border-strong: #434b5c;
+  --text: #e4e7ee;
+  --muted: #9aa3b5;
+  --accent: #2dd4bf;
+  --accent-text: #06201d;
+  --accent-soft: #11332f;
+  --ok: #4ade80;
+  --ok-soft: #12301e;
+  --busy: #fbbf24;
+  --busy-soft: #38290c;
+  --info: #7ea6ff;
+  --info-soft: #172545;
+  --bad: #f87171;
+  --bad-soft: #3b1717;
+  --off: #7b8497;
+  --off-soft: #262b36;
+  --focus: #6ea0ff;
+  --shadow: 0 8px 28px rgb(0 0 0 / 55%);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 var(--font);
+  -webkit-text-size-adjust: 100%;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+pre,
+code,
+.mono {
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.spacer {
+  flex: 1 1 auto;
+}
+
+/* Top bar */
+
+.topbar {
+  flex: 0 0 var(--topbar);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  min-width: 0;
+}
+
+.brand {
+  font-size: 15px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.version {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.views {
+  display: flex;
+  gap: 2px;
+  margin-left: 8px;
+}
+
+.view-button {
+  padding: 5px 10px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+}
+
+.view-button:hover {
+  background: var(--surface-2);
+}
+
+.view-button.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.count {
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.live {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentcolor;
+}
+
+.live-live {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.live-connecting,
+.live-reconnecting {
+  background: var(--busy-soft);
+  color: var(--busy);
+}
+
+.live-reconnecting .live-dot,
+.live-connecting .live-dot {
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.25;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none !important;
+  }
+}
+
+.icon-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.icon-button:hover {
+  background: var(--surface-2);
+}
+
+.menu-button {
+  display: none;
+}
+
+/* Page layout: station list at the left, the working area at the right */
+
+.layout {
+  position: relative;
+  flex: 1 1 auto;
+  display: grid;
+  grid-template-columns: 290px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.main {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 18px 28px;
+}
+
+/* The transactions table needs the width: the station list steps aside. */
+@media (min-width: 861px) {
+  .layout.wide {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .layout.wide .sidebar {
+    display: none;
+  }
+}
+
+.scrim {
+  display: none;
+}
+
+.welcome {
+  display: grid;
+  gap: 6px;
+  max-width: 46ch;
+  margin: 12vh auto 0;
+  text-align: center;
+}
+
+.welcome h2 {
+  font-size: 18px;
+}
+
+.welcome-list {
+  display: none;
+}
+
+@media (max-width: 860px) {
+  .menu-button {
+    display: inline-grid;
+  }
+
+  .welcome-list {
+    display: inline-block;
+    justify-self: center;
+    margin-top: 8px;
+  }
+
+  .count,
+  .version {
+    display: none;
+  }
+
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .main {
+    padding: 12px 12px 24px;
+  }
+
+  .scrim {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    border: 0;
+    background: rgb(0 0 0 / 40%);
+  }
+
+  .drawer-open .scrim {
+    display: block;
+  }
+}
+
+@media (max-width: 480px) {
+  .topbar {
+    gap: 6px;
+    padding: 0 8px;
+  }
+
+  .views {
+    margin-left: 0;
+  }
+
+  .view-button {
+    padding: 5px 7px;
+  }
+
+  .brand {
+    display: none;
+  }
+}

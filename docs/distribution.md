@@ -93,6 +93,8 @@ docker build -f Dockerfile.dev -t kirby-ocpp:dev .
 docker run --rm kirby-ocpp:dev --version
 ```
 
+The release archives, npm packages and images include the web UI of `kirby-csms --web`. The source image includes it only when `crates/kirby-csms/web/dist/` exists before the build (`trunk build --release` in `crates/kirby-csms-web`, see [development.md](development.md#web-ui)); without it `--web` serves a "Web UI not built" page.
+
 To assemble the release-style image from your own musl binaries, put them in `dist/linux-amd64/` (or `dist/linux-arm64/`) and run `docker build -t kirby-ocpp:local .`:
 
 ```bash

@@ -1,5 +1,7 @@
 [workspace]
 resolver = "3"
+# The web UI is a separate wasm workspace (own lockfile): see crates/kirby-csms-web.
+exclude = ["crates/kirby-csms-web"]
 members = ["crates/kirby-ocpp-core", "crates/kirby-csms-core", "crates/kirby-ocpp-tui", "crates/kirby-csms-tui", "crates/kirby-ocpp", "crates/kirby-csms", "crates/kirby-ocpp-testkit"]
 default-members = ["crates/kirby-ocpp-core", "crates/kirby-csms-core", "crates/kirby-ocpp-tui", "crates/kirby-csms-tui", "crates/kirby-ocpp", "crates/kirby-csms"]
 

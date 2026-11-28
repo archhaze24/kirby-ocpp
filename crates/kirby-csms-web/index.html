@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>kirby-csms</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link data-trunk rel="copy-file" href="favicon.svg">
+  <link data-trunk rel="copy-file" href="boot.js">
+  <link data-trunk rel="css" href="src/ui/base.css">
+  <link data-trunk rel="css" href="src/ui/ui.css">
+  <link data-trunk rel="css" href="src/stations/stations.css">
+  <link data-trunk rel="css" href="src/log/log.css">
+  <link data-trunk rel="css" href="src/commands/commands.css">
+  <link data-trunk rel="css" href="src/rules/rules.css">
+  <link data-trunk rel="css" href="src/transactions/transactions.css">
+  <link data-trunk rel="rust" data-bin="kirby-csms-web" data-wasm-opt="z" data-wasm-opt-params="--all-features">
+</head>
+<body>
+  <noscript>kirby-csms needs JavaScript and WebAssembly.</noscript>
+  <script type="module" src="/boot.js"></script>
+</body>
+</html>

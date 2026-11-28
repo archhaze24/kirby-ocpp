@@ -3426,38 +3426,49 @@ async fn history_limit_keeps_the_shape_on_a_long_history() {
 
 // ---- web UI and the action tables -----------------------------------------------------------
 
-const CSP: &str = "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; \
-connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; \
+img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'; \
+frame-ancestors 'none'";
 
-/// The four embedded files: path, content type, content.
-fn web_assets() -> [(&'static str, &'static str, &'static str); 5] {
-    [
-        (
-            "/",
-            "text/html; charset=utf-8",
-            include_str!("../web/index.html"),
-        ),
-        (
-            "/index.html",
-            "text/html; charset=utf-8",
-            include_str!("../web/index.html"),
-        ),
-        (
-            "/assets/app.js",
-            "text/javascript; charset=utf-8",
-            include_str!("../web/app.js"),
-        ),
-        (
-            "/assets/style.css",
-            "text/css; charset=utf-8",
-            include_str!("../web/style.css"),
-        ),
-        (
-            "/assets/favicon.svg",
-            "image/svg+xml",
-            include_str!("../web/favicon.svg"),
-        ),
-    ]
+/// The start page: served at both paths, with or without a built `web/dist/`.
+const WEB_PAGES: [&str; 2] = ["/", "/index.html"];
+
+/// The built web UI (`web/dist/`), when it exists: served path, content type, file size. The
+/// test jobs do not build it, so every test also has to hold without it.
+fn built_web_files() -> Vec<(String, &'static str, u64)> {
+    let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("web/dist");
+    let mut found = Vec::new();
+    let mut pending = vec![dist.clone()];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry.unwrap();
+            // The build leaves a lock file and a staging directory; `build.rs` skips them.
+            if entry.file_name().to_string_lossy().starts_with('.') {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+                continue;
+            }
+            let relative = path.strip_prefix(&dist).unwrap();
+            let served = format!("/{}", relative.to_string_lossy().replace('\\', "/"));
+            let content_type = match relative.extension().and_then(|e| e.to_str()) {
+                Some("html") => "text/html; charset=utf-8",
+                Some("js") => "text/javascript; charset=utf-8",
+                Some("css") => "text/css; charset=utf-8",
+                Some("wasm") => "application/wasm",
+                Some("svg") => "image/svg+xml",
+                Some("json") => "application/json",
+                _ => "application/octet-stream",
+            };
+            found.push((served, content_type, path.metadata().unwrap().len()));
+        }
+    }
+    found
 }
 
 /// One request with the given extra header lines; returns the status, the head with
@@ -3479,7 +3490,7 @@ async fn page(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn web_serves_the_four_assets_with_their_headers() {
+async fn web_serves_the_start_page_and_the_built_files_with_their_headers() {
     let csms = Csms::start(&["--web"]);
     // The `web UI on` line follows the `api listening` line.
     let web_line = loop {
@@ -3493,10 +3504,30 @@ async fn web_serves_the_four_assets_with_their_headers() {
     assert_eq!(keys(&web_line), ["type", "url"]);
     assert_eq!(web_line["url"], format!("http://{}/", csms.api_addr));
     let addr = csms.api_addr.clone();
-    for (path, content_type, content) in web_assets() {
+    // The start page, plus every file of a built `web/dist/` when there is one.
+    let mut files: Vec<(String, &str, Option<u64>)> = WEB_PAGES
+        .iter()
+        .map(|path| ((*path).to_owned(), "text/html; charset=utf-8", None))
+        .collect();
+    let built = built_web_files();
+    let has_build = built.iter().any(|(path, _, _)| path == "/index.html");
+    files.extend(
+        built
+            .into_iter()
+            .filter(|(path, _, _)| path != "/index.html")
+            .map(|(path, content_type, len)| (path, content_type, Some(len))),
+    );
+    for (path, content_type, len) in &files {
         let (status, head, body) = page(&addr, "GET", path, &[]).await;
         assert_eq!(status, 200, "{path}: {head}");
-        assert_eq!(body, content, "{path}");
+        if let Some(len) = len {
+            let length = format!("content-length: {len}");
+            assert!(head.lines().any(|have| have == length), "{path}: {head}");
+        } else if !has_build {
+            // Without a build the start page names the build command.
+            assert!(body.contains("trunk build --release"), "{body}");
+            assert!(body.to_lowercase().starts_with("<!doctype html"), "{body}");
+        }
         for line in [
             format!("content-type: {content_type}"),
             format!("content-security-policy: {CSP}"),
@@ -3532,7 +3563,9 @@ async fn web_serves_the_four_assets_with_their_headers() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn web_pages_are_unknown_without_the_flag() {
     let csms = Csms::start(&[]);
-    for (path, _, _) in web_assets() {
+    let mut paths: Vec<String> = WEB_PAGES.iter().map(|path| (*path).to_owned()).collect();
+    paths.extend(built_web_files().into_iter().map(|(path, _, _)| path));
+    for path in &paths {
         let (status, body) = csms.get(path).await;
         assert_eq!(status, 404, "{path}");
         assert_eq!(body["error"]["code"], "not_found", "{path}");
@@ -3639,10 +3672,15 @@ async fn web_accepts_requests_from_its_own_page_only() {
 async fn web_pages_need_no_token_but_the_api_does() {
     let csms = Csms::start(&["--web", "--api-token", "tok"]);
     let addr = &csms.api_addr;
-    for (path, _, content) in web_assets() {
+    // Every embedded path is open: the start page always, the built files when present.
+    let mut paths: Vec<String> = WEB_PAGES.iter().map(|path| (*path).to_owned()).collect();
+    paths.extend(built_web_files().into_iter().map(|(path, _, _)| path));
+    for path in &paths {
         let (status, _, body) = page(addr, "GET", path, &[]).await;
         assert_eq!(status, 200, "{path}");
-        assert_eq!(body, content);
+        if path == "/" {
+            assert_ne!(body, "");
+        }
     }
     for path in ["/v1/health", "/v1/actions?protocol=ocpp1.6", "/v1/events"] {
         assert_eq!(page(addr, "GET", path, &[]).await.0, 401, "{path}");

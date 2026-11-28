@@ -31,3 +31,7 @@ jobs:
 
       - name: Advisories
         run: cargo deny check advisories
+
+      # The web UI is a separate workspace with its own lock file.
+      - name: Advisories (web UI)
+        run: cargo deny --manifest-path crates/kirby-csms-web/Cargo.toml check advisories
