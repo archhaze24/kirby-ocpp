@@ -358,8 +358,7 @@ fn ActionForm(station: String, spec: ActionSpec, send: Callback<(String, Value)>
     let txs = Memo::new(move |_| {
         store
             .station(&station)
-            .map(|s| s.active_transactions)
-            .unwrap_or_default()
+            .map_or_default(|s| s.active_transactions)
     });
     let raw = spec.input == "raw";
     let template = if raw {
@@ -456,7 +455,7 @@ fn FieldInput(field: FieldState, txs: Memo<Vec<ActiveTx>>) -> impl IntoView {
             let current = value.get_untracked();
             if !list.iter().any(|t| t.id == current) {
                 value.set(if spec.required {
-                    list.first().map(|t| t.id.clone()).unwrap_or_default()
+                    list.first().map_or_default(|t| t.id.clone())
                 } else {
                     String::new()
                 });

@@ -104,11 +104,7 @@ fn RuleSection(station: Option<String>) -> impl IntoView {
             }
         }
     };
-    let rows = Memo::new(move |_| {
-        rules
-            .data
-            .with(|r| r.as_ref().map(rule_rows).unwrap_or_default())
-    });
+    let rows = Memo::new(move |_| rules.data.with(|r| r.as_ref().map_or_default(rule_rows)));
     let title = if station.is_some() {
         "Rules of this station"
     } else {
@@ -226,7 +222,7 @@ fn FaultSection(station: String) -> impl IntoView {
     let rows = Memo::new(move |_| {
         faults
             .data
-            .with(|f| f.as_ref().map(|f| f.faults.clone()).unwrap_or_default())
+            .with(|f| f.as_ref().map_or_default(|f| f.faults.clone()))
     });
     let mine = station.clone();
     view! {

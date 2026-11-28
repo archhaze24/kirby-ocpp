@@ -51,11 +51,11 @@ fn csv_text(cell: &str) -> String {
 }
 
 fn csv_number<T: ToString>(value: Option<T>) -> String {
-    value.map(|v| v.to_string()).unwrap_or_default()
+    value.map_or_default(|v| v.to_string())
 }
 
 fn csv_row(tx: &Transaction) -> Vec<String> {
-    let text = |value: &Option<String>| value.as_deref().map(csv_text).unwrap_or_default();
+    let text = |value: &Option<String>| value.as_deref().map_or_default(csv_text);
     vec![
         csv_text(&tx.station),
         csv_text(&tx.id),
@@ -73,10 +73,7 @@ fn csv_row(tx: &Transaction) -> Vec<String> {
         text(&tx.last_meter_at),
         csv_number(tx.evse),
         csv_number(delivered_wh(tx)),
-        tx.cost
-            .as_ref()
-            .map(|c| csv_text(&c.currency))
-            .unwrap_or_default(),
+        tx.cost.as_ref().map_or_default(|c| csv_text(&c.currency)),
         csv_number(tx.cost.as_ref().and_then(|c| c.total_incl_tax)),
     ]
 }
@@ -108,19 +105,17 @@ pub fn TransactionsView() -> impl IntoView {
     let rows = Memo::new(move |_| {
         let needle = station_filter.get().trim().to_lowercase();
         fetched.data.with(|d| {
-            d.as_ref()
-                .map(|list| {
-                    let mut rows: Vec<Transaction> = list
-                        .transactions
-                        .iter()
-                        .filter(|t| needle.is_empty() || t.station.to_lowercase().contains(&needle))
-                        .cloned()
-                        .collect();
-                    // Newest first.
-                    rows.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-                    rows
-                })
-                .unwrap_or_default()
+            d.as_ref().map_or_default(|list| {
+                let mut rows: Vec<Transaction> = list
+                    .transactions
+                    .iter()
+                    .filter(|t| needle.is_empty() || t.station.to_lowercase().contains(&needle))
+                    .cloned()
+                    .collect();
+                // Newest first.
+                rows.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+                rows
+            })
         })
     });
     let truncated = move || {

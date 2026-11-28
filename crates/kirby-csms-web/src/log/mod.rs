@@ -35,7 +35,7 @@ fn summary(frame: &Frame) -> String {
             frame.code.as_deref().unwrap_or_default(),
             frame.description.as_deref().unwrap_or_default()
         ),
-        _ => frame.payload.as_ref().map(compact).unwrap_or_default(),
+        _ => frame.payload.as_ref().map_or_default(compact),
     };
     clean(&text)
 }

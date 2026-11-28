@@ -134,78 +134,64 @@ pub fn OverviewTab(id: String) -> impl IntoView {
         let id = id.clone();
         use_fetch::<TransactionList>(move || format!("/v1/transactions?station={}", encode(&id)))
     };
-    let tile_list = Memo::new(move |_| {
-        detail
-            .data
-            .with(|d| d.as_ref().map(tiles).unwrap_or_default())
-    });
-    let boot = Memo::new(move |_| {
-        detail
-            .data
-            .with(|d| d.as_ref().map(boot_rows).unwrap_or_default())
-    });
+    let tile_list = Memo::new(move |_| detail.data.with(|d| d.as_ref().map_or_default(tiles)));
+    let boot = Memo::new(move |_| detail.data.with(|d| d.as_ref().map_or_default(boot_rows)));
     let active = Memo::new(move |_| {
         transactions.data.with(|d| {
-            d.as_ref()
-                .map(|list| {
-                    list.transactions
-                        .iter()
-                        .filter(|t| t.status == "active")
-                        .cloned()
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default()
+            d.as_ref().map_or_default(|list| {
+                list.transactions
+                    .iter()
+                    .filter(|t| t.status == "active")
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
         })
     });
     let recent = Memo::new(move |_| {
         transactions.data.with(|d| {
-            d.as_ref()
-                .map(|list| {
-                    let mut stopped: Vec<Transaction> = list
-                        .transactions
-                        .iter()
-                        .filter(|t| t.status != "active")
-                        .cloned()
-                        .collect();
-                    stopped.reverse();
-                    stopped.truncate(5);
-                    stopped
-                })
-                .unwrap_or_default()
+            d.as_ref().map_or_default(|list| {
+                let mut stopped: Vec<Transaction> = list
+                    .transactions
+                    .iter()
+                    .filter(|t| t.status != "active")
+                    .cloned()
+                    .collect();
+                stopped.reverse();
+                stopped.truncate(5);
+                stopped
+            })
         })
     });
     let facts = Memo::new(move |_| {
         detail.data.with(|d| {
-            d.as_ref()
-                .map(|d| {
-                    let heartbeat = d
-                        .state
-                        .as_ref()
-                        .and_then(|s| s["last_heartbeat_at"].as_str())
-                        .map_or_else(|| "none yet".to_owned(), date_time);
-                    vec![
-                        (
-                            "Connection",
-                            if d.station.connected {
-                                "connected"
-                            } else {
-                                "disconnected"
-                            }
-                            .to_owned(),
-                        ),
-                        (
-                            "Remote address",
-                            d.station
-                                .remote_addr
-                                .clone()
-                                .unwrap_or_else(|| "-".to_owned()),
-                        ),
-                        ("CALLs received", d.station.received_calls.to_string()),
-                        ("Last heartbeat answered", heartbeat),
-                        ("Security events", d.station.security_events.to_string()),
-                    ]
-                })
-                .unwrap_or_default()
+            d.as_ref().map_or_default(|d| {
+                let heartbeat = d
+                    .state
+                    .as_ref()
+                    .and_then(|s| s["last_heartbeat_at"].as_str())
+                    .map_or_else(|| "none yet".to_owned(), date_time);
+                vec![
+                    (
+                        "Connection",
+                        if d.station.connected {
+                            "connected"
+                        } else {
+                            "disconnected"
+                        }
+                        .to_owned(),
+                    ),
+                    (
+                        "Remote address",
+                        d.station
+                            .remote_addr
+                            .clone()
+                            .unwrap_or_else(|| "-".to_owned()),
+                    ),
+                    ("CALLs received", d.station.received_calls.to_string()),
+                    ("Last heartbeat answered", heartbeat),
+                    ("Security events", d.station.security_events.to_string()),
+                ]
+            })
         })
     });
     view! {

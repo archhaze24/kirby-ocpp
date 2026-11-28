@@ -3,6 +3,8 @@ name = "kirby-csms-web"
 description = "Web UI of kirby-csms (Leptos, client-side rendered, built to WebAssembly with trunk)"
 version = "0.9.0-dev"
 edition = "2024"
+# Built only with the current stable toolchain (CI and release); `Option::map_or_default` needs 1.100.
+rust-version = "1.100"
 license = "MIT"
 repository = "https://github.com/archhaze24/kirby-ocpp"
 publish = false
